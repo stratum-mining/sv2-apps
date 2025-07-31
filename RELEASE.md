@@ -1,6 +1,8 @@
+# SV2 Applications Release Process
+
 ## Changelog
 
-The changelog is a list of notable changes for each version of a project. 
+The changelog is a list of notable changes for each version of the SV2 Applications. 
 It is a way to keep track of the project's progress and to communicate 
 the changes to the users and the community.
 
@@ -9,6 +11,7 @@ information is added as needed, such as:
  - General release information.
  - Breaking changes.
  - Notable changes.
+ - Dependencies updates from the main SRI repository.
 
 ## Release Process
 
@@ -23,23 +26,37 @@ release branch is ready, create a new tag and initiate any publishing tasks.
 
 Usually the release process is as follows:
 
-1. Create a new release branch from the `main` branch.
-2. Create a new tag for the release branch.
-3. Publish the release.
+1. **Update Dependencies:** Ensure all SRI dependencies are updated to the latest stable versions from the main repository.
+2. **Run Tests:** Execute `./scripts/clippy-fmt-and-test.sh` to ensure all workspaces pass tests, linting, and formatting.
+3. **Create Release Branch:** Create a new release branch from the `main` branch.
+4. **Update Versions:** Update version numbers in relevant `Cargo.toml` files.
+5. **Create Tag:** Create a new tag for the release branch.
+6. **Publish Release:** Use `./scripts/publish-apps.sh` to publish applications to crates.io (if applicable).
+7. **Create GitHub Release:** Create a GitHub release with changelog and release notes.
 
 ## Versioning
 
-Crates under `protocols` and `utils` workspaces follow SemVer 2.0.0. The version number is stored in
-the `Cargo.toml` file of each crate. If a breaking change is introduced to one
-of the crates, the version number must be updated accordingly, otherwise a
-SemVer CI check would fail. Note that this does not apply to the `roles` and
-other crates in the repository.
+This repository contains alpha-stage applications organized in workspaces:
+- `pool-apps/` - Pool server and Job Declarator Server
+- `miner-apps/` - Job Declarator Client, Translator Proxy, and test utilities  
+- `test/integration-tests/` - End-to-end testing suite
 
-The global repository releases follow `X.Y.Z`, which is changed under some subjective criteria:
-- Changes in `roles` are not taken into account. `roles` crates are still in Proof of Concept phase and not production ready. 
-- If a release includes only bug fixes in `protocols` and/or `utils`, then `Z` is bumped.
-- If a release includes breaking and/or non-breaking changes to `protocols` and/or `utils`, then `Y` is bumped.
-- If a release marks a milestone i.e., `protocols` is reaching a new maturity level, then `X` is bumped.
+### Application Versioning
+
+Applications in this repository follow SemVer 2.0.0. The version number is stored in
+the `Cargo.toml` file of each application. Applications are designed to be production-ready
+and stable, so version changes should reflect this maturity level.
+
+### Repository Versioning  
+
+The global repository releases follow `X.Y.Z`, which is changed under the following criteria:
+- If a release includes only bug fixes and minor improvements, then `Z` is bumped.
+- If a release includes new features, application improvements, or dependency updates from the main SRI repository, then `Y` is bumped.
+- If a release marks a major milestone (e.g., significant architectural changes, major new applications, or breaking changes), then `X` is bumped.
+
+### Dependency Management
+
+This repository depends on the main [SRI repository](https://github.com/stratum-mining/stratum) for protocol implementations. When SRI releases new versions, this repository should be updated to use the latest stable SRI dependencies and tested for compatibility.
 
 ## Tags and Branches
 

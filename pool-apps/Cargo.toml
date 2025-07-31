@@ -1,0 +1,15 @@
+[workspace]
+resolver="2"
+
+members = [
+    "pool",
+    "jd-server",
+]
+
+[profile.dev]
+# Required by super_safe_lock
+opt-level = 1
+
+[profile.test]
+# Required by super_safe_lock
+opt-level = 1
