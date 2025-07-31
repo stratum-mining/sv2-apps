@@ -1,0 +1,258 @@
+name: Integration Test with Stratum Repository Changes
+
+on:
+  workflow_call:
+    inputs:
+      stratum_repo_url:
+        description: 'Stratum repository URL (for handling forks)'
+        required: true
+        type: string
+      stratum_branch:
+        description: 'Stratum branch name to test'
+        required: true
+        type: string
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: 🧪 Integration Test Setup - Testing Stratum Protocol Changes
+        run: |
+          echo "🧪 =============================================="
+          echo "🧪 SV2 INTEGRATION TEST - TESTING STRATUM PR"
+          echo "🧪 =============================================="
+          echo ""
+          echo "🎯 WHAT ARE WE TESTING?"
+          echo "   Stratum repository: ${{ inputs.stratum_repo_url }}"
+          echo "   Branch/PR:         ${{ inputs.stratum_branch }}"
+          echo ""
+          echo "🔍 HOW THE TEST WORKS:"
+          echo "   • Integration tests will use YOUR stratum protocol changes"
+          echo "   • SV2 applications (pool, jd-server, jd-client, translator) will use YOUR protocol changes"
+          echo "   • This tests if your protocol changes break existing SV2 applications"
+          echo ""
+          echo "⏰ Test started at: $(date)"
+          echo "🧪 =============================================="
+
+      - name: Derive stratum repo slug from URL
+        id: derive_stratum_slug
+        run: |
+          REPO_URL="${{ inputs.stratum_repo_url }}"
+          REPO_SLUG=$(echo "$REPO_URL" | sed -E 's#(https://github.com/|git@github.com:|.git$)##g')
+          echo "slug=$REPO_SLUG" >> $GITHUB_OUTPUT
+          echo "📍 Derived stratum repository slug: $REPO_SLUG"
+
+      - name: 📥 Checkout stratum repository with PR changes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.derive_stratum_slug.outputs.slug }}
+          ref: ${{ inputs.stratum_branch }}
+          path: stratum-changes
+          fetch-depth: 1
+          
+      - name: 📥 Checkout sv2-apps repository (integration tests)
+        uses: actions/checkout@v4
+        with:
+          repository: stratum-mining/sv2-apps
+          path: sv2-apps
+          fetch-depth: 1
+          
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
+          
+      - name: Cache cargo registry and dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            sv2-apps/test/integration-tests/target
+          key: ${{ runner.os }}-cargo-integration-stratum-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integration-stratum-
+            ${{ runner.os }}-cargo-integration-
+          
+      - name: 🔧 Configure integration tests to use Stratum PR changes
+        run: |
+          echo "🔧 =============================================="
+          echo "🔧 CONFIGURING INTEGRATION TESTS"
+          echo "🔧 =============================================="
+          echo ""
+          echo "🎯 Goal: Make sv2-apps integration tests use Stratum protocol PR changes"
+          echo "📂 Stratum PR code is in: stratum-changes/"
+          echo "🧪 SV2 Apps are in: sv2-apps/"
+          echo "🧪 Integration tests are in: sv2-apps/test/integration-tests/"
+          echo ""
+          
+          cd sv2-apps/test/integration-tests
+          
+          # Get commit info for patch section comments
+          cd ../../../stratum-changes
+          PR_COMMIT_HASH=$(git rev-parse HEAD)
+          PR_SHORT_HASH=$(git rev-parse --short HEAD)
+          COMMIT_SUBJECT=$(git log -1 --pretty=format:'%s')
+          cd ../sv2-apps/test/integration-tests
+          
+          echo "🔖 Testing Stratum commit: $PR_SHORT_HASH ($PR_COMMIT_HASH)"
+          echo "📝 Commit message: $COMMIT_SUBJECT"
+          echo ""
+          
+          # Create .cargo/config.toml to prevent workspace discovery conflicts
+          mkdir -p .cargo
+          {
+            echo "# Prevent Cargo from discovering parent workspaces that could conflict"
+            echo "[build]"
+            echo "target-dir = \"target\""
+          } > .cargo/config.toml
+          echo "🛡️  Created workspace isolation config"
+
+          # Set up path to stratum PR changes
+          STRATUM_PR_DIR="../../../stratum-changes"
+          
+          echo ""
+          echo "🔀 Redirecting Stratum protocol dependencies to PR changes..."
+          
+          # Replace git dependencies with local path dependencies
+          sed -i "s|stratum-common = { git = \"https://github.com/stratum-mining/stratum\", branch = \"main\", features = \[\"with_network_helpers\", \"sv1\"\] }|stratum-common = { path = \"$STRATUM_PR_DIR/common\", features = [\"with_network_helpers\", \"sv1\"] }|g" Cargo.toml
+          sed -i "s|sv1_api = { git = \"https://github.com/stratum-mining/stratum\", branch = \"main\", optional = true }|sv1_api = { path = \"$STRATUM_PR_DIR/protocols/v1\", optional = true }|g" Cargo.toml
+          sed -i "s|config_helpers_sv2 = { git = \"https://github.com/stratum-mining/stratum\", branch = \"main\" }|config_helpers_sv2 = { path = \"$STRATUM_PR_DIR/roles/roles-utils/config-helpers\" }|g" Cargo.toml
+          sed -i "s|key-utils = { git = \"https://github.com/stratum-mining/stratum\", branch = \"main\" }|key-utils = { path = \"$STRATUM_PR_DIR/utils/key-utils\" }|g" Cargo.toml
+
+          # Add comprehensive patch section to force ALL stratum protocol crates to use PR changes
+          echo "🎯 Adding comprehensive patch to force ALL stratum protocol crates to use PR changes..."
+          {
+            echo ""
+            echo "# INTEGRATION TEST OVERRIDE: Use PR changes for all stratum protocol crates"
+            echo "# Testing commit: $PR_SHORT_HASH ($PR_COMMIT_HASH)"
+            echo "# Commit message: $COMMIT_SUBJECT"
+            echo "# Branch: ${{ inputs.stratum_branch }} from ${{ inputs.stratum_repo_url }}"
+            echo "[patch.\"https://github.com/stratum-mining/stratum\"]"
+            echo "# Core utilities"
+            echo "stratum-common = { path = \"$STRATUM_PR_DIR/common\" }"
+            echo "key-utils = { path = \"$STRATUM_PR_DIR/utils/key-utils\" }"
+            echo "buffer_sv2 = { path = \"$STRATUM_PR_DIR/utils/buffer\" }"
+            echo "error-handling = { path = \"$STRATUM_PR_DIR/utils/error-handling\" }"
+            echo "# SV1 Protocol"
+            echo "sv1_api = { path = \"$STRATUM_PR_DIR/protocols/v1\" }"
+            echo "# SV2 Core protocols"
+            echo "binary_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/binary-sv2/binary-sv2\" }"
+            echo "binary_codec_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/binary-sv2/codec\" }"
+            echo "derive_codec_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/binary-sv2/derive-codec\" }"
+            echo "noise_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/noise-sv2\" }"
+            echo "framing_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/framing-sv2\" }"
+            echo "codec_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/codec-sv2\" }"
+            echo "# SV2 Subprotocols"
+            echo "common_messages_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/subprotocols/common-messages\" }"
+            echo "template_distribution_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/subprotocols/template-distribution\" }"
+            echo "mining_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/subprotocols/mining\" }"
+            echo "job_declaration_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/subprotocols/job-declaration\" }"
+            echo "# SV2 High-level"
+            echo "roles_logic_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/roles-logic-sv2\" }"
+            echo "const_sv2 = { path = \"$STRATUM_PR_DIR/protocols/v2/const-sv2\" }"
+            echo "# Role utilities"
+            echo "config_helpers_sv2 = { path = \"$STRATUM_PR_DIR/roles/roles-utils/config-helpers\" }"
+            echo "network_helpers_sv2 = { path = \"$STRATUM_PR_DIR/roles/roles-utils/network-helpers\" }"
+            echo "rpc_sv2 = { path = \"$STRATUM_PR_DIR/roles/roles-utils/rpc\" }"
+          } >> Cargo.toml
+          echo "✅ All stratum protocol crates will now use PR changes"
+          
+          echo ""
+          echo "🎉 =============================================="
+          echo "🎉 CONFIGURATION COMPLETE!"
+          echo "🎉 =============================================="
+          echo "✅ Integration tests are now configured to use Stratum PR changes"
+          echo "📋 What happens next:"
+          echo "   1. Cargo will build Stratum protocol changes from stratum-changes/"
+          echo "   2. SV2 applications will use the updated protocol implementations"
+          echo "   3. Integration tests will run using PR protocol code"
+          echo "   4. Any failures indicate Stratum PR changes break existing applications"
+          echo ""
+          echo "📄 Updated integration test configuration (patch section):"
+          tail -25 Cargo.toml
+          echo ""
+          echo "🔖 STRATUM COMMIT VERIFICATION:"
+          echo "   Testing commit: $PR_SHORT_HASH"
+          echo "   Full hash: $PR_COMMIT_HASH"
+          echo "   From: ${{ inputs.stratum_repo_url }}/tree/${{ inputs.stratum_branch }}"
+          
+      - name: 🌳 Show dependency tree for manual verification
+        run: |
+          cd sv2-apps/test/integration-tests
+          
+          # Get commit info for display
+          cd ../../../stratum-changes
+          PR_COMMIT_HASH=$(git rev-parse HEAD)
+          PR_SHORT_HASH=$(git rev-parse --short HEAD)
+          cd ../sv2-apps/test/integration-tests
+          
+          echo "🌳 =============================================="
+          echo "🌳 DEPENDENCY TREE - MANUAL VERIFICATION"
+          echo "🌳 =============================================="
+          echo ""
+          echo "📋 This shows exactly which stratum protocol code is being used:"
+          echo "🔖 Testing stratum commit: $PR_SHORT_HASH ($PR_COMMIT_HASH)"
+          echo ""
+          
+          # Show key dependencies to verify they're using local paths
+          cargo tree --features sv1 | grep -E "(stratum-common|binary_sv2|mining_sv2|template_distribution_sv2|roles_logic_sv2|config_helpers_sv2|sv1_api|key-utils)" | head -20
+          
+          echo ""
+          echo "🔍 WHAT TO LOOK FOR:"
+          echo ""
+          echo "✅ EXPECTED - stratum protocol crates should show LOCAL paths like:"
+          echo "   stratum-common v3.0.0 (/github/workspace/stratum-changes/common) [commit $PR_SHORT_HASH]"
+          echo "   mining_sv2 v2.0.0 (/github/workspace/stratum-changes/protocols/v2/subprotocols/mining) [commit $PR_SHORT_HASH]"
+          echo "   roles_logic_sv2 v1.0.0 (/github/workspace/stratum-changes/protocols/v2/roles-logic-sv2) [commit $PR_SHORT_HASH]"
+          echo ""
+          echo "✅ EXPECTED - sv2-apps should show LOCAL paths like:"
+          echo "   pool_sv2 v0.1.3 (/github/workspace/sv2-apps/pool-apps/pool)"
+          echo "   jd_server v0.1.3 (/github/workspace/sv2-apps/pool-apps/jd-server)"
+          echo "   jd_client v0.1.4 (/github/workspace/sv2-apps/miner-apps/jd-client)"
+          echo ""
+          echo "🎯 If you see the expected pattern above, Stratum PR changes (commit $PR_SHORT_HASH) are being tested correctly!"
+          echo "🌳 =============================================="
+          
+      - name: Run integration tests
+        run: |
+          cd sv2-apps/test/integration-tests
+          
+          # Get commit info for test logs
+          cd ../../../stratum-changes
+          PR_COMMIT_HASH=$(git rev-parse HEAD)
+          PR_SHORT_HASH=$(git rev-parse --short HEAD)
+          COMMIT_SUBJECT=$(git log -1 --pretty=format:'%s')
+          cd ../sv2-apps/test/integration-tests
+          
+          echo "🏃 =============================================="
+          echo "🏃 RUNNING INTEGRATION TESTS"
+          echo "🏃 =============================================="
+          echo "🔖 Testing stratum commit: $PR_SHORT_HASH"
+          echo "   Full hash: $PR_COMMIT_HASH"
+          echo "   Message: $COMMIT_SUBJECT"
+          echo "   Repository: ${{ inputs.stratum_repo_url }}"
+          echo "   Branch: ${{ inputs.stratum_branch }}"
+          echo ""
+          
+          # Show effective configuration
+          echo "📋 Test configuration:"
+          echo "├── Working directory: $(pwd)"
+          echo "├── Stratum PR directory: ../../../stratum-changes"
+          echo "├── SV2 Apps directory: ../../.."
+          echo "└── Workspace isolation: .cargo/config.toml"
+          
+          # Run tests with verbose output but suppress cargo output for readability
+          echo "🧪 Starting integration tests for stratum commit $PR_SHORT_HASH..."
+          echo ""
+          
+          # Use cargo-nextest for test execution (matches existing integration test workflow)
+          echo "📦 Using cargo-nextest for test execution"
+          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --features sv1 --nocapture
