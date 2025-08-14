@@ -1,0 +1,62 @@
+name: Coverage Analysis
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  coverage:
+    name: Generate Test Coverage
+    runs-on: ubuntu-latest
+    container:
+      image: xd009642/tarpaulin:0.27.1-nightly
+      options: --security-opt seccomp=unconfined
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate code coverage
+        run: |
+          ./scripts/coverage-apps.sh
+
+      - name: Upload pool apps coverage to codecov.io
+        uses: codecov/codecov-action@v4
+        with:
+          directory: ./pool-apps/target/tarpaulin-reports/pool-apps-coverage
+          file: ./pool-apps/target/tarpaulin-reports/pool-apps-coverage/cobertura.xml
+          flags: pool_apps
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload miner apps coverage to codecov.io
+        uses: codecov/codecov-action@v4
+        with:
+          directory: ./miner-apps/target/tarpaulin-reports/miner-apps-coverage
+          file: ./miner-apps/target/tarpaulin-reports/miner-apps-coverage/cobertura.xml
+          flags: miner_apps
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload integration tests coverage to codecov.io
+        uses: codecov/codecov-action@v4
+        with:
+          directory: ./test/integration-tests/target/tarpaulin-reports/integration-tests-coverage
+          file: ./test/integration-tests/target/tarpaulin-reports/integration-tests-coverage/cobertura.xml
+          flags: integration_tests
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true
+
+      - name: Archive coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            pool-apps/target/tarpaulin-reports/
+            miner-apps/target/tarpaulin-reports/
+            test/integration-tests/target/tarpaulin-reports/
+        if: always()

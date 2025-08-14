@@ -1,0 +1,42 @@
+on:
+  pull_request:
+    branches:
+      - main
+
+name: MSRV 1.75 Check
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - 1.75.0 # MSRV
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v1.2.0
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          override: true
+      
+      - name: Build pool applications workspace
+        run: cargo build --manifest-path=pool-apps/Cargo.toml
+      
+      - name: Build miner applications workspace
+        run: cargo build --manifest-path=miner-apps/Cargo.toml
+
+      - name: Build integration tests workspace
+        run: cargo build --manifest-path=test/integration-tests/Cargo.toml
+      
+      # Also check test compilation without running tests
+      - name: Check test compilation for pool applications workspace
+        run: cargo test --manifest-path=pool-apps/Cargo.toml --no-run
+      
+      - name: Check test compilation for miner applications workspace
+        run: cargo test --manifest-path=miner-apps/Cargo.toml --no-run
+
+      - name: Check test compilation for integration tests workspace
+        run: cargo test --manifest-path=test/integration-tests/Cargo.toml --no-run
