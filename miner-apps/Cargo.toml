@@ -1,0 +1,17 @@
+[workspace]
+resolver="2"
+
+members = [
+    "jd-client",
+    "translator",
+    "test-utils/mining-device",
+    "test-utils/mining-device-sv1",
+]
+
+[profile.dev]
+# Required by super_safe_lock
+opt-level = 1
+
+[profile.test]
+# Required by super_safe_lock
+opt-level = 1

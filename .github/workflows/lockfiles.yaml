@@ -21,6 +21,6 @@ jobs:
 
       - name: Build with locked dependencies
         run: |
-          cargo build --manifest-path=roles/Cargo.toml --locked
-          cargo build --manifest-path=utils/Cargo.toml --locked
+          cargo build --manifest-path=pool-apps/Cargo.toml --locked
+          cargo build --manifest-path=miner-apps/Cargo.toml --locked
           cargo build --manifest-path=test/integration-tests/Cargo.toml --locked

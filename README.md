@@ -3,11 +3,11 @@
   <br>
   <a href="https://stratumprotocol.org"><img src="https://github.com/stratum-mining/stratumprotocol.org/blob/660ecc6ccd2eca82d0895cef939f4670adc6d1f4/src/.vuepress/public/assets/stratum-logo%402x.png" alt="SRI" width="200"></a>
   <br>
-Stratum V2 Reference Implementation (SRI)
+SV2 Applications
   <br>
 </h1>
 
-<h4 align="center">SRI is a reference implementation of the Stratum V2 protocol written in Rust 🦀.</h4>
+<h4 align="center">Stratum V2 pool and miner applications from the SRI project 🦀</h4>
 
 <p align="center">
   <a href="https://codecov.io/gh/stratum-mining/stratum">
@@ -18,13 +18,22 @@ Stratum V2 Reference Implementation (SRI)
   </a>
 </p>
 
+> [!CAUTION]
+> **🚧 REPOSITORY UNDER MIGRATION - NOT READY FOR USE 🚧**
+> 
+> This repository is part of an ongoing process to move applications outside of the main [SRI repository](https://github.com/stratum-mining/stratum). **This repository will be rebased on top of the main repository** and is subject to significant changes until the SRI 1.5.0 release.
+>
+> **⚠️ DO NOT USE THIS REPOSITORY YET** - it may contain outdated code, broken functionality, or be completely restructured without notice.
+>
+> **This repository will be ready for use only after the [SRI 1.5.0 release](https://github.com/stratum-mining/stratum) when the migration process is complete.**
+>
+> For stable, usable applications, please use the main [SRI repository](https://github.com/stratum-mining/stratum) instead.
+
 ## 💼 Table of Contents
 
 <p align="center">
   <a href="#-introduction">Introduction</a> •
-  <a href="#%EF%B8%8F-getting-started">Getting Started</a> •
-  <a href="#-use-cases">Use Cases</a> •
-  <a href="#-roadmap">Roadmap</a> •
+  <a href="#-applications">Applications</a> •
   <a href="#-contribute">Contribute</a> •
   <a href="#-support">Support</a> •
   <a href="#-donate">Donate</a> •
@@ -35,87 +44,100 @@ Stratum V2 Reference Implementation (SRI)
 
 ## 👋 Introduction
 
-Welcome to the official GitHub repository for the **SRI - Stratum V2 Reference Implementation**. 
+Welcome to the **SV2 Applications** repository, containing alpha-stage Stratum V2 implementations for both pool operators and miners from the [Stratum V2 Reference Implementation (SRI)](https://github.com/stratum-mining/stratum) project.
 
-[Stratum V2](https://stratumprotocol.org) is a next-generation bitcoin mining protocol designed to enhance the efficiency, security, flexibility and decentralization. 
-SRI is fully open-source, community-developed, independent of any single entity, aiming to be fully compatible with [Stratum V2 Specification](https://github.com/stratum-mining/sv2-spec).
+This repository provides complete application suite implementing the [Stratum V2 protocol](https://stratumprotocol.org), including pool server, job declaration server and client, translator proxy, and testing utilities - delivering enhanced efficiency, security, flexibility and decentralization for Bitcoin mining operations.
 
-## ⛏️ Getting Started
+## 🏗️ Applications
 
-To get started with the Stratum V2 Reference Implementation (SRI), please follow the detailed setup instructions available on the official website:
+This repository contains a complete suite of SV2 applications for pool operators, miners, and developers organized in three workspaces:
 
-[Getting Started with Stratum V2](https://stratumprotocol.org/blog/getting-started/)
+### 🏊 Pool Applications (`pool-apps/`)
+- **Pool Server (`pool/`)** - SV2-compatible mining pool server that communicates with downstream roles and Template Providers
+- **Job Declarator Server (`jd-server/`)** - Coordinates job declaration between miners and pools, maintains synchronized mempool
 
-This guide provides all the necessary information on prerequisites, installation, and configuration to help you begin using, testing or contributing to SRI.
+### ⛏️ Miner Applications (`miner-apps/`)
+- **Job Declarator Client (`jd-client/`)** - Allows miners to declare custom block templates for decentralized mining
+- **Translator Proxy (`translator/`)** - Bridges SV1 miners to SV2 pools, enabling protocol transition
+- **Test Utilities (`test-utils/`)** - Mining device simulators for development and testing
 
-## 🚀 Use Cases
+### 🧪 Integration Tests (`test/`)
+- **End-to-End Tests (`integration-tests/`)** - Comprehensive testing suite validating interoperability between all components
 
-The library is modular to address different use-cases and desired functionality. Examples include:
+## ⚙️ Development & Building
 
-### 👷 Miners
+### Prerequisites
+- Rust 1.75.0 or later
+- For coverage analysis: `cargo install cargo-tarpaulin`
 
-- SV1 Miners can use the translator proxy (`roles/translator`) to connect with a SV2-compatible pool.
-- SV1 mining farms mining to a SV2-compatible pool gain some of the security and efficiency improvements SV2 offers over Stratum V1 (SV1). The SV1<->SV2 translator proxy does not support  _all_ the features of SV2, but works as a temporary measure before upgrading completely to SV2-compatible firmware. (The SV1<->SV2 translation proxy implementation is a work in progress.)
+### Build All Applications
+```bash
+# Builds pool-apps, miner-apps, and integration-tests workspaces
+./scripts/build-all-workspaces.sh
+```
 
-### 🛠️ Pools
+### Run Tests and Linting
+```bash
+# Runs clippy, tests, and formatting across all workspaces
+./scripts/clippy-fmt-and-test.sh
+```
 
-- Pools supporting SV2 can deploy the open source binary crate (`roles/pool`) to offer their clients (miners participating in said pool) an SV2-compatible pool.
-- The Rust helper library provides a suite of tools for mining pools to build custom SV2 compatible pool implementations.
+### Generate Coverage Reports
+```bash
+# Creates coverage reports for all workspaces
+./scripts/coverage-apps.sh
+```
+
+### Publish to crates.io (Maintainers)
+```bash
+# Test publishing workflow
+./scripts/publish-apps.sh --dry-run
+
+# Publish all crates
+./scripts/publish-apps.sh
+```
+
+For detailed development documentation, see [`scripts/README.md`](scripts/README.md).
 
 ## 🛣 Roadmap 
 
-Our roadmap is publicly available, outlining current and future plans. Decisions on the roadmap are made through a consensus-driven approach, through participation on dev meetings, Discord or GitHub.
+Our roadmap is publicly available as part of the broader SRI project, outlining current and future plans. Decisions are made through a consensus-driven approach via dev meetings, Discord, and GitHub.
 
 [View the SRI Roadmap](https://github.com/orgs/stratum-mining/projects/5)
 
-### 🏅 Project Maturity
-
-Low-level crates (`protocols` directory) are considered **beta** software. Rust API Docs is a [work-in-progress](https://github.com/stratum-mining/stratum/issues/845), and the community should still expect small breaking API changes and patches.
-
-Application-level crates (`roles` directory) are considered **alpha** software, and bugs are expected. They should be used as a guide on how to consume the low-level crates as dependencies.
-
-### 🎯 Goals
-
-The goals of this project are to provide:
-
-1. A robust set of Stratum V2 (SV2) primitives as Rust library crates which anyone can use
-   to expand the protocol or implement a role. For example:
-   - Pools supporting SV2
-   - Mining-device/hashrate producers integrating SV2 into their firmware
-   - Bitcoin nodes implementing Template Provider to build the `blocktemplate`
-2. A set of helpers built on top of the above primitives and the external Bitcoin-related Rust crates for anyone to implement the SV2 roles.
-3. An open-source implementation of a SV2 proxy for miners.
-4. An open-source implementation of a SV2 pool for mining pool operators.
-
 ## 💻 Contribute 
 
-If you are a developer looking to help, but you're not sure where to begin, check the [good first issue label](https://github.com/stratum-mining/stratum/labels/good%20first%20issue), which contains small pieces of work that have been specifically flagged as being friendly to new contributors.
+We welcome contributions to improve these pool applications! Here's how you can help:
 
-Contributors looking to do something a bit more challenging, before opening a pull request, please join [our community chat](https://discord.gg/fsEW23wFYs) or [start a GitHub issue](https://github.com/stratum-mining/stratum/issues) to get early feedback, discuss the best ways to tackle the problem, and ensure there is no work duplication and consensus.
+1. **Start small**: Check the [good first issue label](https://github.com/stratum-mining/stratum/labels/good%20first%20issue) in the main SRI repository
+2. **Join the community**: Connect with us on [Discord](https://discord.gg/fsEW23wFYs) before starting larger contributions
+3. **Open issues**: [Create GitHub issues](https://github.com/stratum-mining/stratum/issues) for bugs, feature requests, or questions
+4. **Follow standards**: Ensure code follows Rust best practices and includes appropriate tests
 
 ## 🤝 Support
 
-Join our Discord community to get help, share your ideas, or discuss anything related to Stratum V2 and its reference implementation. 
-
-Whether you're looking for technical support, want to contribute, or are just interested in learning more about the project, our community is the place to be.
+Join our Discord community for technical support, discussions, and collaboration:
 
 [Join the Stratum V2 Discord Community](https://discord.gg/fsEW23wFYs)
+
+For detailed documentation and guides, visit:
+[Stratum V2 Documentation](https://stratumprotocol.org)
 
 ## 🎁 Donate
 
 ### 👤 Individual Donations 
-If you wish to support the development and maintenance of the Stratum V2 Reference Implementation, individual donations are greatly appreciated. You can donate through OpenSats, a 501(c)(3) public charity dedicated to supporting open-source Bitcoin projects.
+Support the development of Stratum V2 and these pool applications through OpenSats:
 
 [Donate through OpenSats](https://opensats.org/projects/stratumv2)
 
 ### 🏢 Corporate Donations
-For corporate entities interested in providing more substantial support, such as grants to SRI contributors, please get in touch with us directly. Your support can make a significant difference in accelerating development, research, and innovation.
+For corporate support and grants, contact us directly:
 
-Email us at: stratumv2@gmail.com
+Email: stratumv2@gmail.com
 
 ## 🙏 Supporters
 
-SRI contributors are independently, financially supported by following entities: 
+SRI contributors are independently supported by these organizations:
 
 <p float="left">
   <a href="https://hrf.org"><img src="https://raw.githubusercontent.com/stratum-mining/stratumprotocol.org/refs/heads/main/public/assets/hrf-logo-boxed.svg" width="250" /></a>
@@ -134,4 +156,5 @@ Minimum Supported Rust Version: 1.75.0
 
 > Website [stratumprotocol.org](https://www.stratumprotocol.org) &nbsp;&middot;&nbsp;
 > Discord [SV2 Discord](https://discord.gg/fsEW23wFYs) &nbsp;&middot;&nbsp;
-> Twitter [@Stratumv2](https://twitter.com/StratumV2)
+> Twitter [@Stratumv2](https://twitter.com/StratumV2) &nbsp;&middot;&nbsp;
+> Main Repository [stratum-mining/stratum](https://github.com/stratum-mining/stratum)

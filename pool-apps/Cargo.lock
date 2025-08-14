@@ -1293,7 +1293,6 @@ dependencies = [
  "pool_sv2",
  "rand 0.9.2",
  "stratum-common",
- "sv1_api",
  "tar",
  "tokio",
  "tracing",
@@ -1549,12 +1548,11 @@ dependencies = [
 
 [[package]]
 name = "minreq"
-version = "2.12.0"
+version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "763d142cdff44aaadd9268bebddb156ef6c65a0e13486bb81673cf2d8739f9b0"
+checksum = "84885312a86831bff4a3cb04a1e54a3f698407e3274c83249313f194d3e0b678"
 dependencies = [
  "log",
- "once_cell",
  "rustls",
  "rustls-webpki",
  "serde",
@@ -1864,6 +1862,8 @@ dependencies = [
  "config",
  "config_helpers_sv2",
  "error_handling",
+ "hex",
+ "integration_tests_sv2",
  "key-utils",
  "nohash-hasher",
  "rand 0.8.5",

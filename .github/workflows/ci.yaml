@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build pool applications workspace
+        run: cargo build --manifest-path=pool-apps/Cargo.toml
+
+      - name: Build miner applications workspace
+        run: cargo build --manifest-path=miner-apps/Cargo.toml
+
+      - name: Build integration tests workspace
+        run: cargo build --manifest-path=test/integration-tests/Cargo.toml
+
+      - name: Test pool applications workspace
+        run: cargo test --manifest-path=pool-apps/Cargo.toml
+
+      - name: Test miner applications workspace
+        run: cargo test --manifest-path=miner-apps/Cargo.toml
+
+      # We have a separate workflow to run integration tests (see integration-tests.yaml)
+
+      - name: Clippy check pool applications workspace
+        run: cargo clippy --manifest-path=pool-apps/Cargo.toml -- -D warnings
+
+      - name: Clippy check miner applications workspace
+        run: cargo clippy --manifest-path=miner-apps/Cargo.toml -- -D warnings
+
+      - name: Clippy check integration tests workspace
+        run: cargo clippy --manifest-path=test/integration-tests/Cargo.toml -- -D warnings
+
+  fmt:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          components: rustfmt
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all --manifest-path=pool-apps/Cargo.toml -- --check
+          cargo fmt --all --manifest-path=miner-apps/Cargo.toml -- --check
+          cargo fmt --all --manifest-path=test/integration-tests/Cargo.toml -- --check 
