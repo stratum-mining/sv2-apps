@@ -28,3 +28,9 @@ pool_signature = "Stratum V2 SRI Pool"
 tp_address = "127.0.0.1:8442"
 shares_per_minute = 6.0
 share_batch_size = 10
+
+# Persistence configuration (optional)
+# Uncomment to enable file-based persistence of share events
+# [persistence]
+# file_path = "./pool_shares.log"
+# channel_size = 10000  # Optional, defaults to 10000

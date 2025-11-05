@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_channel::unbounded;
 use stratum_apps::{
-    stratum_core::{bitcoin::consensus::Encodable, parsers_sv2::TemplateDistribution},
+    persistence::{SharePersistence, FileHandler},
+    stratum_core::{
+        bitcoin::consensus::Encodable, parsers_sv2::TemplateDistribution,
+    },
     task_manager::TaskManager,
 };
 use tokio::sync::broadcast;
@@ -68,6 +71,27 @@ impl PoolSv2 {
 
         debug!("Channels initialized.");
 
+        // Initialize persistence from config
+        let persistence = match self.config.persistence() {
+            Some(config) => {
+                match FileHandler::new(config.file_path.clone(), config.channel_size) {
+                    Ok(handler) => {
+                        info!("Persistence enabled: file_path={}, channel_size={}",
+                              config.file_path.display(), config.channel_size);
+                        SharePersistence::new(Some(handler))
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize persistence, disabling: {}", e);
+                        SharePersistence::default()
+                    }
+                }
+            }
+            None => {
+                info!("Persistence disabled (not configured).");
+                SharePersistence::default()
+            }
+        };
+
         let channel_manager = ChannelManager::new(
             self.config.clone(),
             channel_manager_to_tp_sender,
@@ -75,6 +99,7 @@ impl PoolSv2 {
             channel_manager_to_downstream_sender.clone(),
             downstream_to_channel_manager_receiver,
             encoded_outputs.clone(),
+            persistence,
         )
         .await?;
 

@@ -186,7 +186,7 @@ mod tests {
 
         // Create share hash
         use stratum_core::bitcoin::hashes::{sha256d::Hash, Hash as HashTrait};
-        let share_hash = Hash::from_byte_array([0xab; 32]);
+        let share_hash = Some(Hash::from_byte_array([0xab; 32]));
 
         // Write some events
         let event1 = ShareEvent {
@@ -262,7 +262,7 @@ mod tests {
         let handler = FileHandler::new(test_file.clone(), 100).unwrap();
 
         use stratum_core::bitcoin::hashes::{sha256d::Hash, Hash as HashTrait};
-        let share_hash = Hash::from_byte_array([0u8; 32]);
+        let share_hash = Some(Hash::from_byte_array([0u8; 32]));
 
         let event = ShareEvent {
             error_code: None,

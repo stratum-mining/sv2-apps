@@ -129,7 +129,7 @@ pub struct ShareEvent {
     pub nonce: u32,
     pub ntime: u32,
     pub rollable_extranonce_size: Option<u16>,
-    pub share_hash: Hash,
+    pub share_hash: Option<Hash>,
     pub share_work: f64,
     pub target: [u8; 32],
     pub template_id: Option<u64>,
@@ -148,7 +148,7 @@ mod tests {
         let persistence: SharePersistence<FileHandler> = SharePersistence::default();
 
         // Create a test event
-        let share_hash = Hash::from_byte_array([0u8; 32]);
+        let share_hash = Some(Hash::from_byte_array([0u8; 32]));
 
         let event = ShareEvent {
             error_code: None,
@@ -191,7 +191,7 @@ mod tests {
         let handler = FileHandler::new(test_file.clone(), 100).unwrap();
         let persistence = SharePersistence::new(Some(handler));
 
-        let share_hash = Hash::from_byte_array([0u8; 32]);
+        let share_hash = Some(Hash::from_byte_array([0u8; 32]));
         let event = ShareEvent {
             error_code: None,
             extranonce_prefix: vec![],

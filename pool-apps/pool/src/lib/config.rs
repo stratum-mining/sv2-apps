@@ -35,6 +35,21 @@ pub struct PoolConfig {
     share_batch_size: SharesBatchSize,
     log_file: Option<PathBuf>,
     server_id: u16,
+    persistence: Option<PersistenceConfig>,
+}
+
+/// Persistence configuration for share event logging.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PersistenceConfig {
+    /// Path to the persistence log file
+    pub file_path: PathBuf,
+    /// Channel buffer size for async persistence
+    #[serde(default = "default_channel_size")]
+    pub channel_size: usize,
+}
+
+fn default_channel_size() -> usize {
+    10000
 }
 
 impl PoolConfig {
@@ -51,6 +66,7 @@ impl PoolConfig {
         shares_per_minute: SharesPerMinute,
         share_batch_size: SharesBatchSize,
         server_id: u16,
+        persistence: Option<PersistenceConfig>,
     ) -> Self {
         Self {
             listen_address: pool_connection.listen_address,
@@ -65,6 +81,7 @@ impl PoolConfig {
             share_batch_size,
             log_file: None,
             server_id,
+            persistence,
         }
     }
 
@@ -142,6 +159,11 @@ impl PoolConfig {
     /// Returns the server id.
     pub fn server_id(&self) -> u16 {
         self.server_id
+    }
+
+    /// Returns the persistence configuration.
+    pub fn persistence(&self) -> Option<&PersistenceConfig> {
+        self.persistence.as_ref()
     }
 
     pub fn get_txout(&self) -> TxOut {
