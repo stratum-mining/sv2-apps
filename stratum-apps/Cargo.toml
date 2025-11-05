@@ -54,6 +54,7 @@ default = ["network", "config", "std"]
 network = ["tokio-util", "core"]
 config = []
 rpc = ["serde_json", "hex", "base64", "hyper", "hyper-util", "http-body-util"]
+persistence = ["core"]
 std = ["bs58/std", "secp256k1/rand-std", "rand/std", "rand/std_rng"]
 core = ["stratum-core"]
 
@@ -62,7 +63,7 @@ sv1 = ["stratum-core/sv1", "stratum-core/translation", "tokio-util", "serde_json
 with_buffer_pool = ["stratum-core/with_buffer_pool"]
 
 # Convenience feature bundles for different role types
-pool = ["network", "config", "with_buffer_pool", "core"]
+pool = ["network", "config", "with_buffer_pool", "core", "persistence"]
 jd_client = ["network", "config", "with_buffer_pool", "core"]
 # Note: jd_server intentionally excludes 'core', 'network', and 'rpc' - it uses crates.io crates directly
 jd_server = ["config"]
