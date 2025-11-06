@@ -13,7 +13,9 @@ use crate::{
     error::PoolError,
 };
 
-impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
+impl<P: stratum_apps::persistence::SharePersistenceHandler>
+    HandleTemplateDistributionMessagesFromServerAsync for ChannelManager<P>
+{
     type Error = PoolError;
 
     async fn handle_new_template(

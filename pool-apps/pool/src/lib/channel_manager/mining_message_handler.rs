@@ -29,7 +29,7 @@ use crate::{
     error::PoolError,
 };
 
-impl HandleMiningMessagesFromClientAsync for ChannelManager {
+impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for ChannelManager<P> {
     type Error = PoolError;
 
     fn get_channel_type_for_client(&self, _client_id: Option<usize>) -> SupportedChannelTypes {

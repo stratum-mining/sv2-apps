@@ -26,3 +26,7 @@ tokio = { version = "1.44.1", features = ["full"] }
 ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
 tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
+
+[features]
+default = ["persistence"]
+persistence = ["stratum-apps/persistence"]
