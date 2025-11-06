@@ -11,7 +11,7 @@ use stratum_apps::{
     custom_mutex::Mutex,
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::noise_stream::NoiseTcpStream,
-    persistence::{SharePersistence, FileHandler},
+    persistence::{FileHandler, SharePersistence},
     stratum_core::{
         channels_sv2::{
             server::{

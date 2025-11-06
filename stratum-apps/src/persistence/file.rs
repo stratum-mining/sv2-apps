@@ -4,12 +4,9 @@
 //! events to a log file using Debug formatting. Events are written in the background
 //! via an async channel to ensure the hot path remains unblocked.
 
-use super::{SharePersistenceHandler, ShareEvent};
-use async_channel::{Sender, Receiver};
-use std::fmt::Debug;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
+use super::{ShareEvent, SharePersistenceHandler};
+use async_channel::{Receiver, Sender};
+use std::{fmt::Debug, fs::OpenOptions, io::Write, path::PathBuf};
 
 /// File-based persistence handler that appends events to a log file.
 ///
@@ -20,8 +17,8 @@ use std::path::PathBuf;
 /// # Example
 ///
 /// ```rust,no_run
-/// use stratum_apps::persistence::{FileHandler, SharePersistence};
 /// use std::path::PathBuf;
+/// use stratum_apps::persistence::{FileHandler, SharePersistence};
 ///
 /// // Create a file handler with buffer size 1000
 /// let handler = FileHandler::new(PathBuf::from("events.log"), 1000).unwrap();
@@ -63,10 +60,7 @@ impl FileHandler {
 
         // Test that we can open the file
         {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
             file.flush()?;
         }
 
@@ -85,10 +79,7 @@ impl FileHandler {
 
     /// Worker loop that runs in a background thread and handles file writes.
     fn worker_loop(path: PathBuf, receiver: Receiver<FileCommand>) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         loop {
             // Use blocking receive to avoid busy-waiting
@@ -166,10 +157,7 @@ impl SharePersistenceHandler for FileHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
-    use std::io::Read;
-    use std::thread;
-    use std::time::Duration;
+    use std::{fs::File, io::Read, thread, time::Duration};
 
     #[test]
     fn test_file_handler_basic_operations() {

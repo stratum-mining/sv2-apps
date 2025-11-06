@@ -49,8 +49,8 @@ pub trait SharePersistenceHandler: Send + Sync {
 /// # Example
 ///
 /// ```rust,no_run
-/// use stratum_apps::persistence::{SharePersistence, FileHandler};
 /// use std::path::PathBuf;
+/// use stratum_apps::persistence::{FileHandler, SharePersistence};
 ///
 /// // Create with enabled persistence
 /// let handler = FileHandler::new(PathBuf::from("shares.log"), 1000).unwrap();
