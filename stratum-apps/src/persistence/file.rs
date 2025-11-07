@@ -18,14 +18,13 @@ use std::{fmt::Debug, fs::OpenOptions, io::Write, path::PathBuf};
 ///
 /// ```rust,no_run
 /// use std::path::PathBuf;
-/// use stratum_apps::persistence::{FileHandler, SharePersistence};
+/// use stratum_apps::persistence::{FileHandler, SharePersistenceHandler};
 ///
 /// // Create a file handler with buffer size 1000
 /// let handler = FileHandler::new(PathBuf::from("events.log"), 1000).unwrap();
-/// let persistence = SharePersistence::new(Some(handler));
 ///
 /// // Persist events (non-blocking) - handler uses Debug format internally
-/// // persistence.persist_event(share_event);
+/// // handler.persist_event(share_event);
 /// ```
 #[derive(Debug, Clone)]
 pub struct FileHandler {
