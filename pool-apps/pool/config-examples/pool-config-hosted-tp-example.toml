@@ -34,5 +34,10 @@ share_batch_size = 10
 # Persistence configuration (optional)
 # Uncomment to enable file-based persistence of share events
 # [persistence]
+# entities = ["shares"]
+# backend = "file"
+# 
+# # File backend configuration (only used when backend = "file")
+# [persistence.file]
 # file_path = "./pool_shares.log"
 # channel_size = 10000  # Optional, defaults to 10000

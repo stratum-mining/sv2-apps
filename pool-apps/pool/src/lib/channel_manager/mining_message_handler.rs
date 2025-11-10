@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use stratum_apps::{
-    persistence::{ShareEvent, SharePersistenceHandler},
+    persistence::{ShareEvent, PersistenceEvent},
     stratum_core::{
         binary_sv2::Str0255,
         bitcoin::{consensus::Decodable, Amount, Target, TxOut},
@@ -29,7 +29,7 @@ use crate::{
     error::PoolError,
 };
 
-impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for ChannelManager<P> {
+impl HandleMiningMessagesFromClientAsync for ChannelManager {
     type Error = PoolError;
 
     fn get_channel_type_for_client(&self, _client_id: Option<usize>) -> SupportedChannelTypes {
@@ -542,7 +542,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                 match res {
                     Ok(ShareValidationResult::Valid(share_hash)) => {
                         // Persist valid share
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: None,
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -558,7 +558,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
                         let share_accounting = standard_channel.get_share_accounting();
                         if share_accounting.should_acknowledge() {
                             let success = SubmitSharesSuccess {
@@ -580,7 +580,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Ok(ShareValidationResult::BlockFound(share_hash, template_id, coinbase)) => {
                         // Persist block found
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: None,
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: true,
@@ -596,7 +596,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         info!("SubmitSharesStandard: 💰 Block Found!!! 💰{share_hash}");
                         // if we have a template id (i.e.: this was not a custom job)
@@ -623,7 +623,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::Invalid) => {
                         // Persist invalid share
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("invalid-share".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -639,7 +639,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: invalid-share ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -655,7 +655,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::Stale) => {
                         // Persist stale share
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("stale-share".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -671,7 +671,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: stale-share ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -686,7 +686,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::InvalidJobId) => {
                         // Persist invalid job id error
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("invalid-job-id".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -702,7 +702,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: invalid-job-id ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -717,7 +717,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::DoesNotMeetTarget) => {
                         // Persist difficulty too low error
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("difficulty-too-low".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -733,7 +733,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: difficulty-too-low ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -819,7 +819,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                 match res {
                     Ok(ShareValidationResult::Valid(share_hash)) => {
                         // Persist valid share
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: None,
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -835,7 +835,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
                         let share_accounting = extended_channel.get_share_accounting();
                         if share_accounting.should_acknowledge() {
                             let success = SubmitSharesSuccess {
@@ -856,7 +856,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Ok(ShareValidationResult::BlockFound(share_hash, template_id, coinbase)) => {
                         // Persist block found
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: None,
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: true,
@@ -872,7 +872,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         info!("SubmitSharesExtended: 💰 Block Found!!! 💰{share_hash}");
                         // if we have a template id (i.e.: this was not a custom job)
@@ -899,7 +899,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::Invalid) => {
                         // Persist invalid share
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("invalid-share".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -915,7 +915,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: invalid-share ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -930,7 +930,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::Stale) => {
                         // Persist stale share
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("stale-share".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -946,7 +946,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: stale-share ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -961,7 +961,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::InvalidJobId) => {
                         // Persist invalid job id error
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("invalid-job-id".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -977,7 +977,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: invalid-job-id ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -992,7 +992,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::DoesNotMeetTarget) => {
                         // Persist difficulty too low error
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("difficulty-too-low".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -1008,7 +1008,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: difficulty-too-low ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
@@ -1035,7 +1035,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                     }
                     Err(ShareValidationError::BadExtranonceSize) => {
                         // Persist bad extranonce size error
-                        self.persistence.persist_event(ShareEvent {
+                        self.persistence.persist(PersistenceEvent::Share(ShareEvent {
                             error_code: Some("bad-extranonce-size".to_string()),
                             extranonce_prefix: extranonce_prefix.to_vec(),
                             is_block_found: false,
@@ -1051,7 +1051,7 @@ impl<P: SharePersistenceHandler> HandleMiningMessagesFromClientAsync for Channel
                             timestamp: std::time::SystemTime::now(),
                             user_identity: user_identity.to_string(),
                             version: msg.version,
-                        });
+                        }));
 
                         error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: bad-extranonce-size ❌", downstream_id, channel_id, msg.sequence_number);
                         let error = SubmitSharesError {
