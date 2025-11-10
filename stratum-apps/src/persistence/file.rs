@@ -4,7 +4,7 @@
 //! events to a log file using Debug formatting. Events are written in the background
 //! via an async channel to ensure the hot path remains unblocked.
 
-use super::{ShareEvent, SharePersistenceHandler};
+use super::{PersistenceBackend, PersistenceEvent};
 use async_channel::{Receiver, Sender};
 use std::{fmt::Debug, fs::OpenOptions, io::Write, path::PathBuf};
 
@@ -18,16 +18,16 @@ use std::{fmt::Debug, fs::OpenOptions, io::Write, path::PathBuf};
 ///
 /// ```rust,no_run
 /// use std::path::PathBuf;
-/// use stratum_apps::persistence::{FileHandler, SharePersistenceHandler};
+/// use stratum_apps::persistence::{FileBackend, PersistenceBackend};
 ///
 /// // Create a file handler with buffer size 1000
-/// let handler = FileHandler::new(PathBuf::from("events.log"), 1000).unwrap();
+/// let handler = FileBackend::new(PathBuf::from("events.log"), 1000).unwrap();
 ///
 /// // Persist events (non-blocking) - handler uses Debug format internally
 /// // handler.persist_event(share_event);
 /// ```
 #[derive(Debug, Clone)]
-pub struct FileHandler {
+pub struct FileBackend {
     sender: Sender<FileCommand>,
 }
 
@@ -38,7 +38,7 @@ enum FileCommand {
     Shutdown,
 }
 
-impl FileHandler {
+impl FileBackend {
     /// Create a new file handler that will write to the specified path.
     ///
     /// This will spawn a background thread that handles all file I/O operations.
@@ -128,8 +128,8 @@ impl FileHandler {
     }
 }
 
-impl SharePersistenceHandler for FileHandler {
-    fn persist_event(&self, event: ShareEvent) {
+impl PersistenceBackend for FileBackend {
+    fn persist_event(&self, event: PersistenceEvent) {
         // Format using Debug - handler decides serialization format
         let formatted = format!("{:?}", event);
 
@@ -164,12 +164,19 @@ mod tests {
         use std::time::SystemTime;
 
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join(format!("test_persistence_{}.log", std::process::id()));
+        let test_file = temp_dir.join(format!(
+            "test_persistence_{}_{}.log",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
 
         // Clean up any existing test file
         let _ = std::fs::remove_file(&test_file);
 
-        let handler = FileHandler::new(test_file.clone(), 100).unwrap();
+        let handler = FileBackend::new(test_file.clone(), 100).unwrap();
 
         // Create share hash
         use stratum_core::bitcoin::hashes::{sha256d::Hash, Hash as HashTrait};
@@ -194,13 +201,14 @@ mod tests {
             version: 536870912,
         };
 
-        handler.persist_event(event1.clone());
-        handler.persist_event(event1.clone());
-        handler.persist_event(event1);
+        use super::super::PersistenceEvent;
+        handler.persist_event(PersistenceEvent::Share(event1.clone()));
+        handler.persist_event(PersistenceEvent::Share(event1.clone()));
+        handler.persist_event(PersistenceEvent::Share(event1));
         handler.flush();
 
-        // Give the worker thread time to process
-        thread::sleep(Duration::from_millis(100));
+        // Give the worker thread time to process and flush
+        thread::sleep(Duration::from_millis(200));
 
         // Read back the file
         let mut file = File::open(&test_file).unwrap();
@@ -208,7 +216,8 @@ mod tests {
         file.read_to_string(&mut contents).unwrap();
 
         assert!(contents.contains("miner1"));
-        let line_count = contents.lines().count();
+        // Count non-empty lines (writeln! adds trailing newline)
+        let line_count = contents.lines().filter(|l| !l.is_empty()).count();
         assert_eq!(line_count, 3);
 
         // Clean up
@@ -225,7 +234,7 @@ mod tests {
             .join("subdir")
             .join("persistence.log");
 
-        let handler = FileHandler::new(nested_path.clone(), 100).unwrap();
+        let handler = FileBackend::new(nested_path.clone(), 100).unwrap();
 
         assert!(nested_path.exists());
 
@@ -246,7 +255,7 @@ mod tests {
 
         let _ = std::fs::remove_file(&test_file);
 
-        let handler = FileHandler::new(test_file.clone(), 100).unwrap();
+        let handler = FileBackend::new(test_file.clone(), 100).unwrap();
 
         use stratum_core::bitcoin::hashes::{sha256d::Hash, Hash as HashTrait};
         let share_hash = Some(Hash::from_byte_array([0u8; 32]));
@@ -269,7 +278,8 @@ mod tests {
             version: 1,
         };
 
-        handler.persist_event(event);
+        use super::super::PersistenceEvent;
+        handler.persist_event(PersistenceEvent::Share(event));
         handler.shutdown();
 
         // Give worker time to shutdown

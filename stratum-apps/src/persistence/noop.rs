@@ -4,7 +4,10 @@
 //! The compiler will optimize away all calls to this handler with `#[inline(always)]`,
 //! resulting in true zero-cost abstraction when persistence is not needed.
 
-use super::{ShareEvent, SharePersistenceHandler};
+use super::{PersistenceBackend, PersistenceEvent};
+
+#[cfg(test)]
+use super::ShareEvent;
 
 /// A persistence handler that does nothing.
 ///
@@ -14,25 +17,25 @@ use super::{ShareEvent, SharePersistenceHandler};
 /// # Example
 ///
 /// ```rust,no_run
-/// use stratum_apps::persistence::{NoOpHandler, SharePersistenceHandler};
+/// use stratum_apps::persistence::{NoOpBackend, PersistenceBackend};
 ///
-/// let handler = NoOpHandler;
+/// let handler = NoOpBackend::new();
 /// // All operations compile to nothing
 /// // handler.persist_event(event);
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NoOpHandler;
+pub struct NoOpBackend;
 
-impl NoOpHandler {
+impl NoOpBackend {
     /// Create a new NoOpHandler.
     pub const fn new() -> Self {
-        NoOpHandler
+        NoOpBackend
     }
 }
 
-impl SharePersistenceHandler for NoOpHandler {
+impl PersistenceBackend for NoOpBackend {
     #[inline(always)]
-    fn persist_event(&self, _event: ShareEvent) {
+    fn persist_event(&self, _event: PersistenceEvent) {
         // Intentionally empty - compiles to nothing
     }
 
@@ -55,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_noop_handler() {
-        let handler = NoOpHandler::new();
+        let handler = NoOpBackend::new();
 
         let share_hash = Some(Hash::from_byte_array([0u8; 32]));
         let event = ShareEvent {
@@ -77,18 +80,18 @@ mod tests {
         };
 
         // Should not panic - all operations are no-ops
-        handler.persist_event(event);
+        handler.persist_event(PersistenceEvent::Share(event));
         handler.flush();
         handler.shutdown();
     }
 
     #[test]
     fn test_noop_is_default() {
-        let _handler: NoOpHandler = Default::default();
+        let _handler: NoOpBackend = Default::default();
     }
 
     #[test]
     fn test_noop_is_const() {
-        const _HANDLER: NoOpHandler = NoOpHandler::new();
+        const _HANDLER: NoOpBackend = NoOpBackend::new();
     }
 }
