@@ -66,8 +66,7 @@ impl FileBackend {
 
         // Test that we can open the file (sync check during initialization)
         {
-            use std::fs::OpenOptions;
-            use std::io::Write;
+            use std::{fs::OpenOptions, io::Write};
             let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
             file.flush()?;
         }
@@ -194,7 +193,8 @@ mod tests {
         // Clean up any existing test file
         let _ = std::fs::remove_file(&test_file);
 
-        let handler = FileBackend::new(test_file.clone(), 100).unwrap();
+        let task_manager = Arc::new(crate::task_manager::TaskManager::new());
+        let handler = FileBackend::new(test_file.clone(), 100, task_manager).unwrap();
 
         // Create share hash
         use stratum_core::bitcoin::hashes::{sha256d::Hash, Hash as HashTrait};
@@ -252,7 +252,8 @@ mod tests {
             .join("subdir")
             .join("persistence.log");
 
-        let handler = FileBackend::new(nested_path.clone(), 100).unwrap();
+        let task_manager = Arc::new(crate::task_manager::TaskManager::new());
+        let handler = FileBackend::new(nested_path.clone(), 100, task_manager).unwrap();
 
         assert!(nested_path.exists());
 
@@ -273,7 +274,8 @@ mod tests {
 
         let _ = std::fs::remove_file(&test_file);
 
-        let handler = FileBackend::new(test_file.clone(), 100).unwrap();
+        let task_manager = Arc::new(crate::task_manager::TaskManager::new());
+        let handler = FileBackend::new(test_file.clone(), 100, task_manager).unwrap();
 
         use stratum_core::bitcoin::hashes::{sha256d::Hash, Hash as HashTrait};
         let share_hash = Some(Hash::from_byte_array([0u8; 32]));

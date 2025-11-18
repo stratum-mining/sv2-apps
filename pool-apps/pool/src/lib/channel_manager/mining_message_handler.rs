@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use stratum_apps::{
-    persistence::{ShareEvent, PersistenceEvent},
+    persistence::{PersistenceEvent, ShareEvent},
     stratum_core::{
         binary_sv2::Str0255,
         bitcoin::{consensus::Decodable, Amount, Target, TxOut},

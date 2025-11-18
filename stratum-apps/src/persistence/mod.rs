@@ -199,7 +199,10 @@ impl Persistence {
     /// let persistence = Persistence::new(pool_config.persistence)?;
     /// ```
     #[cfg(feature = "persistence")]
-    pub fn new(config: Option<impl IntoPersistence>, task_manager: Arc<TaskManager>) -> Result<Self, Error> {
+    pub fn new(
+        config: Option<impl IntoPersistence>,
+        task_manager: Arc<TaskManager>,
+    ) -> Result<Self, Error> {
         match config {
             Some(cfg) => cfg.into_persistence(task_manager),
             None => Ok(Self::noop()),
@@ -295,7 +298,7 @@ impl Clone for Persistence {
                 Backend::File(b) => Backend::File(b.clone()),
                 // #[cfg(feature = "persistence")]
                 // Backend::Sqlite(b) => Backend::Sqlite(b.clone()),
-                Backend::NoOp(b) => Backend::NoOp(b.clone()),
+                Backend::NoOp(b) => Backend::NoOp(*b),
             },
             enabled_entities: self.enabled_entities.clone(),
         }
@@ -312,7 +315,8 @@ impl std::fmt::Debug for Persistence {
                 self.enabled_entities
             ),
             // #[cfg(feature = "persistence")]
-            // Backend::Sqlite(_) => write!(f, "Persistence(Sqlite, entities: {:?})", self.enabled_entities),
+            // Backend::Sqlite(_) => write!(f, "Persistence(Sqlite, entities: {:?})",
+            // self.enabled_entities),
             Backend::NoOp(_) => write!(f, "Persistence(NoOp)"),
         }
     }
@@ -395,7 +399,8 @@ mod tests {
         let _ = std::fs::remove_file(&test_file);
 
         let task_manager = Arc::new(crate::task_manager::TaskManager::new());
-        let backend = Backend::File(FileBackend::new(test_file.clone(), 100, task_manager).unwrap());
+        let backend =
+            Backend::File(FileBackend::new(test_file.clone(), 100, task_manager).unwrap());
         let persistence = Persistence::with_backend(backend, vec![EntityType::Share]);
 
         let event = create_test_event();
@@ -421,8 +426,15 @@ mod tests {
         }
 
         impl IntoPersistence for TestConfig {
-            fn into_persistence(self, task_manager: Arc<TaskManager>) -> Result<Persistence, Error> {
-                let backend = Backend::File(FileBackend::new(self.file_path, self.channel_size, task_manager)?);
+            fn into_persistence(
+                self,
+                task_manager: Arc<TaskManager>,
+            ) -> Result<Persistence, Error> {
+                let backend = Backend::File(FileBackend::new(
+                    self.file_path,
+                    self.channel_size,
+                    task_manager,
+                )?);
                 Ok(Persistence::with_backend(backend, vec![EntityType::Share]))
             }
         }

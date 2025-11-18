@@ -85,9 +85,12 @@ fn default_entities() -> Vec<String> {
 /// Implement IntoPersistence trait for pool's config type
 #[cfg(feature = "persistence")]
 impl stratum_apps::persistence::IntoPersistence for PersistenceConfig {
-    fn into_persistence(self, task_manager: Arc<TaskManager>) -> Result<stratum_apps::persistence::Persistence, stratum_apps::persistence::Error> {
+    fn into_persistence(
+        self,
+        task_manager: Arc<TaskManager>,
+    ) -> Result<stratum_apps::persistence::Persistence, stratum_apps::persistence::Error> {
         use stratum_apps::persistence::{Backend, EntityType, FileBackend, Persistence};
-        
+
         // Parse entity types
         let enabled_entities: Vec<EntityType> = self
             .entities
@@ -101,30 +104,37 @@ impl stratum_apps::persistence::IntoPersistence for PersistenceConfig {
                 }
             })
             .collect();
-        
+
         // Create backend based on config
         let backend = match self.backend.as_str() {
             "file" => {
-                let file_config = self.file
-                    .ok_or_else(|| stratum_apps::persistence::Error::Custom(
-                        "[persistence.file] section required for file backend".to_string()
-                    ))?;
-                
-                Backend::File(FileBackend::new(file_config.file_path, file_config.channel_size, task_manager)?)
+                let file_config = self.file.ok_or_else(|| {
+                    stratum_apps::persistence::Error::Custom(
+                        "[persistence.file] section required for file backend".to_string(),
+                    )
+                })?;
+
+                Backend::File(FileBackend::new(
+                    file_config.file_path,
+                    file_config.channel_size,
+                    task_manager,
+                )?)
             }
             // Future: Add more backends here
             // "sqlite" => {
             //     let sqlite_config = self.sqlite
-            //         .ok_or_else(|| Error::Custom("[persistence.sqlite] section required".to_string()))?;
-            //     Backend::Sqlite(SqliteBackend::new(sqlite_config.database_path, sqlite_config.pool_size)?)
-            // }
+            //         .ok_or_else(|| Error::Custom("[persistence.sqlite] section
+            // required".to_string()))?;
+            //     Backend::Sqlite(SqliteBackend::new(sqlite_config.database_path,
+            // sqlite_config.pool_size)?) }
             other => {
-                return Err(stratum_apps::persistence::Error::Custom(
-                    format!("Unknown backend type: {}", other)
-                ));
+                return Err(stratum_apps::persistence::Error::Custom(format!(
+                    "Unknown backend type: {}",
+                    other
+                )));
             }
         };
-        
+
         Ok(Persistence::with_backend(backend, enabled_entities))
     }
 }
@@ -308,10 +318,10 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "persistence")]
-    #[test]
-    fn test_persistence_config_file_backend() {
-        use stratum_apps::persistence::IntoPersistence;
+    #[tokio::test]
+    async fn test_persistence_config_file_backend() {
         use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
 
         let config = PersistenceConfig {
             backend: "file".to_string(),
@@ -328,14 +338,14 @@ mod tests {
         // Test that config can be converted to Persistence
         let result = config.into_persistence(task_manager);
         assert!(result.is_ok());
-        
+
         // Clean up test file if created
         let _ = std::fs::remove_file("/tmp/test_pool_persistence.log");
     }
 
     #[cfg(feature = "persistence")]
-    #[test]
-    fn test_persistence_config_missing_file_section() {
+    #[tokio::test]
+    async fn test_persistence_config_missing_file_section() {
         use stratum_apps::persistence::IntoPersistence;
 
         let config = PersistenceConfig {
@@ -355,10 +365,10 @@ mod tests {
     }
 
     #[cfg(feature = "persistence")]
-    #[test]
-    fn test_persistence_config_unknown_backend() {
-        use stratum_apps::persistence::IntoPersistence;
+    #[tokio::test]
+    async fn test_persistence_config_unknown_backend() {
         use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
 
         let config = PersistenceConfig {
             backend: "unknown_backend".to_string(),
@@ -380,10 +390,10 @@ mod tests {
     }
 
     #[cfg(feature = "persistence")]
-    #[test]
-    fn test_persistence_config_entity_filtering() {
-        use stratum_apps::persistence::IntoPersistence;
+    #[tokio::test]
+    async fn test_persistence_config_entity_filtering() {
         use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
 
         let config = PersistenceConfig {
             backend: "file".to_string(),
@@ -409,7 +419,7 @@ mod tests {
     #[test]
     fn test_file_backend_config_channel_size() {
         use std::path::PathBuf;
-        
+
         // Test that FileBackendConfig can be created with custom channel_size
         let config = FileBackendConfig {
             file_path: PathBuf::from("/tmp/test.log"),
@@ -419,10 +429,10 @@ mod tests {
     }
 
     #[cfg(feature = "persistence")]
-    #[test]
-    fn test_persistence_config_multiple_entities() {
-        use stratum_apps::persistence::IntoPersistence;
+    #[tokio::test]
+    async fn test_persistence_config_multiple_entities() {
         use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
 
         // Test with multiple entities (even though only "shares" is currently supported)
         let config = PersistenceConfig {
@@ -439,7 +449,7 @@ mod tests {
 
         let result = config.into_persistence(task_manager);
         assert!(result.is_ok());
-        
+
         // Clean up
         let _ = std::fs::remove_file("/tmp/test_multi.log");
     }
