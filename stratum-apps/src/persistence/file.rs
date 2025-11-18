@@ -4,9 +4,12 @@
 //! events to a log file using Debug formatting. Events are written in the background
 //! via an async channel to ensure the hot path remains unblocked.
 
+use crate::task_manager::TaskManager;
+
 use super::{PersistenceBackend, PersistenceEvent};
 use async_channel::{Receiver, Sender};
-use std::{fmt::Debug, fs::OpenOptions, io::Write, path::PathBuf};
+use std::{fmt::Debug, path::PathBuf, sync::Arc};
+use tokio::io::AsyncWriteExt;
 
 /// File-based persistence handler that appends events to a log file.
 ///
@@ -51,45 +54,61 @@ impl FileBackend {
     /// # Errors
     ///
     /// Returns an error if the file cannot be created or opened.
-    pub fn new(path: PathBuf, channel_size: usize) -> std::io::Result<Self> {
+    pub fn new(
+        path: PathBuf,
+        channel_size: usize,
+        task_manager: Arc<TaskManager>,
+    ) -> std::io::Result<Self> {
         // Ensure the parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Test that we can open the file
+        // Test that we can open the file (sync check during initialization)
         {
+            use std::fs::OpenOptions;
+            use std::io::Write;
             let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
             file.flush()?;
         }
 
         let (sender, receiver) = async_channel::bounded(channel_size);
 
-        // Spawn background worker thread
-        std::thread::spawn(move || {
-            if let Err(e) = Self::worker_loop(path, receiver) {
-                tracing::error!("File persistence worker failed: {}", e);
-            }
-        });
+        // Spawn background worker task
+        task_manager.spawn(Self::worker_loop(path, receiver));
 
         tracing::info!("Initialized file persistence handler");
         Ok(Self { sender })
     }
 
-    /// Worker loop that runs in a background thread and handles file writes.
-    fn worker_loop(path: PathBuf, receiver: Receiver<FileCommand>) -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    /// Worker loop that runs as an async task and handles file writes.
+    async fn worker_loop(path: PathBuf, receiver: Receiver<FileCommand>) {
+        // Open file with tokio async file operations
+        let file_result = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await;
+
+        let mut file = match file_result {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to open file for persistence: {}", e);
+                return;
+            }
+        };
 
         loop {
-            // Use blocking receive to avoid busy-waiting
-            match receiver.recv_blocking() {
+            // Use async receive
+            match receiver.recv().await {
                 Ok(FileCommand::Write(text)) => {
-                    if let Err(e) = writeln!(file, "{}", text) {
+                    let line = format!("{}\n", text);
+                    if let Err(e) = file.write_all(line.as_bytes()).await {
                         tracing::error!("Failed to write to file: {}", e);
                     }
                 }
                 Ok(FileCommand::Flush) => {
-                    if let Err(e) = file.flush() {
+                    if let Err(e) = file.flush().await {
                         tracing::error!("Failed to flush file: {}", e);
                     }
                 }
@@ -98,28 +117,27 @@ impl FileBackend {
                     while let Ok(cmd) = receiver.try_recv() {
                         match cmd {
                             FileCommand::Write(text) => {
-                                let _ = writeln!(file, "{}", text);
+                                let line = format!("{}\n", text);
+                                let _ = file.write_all(line.as_bytes()).await;
                             }
                             FileCommand::Flush => {
-                                let _ = file.flush();
+                                let _ = file.flush().await;
                             }
                             FileCommand::Shutdown => break,
                         }
                     }
-                    let _ = file.flush();
+                    let _ = file.flush().await;
                     tracing::info!("File persistence worker shutdown complete");
                     break;
                 }
                 Err(_) => {
                     // Channel closed, shutdown
-                    let _ = file.flush();
+                    let _ = file.flush().await;
                     tracing::info!("File persistence channel closed, shutting down");
                     break;
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Get the number of events waiting in the channel.

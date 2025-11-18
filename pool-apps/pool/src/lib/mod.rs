@@ -72,7 +72,7 @@ impl PoolSv2 {
         // Initialize persistence using the new trait-based approach
         #[cfg(feature = "persistence")]
         let persistence = {
-            match Persistence::new(self.config.persistence().cloned()) {
+            match Persistence::new(self.config.persistence().cloned(), task_manager.clone()) {
                 Ok(p) => {
                     info!("Persistence initialized: {:?}", p);
                     p

@@ -22,6 +22,8 @@ pub mod file;
 // pub mod sqlite;
 pub mod noop;
 
+#[cfg(feature = "persistence")]
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use stratum_core::bitcoin::hashes::sha256d::Hash;
@@ -31,6 +33,9 @@ pub use file::FileBackend;
 // #[cfg(feature = "persistence")]
 // pub use sqlite::SqliteBackend;
 pub use noop::NoOpBackend;
+
+#[cfg(feature = "persistence")]
+use crate::task_manager::TaskManager;
 
 /// Entity types that can be persisted
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -178,7 +183,7 @@ impl std::error::Error for Error {}
 #[cfg(feature = "persistence")]
 pub trait IntoPersistence {
     /// Convert this config into a Persistence instance
-    fn into_persistence(self) -> Result<Persistence, Error>;
+    fn into_persistence(self, task_manager: Arc<TaskManager>) -> Result<Persistence, Error>;
 }
 
 impl Persistence {
@@ -194,9 +199,9 @@ impl Persistence {
     /// let persistence = Persistence::new(pool_config.persistence)?;
     /// ```
     #[cfg(feature = "persistence")]
-    pub fn new(config: Option<impl IntoPersistence>) -> Result<Self, Error> {
+    pub fn new(config: Option<impl IntoPersistence>, task_manager: Arc<TaskManager>) -> Result<Self, Error> {
         match config {
-            Some(cfg) => cfg.into_persistence(),
+            Some(cfg) => cfg.into_persistence(task_manager),
             None => Ok(Self::noop()),
         }
     }
@@ -357,7 +362,8 @@ mod tests {
         let test_file = temp_dir.join(format!("test_file_{}.log", std::process::id()));
         let _ = std::fs::remove_file(&test_file);
 
-        let handler = FileBackend::new(test_file.clone(), 100).unwrap();
+        let task_manager = Arc::new(crate::task_manager::TaskManager::new());
+        let handler = FileBackend::new(test_file.clone(), 100, task_manager).unwrap();
 
         let event = create_test_event();
         handler.persist_event(PersistenceEvent::Share(event));
@@ -388,7 +394,8 @@ mod tests {
         let test_file = temp_dir.join(format!("test_persistence_{}.log", std::process::id()));
         let _ = std::fs::remove_file(&test_file);
 
-        let backend = Backend::File(FileBackend::new(test_file.clone(), 100).unwrap());
+        let task_manager = Arc::new(crate::task_manager::TaskManager::new());
+        let backend = Backend::File(FileBackend::new(test_file.clone(), 100, task_manager).unwrap());
         let persistence = Persistence::with_backend(backend, vec![EntityType::Share]);
 
         let event = create_test_event();
@@ -414,8 +421,8 @@ mod tests {
         }
 
         impl IntoPersistence for TestConfig {
-            fn into_persistence(self) -> Result<Persistence, Error> {
-                let backend = Backend::File(FileBackend::new(self.file_path, self.channel_size)?);
+            fn into_persistence(self, task_manager: Arc<TaskManager>) -> Result<Persistence, Error> {
+                let backend = Backend::File(FileBackend::new(self.file_path, self.channel_size, task_manager)?);
                 Ok(Persistence::with_backend(backend, vec![EntityType::Share]))
             }
         }
@@ -429,7 +436,8 @@ mod tests {
             channel_size: 100,
         };
 
-        let persistence = Persistence::new(Some(config)).unwrap();
+        let task_manager = Arc::new(crate::task_manager::TaskManager::new());
+        let persistence = Persistence::new(Some(config), task_manager).unwrap();
         let event = create_test_event();
         persistence.persist(PersistenceEvent::Share(event));
         persistence.shutdown();
