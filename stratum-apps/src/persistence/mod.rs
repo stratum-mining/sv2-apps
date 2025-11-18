@@ -359,9 +359,9 @@ mod tests {
         handler.shutdown();
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(feature = "persistence")]
-    fn test_file_handler() {
+    async fn test_file_handler() {
         let temp_dir = std::env::temp_dir();
         let test_file = temp_dir.join(format!("test_file_{}.log", std::process::id()));
         let _ = std::fs::remove_file(&test_file);
@@ -374,7 +374,7 @@ mod tests {
         handler.shutdown();
 
         // Give worker thread time to process
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Clean up
         let _ = std::fs::remove_file(&test_file);
@@ -391,9 +391,9 @@ mod tests {
         persistence.shutdown();
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(feature = "persistence")]
-    fn test_persistence_with_backend() {
+    async fn test_persistence_with_backend() {
         let temp_dir = std::env::temp_dir();
         let test_file = temp_dir.join(format!("test_persistence_{}.log", std::process::id()));
         let _ = std::fs::remove_file(&test_file);
@@ -408,15 +408,15 @@ mod tests {
         persistence.shutdown();
 
         // Give worker thread time to process
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Clean up
         let _ = std::fs::remove_file(&test_file);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(feature = "persistence")]
-    fn test_into_persistence_trait() {
+    async fn test_into_persistence_trait() {
         use std::path::PathBuf;
 
         // Example config struct
@@ -455,7 +455,7 @@ mod tests {
         persistence.shutdown();
 
         // Give worker thread time to process
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Clean up
         let _ = std::fs::remove_file(&test_file);

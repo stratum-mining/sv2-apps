@@ -20,11 +20,13 @@ use tokio::io::AsyncWriteExt;
 /// # Example
 ///
 /// ```rust,no_run
-/// use std::path::PathBuf;
+/// use std::{path::PathBuf, sync::Arc};
 /// use stratum_apps::persistence::{FileBackend, PersistenceBackend};
+/// use stratum_apps::task_manager::TaskManager;
 ///
 /// // Create a file handler with buffer size 1000
-/// let handler = FileBackend::new(PathBuf::from("events.log"), 1000).unwrap();
+/// let task_manager = Arc::new(TaskManager::new());
+/// let handler = FileBackend::new(PathBuf::from("events.log"), 1000, task_manager).unwrap();
 ///
 /// // Persist events (non-blocking) - handler uses Debug format internally
 /// // handler.persist_event(share_event);
@@ -166,10 +168,10 @@ impl PersistenceBackend for FileBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, io::Read, thread, time::Duration};
+    use std::{fs::File, io::Read};
 
-    #[test]
-    fn test_file_handler_basic_operations() {
+    #[tokio::test]
+    async fn test_file_handler_basic_operations() {
         use super::super::ShareEvent;
         use std::time::SystemTime;
 
@@ -219,7 +221,7 @@ mod tests {
         handler.flush();
 
         // Give the worker thread time to process and flush
-        thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Read back the file
         let mut file = File::open(&test_file).unwrap();
@@ -233,12 +235,12 @@ mod tests {
 
         // Clean up
         handler.shutdown();
-        thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         std::fs::remove_file(&test_file).unwrap();
     }
 
-    #[test]
-    fn test_file_handler_creates_parent_directories() {
+    #[tokio::test]
+    async fn test_file_handler_creates_parent_directories() {
         let temp_dir = std::env::temp_dir();
         let nested_path = temp_dir
             .join(format!("test_nested_{}", std::process::id()))
@@ -248,7 +250,8 @@ mod tests {
         let task_manager = Arc::new(crate::task_manager::TaskManager::new());
         let handler = FileBackend::new(nested_path.clone(), 100, task_manager).unwrap();
 
-        assert!(nested_path.exists());
+        // Verify that parent directories were created synchronously
+        assert!(nested_path.parent().unwrap().exists());
 
         // Clean up
         handler.shutdown();
@@ -257,8 +260,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_file_handler_shutdown() {
+    #[tokio::test]
+    async fn test_file_handler_shutdown() {
         use super::super::ShareEvent;
         use std::time::SystemTime;
 
@@ -296,7 +299,7 @@ mod tests {
         handler.shutdown();
 
         // Give worker time to shutdown
-        thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Verify file was flushed
         let metadata = std::fs::metadata(&test_file).unwrap();
