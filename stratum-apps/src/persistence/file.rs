@@ -64,13 +64,6 @@ impl FileBackend {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Test that we can open the file (sync check during initialization)
-        {
-            use std::{fs::OpenOptions, io::Write};
-            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-            file.flush()?;
-        }
-
         let (sender, receiver) = async_channel::bounded(channel_size);
 
         // Spawn background worker task
