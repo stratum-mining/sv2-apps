@@ -8,11 +8,15 @@
 //! - Managing [`TemplateProviderConfig`], [`AuthorityConfig`], [`CoinbaseOutput`], and
 //!   [`ConnectionConfig`]
 //! - Validating and converting coinbase outputs
+#[cfg(feature = "persistence")]
+use std::sync::Arc;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "persistence")]
+use stratum_apps::task_manager::TaskManager;
 use stratum_apps::{
     config_helpers::CoinbaseRewardScript,
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
@@ -35,6 +39,104 @@ pub struct PoolConfig {
     share_batch_size: SharesBatchSize,
     log_file: Option<PathBuf>,
     server_id: u16,
+    #[cfg(feature = "persistence")]
+    persistence: Option<PersistenceConfig>,
+}
+
+/// File backend configuration
+#[cfg(feature = "persistence")]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct FileBackendConfig {
+    /// Path to the persistence file
+    pub file_path: PathBuf,
+    /// Channel buffer size for async persistence
+    #[serde(default = "default_channel_size")]
+    pub channel_size: usize,
+}
+
+/// Persistence configuration for share event logging.
+///
+/// This is only available when the `persistence` feature is enabled.
+#[cfg(feature = "persistence")]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PersistenceConfig {
+    /// Backend type: "file", "sqlite", etc.
+    pub backend: String,
+    /// Which entities to persist (e.g., ["shares"])
+    #[serde(default = "default_entities")]
+    pub entities: Vec<String>,
+    /// File backend configuration (only used when backend = "file")
+    #[serde(default)]
+    pub file: Option<FileBackendConfig>,
+    // Future: Add more backend configs
+    // pub sqlite: Option<SqliteBackendConfig>,
+}
+
+#[cfg(feature = "persistence")]
+fn default_channel_size() -> usize {
+    10000
+}
+
+#[cfg(feature = "persistence")]
+fn default_entities() -> Vec<String> {
+    vec!["shares".to_string()]
+}
+
+/// Implement IntoPersistence trait for pool's config type
+#[cfg(feature = "persistence")]
+impl stratum_apps::persistence::IntoPersistence for PersistenceConfig {
+    fn into_persistence(
+        self,
+        task_manager: Arc<TaskManager>,
+    ) -> Result<stratum_apps::persistence::Persistence, stratum_apps::persistence::Error> {
+        use stratum_apps::persistence::{Backend, EntityType, FileBackend, Persistence};
+
+        // Parse entity types
+        let enabled_entities: Vec<EntityType> = self
+            .entities
+            .iter()
+            .filter_map(|s| match s.as_str() {
+                "shares" => Some(EntityType::Share),
+                // Future: "connections" => Some(EntityType::Connection),
+                _ => {
+                    tracing::warn!("Unknown entity type: {}", s);
+                    None
+                }
+            })
+            .collect();
+
+        // Create backend based on config
+        let backend = match self.backend.as_str() {
+            "file" => {
+                let file_config = self.file.ok_or_else(|| {
+                    stratum_apps::persistence::Error::Custom(
+                        "[persistence.file] section required for file backend".to_string(),
+                    )
+                })?;
+
+                Backend::File(FileBackend::new(
+                    file_config.file_path,
+                    file_config.channel_size,
+                    task_manager,
+                )?)
+            }
+            // Future: Add more backends here
+            // "sqlite" => {
+            //     let sqlite_config = self.sqlite
+            //         .ok_or_else(|| Error::Custom("[persistence.sqlite] section
+            // required".to_string()))?;
+            //     Backend::Sqlite(SqliteBackend::new(sqlite_config.database_path,
+            // sqlite_config.pool_size)?) }
+            other => {
+                return Err(stratum_apps::persistence::Error::Custom(format!(
+                    "Unknown backend type: {}",
+                    other
+                )));
+            }
+        };
+
+        Ok(Persistence::with_backend(backend, enabled_entities))
+    }
 }
 
 impl PoolConfig {
@@ -43,6 +145,7 @@ impl PoolConfig {
     /// # Panics
     ///
     /// Panics if `coinbase_reward_script` is empty.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool_connection: ConnectionConfig,
         template_provider: TemplateProviderConfig,
@@ -51,6 +154,7 @@ impl PoolConfig {
         shares_per_minute: SharesPerMinute,
         share_batch_size: SharesBatchSize,
         server_id: u16,
+        #[cfg(feature = "persistence")] persistence: Option<PersistenceConfig>,
     ) -> Self {
         Self {
             listen_address: pool_connection.listen_address,
@@ -65,6 +169,8 @@ impl PoolConfig {
             share_batch_size,
             log_file: None,
             server_id,
+            #[cfg(feature = "persistence")]
+            persistence,
         }
     }
 
@@ -144,6 +250,14 @@ impl PoolConfig {
         self.server_id
     }
 
+    /// Returns the persistence configuration.
+    ///
+    /// Only available when the `persistence` feature is enabled.
+    #[cfg(feature = "persistence")]
+    pub fn persistence(&self) -> Option<&PersistenceConfig> {
+        self.persistence.as_ref()
+    }
+
     pub fn get_txout(&self) -> TxOut {
         TxOut {
             value: Amount::from_sat(0),
@@ -196,5 +310,147 @@ impl ConnectionConfig {
             cert_validity_sec,
             signature,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn test_persistence_config_file_backend() {
+        use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
+
+        let config = PersistenceConfig {
+            backend: "file".to_string(),
+            entities: vec!["shares".to_string()],
+            file: Some(FileBackendConfig {
+                file_path: PathBuf::from("/tmp/test_pool_persistence.log"),
+                channel_size: 5000,
+            }),
+        };
+
+        // Create a TaskManager for the test
+        let task_manager = Arc::new(TaskManager::new());
+
+        // Test that config can be converted to Persistence
+        let result = config.into_persistence(task_manager);
+        assert!(result.is_ok());
+
+        // Clean up test file if created
+        let _ = std::fs::remove_file("/tmp/test_pool_persistence.log");
+    }
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn test_persistence_config_missing_file_section() {
+        use stratum_apps::persistence::IntoPersistence;
+
+        let config = PersistenceConfig {
+            backend: "file".to_string(),
+            entities: vec!["shares".to_string()],
+            file: None, // Missing file config
+        };
+
+        // Create a TaskManager for the test
+        let task_manager = Arc::new(TaskManager::new());
+
+        // Should fail because file backend requires [persistence.file] section
+        let result = config.into_persistence(task_manager);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("[persistence.file] section required"));
+    }
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn test_persistence_config_unknown_backend() {
+        use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
+
+        let config = PersistenceConfig {
+            backend: "unknown_backend".to_string(),
+            entities: vec!["shares".to_string()],
+            file: Some(FileBackendConfig {
+                file_path: PathBuf::from("/tmp/test.log"),
+                channel_size: 5000,
+            }),
+        };
+
+        // Create a TaskManager for the test
+        let task_manager = Arc::new(TaskManager::new());
+
+        // Should fail with unknown backend error
+        let result = config.into_persistence(task_manager);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("Unknown backend type"));
+    }
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn test_persistence_config_entity_filtering() {
+        use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
+
+        let config = PersistenceConfig {
+            backend: "file".to_string(),
+            entities: vec![
+                "shares".to_string(),
+                "unknown_entity".to_string(), // Should be filtered out
+            ],
+            file: Some(FileBackendConfig {
+                file_path: PathBuf::from("/tmp/test.log"),
+                channel_size: 5000,
+            }),
+        };
+
+        // Create a TaskManager for the test
+        let task_manager = Arc::new(TaskManager::new());
+
+        // Should succeed and filter out unknown entities
+        let result = config.into_persistence(task_manager);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn test_file_backend_config_channel_size() {
+        use std::path::PathBuf;
+
+        // Test that FileBackendConfig can be created with custom channel_size
+        let config = FileBackendConfig {
+            file_path: PathBuf::from("/tmp/test.log"),
+            channel_size: 5000,
+        };
+        assert_eq!(config.channel_size, 5000);
+    }
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn test_persistence_config_multiple_entities() {
+        use std::path::PathBuf;
+        use stratum_apps::persistence::IntoPersistence;
+
+        // Test with multiple entities (even though only "shares" is currently supported)
+        let config = PersistenceConfig {
+            backend: "file".to_string(),
+            entities: vec!["shares".to_string()],
+            file: Some(FileBackendConfig {
+                file_path: PathBuf::from("/tmp/test_multi.log"),
+                channel_size: 10000,
+            }),
+        };
+
+        // Create a TaskManager for the test
+        let task_manager = Arc::new(TaskManager::new());
+
+        let result = config.into_persistence(task_manager);
+        assert!(result.is_ok());
+
+        // Clean up
+        let _ = std::fs::remove_file("/tmp/test_multi.log");
     }
 }

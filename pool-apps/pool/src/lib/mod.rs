@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_channel::unbounded;
 use stratum_apps::{
+    persistence::Persistence,
     stratum_core::{bitcoin::consensus::Encodable, parsers_sv2::TemplateDistribution},
     task_manager::TaskManager,
 };
@@ -68,6 +69,29 @@ impl PoolSv2 {
 
         debug!("Channels initialized.");
 
+        // Initialize persistence using the new trait-based approach
+        #[cfg(feature = "persistence")]
+        let persistence = {
+            match Persistence::new(self.config.persistence().cloned(), task_manager.clone()) {
+                Ok(p) => {
+                    info!("Persistence initialized: {:?}", p);
+                    p
+                }
+                Err(e) => {
+                    return Err(crate::error::PoolError::PersistenceError(format!(
+                        "Failed to initialize persistence: {}",
+                        e
+                    )));
+                }
+            }
+        };
+
+        #[cfg(not(feature = "persistence"))]
+        let persistence = {
+            info!("Persistence disabled (feature not enabled).");
+            Persistence::noop()
+        };
+
         let channel_manager = ChannelManager::new(
             self.config.clone(),
             channel_manager_to_tp_sender,
@@ -75,6 +99,7 @@ impl PoolSv2 {
             channel_manager_to_downstream_sender.clone(),
             downstream_to_channel_manager_receiver,
             encoded_outputs.clone(),
+            persistence,
         )
         .await?;
 
