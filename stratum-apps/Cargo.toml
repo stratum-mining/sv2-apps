@@ -72,3 +72,9 @@ mining_device = ["config"]
 
 [package.metadata.docs.rs]
 features = ["pool", "jd_client", "jd_server", "translator", "sv1", "rpc"]
+
+# this patch enables synchronizing development workflows across sv2-apps and stratum repos
+# it MUST be disabled before stratum-apps is published to crates.io
+# with the proper version of stratum-core being fetched from crates.io as well
+[patch.crates-io]
+stratum-core = { git = "https://github.com/stratum-mining/stratum", branch = "main" }
