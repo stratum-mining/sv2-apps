@@ -26,6 +26,7 @@ clap = { version = "4.5.39", features = ["derive"] }
 bitcoin_core_sv2 = { path = "../../bitcoin-core-sv2" }
 hex = "0.4.3"
 hotpath = "0.9"
+mimalloc = "0.1.48"
 
 [features]
 hotpath = ["hotpath/hotpath"]

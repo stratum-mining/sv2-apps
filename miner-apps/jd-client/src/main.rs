@@ -2,6 +2,11 @@ use jd_client_sv2::JobDeclaratorClient;
 use stratum_apps::config_helpers::logging::init_logging;
 
 use crate::args::process_cli_args;
+use mimalloc::MiMalloc;
+
+// Add mimalloc
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 mod args;
 

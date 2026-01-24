@@ -31,6 +31,7 @@ clap = { version = "4.5.39", features = ["derive"] }
 hex = "0.4.3"
 hotpath = "0.9"
 dashmap = "6.1.0"
+mimalloc = "0.1.48"
 
 [features]
 hotpath = ["hotpath/hotpath"]
