@@ -2,9 +2,11 @@ use jd_client_sv2::JobDeclaratorClient;
 use stratum_apps::config_helpers::logging::init_logging;
 
 use crate::args::process_cli_args;
+#[cfg(not(feature = "hotpath-alloc"))]
 use mimalloc::MiMalloc;
 
 // Add mimalloc
+#[cfg(not(feature = "hotpath-alloc"))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
