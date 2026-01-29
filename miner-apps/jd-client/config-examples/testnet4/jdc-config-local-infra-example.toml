@@ -35,7 +35,17 @@ jdc_signature = "Sv2MinerSignature"
 #     https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki#appendix-b-index-of-script-expressions
 # Although the `musig` descriptor is not yet supported and the legacy `combo` descriptor never
 # will be. If you have an address, embed it in a descriptor like `addr(<address here>)`.
+#
+# For automatic address rotation (quantum-resistant payout hygiene), use a wildcard descriptor:
+#   coinbase_reward_script = "wpkh(tpub.../0/*)"
+# This derives a fresh address for each block found. Requires coinbase_index_file.
 coinbase_reward_script = "addr(tb1qpusf5256yxv50qt0pm0tue8k952fsu5lzsphft)"
+
+# Coinbase rotation settings (only used when coinbase_reward_script has a wildcard)
+# Path to persist the current derivation index (required for rotation)
+# coinbase_index_file = "/var/lib/jdc/coinbase_index.dat"
+# Starting index if no persistence file exists (default: 0)
+# coinbase_start_index = 0
 
 # Enable this option to set a predefined log file path.
 # When enabled, logs will always be written to this file.

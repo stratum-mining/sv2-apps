@@ -48,14 +48,14 @@ pub struct PoolConfig {
     monitoring_address: Option<SocketAddr>,
     #[serde(default = "default_monitoring_cache_refresh_secs")]
     monitoring_cache_refresh_secs: u64,
+    #[serde(default)]
+    jds: Option<JDSPartialConfig>,
 
     /// Starting derivation index for coinbase rotation (default: 0).
     ///
     /// Only used when `coinbase_reward_script` contains a wildcard descriptor
     /// (e.g., `wpkh(xpub.../0/*)`). Ignored for static addresses.
     #[serde(default)]
-    jds: Option<JDSPartialConfig>,
-    monitoring_cache_refresh_secs: Option<u64>,
     coinbase_start_index: u32,
 
     /// Path to persist the current coinbase derivation index.
@@ -71,7 +71,6 @@ pub struct PoolConfig {
 
 fn default_monitoring_cache_refresh_secs() -> u64 {
     15
-}
 }
 
 impl PoolConfig {

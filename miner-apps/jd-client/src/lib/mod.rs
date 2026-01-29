@@ -132,9 +132,7 @@ impl JobDeclaratorClient {
                 monitoring_addr,
                 Some(Arc::new(channel_manager.clone())), // SV2 channels opened with servers
                 Some(Arc::new(channel_manager.clone())), // SV2 channels opened with clients
-                std::time::Duration::from_secs(
-                    self.config.monitoring_cache_refresh_secs().unwrap_or(15),
-                ),
+                std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs()),
             )
             .expect("Failed to initialize monitoring server");
 
@@ -504,7 +502,7 @@ impl JobDeclaratorClient {
                                         monitoring_addr,
                                         Some(Arc::new(channel_manager_clone.clone())),
                                         Some(Arc::new(channel_manager_clone.clone())),
-                                        std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs().unwrap_or(15)),
+                                        std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs()),
                                     )
                                     .expect("Failed to initialize monitoring server");
 

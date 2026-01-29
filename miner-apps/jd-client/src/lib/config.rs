@@ -81,7 +81,6 @@ pub struct JobDeclaratorClientConfig {
 fn default_monitoring_cache_refresh_secs() -> u64 {
     15
 }
-}
 
 impl JobDeclaratorClientConfig {
     #[allow(clippy::too_many_arguments)]
