@@ -46,6 +46,7 @@ pub mod config_helpers;
 ///
 /// A wrapper around std::sync::Mutex
 pub mod custom_mutex;
+pub mod custom_read_write_lock;
 /// RPC utilities for Job Declaration Server
 ///
 /// HTTP-based RPC server implementation for JD Server functionality.

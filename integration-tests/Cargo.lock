@@ -2795,6 +2795,7 @@ dependencies = [
  "dirs",
  "futures",
  "miniscript 13.0.0",
+ "parking_lot",
  "prometheus",
  "rand",
  "rustversion",

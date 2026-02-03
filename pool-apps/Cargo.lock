@@ -2423,6 +2423,7 @@ dependencies = [
  "dirs",
  "futures",
  "miniscript",
+ "parking_lot",
  "prometheus",
  "rand",
  "rustversion",
