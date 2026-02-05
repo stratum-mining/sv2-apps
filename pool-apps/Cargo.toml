@@ -9,6 +9,21 @@ exclude = [
     "jd-server"
 ]
 
+[workspace.dependencies]
+# Shared external dependencies
+async-channel = "1.5.1"
+serde = { version = "1.0.89", features = ["derive", "alloc"], default-features = false }
+tokio = { version = "1.44.1", features = ["full"] }
+ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
+tracing = "0.1"
+clap = { version = "4.5.39", features = ["derive"] }
+hex = "0.4.3"
+hotpath = "0.9"
+
+# Shared local dependencies
+stratum-apps = { path = "../stratum-apps" }
+bitcoin_core_sv2 = { path = "../bitcoin-core-sv2" }
+
 [profile.dev]
 # Required by super_safe_lock
 opt-level = 1
