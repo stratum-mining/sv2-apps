@@ -55,7 +55,6 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
 # Common external dependencies that roles always need
 ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
 shellexpand = "3.1.1"
-parking_lot = "0.12.5"
 
 [features]
 default = ["network", "config", "std"]
