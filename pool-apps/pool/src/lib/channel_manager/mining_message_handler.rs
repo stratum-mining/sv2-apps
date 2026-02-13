@@ -1,8 +1,9 @@
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
 use stratum_apps::stratum_core::{
     binary_sv2::Str0255,
-    bitcoin::{consensus::Decodable, Amount, Target, TxOut},
+    bitcoin::{consensus::Decodable, Address, Amount, Target, TxOut},
     channels_sv2::{
         server::{
             error::{ExtendedChannelError, StandardChannelError},
@@ -141,10 +142,23 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                 return Err(PoolError::disconnect(PoolErrorKind::LastNewPrevhashNotFound, downstream_id));
             };
 
+            // Determine the script pubkey for the coinbase output
+            // If SOLO mining is enabled, we try to use the address provided by the miner
+            let script_pubkey = if self.solo_mining {
+                match Address::from_str(&user_identity) {
+                    Ok(addr) => addr.assume_checked().script_pubkey(),
+                    Err(_) => {
+                        error!("SOLO Mining Error: Invalid address '{}' provided by user. Fallback to pool reward address.", user_identity);
+                        self.coinbase_reward_script.script_pubkey().clone()
+                    }
+                }
+            } else {
+                self.coinbase_reward_script.script_pubkey().clone()
+            };
 
             let pool_coinbase_output = TxOut {
                 value: Amount::from_sat(last_future_template.coinbase_tx_value_remaining),
-                script_pubkey: self.coinbase_reward_script.script_pubkey(),
+                script_pubkey,
             };
 
             downstream.downstream_data.super_safe_lock(|downstream_data| {
@@ -435,11 +449,25 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                             // future extended job
                             // and the SetNewPrevHash message
                         } else {
+                            // Determine the script pubkey for the coinbase output
+                            // If SOLO mining is enabled, we try to use the address provided by the miner
+                            let script_pubkey = if self.solo_mining {
+                                match Address::from_str(&user_identity) {
+                                    Ok(addr) => addr.assume_checked().script_pubkey(),
+                                    Err(_) => {
+                                        error!("SOLO Mining Error: Invalid address '{}' provided by user. Fallback to pool reward address.", user_identity);
+                                        self.coinbase_reward_script.script_pubkey().clone()
+                                    }
+                                }
+                            } else {
+                                self.coinbase_reward_script.script_pubkey().clone()
+                            };
+
                             let pool_coinbase_output = TxOut {
                                 value: Amount::from_sat(
                                     last_future_template.coinbase_tx_value_remaining,
                                 ),
-                                script_pubkey: self.coinbase_reward_script.script_pubkey(),
+                                script_pubkey,
                             };
 
                             extended_channel.on_new_template(

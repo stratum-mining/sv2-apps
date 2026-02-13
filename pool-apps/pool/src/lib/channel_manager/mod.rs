@@ -98,6 +98,8 @@ pub struct ChannelManager {
     share_batch_size: usize,
     shares_per_minute: SharesPerMinute,
     coinbase_reward_script: CoinbaseRewardScript,
+    /// Indicates if SOLO mining mode is enabled.
+    solo_mining: bool,
     /// Protocol extensions that the pool supports (will accept if requested by clients).
     supported_extensions: Vec<u16>,
     /// Protocol extensions that the pool requires (clients must support these).
@@ -163,6 +165,7 @@ impl ChannelManager {
             shares_per_minute: config.shares_per_minute(),
             pool_tag_string: config.pool_signature().to_string(),
             coinbase_reward_script: config.coinbase_reward_script().clone(),
+            solo_mining: config.solo_mining(),
             supported_extensions: config.supported_extensions().to_vec(),
             required_extensions: config.required_extensions().to_vec(),
         };

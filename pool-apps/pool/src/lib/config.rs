@@ -40,6 +40,12 @@ pub struct PoolConfig {
     required_extensions: Vec<u16>,
     #[serde(default)]
     monitoring_address: Option<SocketAddr>,
+
+    /// Enable SOLO mining mode.
+    /// In this mode, the block reward is sent to the address provided by the miner
+    /// in the 'user_identity' field.
+    #[serde(default)]
+    solo_mining: bool,
 }
 
 impl PoolConfig {
@@ -75,6 +81,7 @@ impl PoolConfig {
             supported_extensions,
             required_extensions,
             monitoring_address: None,
+            solo_mining: false,
         }
     }
 
@@ -164,6 +171,11 @@ impl PoolConfig {
     /// Returns the monitoring address (optional).
     pub fn monitoring_address(&self) -> Option<SocketAddr> {
         self.monitoring_address
+    }
+
+    /// Returns true if SOLO mining mode is enabled.
+    pub fn solo_mining(&self) -> bool {
+        self.solo_mining
     }
 }
 
