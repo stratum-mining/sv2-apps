@@ -52,6 +52,7 @@ impl JobDeclaratorServerConfig {
         core_rpc: CoreRpc,
         mempool_update_interval: Duration,
     ) -> Self {
+        assert!(!coinbase_reward_script.script_pubkey().is_empty());
         Self {
             full_template_mode_required: true,
             listen_jd_address,

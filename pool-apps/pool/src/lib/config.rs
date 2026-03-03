@@ -66,6 +66,7 @@ impl PoolConfig {
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
     ) -> Self {
+        assert!(!coinbase_reward_script.script_pubkey().is_empty());
         Self {
             listen_address: pool_connection.listen_address,
             template_provider_type,
