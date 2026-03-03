@@ -76,11 +76,18 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
         }
 
+        let mut token_opt = if !msg.future_template && get_jd_mode() == JdMode::CoinbaseOnly {
+            Some(self.token_manager.take().await?)
+        } else {
+            None
+        };
+
         let messages = self.channel_manager_data.super_safe_lock(|channel_manager_data| {
             let mut messages: Vec<RouteMessageTo> = Vec::new();
             coinbase_outputs[0].value = Amount::from_sat(msg.coinbase_tx_value_remaining);
 
             for (downstream_id, downstream) in channel_manager_data.downstream.iter_mut() {
+                let maybe_token = token_opt.take();
 
                 let messages_ = downstream.downstream_data.super_safe_lock(|data| {
                     data.group_channel.on_new_template(msg.clone().into_static(), coinbase_outputs.clone()).map_err(|e| {
@@ -102,30 +109,29 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
 
                     if let Some(upstream_channel) = channel_manager_data.upstream_channel.as_mut() {
                         if !msg.future_template && get_jd_mode() == JdMode::CoinbaseOnly {
-                                if let (Some(token), Some(prevhash)) = (
-                                    channel_manager_data.allocate_tokens.clone(),
-                                    channel_manager_data.last_new_prev_hash.clone(),
-                                ) {
-                                    let request_id = channel_manager_data.request_id_factory.fetch_add(1, Ordering::Relaxed);
-                                    let job_factory = channel_manager_data.job_factory.as_mut().unwrap();
-                                    let full_extranonce_size = upstream_channel.get_full_extranonce_size();
-                                    let custom_job = job_factory.new_custom_job(upstream_channel.get_channel_id(), request_id, token.clone().mining_job_token, prevhash.clone().into(), msg.clone(), coinbase_outputs.clone(), full_extranonce_size);
+                                if let Some(prevhash) = channel_manager_data.last_new_prev_hash.clone() {
+                                    if let Some(token) = maybe_token {
+                                        let request_id = channel_manager_data.request_id_factory.fetch_add(1, Ordering::Relaxed);
+                                        let job_factory = channel_manager_data.job_factory.as_mut().unwrap();
+                                        let full_extranonce_size = upstream_channel.get_full_extranonce_size();
+                                        let custom_job = job_factory.new_custom_job(upstream_channel.get_channel_id(), request_id, token.clone().mining_job_token, prevhash.clone().into(), msg.clone(), coinbase_outputs.clone(), full_extranonce_size);
 
-                                    if let Ok(custom_job) = custom_job{
-                                        let last_declare = DeclaredJob {
-                                            declare_mining_job: None,
-                                            template: msg.clone().into_static(),
-                                            prev_hash: Some(prevhash),
-                                            set_custom_mining_job: Some(custom_job.clone().into_static()),
-                                            coinbase_output: channel_manager_data.coinbase_outputs.clone(),
-                                            tx_list: Vec::new(),
-                                        };
-                                        channel_manager_data
-                                            .last_declare_job_store
-                                            .insert(request_id, last_declare);
-                                        messages.push(
-                                            Mining::SetCustomMiningJob(custom_job).into()
-                                        );
+                                        if let Ok(custom_job) = custom_job{
+                                            let last_declare = DeclaredJob {
+                                                declare_mining_job: None,
+                                                template: msg.clone().into_static(),
+                                                prev_hash: Some(prevhash),
+                                                set_custom_mining_job: Some(custom_job.clone().into_static()),
+                                                coinbase_output: channel_manager_data.coinbase_outputs.clone(),
+                                                tx_list: Vec::new(),
+                                            };
+                                            channel_manager_data
+                                                .last_declare_job_store
+                                                .insert(request_id, last_declare);
+                                            messages.push(
+                                                Mining::SetCustomMiningJob(custom_job).into()
+                                            );
+                                        }
                                     }
                                 }
                         }
@@ -218,10 +224,6 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
             Ok::<Vec<RouteMessageTo>, Self::Error>(messages)
         })?;
 
-        if get_jd_mode() == JdMode::CoinbaseOnly && !msg.future_template {
-            _ = self.allocate_tokens(1).await;
-        }
-
         for message in messages {
             let _ = message.forward(&self.channel_manager_channel).await;
         }
@@ -274,21 +276,16 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
         let mut deserialized_outputs = deserialize_outputs(coinbase_outputs)
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
 
-        let (token, template_message, request_id, prevhash) =
+        let token = self.token_manager.take().await?;
+
+        let (template_message, request_id, prevhash) =
             self.channel_manager_data.super_safe_lock(|data| {
                 (
-                    data.allocate_tokens.clone(),
                     data.template_store.remove(&msg.template_id),
                     data.request_id_factory.fetch_add(1, Ordering::Relaxed),
                     data.last_new_prev_hash.clone(),
                 )
             });
-
-        _ = self.allocate_tokens(1).await;
-        let Some(token) = token else {
-            error!("Token not found, template id: {}", msg.template_id);
-            return Err(JDCError::log(JDCErrorKind::TokenNotFound));
-        };
 
         let Some(template_message) = template_message else {
             error!("Template not found, template id: {}", msg.template_id);
@@ -432,6 +429,12 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
             }
         }
 
+        let token_opt = if get_jd_mode() == JdMode::CoinbaseOnly && future_template.is_some() {
+            Some(self.token_manager.take().await?)
+        } else {
+            None
+        };
+
         let messages = self.channel_manager_data.super_safe_lock(|channel_manager_data| {
             channel_manager_data.last_new_prev_hash = Some(msg.clone().into_static());
             channel_manager_data.last_declare_job_store.iter_mut().for_each(|(_k, v)| {
@@ -447,40 +450,41 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 _ = upstream_channel.on_chain_tip_update(msg.clone().into());
 
                 if get_jd_mode() == JdMode::CoinbaseOnly {
-                    if let (Some(job_factory), Some(token), Some(template)) = (
+                    if let (Some(job_factory), Some(template)) = (
                         channel_manager_data.job_factory.as_mut(),
-                        channel_manager_data.allocate_tokens.clone(),
                         future_template.clone(),
                     ) {
-                        let request_id = channel_manager_data.request_id_factory.fetch_add(1, Ordering::Relaxed);
-                        let chain_tip = ChainTip::new(
-                            msg.prev_hash.clone().into_static(),
-                            msg.n_bits,
-                            msg.header_timestamp,
-                        );
+                        if let Some(token) = token_opt {
+                            let request_id = channel_manager_data.request_id_factory.fetch_add(1, Ordering::Relaxed);
+                            let chain_tip = ChainTip::new(
+                                msg.prev_hash.clone().into_static(),
+                                msg.n_bits,
+                                msg.header_timestamp,
+                            );
 
-                        let full_extranonce_size = upstream_channel.get_full_extranonce_size();
+                            let full_extranonce_size = upstream_channel.get_full_extranonce_size();
 
-                        if let Ok(custom_job) = job_factory.new_custom_job(
-                            upstream_channel.get_channel_id(),
-                            request_id,
-                            token.clone().mining_job_token,
-                            chain_tip,
-                            template.clone(),
-                            outputs,
-                            full_extranonce_size,
-                        ) {
-                            let last_declare = DeclaredJob {
-                                declare_mining_job: None,
-                                template: template.into_static(),
-                                prev_hash: Some(msg.clone().into_static()),
-                                set_custom_mining_job: Some(custom_job.clone().into_static()),
-                                coinbase_output: channel_manager_data.coinbase_outputs.clone(),
-                                tx_list: vec![],
-                            };
+                            if let Ok(custom_job) = job_factory.new_custom_job(
+                                upstream_channel.get_channel_id(),
+                                request_id,
+                                token.mining_job_token,
+                                chain_tip,
+                                template.clone(),
+                                outputs,
+                                full_extranonce_size,
+                            ) {
+                                let last_declare = DeclaredJob {
+                                    declare_mining_job: None,
+                                    template: template.into_static(),
+                                    prev_hash: Some(msg.clone().into_static()),
+                                    set_custom_mining_job: Some(custom_job.clone().into_static()),
+                                    coinbase_output: channel_manager_data.coinbase_outputs.clone(),
+                                    tx_list: vec![],
+                                };
 
-                            channel_manager_data.last_declare_job_store.insert(request_id, last_declare);
-                            messages.push(Mining::SetCustomMiningJob(custom_job).into());
+                                channel_manager_data.last_declare_job_store.insert(request_id, last_declare);
+                                messages.push(Mining::SetCustomMiningJob(custom_job).into());
+                            }
                         }
                     }
                 }
@@ -583,10 +587,6 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
 
             Ok::<Vec<RouteMessageTo>, Self::Error>(messages)
         })?;
-
-        if get_jd_mode() == JdMode::CoinbaseOnly {
-            _ = self.allocate_tokens(1).await;
-        }
 
         for message in messages {
             let _ = message.forward(&self.channel_manager_channel).await;

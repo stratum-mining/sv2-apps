@@ -6,6 +6,8 @@ use std::{
         Arc,
     },
 };
+mod token_manager;
+use token_manager::TokenManager;
 
 use async_channel::{Receiver, Sender};
 use bitcoin_core_sv2::CancellationToken;
@@ -36,9 +38,7 @@ use stratum_apps::{
             HandleMiningMessagesFromClientAsync, HandleMiningMessagesFromServerAsync,
             HandleTemplateDistributionMessagesFromServerAsync,
         },
-        job_declaration_sv2::{
-            AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob,
-        },
+        job_declaration_sv2::DeclareMiningJob,
         mining_sv2::{
             ExtendedExtranonce, OpenExtendedMiningChannel, SetCustomMiningJob, SetTarget,
             UpdateChannel,
@@ -125,7 +125,7 @@ pub struct ChannelManagerData {
     extranonce_prefix_factory_standard: ExtendedExtranonce,
     // Factory that generates **monotonically increasing request IDs**
     // for messages sent from the JDC.
-    request_id_factory: AtomicU32,
+    request_id_factory: Arc<AtomicU32>,
     // Factory that assigns a unique ID to each new **downstream connection**.
     downstream_id_factory: AtomicUsize,
     // Factory that assigns a unique **sequence number** to each share
@@ -135,8 +135,6 @@ pub struct ChannelManagerData {
     last_future_template: Option<NewTemplate<'static>>,
     // The last **new prevhash** received from the upstream.
     pub last_new_prev_hash: Option<SetNewPrevHashTdp<'static>>,
-    // The most recent set of **allocation tokens** received from the JDS.
-    allocate_tokens: Option<AllocateMiningJobTokenSuccess<'static>>,
     // Stores new templates as they arrive, mapped by their **template ID**.
     template_store: HashMap<TemplateId, NewTemplate<'static>>,
     // Stores the last declared job, keyed by the `request_id` used when
@@ -187,7 +185,7 @@ impl ChannelManagerData {
         self.cached_shares.clear();
 
         self.downstream_id_factory = AtomicUsize::new(0);
-        self.request_id_factory = AtomicU32::new(0);
+        self.request_id_factory.store(0, Ordering::Release);
 
         let (range_0, range_1, range_2) = {
             let range_1 = 0..JDC_SEARCH_SPACE_BYTES;
@@ -203,7 +201,6 @@ impl ChannelManagerData {
         self.extranonce_prefix_factory_standard =
             ExtendedExtranonce::new(range_0, range_1, range_2, None).expect("valid ranges");
 
-        self.allocate_tokens = None;
         self.upstream_channel = None;
         self.pool_tag_string = None;
 
@@ -260,6 +257,8 @@ pub struct ChannelManager {
     share_batch_size: SharesBatchSize,
     shares_per_minute: SharesPerMinute,
     user_identity: String,
+    /// Manages the pool of allocation tokens.
+    pub token_manager: TokenManager,
     /// This represent the current state of Upstream channel
     /// 1. NoChannel: No active upstream connection.
     /// 2. Pending: A channel request has been sent, awaiting response.
@@ -303,16 +302,17 @@ impl ChannelManager {
         let extranonce_prefix_factory_extended = make_extranonce_factory();
         let extranonce_prefix_factory_standard = make_extranonce_factory();
 
+        let request_id_factory = Arc::new(AtomicU32::new(0));
+
         let channel_manager_data = Arc::new(Mutex::new(ChannelManagerData {
             downstream: HashMap::new(),
             extranonce_prefix_factory_extended,
             extranonce_prefix_factory_standard,
             downstream_id_factory: AtomicUsize::new(0),
-            request_id_factory: AtomicU32::new(0),
+            request_id_factory: request_id_factory.clone(),
             sequence_number_factory: AtomicU32::new(1),
             last_future_template: None,
             last_new_prev_hash: None,
-            allocate_tokens: None,
             template_store: HashMap::new(),
             last_declare_job_store: HashMap::new(),
             template_id_to_upstream_job_id: HashMap::new(),
@@ -328,6 +328,12 @@ impl ChannelManager {
             required_extensions,
             cached_shares: HashMap::new(),
         }));
+
+        let token_manager = TokenManager::new(
+            jd_sender.clone(),
+            config.user_identity().to_string(),
+            request_id_factory,
+        );
 
         let channel_manager_channel = ChannelManagerChannel {
             upstream_sender,
@@ -347,6 +353,7 @@ impl ChannelManager {
             shares_per_minute: config.shares_per_minute(),
             miner_tag_string: config.jdc_signature().to_string(),
             user_identity: config.user_identity().to_string(),
+            token_manager,
             upstream_state: AtomicUpstreamState::new(UpstreamState::SoloMining),
         };
 
@@ -621,6 +628,7 @@ impl ChannelManager {
                     _ = fallback_token.cancelled() => {
                         info!("Channel Manager: fallback triggered, resetting state");
                         self.upstream_state.set(UpstreamState::SoloMining);
+                        self.token_manager.drain();
                         self.channel_manager_data.super_safe_lock(|data| data.reset(serialized_coinbase_outputs.clone()));
 
                         break;
@@ -941,48 +949,6 @@ impl ChannelManager {
     ) -> JDCResult<(), error::ChannelManager> {
         self.handle_mining_message_from_client(Some(downstream_id), message, tlvs)
             .await?;
-        Ok(())
-    }
-
-    /// Utility method to request for more token to JDS.
-    pub async fn allocate_tokens(
-        &self,
-        token_to_allocate: u32,
-    ) -> JDCResult<(), error::ChannelManager> {
-        debug!("Allocating {} job tokens", token_to_allocate);
-
-        for i in 0..token_to_allocate {
-            let request_id = self
-                .channel_manager_data
-                .super_safe_lock(|data| data.request_id_factory.fetch_add(1, Ordering::Relaxed));
-
-            debug!(
-                request_id,
-                "Allocating token {}/{}",
-                i + 1,
-                token_to_allocate
-            );
-
-            let message = JobDeclaration::AllocateMiningJobToken(AllocateMiningJobToken {
-                user_identifier: self
-                    .user_identity
-                    .to_string()
-                    .try_into()
-                    .expect("Static string should always convert"),
-                request_id,
-            });
-
-            self.channel_manager_channel
-                .jd_sender
-                .send(message)
-                .await
-                .map_err(|e| {
-                    info!(error = ?e, "Failed to send AllocateMiningJobToken frame");
-                    JDCError::fallback(JDCErrorKind::ChannelErrorSender)
-                })?;
-        }
-
-        info!("Requested allocation of {token_to_allocate} mining job tokens to JDS");
         Ok(())
     }
 

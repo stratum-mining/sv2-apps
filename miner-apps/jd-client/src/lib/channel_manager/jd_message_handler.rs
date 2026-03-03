@@ -56,9 +56,9 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
         let coinbase_changed = self.channel_manager_data.super_safe_lock(|data| {
             let changed = data.coinbase_outputs != msg.coinbase_outputs.to_vec();
             data.coinbase_outputs = msg.coinbase_outputs.to_vec();
-            data.allocate_tokens = Some(msg.clone().into_static());
             changed
         });
+        self.token_manager.push(msg.clone().into_static());
 
         if coinbase_changed {
             info!("Coinbase outputs from JDS changed, recalculating constraints");

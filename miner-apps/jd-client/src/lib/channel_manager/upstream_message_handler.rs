@@ -104,6 +104,12 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
             return Err(JDCError::fallback(JDCErrorKind::ExtranonceSizeTooSmall));
         }
 
+        let upstream_token_opt = if get_jd_mode() == JdMode::CoinbaseOnly {
+            Some(self.token_manager.take().await?)
+        } else {
+            None
+        };
+
         let (channel_state, template, custom_job, close_channel) =
             self.channel_manager_data.super_safe_lock(|data| {
                 let Some(pending_request) = data.pending_downstream_requests.front() else {
@@ -167,36 +173,40 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                 }
 
                 let set_custom_job = if get_jd_mode() == JdMode::CoinbaseOnly {
-                    if let (Some(job_factory), Some(token), Some(template), Some(prevhash)) = (
+                    if let (Some(job_factory), Some(template), Some(prevhash)) = (
                         data.job_factory.as_mut(),
-                        data.allocate_tokens.clone(),
                         data.last_future_template.clone(),
                         data.last_new_prev_hash.clone(),
                     ) {
-                        let request_id = data.request_id_factory.fetch_add(1, Ordering::Relaxed);
+                        if let Some(token) = upstream_token_opt {
+                            let request_id =
+                                data.request_id_factory.fetch_add(1, Ordering::Relaxed);
 
-                        let full_extranonce_size = extended_channel.get_full_extranonce_size();
+                            let full_extranonce_size = extended_channel.get_full_extranonce_size();
 
-                        if let Ok(custom_job) = job_factory.new_custom_job(
-                            extended_channel.get_channel_id(),
-                            request_id,
-                            token.clone().mining_job_token,
-                            prevhash.clone().into(),
-                            template.clone(),
-                            outputs,
-                            full_extranonce_size,
-                        ) {
-                            let last_declare = DeclaredJob {
-                                declare_mining_job: None,
-                                template: template.into_static(),
-                                prev_hash: Some(prevhash.into_static()),
-                                set_custom_mining_job: Some(custom_job.clone().into_static()),
-                                coinbase_output: data.coinbase_outputs.clone(),
-                                tx_list: vec![],
-                            };
+                            if let Ok(custom_job) = job_factory.new_custom_job(
+                                extended_channel.get_channel_id(),
+                                request_id,
+                                token.mining_job_token,
+                                prevhash.clone().into(),
+                                template.clone(),
+                                outputs,
+                                full_extranonce_size,
+                            ) {
+                                let last_declare = DeclaredJob {
+                                    declare_mining_job: None,
+                                    template: template.into_static(),
+                                    prev_hash: Some(prevhash.into_static()),
+                                    set_custom_mining_job: Some(custom_job.clone().into_static()),
+                                    coinbase_output: data.coinbase_outputs.clone(),
+                                    tx_list: vec![],
+                                };
 
-                            data.last_declare_job_store.insert(request_id, last_declare);
-                            Some(custom_job)
+                                data.last_declare_job_store.insert(request_id, last_declare);
+                                Some(custom_job)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -261,7 +271,6 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                         .send(sv2_frame)
                         .await
                         .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
-                    _ = self.allocate_tokens(1).await;
                 }
             }
 
@@ -290,7 +299,6 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                 .send(sv2_frame)
                 .await
                 .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
-            _ = self.allocate_tokens(1).await;
         }
 
         Ok(())

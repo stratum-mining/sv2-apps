@@ -305,7 +305,10 @@ impl JobDeclaratorClient {
                 channel_manager_clone
                     .upstream_state
                     .set(UpstreamState::NoChannel);
-                _ = channel_manager_clone.allocate_tokens(1).await;
+                if let Err(e) = channel_manager_clone.token_manager.init().await {
+                    error!("Could not initiate the token manager: {e:?}");
+                    return;
+                };
             }
             Err(e) => {
                 tracing::error!("Failed to initialize upstream: {:?}", e);
@@ -461,7 +464,13 @@ impl JobDeclaratorClient {
 
                                         channel_manager_clone.upstream_state.set(UpstreamState::NoChannel);
 
-                                        _ = channel_manager_clone.allocate_tokens(1).await;
+                                        if let Err(e) = channel_manager_clone
+                                            .token_manager
+                                            .init()
+                                            .await {
+                                                error!("Could not initiate the token manager: {e:?}");
+                                                return;
+                                            };
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to initialize upstream: {:?}", e);
