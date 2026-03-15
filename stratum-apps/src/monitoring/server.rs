@@ -19,9 +19,9 @@ pub struct ServerExtendedChannelInfo {
     pub rollable_extranonce_size: u16,
     pub version_rolling: bool,
     pub shares_accepted: u32,
-    pub share_work_sum: f64,
+    pub share_work_sum: u64,
     pub shares_submitted: u32,
-    pub best_diff: f64,
+    pub best_diff: u64,
     pub blocks_found: u32,
 }
 
@@ -35,9 +35,9 @@ pub struct ServerStandardChannelInfo {
     pub target_hex: String,
     pub extranonce_prefix_hex: String,
     pub shares_accepted: u32,
-    pub share_work_sum: f64,
+    pub share_work_sum: u64,
     pub shares_submitted: u32,
-    pub best_diff: f64,
+    pub best_diff: u64,
     pub blocks_found: u32,
 }
 

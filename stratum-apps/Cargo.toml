@@ -82,3 +82,10 @@ mining_device = ["config"]
 
 [package.metadata.docs.rs]
 features = ["pool", "jd_client", "jd_server", "translator", "sv1", "rpc"]
+
+[patch."https://github.com/stratum-mining/stratum"]
+channels_sv2 = { path = "../../sv2/channels-sv2" }
+codec_sv2 = { path = "../../sv2/codec-sv2" }
+framing_sv2 = { path = "../../sv2/framing-sv2" }
+binary_sv2 = { path = "../../sv2/binary-sv2" }
+stratum-core = { path = "../../stratum-core" }

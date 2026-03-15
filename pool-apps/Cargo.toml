@@ -16,3 +16,9 @@ opt-level = 1
 [profile.test]
 # Required by super_safe_lock
 opt-level = 1
+[patch."https://github.com/stratum-mining/stratum"]
+channels_sv2 = { path = "../../sv2/channels-sv2" }
+codec_sv2 = { path = "../../sv2/codec-sv2" }
+framing_sv2 = { path = "../../sv2/framing-sv2" }
+binary_sv2 = { path = "../../sv2/binary-sv2" }
+stratum-core = { path = "../../stratum-core" }
