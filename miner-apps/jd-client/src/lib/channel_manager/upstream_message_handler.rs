@@ -500,7 +500,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
             if let Some(upstream_channel) = data.upstream_channel.as_mut() {
                 upstream_channel.on_share_acknowledgement(
                     msg.new_submits_accepted_count,
-                    msg.new_shares_sum as f64,
+                    msg.new_shares_sum,
                 );
             }
         });
