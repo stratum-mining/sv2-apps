@@ -3,6 +3,13 @@ use stratum_apps::config_helpers::logging::init_logging;
 pub use translator_sv2::{config, error, status, sv1, sv2, TranslatorSv2};
 
 use crate::args::process_cli_args;
+#[cfg(not(feature = "hotpath-alloc"))]
+use mimalloc::MiMalloc;
+
+// Add mimalloc
+#[cfg(not(feature = "hotpath-alloc"))]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[cfg(all(feature = "hotpath-alloc", not(test)))]
 #[tokio::main(flavor = "current_thread")]
