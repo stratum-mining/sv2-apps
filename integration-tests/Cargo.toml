@@ -29,3 +29,4 @@ hex = "0.4.3"
 
 [lib]
 path = "lib/mod.rs"
+

@@ -16,7 +16,7 @@ keywords = ["stratum", "mining", "bitcoin", "protocol", "sv2"]
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before stratum-apps is published to crates.io
 # with the proper version of stratum-core being fetched from crates.io as well
-stratum-core = { git = "https://github.com/stratum-mining/stratum", branch = "main", optional = true }
+stratum-core = { git = "https://github.com/stratum-mining/stratum", branch = "fix/issue-2092-share-accounting", optional = true }
 
 # External dependencies needed by the modules
 # Network helpers dependencies
@@ -83,9 +83,4 @@ mining_device = ["config"]
 [package.metadata.docs.rs]
 features = ["pool", "jd_client", "jd_server", "translator", "sv1", "rpc"]
 
-[patch."https://github.com/stratum-mining/stratum"]
-channels_sv2 = { path = "../../sv2/channels-sv2" }
-codec_sv2 = { path = "../../sv2/codec-sv2" }
-framing_sv2 = { path = "../../sv2/framing-sv2" }
-binary_sv2 = { path = "../../sv2/binary-sv2" }
-stratum-core = { path = "../../stratum-core" }
+

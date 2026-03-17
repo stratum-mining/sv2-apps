@@ -498,10 +498,8 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
 
         self.channel_manager_data.super_safe_lock(|data| {
             if let Some(upstream_channel) = data.upstream_channel.as_mut() {
-                upstream_channel.on_share_acknowledgement(
-                    msg.new_submits_accepted_count,
-                    msg.new_shares_sum,
-                );
+                upstream_channel
+                    .on_share_acknowledgement(msg.new_submits_accepted_count, msg.new_shares_sum);
             }
         });
 

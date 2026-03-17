@@ -10,12 +10,9 @@ homepage = "https://stratumprotocol.org"
 repository = "https://github.com/stratum-mining/stratum"
 license = "MIT OR Apache-2.0"
 keywords = ["stratum", "mining", "bitcoin", "protocol"]
-
-
 [lib]
 name = "jd_server"
 path = "src/lib/mod.rs"
-
 [dependencies]
 stratum-common = { git = "https://github.com/stratum-mining/stratum", rev = "v1.5.0", features = ["with_network_helpers"] }
 async-channel = "1.5.1"
