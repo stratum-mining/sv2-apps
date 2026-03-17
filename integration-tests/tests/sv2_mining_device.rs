@@ -5,7 +5,7 @@ use stratum_apps::stratum_core::common_messages_sv2::*;
 async fn sv2_mining_device_and_pool_success() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
     let (sniffer, sniffer_addr) = start_sniffer("A", pool_addr, false, vec![], None);
     start_mining_device_sv2(sniffer_addr, None, None, None, 1, None, true);
     sniffer

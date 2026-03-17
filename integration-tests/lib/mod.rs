@@ -31,6 +31,7 @@ use utils::get_available_address;
 pub mod interceptor;
 pub mod message_aggregator;
 pub mod mock_roles;
+pub mod prometheus_metrics_assertions;
 pub mod sniffer;
 pub mod sniffer_error;
 pub mod sv1_minerd;
@@ -121,7 +122,8 @@ pub async fn start_pool(
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
-) -> (PoolSv2, SocketAddr) {
+    enable_monitoring: bool,
+) -> (PoolSv2, SocketAddr, Option<SocketAddr>) {
     use pool_sv2::config::PoolConfig;
     let listening_address = get_available_address();
     let authority_public_key = Secp256k1PublicKey::try_from(
@@ -144,6 +146,12 @@ pub async fn start_pool(
     let authority_config =
         pool_sv2::config::AuthorityConfig::new(authority_public_key, authority_secret_key);
     let share_batch_size = 1;
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
+    } else {
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
     let config = PoolConfig::new(
         connection_config,
         template_provider_config,
@@ -154,6 +162,8 @@ pub async fn start_pool(
         1,
         supported_extensions,
         required_extensions,
+        monitoring_address,
+        monitoring_cache_refresh_secs,
     );
     let pool = PoolSv2::new(config);
     let pool_clone = pool.clone();
@@ -161,7 +171,7 @@ pub async fn start_pool(
         _ = pool_clone.start().await;
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
-    (pool, listening_address)
+    (pool, listening_address, monitoring_address)
 }
 
 pub fn start_template_provider(
@@ -187,7 +197,8 @@ pub fn start_jdc(
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
-) -> (JobDeclaratorClient, SocketAddr) {
+    enable_monitoring: bool,
+) -> (JobDeclaratorClient, SocketAddr, Option<SocketAddr>) {
     use jd_client_sv2::config::{JobDeclaratorClientConfig, PoolConfig, ProtocolConfig, Upstream};
     let jdc_address = get_available_address();
     let max_supported_version = 2;
@@ -228,6 +239,12 @@ pub fn start_jdc(
     let shares_batch_size = 1;
     let user_identity = "IT-test".to_string();
     let jdc_signature = "JDC".to_string();
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
+    } else {
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
     let jd_client_proxy = JobDeclaratorClientConfig::new(
         jdc_address,
         protocol_config,
@@ -242,11 +259,13 @@ pub fn start_jdc(
         None,
         supported_extensions,
         required_extensions,
+        monitoring_address,
+        monitoring_cache_refresh_secs,
     );
     let ret = jd_client_sv2::JobDeclaratorClient::new(jd_client_proxy);
     let ret_clone = ret.clone();
     tokio::spawn(async move { ret_clone.start().await });
-    (ret, jdc_address)
+    (ret, jdc_address, monitoring_address)
 }
 
 pub fn start_jds(tp_rpc_connection: &ConnectParams) -> (JobDeclaratorServer, SocketAddr) {
@@ -303,7 +322,8 @@ pub async fn start_sv2_translator(
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
     job_keepalive_interval_secs: Option<u16>,
-) -> (TranslatorSv2, SocketAddr) {
+    enable_monitoring: bool,
+) -> (TranslatorSv2, SocketAddr, Option<SocketAddr>) {
     let job_keepalive_interval_secs = job_keepalive_interval_secs.unwrap_or(60);
     let upstreams = upstreams
         .iter()
@@ -340,6 +360,12 @@ pub async fn start_sv2_translator(
 
     let downstream_extranonce2_size = 4;
 
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
+    } else {
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
     let config = translator_sv2::config::TranslatorConfig::new(
         upstreams,
         listening_address.ip().to_string(),
@@ -352,13 +378,15 @@ pub async fn start_sv2_translator(
         aggregate_channels,
         supported_extensions,
         required_extensions,
+        monitoring_address,
+        monitoring_cache_refresh_secs,
     );
     let translator_v2 = translator_sv2::TranslatorSv2::new(config);
     let clone_translator_v2 = translator_v2.clone();
     tokio::spawn(async move {
         clone_translator_v2.start().await;
     });
-    (translator_v2, listening_address)
+    (translator_v2, listening_address, monitoring_address)
 }
 
 pub async fn start_minerd(

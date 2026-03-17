@@ -80,6 +80,11 @@ translator = ["network", "config", "sv1", "with_buffer_pool", "core"]
 # Note: mining_device intentionally excludes 'core', 'network', and 'rpc' - it uses crates.io crates directly
 mining_device = ["config"]
 
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+hyper = "1.1.0"
+
 [package.metadata.docs.rs]
 features = ["pool", "jd_client", "jd_server", "translator", "sv1", "rpc"]
 

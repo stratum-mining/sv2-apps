@@ -53,3 +53,67 @@ pub trait Sv1ClientsMonitoring: Send + Sync {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_sv1_client_info(id: usize, hashrate: Option<f32>) -> Sv1ClientInfo {
+        Sv1ClientInfo {
+            client_id: id,
+            channel_id: Some(id as u32),
+            authorized_worker_name: format!("worker-{}", id),
+            user_identity: format!("miner-{}", id),
+            target_hex: "00ff".into(),
+            hashrate,
+            extranonce1_hex: "aabb".into(),
+            extranonce2_len: 8,
+            version_rolling_mask: Some("ffffffff".into()),
+            version_rolling_min_bit: Some("00000000".into()),
+        }
+    }
+
+    struct MockSv1Clients(Vec<Sv1ClientInfo>);
+    impl Sv1ClientsMonitoring for MockSv1Clients {
+        fn get_sv1_clients(&self) -> Vec<Sv1ClientInfo> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn sv1_get_client_by_id_found() {
+        let monitor = MockSv1Clients(vec![
+            create_sv1_client_info(1, Some(10.0)),
+            create_sv1_client_info(2, Some(20.0)),
+        ]);
+        let found = monitor.get_sv1_client_by_id(2);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().client_id, 2);
+    }
+
+    #[test]
+    fn sv1_get_client_by_id_not_found() {
+        let monitor = MockSv1Clients(vec![create_sv1_client_info(1, Some(10.0))]);
+        assert!(monitor.get_sv1_client_by_id(999).is_none());
+    }
+
+    #[test]
+    fn sv1_summary_empty() {
+        let monitor = MockSv1Clients(vec![]);
+        let summary = monitor.get_sv1_clients_summary();
+        assert_eq!(summary.total_clients, 0);
+        assert_eq!(summary.total_hashrate, 0.0);
+    }
+
+    #[test]
+    fn sv1_summary_skips_none_hashrate() {
+        let monitor = MockSv1Clients(vec![
+            create_sv1_client_info(1, Some(100.0)),
+            create_sv1_client_info(2, None),
+            create_sv1_client_info(3, Some(50.0)),
+        ]);
+        let summary = monitor.get_sv1_clients_summary();
+        assert_eq!(summary.total_clients, 3);
+        assert_eq!(summary.total_hashrate, 150.0);
+    }
+}

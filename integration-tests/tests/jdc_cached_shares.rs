@@ -38,14 +38,15 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
     let (pool_sniffer, pool_sniffer_addr) =
         start_sniffer("pool", mock_pool_addr, false, vec![], None);
 
-    let (jdc, jdc_addr) = start_jdc(
+    let (jdc, jdc_addr, _) = start_jdc(
         &[(pool_sniffer_addr, jds_addr)],
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
+        false,
     );
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None, false).await;
 
     let (sv1_sniffer, sv1_sniffer_addr) = start_sv1_sniffer(tproxy_addr);
     let (_minerd, _minerd_addr) = start_minerd(sv1_sniffer_addr, None, None, false).await;

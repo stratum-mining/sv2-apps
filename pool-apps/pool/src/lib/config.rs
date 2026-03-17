@@ -43,12 +43,8 @@ pub struct PoolConfig {
     required_extensions: Vec<u16>,
     #[serde(default)]
     monitoring_address: Option<SocketAddr>,
-    #[serde(default = "default_monitoring_cache_refresh_secs")]
-    monitoring_cache_refresh_secs: u64,
-}
-
-fn default_monitoring_cache_refresh_secs() -> u64 {
-    15
+    #[serde(default)]
+    monitoring_cache_refresh_secs: Option<u64>,
 }
 
 impl PoolConfig {
@@ -68,6 +64,8 @@ impl PoolConfig {
         server_id: u16,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
+        monitoring_address: Option<SocketAddr>,
+        monitoring_cache_refresh_secs: Option<u64>,
     ) -> Self {
         Self {
             listen_address: pool_connection.listen_address,
@@ -83,8 +81,8 @@ impl PoolConfig {
             server_id,
             supported_extensions,
             required_extensions,
-            monitoring_address: None,
-            monitoring_cache_refresh_secs: 15,
+            monitoring_address,
+            monitoring_cache_refresh_secs,
         }
     }
 
@@ -177,7 +175,7 @@ impl PoolConfig {
     }
 
     /// Returns the monitoring cache refresh interval in seconds.
-    pub fn monitoring_cache_refresh_secs(&self) -> u64 {
+    pub fn monitoring_cache_refresh_secs(&self) -> Option<u64> {
         self.monitoring_cache_refresh_secs
     }
 }

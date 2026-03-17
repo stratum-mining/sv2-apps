@@ -6,17 +6,18 @@ async fn jds_ask_for_missing_transactions() {
     start_tracing();
     let (tp_1, tp_addr_1) = start_template_provider(None, DifficultyLevel::Low);
     let (tp_2, tp_addr_2) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr_1), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr_1), vec![], vec![], false).await;
     let (_jds, jds_addr) = start_jds(tp_1.rpc_info());
     let (sniffer, sniffer_addr) = start_sniffer("A", jds_addr, false, vec![], None);
-    let (jdc, jdc_addr) = start_jdc(
+    let (jdc, jdc_addr, _) = start_jdc(
         &[(pool_addr, sniffer_addr)],
         sv2_tp_config(tp_addr_2),
         vec![],
         vec![],
+        false,
     );
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None, false).await;
     let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
     assert!(tp_2.fund_wallet().is_ok());
     assert!(tp_2.create_mempool_transaction().is_ok());

@@ -57,12 +57,8 @@ pub struct TranslatorConfig {
     /// Optional monitoring server bind address
     #[serde(default)]
     monitoring_address: Option<SocketAddr>,
-    #[serde(default = "default_monitoring_cache_refresh_secs")]
-    monitoring_cache_refresh_secs: u64,
-}
-
-fn default_monitoring_cache_refresh_secs() -> u64 {
-    15
+    #[serde(default)]
+    monitoring_cache_refresh_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -102,6 +98,8 @@ impl TranslatorConfig {
         aggregate_channels: bool,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
+        monitoring_address: Option<SocketAddr>,
+        monitoring_cache_refresh_secs: Option<u64>,
     ) -> Self {
         Self {
             upstreams,
@@ -116,8 +114,8 @@ impl TranslatorConfig {
             supported_extensions,
             required_extensions,
             log_file: None,
-            monitoring_address: None,
-            monitoring_cache_refresh_secs: 15,
+            monitoring_address,
+            monitoring_cache_refresh_secs,
         }
     }
 
@@ -127,7 +125,7 @@ impl TranslatorConfig {
     }
 
     /// Returns the monitoring cache refresh interval in seconds.
-    pub fn monitoring_cache_refresh_secs(&self) -> u64 {
+    pub fn monitoring_cache_refresh_secs(&self) -> Option<u64> {
         self.monitoring_cache_refresh_secs
     }
 
@@ -224,6 +222,8 @@ mod tests {
             true,
             vec![],
             vec![],
+            None,
+            None,
         );
 
         assert_eq!(config.upstreams.len(), 1);
@@ -256,6 +256,8 @@ mod tests {
             false,
             vec![],
             vec![],
+            None,
+            None,
         );
 
         assert!(config.log_dir().is_none());
@@ -290,6 +292,8 @@ mod tests {
             true,
             vec![],
             vec![],
+            None,
+            None,
         );
 
         assert_eq!(config.upstreams.len(), 2);
@@ -317,6 +321,8 @@ mod tests {
             false,
             vec![],
             vec![],
+            None,
+            None,
         );
 
         assert!(!config.downstream_difficulty_config.enable_vardiff);

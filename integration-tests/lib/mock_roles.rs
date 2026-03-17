@@ -339,7 +339,8 @@ mod tests {
             sniffer.has_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
         );
 
-        // OpenExtendedMiningChannel was never sent, so assert_message_not_present should return true
+        // OpenExtendedMiningChannel was never sent, so assert_message_not_present should return
+        // true
         assert!(
             sniffer
                 .assert_message_not_present(

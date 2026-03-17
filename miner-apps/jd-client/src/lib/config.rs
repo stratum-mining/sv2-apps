@@ -57,12 +57,8 @@ pub struct JobDeclaratorClientConfig {
     /// Optional monitoring server bind address
     #[serde(default)]
     monitoring_address: Option<SocketAddr>,
-    #[serde(default = "default_monitoring_cache_refresh_secs")]
-    monitoring_cache_refresh_secs: u64,
-}
-
-fn default_monitoring_cache_refresh_secs() -> u64 {
-    15
+    #[serde(default)]
+    monitoring_cache_refresh_secs: Option<u64>,
 }
 
 impl JobDeclaratorClientConfig {
@@ -72,7 +68,7 @@ impl JobDeclaratorClientConfig {
         protocol_config: ProtocolConfig,
         user_identity: String,
         shares_per_minute: SharesPerMinute,
-        share_batch_size: SharesBatchSize,
+        shares_batch_size: SharesBatchSize,
         pool_config: PoolConfig,
         cert_validity_sec: u64,
         template_provider_type: TemplateProviderType,
@@ -81,6 +77,8 @@ impl JobDeclaratorClientConfig {
         jdc_mode: Option<String>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
+        monitoring_address: Option<SocketAddr>,
+        monitoring_cache_refresh_secs: Option<u64>,
     ) -> Self {
         Self {
             listening_address,
@@ -96,14 +94,14 @@ impl JobDeclaratorClientConfig {
             log_file: None,
             user_identity,
             shares_per_minute,
-            share_batch_size,
+            share_batch_size: shares_batch_size,
             mode: jdc_mode
                 .map(|s| s.parse::<ConfigJDCMode>().unwrap_or_default())
                 .unwrap_or_default(),
             supported_extensions,
             required_extensions,
-            monitoring_address: None,
-            monitoring_cache_refresh_secs: 15,
+            monitoring_address,
+            monitoring_cache_refresh_secs,
         }
     }
 
@@ -113,7 +111,7 @@ impl JobDeclaratorClientConfig {
     }
 
     /// Returns the monitoring cache refresh interval in seconds.
-    pub fn monitoring_cache_refresh_secs(&self) -> u64 {
+    pub fn monitoring_cache_refresh_secs(&self) -> Option<u64> {
         self.monitoring_cache_refresh_secs
     }
 
