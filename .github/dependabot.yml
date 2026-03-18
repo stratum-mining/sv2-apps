@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/pool-apps"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "stratum-core"
+
+  - package-ecosystem: "cargo"
+    directory: "/miner-apps"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "stratum-core"
+
+  - package-ecosystem: "cargo"
+    directory: "/integration-tests"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "stratum-core"
