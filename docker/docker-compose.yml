@@ -1,6 +1,6 @@
 services:
   pool_sv2:
-    image: stratumv2/pool_sv2:main
+    image: stratumv2/pool_sv2:v0.3.0
     container_name: pool_sv2
     stop_signal: SIGINT
     env_file:
@@ -24,7 +24,7 @@ services:
       - pool_and_miner_apps
 
   jd_client_sv2:
-    image: stratumv2/jd_client_sv2:main
+    image: stratumv2/jd_client_sv2:v0.3.0
     container_name: jd_client_sv2
     stop_signal: SIGINT
     env_file:
@@ -46,7 +46,7 @@ services:
       - pool_and_miner_apps
 
   tproxy_sv2:
-    image: stratumv2/translator_sv2:main
+    image: stratumv2/translator_sv2:v0.3.0
     container_name: tproxy_sv2
     stop_signal: SIGINT
     env_file:
