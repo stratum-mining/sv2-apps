@@ -1,15 +1,6 @@
 use crate::{sniffer::*, sv1_minerd::MinerdProcess, template_provider::*};
-use corepc_node::{ConnectParams, CookieValues};
 use interceptor::InterceptAction;
 use jd_client_sv2::JobDeclaratorClient;
-use jd_server::{
-    config::{
-        CoinbaseRewardScript as JdServerCoinbaseRewardScript,
-        Secp256k1PublicKey as JdServerSecp256k1PublicKey,
-        Secp256k1SecretKey as JdServerSecp256k1SecretKey,
-    },
-    JobDeclaratorServer,
-};
 use mining_device::Secp256k1PublicKey as MiningDeviceSecp256k1PublicKey;
 use once_cell::sync::OnceCell;
 use pool_sv2::PoolSv2;
@@ -31,6 +22,7 @@ use utils::get_available_address;
 pub mod interceptor;
 pub mod message_aggregator;
 pub mod mock_roles;
+pub mod prometheus_metrics_assertions;
 pub mod sniffer;
 pub mod sniffer_error;
 pub mod sv1_minerd;
@@ -52,8 +44,8 @@ macro_rules! shutdown_all {
 
 const SHARES_PER_MINUTE: f32 = 120.0;
 
+pub const POOL_COINBASE_REWARD_ADDRESS: &str = "tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8";
 const POOL_COINBASE_REWARD_DESCRIPTOR: &str = "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)";
-const JDS_COINBASE_REWARD_DESCRIPTOR: &str = POOL_COINBASE_REWARD_DESCRIPTOR;
 const JDC_COINBASE_REWARD_DESCRIPTOR: &str = "addr(tb1qpusf5256yxv50qt0pm0tue8k952fsu5lzsphft)";
 
 static LOGGER: OnceCell<()> = OnceCell::new();
@@ -67,7 +59,11 @@ pub fn sv2_tp_config(address: SocketAddr) -> TemplateProviderType {
 }
 
 /// Helper to create BitcoinCoreIpc config with default thresholds.
-pub fn ipc_config(data_dir: std::path::PathBuf, is_signet: bool) -> TemplateProviderType {
+pub fn ipc_config(
+    data_dir: std::path::PathBuf,
+    is_signet: bool,
+    min_interval: Option<u8>,
+) -> TemplateProviderType {
     use stratum_apps::tp_type::BitcoinNetwork;
 
     let network = if is_signet {
@@ -80,7 +76,7 @@ pub fn ipc_config(data_dir: std::path::PathBuf, is_signet: bool) -> TemplateProv
         network,
         data_dir: Some(data_dir),
         fee_threshold: 0,
-        min_interval: 1,
+        min_interval: min_interval.unwrap_or(5),
     }
 }
 
@@ -121,7 +117,8 @@ pub async fn start_pool(
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
-) -> (PoolSv2, SocketAddr) {
+    enable_monitoring: bool,
+) -> (PoolSv2, SocketAddr, Option<SocketAddr>) {
     use pool_sv2::config::PoolConfig;
     let listening_address = get_available_address();
     let authority_public_key = Secp256k1PublicKey::try_from(
@@ -144,6 +141,12 @@ pub async fn start_pool(
     let authority_config =
         pool_sv2::config::AuthorityConfig::new(authority_public_key, authority_secret_key);
     let share_batch_size = 1;
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
+    } else {
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
     let config = PoolConfig::new(
         connection_config,
         template_provider_config,
@@ -154,6 +157,9 @@ pub async fn start_pool(
         1,
         supported_extensions,
         required_extensions,
+        monitoring_address,
+        monitoring_cache_refresh_secs,
+        None, // no JDS
     );
     let pool = PoolSv2::new(config);
     let pool_clone = pool.clone();
@@ -161,7 +167,7 @@ pub async fn start_pool(
         _ = pool_clone.start().await;
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
-    (pool, listening_address)
+    (pool, listening_address, monitoring_address)
 }
 
 pub fn start_template_provider(
@@ -187,7 +193,8 @@ pub fn start_jdc(
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
-) -> (JobDeclaratorClient, SocketAddr) {
+    enable_monitoring: bool,
+) -> (JobDeclaratorClient, SocketAddr, Option<SocketAddr>) {
     use jd_client_sv2::config::{JobDeclaratorClientConfig, PoolConfig, ProtocolConfig, Upstream};
     let jdc_address = get_available_address();
     let max_supported_version = 2;
@@ -228,6 +235,12 @@ pub fn start_jdc(
     let shares_batch_size = 1;
     let user_identity = "IT-test".to_string();
     let jdc_signature = "JDC".to_string();
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
+    } else {
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
     let jd_client_proxy = JobDeclaratorClientConfig::new(
         jdc_address,
         protocol_config,
@@ -242,59 +255,76 @@ pub fn start_jdc(
         None,
         supported_extensions,
         required_extensions,
+        monitoring_address,
+        monitoring_cache_refresh_secs,
     );
     let ret = jd_client_sv2::JobDeclaratorClient::new(jd_client_proxy);
     let ret_clone = ret.clone();
     tokio::spawn(async move { ret_clone.start().await });
-    (ret, jdc_address)
+    (ret, jdc_address, monitoring_address)
 }
 
-pub fn start_jds(tp_rpc_connection: &ConnectParams) -> (JobDeclaratorServer, SocketAddr) {
-    use jd_server::config::{CoreRpc, JobDeclaratorServerConfig};
-    let authority_public_key = JdServerSecp256k1PublicKey::try_from(
+pub async fn start_pool_with_jds(
+    bitcoin_core: &BitcoinCore,
+    supported_extensions: Vec<u16>,
+    required_extensions: Vec<u16>,
+    enable_monitoring: bool,
+) -> (PoolSv2, SocketAddr, SocketAddr, Option<SocketAddr>) {
+    use pool_sv2::config::{AuthorityConfig, ConnectionConfig, JDSPartialConfig, PoolConfig};
+
+    let pool_address = get_available_address();
+    let jds_address = get_available_address();
+
+    let authority_public_key = Secp256k1PublicKey::try_from(
         "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
     )
-    .unwrap();
-    let authority_secret_key = JdServerSecp256k1SecretKey::try_from(
+    .expect("failed");
+    let authority_secret_key = Secp256k1SecretKey::try_from(
         "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
     )
-    .unwrap();
-    let listen_jd_address = get_available_address();
+    .expect("failed");
     let cert_validity_sec = 3600;
     let coinbase_reward_script =
-        JdServerCoinbaseRewardScript::from_descriptor(JDS_COINBASE_REWARD_DESCRIPTOR).unwrap();
-    if let Ok(Some(CookieValues { user, password })) = tp_rpc_connection.get_cookie_values() {
-        let ip = tp_rpc_connection.rpc_socket.ip().to_string();
-        let url = jd_server::Uri::builder()
-            .scheme("http")
-            .authority(ip)
-            .path_and_query("")
-            .build()
-            .unwrap();
-        let core_rpc = CoreRpc::new(
-            url.to_string(),
-            tp_rpc_connection.rpc_socket.port(),
-            user,
-            password,
-        );
-        let config = JobDeclaratorServerConfig::new(
-            listen_jd_address.to_string(),
-            authority_public_key,
-            authority_secret_key,
-            cert_validity_sec,
-            coinbase_reward_script,
-            core_rpc,
-            std::time::Duration::from_secs(1),
-        );
-        let job_declarator_server = JobDeclaratorServer::new(config);
-        let job_declarator_server_clone = job_declarator_server.clone();
-        tokio::spawn(async move {
-            job_declarator_server_clone.start().await.unwrap();
-        });
-        (job_declarator_server, listen_jd_address)
+        CoinbaseRewardScript::from_descriptor(POOL_COINBASE_REWARD_DESCRIPTOR).unwrap();
+
+    let template_provider_config = ipc_config(
+        bitcoin_core.data_dir().clone(),
+        bitcoin_core.is_signet(),
+        None,
+    );
+
+    let pool_signature = "Stratum V2 SRI Pool".to_string();
+    let connection_config = ConnectionConfig::new(pool_address, cert_validity_sec, pool_signature);
+    let authority_config = AuthorityConfig::new(authority_public_key, authority_secret_key);
+    let share_batch_size = 1;
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
     } else {
-        panic!("Failed to get TP cookie values");
-    }
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
+    let config = PoolConfig::new(
+        connection_config,
+        template_provider_config,
+        authority_config,
+        coinbase_reward_script.clone(),
+        SHARES_PER_MINUTE,
+        share_batch_size,
+        1,
+        supported_extensions.clone(),
+        required_extensions.clone(),
+        monitoring_address,
+        monitoring_cache_refresh_secs,
+        Some(JDSPartialConfig::new(jds_address)),
+    );
+
+    let pool = PoolSv2::new(config);
+    let pool_clone = pool.clone();
+    tokio::spawn(async move {
+        _ = pool_clone.start().await;
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    (pool, pool_address, jds_address, monitoring_address)
 }
 
 pub async fn start_sv2_translator(
@@ -303,7 +333,8 @@ pub async fn start_sv2_translator(
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
     job_keepalive_interval_secs: Option<u16>,
-) -> (TranslatorSv2, SocketAddr) {
+    enable_monitoring: bool,
+) -> (TranslatorSv2, SocketAddr, Option<SocketAddr>) {
     let job_keepalive_interval_secs = job_keepalive_interval_secs.unwrap_or(60);
     let upstreams = upstreams
         .iter()
@@ -340,6 +371,12 @@ pub async fn start_sv2_translator(
 
     let downstream_extranonce2_size = 4;
 
+    let monitoring_address = if enable_monitoring {
+        Some(get_available_address())
+    } else {
+        None
+    };
+    let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
     let config = translator_sv2::config::TranslatorConfig::new(
         upstreams,
         listening_address.ip().to_string(),
@@ -352,13 +389,15 @@ pub async fn start_sv2_translator(
         aggregate_channels,
         supported_extensions,
         required_extensions,
+        monitoring_address,
+        monitoring_cache_refresh_secs,
     );
     let translator_v2 = translator_sv2::TranslatorSv2::new(config);
     let clone_translator_v2 = translator_v2.clone();
     tokio::spawn(async move {
         clone_translator_v2.start().await;
     });
-    (translator_v2, listening_address)
+    (translator_v2, listening_address, monitoring_address)
 }
 
 pub async fn start_minerd(

@@ -8,10 +8,10 @@ use std::{
 };
 
 use async_channel::{Receiver, Sender};
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use core::sync::atomic::Ordering;
 use stratum_apps::{
-    coinbase_output_constraints::coinbase_output_constraints_message,
+    coinbase_output_constraints::coinbase_output_constraints_message_with_offset,
     config_helpers::CoinbaseRewardScript,
     custom_mutex::Mutex,
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
@@ -39,6 +39,8 @@ use stratum_apps::{
 };
 use tokio::{net::TcpListener, select, sync::broadcast};
 use tracing::{debug, error, info, warn};
+
+use jd_server_sv2::job_declarator::JobDeclarator;
 
 use crate::{
     config::PoolConfig,
@@ -100,6 +102,8 @@ pub struct ChannelManager {
     supported_extensions: Vec<u16>,
     /// Protocol extensions that the pool requires (clients must support these).
     required_extensions: Vec<u16>,
+    /// Embedded Job Declaration engine (present when `[jds]` config is set).
+    job_declarator: Option<JobDeclarator>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -113,6 +117,7 @@ impl ChannelManager {
         downstream_sender: broadcast::Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
         downstream_receiver: Receiver<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
         coinbase_outputs: Vec<u8>,
+        job_declarator: Option<JobDeclarator>,
     ) -> PoolResult<Self, error::ChannelManager> {
         let range_0 = 0..0;
         let range_1 = 0..POOL_ALLOCATION_BYTES;
@@ -163,6 +168,7 @@ impl ChannelManager {
             coinbase_reward_script: config.coinbase_reward_script().clone(),
             supported_extensions: config.supported_extensions().to_vec(),
             required_extensions: config.required_extensions().to_vec(),
+            job_declarator,
         };
 
         Ok(channel_manager)
@@ -631,7 +637,7 @@ impl ChannelManager {
         &self,
         coinbase_outputs: Vec<TxOut>,
     ) -> PoolResult<(), error::ChannelManager> {
-        let msg = coinbase_output_constraints_message(coinbase_outputs);
+        let msg = coinbase_output_constraints_message_with_offset(coinbase_outputs);
 
         self.channel_manager_channel
             .tp_sender

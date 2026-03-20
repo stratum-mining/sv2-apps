@@ -3,20 +3,17 @@ set -euo pipefail
 
 
 CONFIG_FILES=(
-  "pool-apps/pool/config-examples/mainnet/pool-config-bitcoin-core-ipc-example.toml"
-  "pool-apps/jd-server/config-examples/mainnet/jds-config-local-example.toml"
+  "pool-apps/pool/config-examples/mainnet/pool-jds-config-bitcoin-core-ipc-example.toml"
   "miner-apps/jd-client/config-examples/mainnet/jdc-config-bitcoin-core-ipc-hosted-infra-example.toml"
   "miner-apps/translator/config-examples/mainnet/tproxy-config-local-jdc-example.toml"
 )
 
 get_template_for_config() {
   case "$1" in
-    pool-apps/pool/config-examples/mainnet/pool-config-bitcoin-core-ipc-example.toml)
-      echo "docker/config/pool-config.toml.template"
+    pool-apps/pool/config-examples/mainnet/pool-jds-config-bitcoin-core-ipc-example.toml)
+      echo "docker/config/pool-jds-config.toml.template"
       ;;
-    pool-apps/jd-server/config-examples/mainnet/jds-config-local-example.toml)
-      echo "docker/config/jds-config.toml.template"
-      ;;
+
     miner-apps/jd-client/config-examples/mainnet/jdc-config-bitcoin-core-ipc-hosted-infra-example.toml)
       echo "docker/config/jdc-config.toml.template"
       ;;
@@ -126,4 +123,3 @@ if [[ "$FAILED" -ne 0 ]]; then
 fi
 
 echo "All Docker templates match their configs."
-

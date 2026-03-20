@@ -406,6 +406,11 @@ impl TemplateProvider {
     pub fn is_signet(&self) -> bool {
         self.bitcoin_core.is_signet()
     }
+
+    /// Return a reference to the inner [`BitcoinCore`] instance.
+    pub fn bitcoin_core(&self) -> &BitcoinCore {
+        &self.bitcoin_core
+    }
 }
 
 impl Drop for TemplateProvider {

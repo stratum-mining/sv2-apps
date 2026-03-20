@@ -1246,6 +1246,8 @@ mod tests {
             true,   // aggregate_channels
             vec![], // supported_extensions
             vec![], // required_extensions
+            None,   // monitoring_address
+            None,   // monitoring_cache_refresh_secs
         )
     }
 

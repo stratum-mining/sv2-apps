@@ -1,8 +1,8 @@
-use std::sync::atomic::Ordering;
+use std::{convert::TryFrom, sync::atomic::Ordering};
 
 use stratum_apps::stratum_core::{
     binary_sv2::Str0255,
-    bitcoin::{consensus::Decodable, Amount, Target, TxOut},
+    bitcoin::Target,
     channels_sv2::{
         server::{
             error::{ExtendedChannelError, StandardChannelError},
@@ -23,10 +23,12 @@ use stratum_apps::stratum_core::{
 };
 use tracing::{error, info};
 
+use jd_server_sv2::job_declarator::SetCustomMiningJobResponse;
+
 use crate::{
     channel_manager::{ChannelManager, RouteMessageTo, CLIENT_SEARCH_SPACE_BYTES},
     error::{self, PoolError, PoolErrorKind},
-    utils::create_close_channel_msg,
+    utils::{create_close_channel_msg, PayoutMode},
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -141,13 +143,29 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                 return Err(PoolError::disconnect(PoolErrorKind::LastNewPrevhashNotFound, downstream_id));
             };
 
-
-            let pool_coinbase_output = TxOut {
-                value: Amount::from_sat(last_future_template.coinbase_tx_value_remaining),
-                script_pubkey: self.coinbase_reward_script.script_pubkey(),
+            let payout_mode = match PayoutMode::try_from(user_identity.as_str()) {
+                Ok(mode) => mode,
+                Err(_) => {
+                    error!("Invalid user_identity '{}': does not match any supported identity format", user_identity);
+                    let open_standard_mining_channel_error = OpenMiningChannelError {
+                        request_id,
+                        error_code: "invalid-user-identity"
+                            .to_string()
+                            .try_into()
+                            .expect("error code must be valid string"),
+                    };
+                    return Ok(vec![(downstream_id, Mining::OpenMiningChannelError(open_standard_mining_channel_error)).into()]);
+                }
             };
 
+            let coinbase_outputs = payout_mode.coinbase_outputs(
+                last_future_template.coinbase_tx_value_remaining,
+                &self.coinbase_reward_script,
+            );
+
             downstream.downstream_data.super_safe_lock(|downstream_data| {
+                downstream_data.payout_mode = Some(payout_mode);
+
                 let nominal_hash_rate = msg.nominal_hash_rate;
                 let requested_max_target = Target::from_le_bytes(msg.max_target.inner_as_ref().try_into().unwrap());
                 let extranonce_prefix = channel_manager_data.extranonce_prefix_factory_standard.next_prefix_standard().map_err(PoolError::shutdown)?;
@@ -205,7 +223,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                 let template_id = last_future_template.template_id;
 
                 // create a future standard job based on the last future template
-                standard_channel.on_new_template(last_future_template, vec![pool_coinbase_output.clone()]).map_err(PoolError::shutdown)?;
+                standard_channel.on_new_template(last_future_template, coinbase_outputs.clone()).map_err(PoolError::shutdown)?;
                 let future_standard_job_id = standard_channel
                     .get_future_job_id_from_template_id(template_id)
                     .expect("future job id must exist");
@@ -305,6 +323,29 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                                     .into()]);
                             }
                         };
+
+                        let payout_mode = match PayoutMode::try_from(user_identity.as_str()) {
+                            Ok(mode) => mode,
+                            Err(_) => {
+                                error!("Invalid user_identity '{}': does not match any supported identity format", user_identity);
+                                let open_extended_mining_channel_error = OpenMiningChannelError {
+                                    request_id,
+                                    error_code: "invalid-user-identity"
+                                        .to_string()
+                                        .try_into()
+                                        .expect("error code must be valid string"),
+                                };
+                                return Ok(vec![(
+                                    downstream_id,
+                                    Mining::OpenMiningChannelError(
+                                        open_extended_mining_channel_error,
+                                    ),
+                                )
+                                    .into()]);
+                            }
+                        };
+
+                        downstream_data.payout_mode = Some(payout_mode.clone());
 
                         let channel_id = downstream_data
                             .channel_id_factory
@@ -435,16 +476,14 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                             // future extended job
                             // and the SetNewPrevHash message
                         } else {
-                            let pool_coinbase_output = TxOut {
-                                value: Amount::from_sat(
-                                    last_future_template.coinbase_tx_value_remaining,
-                                ),
-                                script_pubkey: self.coinbase_reward_script.script_pubkey(),
-                            };
+                            let coinbase_outputs = payout_mode.coinbase_outputs(
+                                last_future_template.coinbase_tx_value_remaining,
+                                &self.coinbase_reward_script,
+                            );
 
                             extended_channel.on_new_template(
                                 last_future_template.clone(),
-                                vec![pool_coinbase_output],
+                                coinbase_outputs,
                             ).map_err(PoolError::shutdown)?;
 
                             let future_extended_job_id = extended_channel
@@ -922,7 +961,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                                     };
                                     messages.push((downstream_id, Mining::UpdateChannelError(update_channel_error)).into());
                                 }
-                                // We don't care about other variants as they are not 
+                                // We don't care about other variants as they are not
                                 // associated to Update channel, and we will never
                                 // encounter it.
                                 _ => unreachable!()
@@ -965,7 +1004,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                                     };
                                     messages.push((downstream_id, Mining::UpdateChannelError(update_channel_error)).into());
                                 }
-                                // We don't care about other variants as they are not 
+                                // We don't care about other variants as they are not
                                 // associated to Update channel, and we will never
                                 // encounter it.
                                 _ => unreachable!()
@@ -1011,39 +1050,43 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
-        // this is a naive implementation, but ideally we should check the SetCustomMiningJob
-        // message parameters, especially:
-        // - the mining_job_token
-        // - the amount of the pool payout output
-        let custom_job_coinbase_outputs = Vec::<TxOut>::consensus_decode(
-            &mut msg.coinbase_tx_outputs.inner_as_ref().to_vec().as_slice(),
-        )
-        .map_err(PoolError::shutdown)?;
+        let Some(ref mut job_declarator) = self.job_declarator else {
+            let error = SetCustomMiningJobError {
+                request_id: msg.request_id,
+                channel_id: msg.channel_id,
+                error_code: "jd-not-supported"
+                    .to_string()
+                    .try_into()
+                    .expect("error code must be valid string"),
+            };
+            let message: RouteMessageTo =
+                (downstream_id, Mining::SetCustomMiningJobError(error)).into();
+            message.forward(&self.channel_manager_channel).await;
+            return Ok(());
+        };
 
+        let msg_static = msg.clone().into_static();
+
+        // Step 1: Validate the custom job via JDS (token + job validation).
+        let jds_response = job_declarator
+            .handle_set_custom_mining_job(msg_static.clone(), _tlv_fields)
+            .await
+            .map_err(|e| PoolError::shutdown(PoolErrorKind::Jds(e.into())))?;
+
+        if let SetCustomMiningJobResponse::Error(jds_err) = jds_response {
+            let message: RouteMessageTo = (
+                downstream_id,
+                Mining::SetCustomMiningJobError(jds_err.into_static()),
+            )
+                .into();
+            message.forward(&self.channel_manager_channel).await;
+            return Ok(());
+        }
+
+        // Step 2: JDS validated successfully — commit the job to the extended channel.
         let message: RouteMessageTo =
             self.channel_manager_data
                 .super_safe_lock(|channel_manager_data| {
-                    // check that the script_pubkey from self.coinbase_reward_script
-                    // is present in the custom job coinbase outputs
-                    let missing_script = !custom_job_coinbase_outputs.iter().any(|pool_output| {
-                        *pool_output.script_pubkey == *self.coinbase_reward_script.script_pubkey()
-                    });
-
-                    if missing_script {
-                        error!("SetCustomMiningJobError: pool-payout-script-missing");
-
-                        let error = SetCustomMiningJobError {
-                            request_id: msg.request_id,
-                            channel_id: msg.channel_id,
-                            error_code: "pool-payout-script-missing"
-                                .to_string()
-                                .try_into()
-                                .expect("error code must be valid string"),
-                        };
-
-                        return Ok((downstream_id, Mining::SetCustomMiningJobError(error)).into());
-                    }
-
                     let Some(downstream) = channel_manager_data.downstream.get_mut(&downstream_id)
                     else {
                         return Err(PoolError::disconnect(
@@ -1055,13 +1098,14 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                     downstream
                         .downstream_data
                         .super_safe_lock(|downstream_data| {
-                            let Some(extended_channel) =
-                                downstream_data.extended_channels.get_mut(&msg.channel_id)
+                            let Some(extended_channel) = downstream_data
+                                .extended_channels
+                                .get_mut(&msg_static.channel_id)
                             else {
                                 error!("SetCustomMiningJobError: invalid-channel-id");
                                 let error = SetCustomMiningJobError {
-                                    request_id: msg.request_id,
-                                    channel_id: msg.channel_id,
+                                    request_id: msg_static.request_id,
+                                    channel_id: msg_static.channel_id,
                                     error_code: "invalid-channel-id"
                                         .to_string()
                                         .try_into()
@@ -1072,14 +1116,13 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                                 );
                             };
 
-                            // TOOD: Send a CustomMiningJobError and not disconnect.
                             let job_id = extended_channel
-                                .on_set_custom_mining_job(msg.clone().into_static())
+                                .on_set_custom_mining_job(msg_static.clone())
                                 .map_err(|error| PoolError::disconnect(error, downstream_id))?;
 
                             let success = SetCustomMiningJobSuccess {
-                                channel_id: msg.channel_id,
-                                request_id: msg.request_id,
+                                channel_id: msg_static.channel_id,
+                                request_id: msg_static.request_id,
                                 job_id,
                             };
                             Ok((downstream_id, Mining::SetCustomMiningJobSuccess(success)).into())

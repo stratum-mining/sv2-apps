@@ -2,7 +2,7 @@
 authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
 authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
 cert_validity_sec = 3600
-listen_address = "0.0.0.0:34254"
+listen_address = "0.0.0.0:3333"
 
 # Coinbase outputs are specified as descriptors. A full list of descriptors is available at
 #     https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki#appendix-b-index-of-script-expressions
@@ -26,6 +26,20 @@ shares_per_minute = ${POOL_SHARES_PER_MINUTE}
 # How many shares do we want to acknowledge in a batch
 share_batch_size = ${POOL_SHARE_BATCH_SIZE}
 
+# Protocol Extensions Configuration
+# Extensions that the pool supports (will accept if requested by clients)
+# Comment/uncomment to enable/disable specific extensions:
+supported_extensions = [
+    # 0x0002,  # Worker-Specific Hashrate Tracking
+]
+
+# Extensions that the pool requires (clients must support these to connect)
+# Use with caution - requiring extensions may prevent some clients from connecting
+required_extensions = [
+    # Example: require Worker-Specific Hashrate Tracking
+    # 0x0002,
+]
+
 # Monitoring HTTP server address for exposing channel data (optional)
 monitoring_address = "0.0.0.0:9090"
 monitoring_cache_refresh_secs = 15
@@ -35,3 +49,11 @@ monitoring_cache_refresh_secs = 15
 network = "mainnet"
 fee_threshold = ${POOL_FEE_THRESHOLD}
 min_interval = ${POOL_MIN_INTERVAL}
+
+# Optional: Embedded Job Declaration Server (JDS)
+# When enabled, Pool runs a JDS subserver that listens for JDP connections from JDC.
+# Requires template_provider_type = BitcoinCoreIpc (engine_config derived from it).
+# Shared fields (authority keys, cert_validity, coinbase_reward_script) are inherited
+# from the Pool config above.
+[jds]
+listen_address = "0.0.0.0:3334"

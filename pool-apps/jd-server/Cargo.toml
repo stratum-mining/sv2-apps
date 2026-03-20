@@ -1,31 +1,32 @@
 [package]
-name = "jd_server"
-version = "0.1.3"
+name = "jd_server_sv2"
+version = "0.1.0"
 authors = ["The Stratum V2 Developers"]
 edition = "2021"
-description = "Job Declarator Server (JDS) role"
-documentation = "https://github.com/stratum-mining/stratum"
+description = "Sv2 Job Declaration Server"
+documentation = "https://docs.rs/jd_server_sv2"
 readme = "README.md"
 homepage = "https://stratumprotocol.org"
-repository = "https://github.com/stratum-mining/stratum"
+repository = "https://github.com/stratum-mining/sv2-apps"
 license = "MIT OR Apache-2.0"
 keywords = ["stratum", "mining", "bitcoin", "protocol"]
+
+
 [lib]
-name = "jd_server"
+name = "jd_server_sv2"
 path = "src/lib/mod.rs"
 [dependencies]
-stratum-common = { git = "https://github.com/stratum-mining/stratum", rev = "v1.5.0", features = ["with_network_helpers"] }
+stratum-apps = { version = "0.3.0", path = "../../stratum-apps", features = ["jd_server"] }
 async-channel = "1.5.1"
-rand = "0.8.4"
-tokio = { version = "1.44.1", features = ["full"] }
-ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
-tracing = { version = "0.1" }
-error_handling = { git = "https://github.com/stratum-mining/stratum", rev = "v1.5.0" }
-nohash-hasher = "0.2.0"
+
+bitcoin_core_sv2 = { version = "0.1.0", path = "../../bitcoin-core-sv2" }
 serde = { version = "1.0.89", features = ["derive", "alloc"], default-features = false }
-hashbrown = { version = "0.11", default-features = false, features = ["ahash", "serde"] }
-key-utils = { git = "https://github.com/stratum-mining/stratum", rev = "v1.5.0" }
-rpc_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "v1.5.0" }
-hex = "0.4.3"
-config_helpers_sv2 = { git = "https://github.com/stratum-mining/stratum", rev = "v1.5.0" }
-clap = { version = "4.5.39", features = ["derive"] }
+tracing = { version = "0.1" }
+tokio = { version = "1.44.1", features = ["full"] }
+dashmap = "6.1.0"
+async-trait = "0.1"
+hotpath = "0.9"
+
+[features]
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]

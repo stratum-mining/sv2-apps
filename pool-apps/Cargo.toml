@@ -1,10 +1,10 @@
+[workspace]
 resolver="2"
 members = [
+    "jd-server",
     "pool"
 ]
-exclude = [
-    "jd-server"
-]
+
 [profile.dev]
 # Required by super_safe_lock
 opt-level = 1

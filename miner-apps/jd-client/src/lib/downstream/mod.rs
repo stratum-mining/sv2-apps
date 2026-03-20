@@ -23,7 +23,7 @@ use stratum_apps::{
     utils::types::{DownstreamId, Message, Sv2Frame},
 };
 
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use tokio::sync::broadcast;
 use tracing::{debug, error, warn};
 

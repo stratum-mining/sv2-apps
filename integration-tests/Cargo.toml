@@ -11,12 +11,11 @@ license = "MIT OR Apache-2.0"
 keywords = ["stratum", "mining", "bitcoin", "protocol"]
 
 [dependencies]
-stratum-apps = { path = "../stratum-apps", features = ["network", "config"] }
-jd_client_sv2 = { path = "../miner-apps/jd-client" }
-jd_server = { path = "../pool-apps/jd-server" }
+stratum-apps = { version = "0.3.0", path = "../stratum-apps", features = ["network", "config"] }
+jd_client_sv2 = { version = "0.1.0", path = "../miner-apps/jd-client" }
 mining_device = { path = "../miner-apps/mining-device" }
-pool_sv2 = { path = "../pool-apps/pool" }
-translator_sv2 = { path = "../miner-apps/translator" }
+pool_sv2 = { version = "0.2.0", path = "../pool-apps/pool" }
+translator_sv2 = { version = "0.2.0", path = "../miner-apps/translator" }
 async-channel = { version = "1.5.1", default-features = false }
 corepc-node = { version = "0.7.0", default-features = false, features = ["28_0"] }
 minreq = { version = "2.12.0", default-features = false, features = ["https"] }

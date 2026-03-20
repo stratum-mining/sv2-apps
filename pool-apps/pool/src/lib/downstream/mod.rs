@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_channel::{unbounded, Receiver, Sender};
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use stratum_apps::{
     custom_mutex::Mutex,
     network_helpers::noise_stream::NoiseTcpStream,
@@ -36,6 +36,7 @@ use crate::{
     error::{self, PoolError, PoolErrorKind, PoolResult},
     io_task::spawn_io_tasks,
     status::{handle_error, Status, StatusSender},
+    utils::PayoutMode,
 };
 
 mod common_message_handler;
@@ -58,6 +59,8 @@ pub struct DownstreamData {
     pub channel_id_factory: AtomicU32,
     /// Extensions that have been successfully negotiated with this client
     pub negotiated_extensions: Vec<u16>,
+    /// Payout mode derived from user_identity (None until channel is opened)
+    pub payout_mode: Option<PayoutMode>,
 }
 
 /// Communication layer for a downstream connection.
@@ -144,6 +147,7 @@ impl Downstream {
             group_channel,
             channel_id_factory,
             negotiated_extensions: vec![],
+            payout_mode: None,
         }));
 
         Downstream {

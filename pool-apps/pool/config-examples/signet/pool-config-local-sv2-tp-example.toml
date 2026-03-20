@@ -33,3 +33,6 @@ monitoring_cache_refresh_secs = 15
 [template_provider_type.Sv2Tp]
 # address accepts "ip:port" or "hostname:port" (e.g. "tp.example.com:8442")
 address = "127.0.0.1:38442"
+
+# Note: Embedded JDS ([jds] section) is NOT available with Sv2Tp template provider.
+# JDS requires template_provider_type = BitcoinCoreIpc for direct IPC access to Bitcoin Core.

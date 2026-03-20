@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use async_channel::{unbounded, Receiver, Sender};
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use stratum_apps::{
     custom_mutex::Mutex,
     fallback_coordinator::FallbackCoordinator,

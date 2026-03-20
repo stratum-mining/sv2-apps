@@ -84,4 +84,30 @@ Run the Pool (example using hosted Sv2 TP):
 ```bash
 cd pool-apps/pool
 cargo run -- -c config-examples/pool-config-hosted-sv2-tp-example.toml
-``` 
+```
+
+## Solo Mining Mode
+
+The solo mining mode is computed during runtime and expects that the `user_identity` value of `OpenStandardMiningChannel`/`OpenExtendMiningChannel` to be crafted in specific patterns.
+If the `user_identity` does not match any of the patterns, the pool continues with the payout to the pool. If the `user_identity` matches the magic bytes: `sri` but the pattern is malformed we send a `OpenMiningChannelError`.
+### User Identity Patterns
+
+Miners must specify their payout mode via `user_identity`:
+
+| Pattern | Mode | Description |
+|---------|------|-------------|
+| `sri/donate/optional_worker_name` | FullDonation | Full reward goes to pool |
+| `sri/solo/payout_address/optional_worker_name` | Solo | Full reward goes to miner's address |
+| `bc1qtzqxqaxyy6lda2fhdtp5dp0v56vlf6g0tljy2x.optional_worker_name`| Solo | Full reward goes to miner's address |
+| `sri/donate/percentage/payout_address/optional_worker_name` | Donate | Pool gets %, miner gets remainder |
+
+
+Any payout address valid for the descriptor `addr` (see [BIP-385](https://github.com/bitcoin/bips/blob/master/bip-0385.mediawiki)) is a valid payout address.
+In all the patterns on the list, the worker name is optional.
+
+### Error Scenarios
+
+| Error Code | Cause |
+|------------|-------|
+| `invalid-user-identity` | Pattern doesn't match expected format |
+

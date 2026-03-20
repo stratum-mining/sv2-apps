@@ -38,11 +38,18 @@ use stratum_apps::stratum_core::{
 async fn translate_sv1_to_sv2_successfully() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
     let (pool_translator_sniffer, pool_translator_sniffer_addr) =
         start_sniffer("0", pool_addr, false, vec![], None);
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[pool_translator_sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) = start_sv2_translator(
+        &[pool_translator_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
     let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
     pool_translator_sniffer
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
@@ -86,8 +93,8 @@ async fn translate_sv1_to_sv2_successfully() {
 async fn test_translator_fallback_on_setup_connection_error() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool_1, pool_addr_1) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
-    let (pool_2, pool_addr_2) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool_1, pool_addr_1, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+    let (pool_2, pool_addr_2, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
     let random_error_code = "Something went wrong".to_string();
 
@@ -113,7 +120,7 @@ async fn test_translator_fallback_on_setup_connection_error() {
     let (pool_translator_sniffer_2, pool_translator_sniffer_addr_2) =
         start_sniffer("B", pool_addr_2, false, vec![], None);
 
-    let (translator, tproxy_addr) = start_sv2_translator(
+    let (translator, tproxy_addr, _) = start_sv2_translator(
         &[
             pool_translator_sniffer_addr_1,
             pool_translator_sniffer_addr_2,
@@ -122,6 +129,7 @@ async fn test_translator_fallback_on_setup_connection_error() {
         vec![],
         vec![],
         None,
+        false,
     )
     .await;
 
@@ -169,8 +177,8 @@ async fn test_translator_fallback_on_setup_connection_error() {
 async fn test_translator_fallback_on_open_mining_message_error() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool_1, pool_addr_1) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
-    let (pool_2, pool_addr_2) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool_1, pool_addr_1, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+    let (pool_2, pool_addr_2, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
     let random_error_code = "Something went wrong".to_string();
 
@@ -196,7 +204,7 @@ async fn test_translator_fallback_on_open_mining_message_error() {
     let (pool_translator_sniffer_2, pool_translator_sniffer_addr_2) =
         start_sniffer("B", pool_addr_2, false, vec![], None);
 
-    let (translator, tproxy_addr) = start_sv2_translator(
+    let (translator, tproxy_addr, _) = start_sv2_translator(
         &[
             pool_translator_sniffer_addr_1,
             pool_translator_sniffer_addr_2,
@@ -205,6 +213,7 @@ async fn test_translator_fallback_on_open_mining_message_error() {
         vec![],
         vec![],
         None,
+        false,
     )
     .await;
 
@@ -260,18 +269,19 @@ async fn test_translator_fallback_on_open_mining_message_error() {
 async fn test_translator_keepalive_job_sent_and_share_received_by_pool() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::High);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
     let (pool_translator_sniffer, pool_translator_sniffer_addr) =
         start_sniffer("0", pool_addr, false, vec![], None);
 
     // Start translator with a short keepalive interval (5 seconds)
     let keepalive_interval_secs = 5_u16;
-    let (translator, tproxy_addr) = start_sv2_translator(
+    let (translator, tproxy_addr, _) = start_sv2_translator(
         &[pool_translator_sniffer_addr],
         false,
         vec![],
         vec![],
         Some(keepalive_interval_secs),
+        false,
     )
     .await;
     let (sv1_sniffer, sv1_sniffer_addr) = start_sv1_sniffer(tproxy_addr);
@@ -331,7 +341,8 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
         None,
     );
 
-    let (pool, pool_addr) = start_pool(sv2_tp_config(sniffer_pool_tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) =
+        start_pool(sv2_tp_config(sniffer_pool_tp_addr), vec![], vec![], false).await;
 
     // ignore SubmitSharesSuccess messages, so we can keep the assertion flow simple
     let ignore_submit_shares_success = IgnoreMessage::new(
@@ -347,8 +358,8 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
     );
 
     // aggregated tProxy
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[sniffer_addr], true, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[sniffer_addr], true, vec![], vec![], None, false).await;
 
     sniffer
         .wait_for_message_type_and_clean_queue(
@@ -577,7 +588,8 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
         None,
     );
 
-    let (pool, pool_addr) = start_pool(sv2_tp_config(sniffer_pool_tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) =
+        start_pool(sv2_tp_config(sniffer_pool_tp_addr), vec![], vec![], false).await;
 
     // ignore SubmitSharesSuccess messages, so we can keep the assertion flow simple
     let ignore_submit_shares_success = IgnoreMessage::new(
@@ -591,8 +603,8 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
         vec![ignore_submit_shares_success.into()],
         None,
     );
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None, false).await;
 
     sniffer
         .wait_for_message_type_and_clean_queue(
@@ -876,8 +888,8 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
 
     let (sniffer, sniffer_addr) = start_sniffer("", mock_upstream_addr, false, vec![], None);
 
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None, false).await;
 
     sniffer
         .wait_for_message_type_and_clean_queue(
@@ -1106,8 +1118,8 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
 
     let (sniffer, sniffer_addr) = start_sniffer("", mock_upstream_addr, false, vec![], None);
 
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None, false).await;
 
     sniffer
         .wait_for_message_type_and_clean_queue(
@@ -1359,12 +1371,13 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
     let _send_to_tproxy_b = mock_upstream_b.start().await;
     let (sniffer_b, sniffer_addr_b) = start_sniffer("", mock_upstream_addr_b, false, vec![], None);
 
-    let (translator, tproxy_addr) = start_sv2_translator(
+    let (translator, tproxy_addr, _) = start_sv2_translator(
         &[sniffer_addr_a, sniffer_addr_b],
         true,
         vec![],
         vec![],
         None,
+        false,
     )
     .await;
 
@@ -1508,8 +1521,8 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
     let send_to_tproxy_a = mock_upstream_a.start().await;
     let (sniffer_a, sniffer_addr_a) = start_sniffer("", mock_upstream_addr_a, false, vec![], None);
 
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[sniffer_addr_a], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[sniffer_addr_a], false, vec![], vec![], None, false).await;
 
     sniffer_a
         .wait_for_message_type_and_clean_queue(
@@ -1661,8 +1674,8 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
     );
 
     // Start translator in aggregated mode
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[sniffer_addr], true, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[sniffer_addr], true, vec![], vec![], None, false).await;
 
     sniffer
         .wait_for_message_type_and_clean_queue(
@@ -1826,14 +1839,21 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
 async fn pool_does_not_hang_on_no_handshake() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
     let ephemeral_stream = TcpStream::connect(pool_addr).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (pool_translator_sniffer, pool_translator_sniffer_addr) =
         start_sniffer("0", pool_addr, false, vec![], None);
-    let (translator, _) =
-        start_sv2_translator(&[pool_translator_sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, _, _) = start_sv2_translator(
+        &[pool_translator_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
 
     pool_translator_sniffer
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
@@ -1879,12 +1899,19 @@ async fn pool_does_not_hang_on_no_handshake() {
 async fn tproxy_sends_single_open_extended_mining_channel_in_aggregated_mode() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::High);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
     let (pool_translator_sniffer, pool_translator_sniffer_addr) =
         start_sniffer("0", pool_addr, false, vec![], None);
-    let (tproxy, tproxy_addr) =
-        start_sv2_translator(&[pool_translator_sniffer_addr], true, vec![], vec![], None).await;
+    let (tproxy, tproxy_addr, _) = start_sv2_translator(
+        &[pool_translator_sniffer_addr],
+        true,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
 
     pool_translator_sniffer
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)

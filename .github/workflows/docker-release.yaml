@@ -15,7 +15,7 @@ jobs:
 
     strategy:
       matrix:
-        app: [pool_sv2, jd_server, jd_client_sv2, translator_sv2]
+        app: [pool_sv2, jd_client_sv2, translator_sv2]
 
     steps:
       - name: Checkout code

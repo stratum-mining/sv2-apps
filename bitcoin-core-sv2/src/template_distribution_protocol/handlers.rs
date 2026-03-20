@@ -1,6 +1,6 @@
-use crate::BitcoinCoreSv2;
+use crate::template_distribution_protocol::BitcoinCoreSv2TDP;
 
-use crate::error::BitcoinCoreSv2Error;
+use crate::template_distribution_protocol::error::BitcoinCoreSv2TDPError;
 use stratum_core::{
     parsers_sv2::TemplateDistribution,
     template_distribution_sv2::{
@@ -10,11 +10,11 @@ use stratum_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-impl BitcoinCoreSv2 {
-    pub async fn handle_coinbase_output_constraints(
+impl BitcoinCoreSv2TDP {
+    pub(crate) async fn handle_coinbase_output_constraints(
         &mut self,
         coinbase_output_constraints: CoinbaseOutputConstraints,
-    ) -> Result<(), BitcoinCoreSv2Error> {
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
         tracing::debug!("handle_coinbase_output_constraints() called");
 
         // break the loop in monitor_ipc_templates() and spawn a new one at the end of this function
@@ -51,7 +51,7 @@ impl BitcoinCoreSv2 {
         if let Some(handle) = handle {
             if let Err(e) = handle.await {
                 tracing::error!("monitor_ipc_templates task panicked: {:?}", e);
-                return Err(BitcoinCoreSv2Error::FailedToWaitForMonitorIpcTemplatesTask);
+                return Err(BitcoinCoreSv2TDPError::FailedToWaitForMonitorIpcTemplatesTask);
             }
         }
 
@@ -61,10 +61,10 @@ impl BitcoinCoreSv2 {
         Ok(())
     }
 
-    pub async fn handle_request_transaction_data(
+    pub(crate) async fn handle_request_transaction_data(
         &self,
         request_transaction_data: RequestTransactionData,
-    ) -> Result<(), BitcoinCoreSv2Error> {
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
         tracing::debug!(
             "handle_request_transaction_data() called for template_id: {}",
             request_transaction_data.template_id
@@ -73,7 +73,7 @@ impl BitcoinCoreSv2 {
         let is_stale = {
             let stale_template_ids_guard = self.stale_template_ids.read().map_err(|e| {
                 tracing::error!("Failed to acquire read lock on stale_template_ids: {:?}", e);
-                BitcoinCoreSv2Error::FailedToSendRequestTransactionDataResponseMessage
+                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
             })?;
             stale_template_ids_guard.contains(&request_transaction_data.template_id)
         };
@@ -101,7 +101,9 @@ impl BitcoinCoreSv2 {
                     "Failed to send RequestTransactionDataError message: {:?}",
                     e
                 );
-                return Err(BitcoinCoreSv2Error::FailedToSendRequestTransactionDataResponseMessage);
+                return Err(
+                    BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage,
+                );
             }
 
             return Ok(());
@@ -110,7 +112,7 @@ impl BitcoinCoreSv2 {
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 tracing::error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2Error::FailedToSendRequestTransactionDataResponseMessage
+                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
             })?;
 
             // clone so we can drop the read lock and avoid holding it across the await
@@ -134,7 +136,7 @@ impl BitcoinCoreSv2 {
                         Ok(request_transaction_data_success) => request_transaction_data_success,
                         Err(e) => {
                             tracing::error!("Failed to fetch template tx data: {:?}", e);
-                            return Err(BitcoinCoreSv2Error::FailedToFetchTemplateTxData);
+                            return Err(BitcoinCoreSv2TDPError::FailedToFetchTemplateTxData);
                         }
                     };
                     TemplateDistribution::RequestTransactionDataSuccess(
@@ -159,16 +161,16 @@ impl BitcoinCoreSv2 {
 
         if let Err(e) = self.outgoing_messages.send(response_message.clone()).await {
             tracing::error!("Failed to send message: {:?}", e);
-            return Err(BitcoinCoreSv2Error::FailedToSendRequestTransactionDataResponseMessage);
+            return Err(BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage);
         }
 
         Ok(())
     }
 
-    pub async fn handle_submit_solution(
+    pub(crate) async fn handle_submit_solution(
         &self,
         submit_solution: SubmitSolution<'static>,
-    ) -> Result<(), BitcoinCoreSv2Error> {
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
         tracing::debug!(
             "handle_submit_solution() called for template_id: {}",
             submit_solution.template_id
@@ -176,7 +178,7 @@ impl BitcoinCoreSv2 {
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 tracing::error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2Error::TemplateNotFound
+                BitcoinCoreSv2TDPError::TemplateNotFound
             })?;
 
             let Some(template_data) = template_data_guard.get(&submit_solution.template_id) else {
@@ -188,7 +190,7 @@ impl BitcoinCoreSv2 {
                     "Available template IDs: {:?}",
                     template_data_guard.keys().collect::<Vec<_>>()
                 );
-                return Err(BitcoinCoreSv2Error::TemplateNotFound);
+                return Err(BitcoinCoreSv2TDPError::TemplateNotFound);
             };
             template_data.clone()
         };
@@ -215,7 +217,7 @@ impl BitcoinCoreSv2 {
             }
             Err(e) => {
                 tracing::error!("Failed to submit solution: {:?}", e);
-                Err(BitcoinCoreSv2Error::FailedToSubmitSolution)
+                Err(BitcoinCoreSv2TDPError::FailedToSubmitSolution)
             }
         }
     }

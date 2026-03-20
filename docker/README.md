@@ -118,14 +118,9 @@ If something behaves weirdly, 99% of the time your `docker_env` is the culprit.
 
 ### **pool_sv2**
 
-* Port **34254**
+* Port **3333**
 * Uses `BITCOIN_SOCKET_PATH` for Bitcoin Core access
-
-### **jd_server_sv2**
-
-* Port **34264**
-* RPC-related values (user, pass, port, etc.) come from your `docker_env`
-* Make sure the RPC port matches the network your node is running on
+* use port **3334** to spawn the job declarator 
 
 ### **jd_client_sv2**
 
@@ -176,4 +171,4 @@ image: pool_sv2:v0.1.0   # pinned version
 image: pool_sv2:main   #latest changes in the main branch
 ```
 
-This applies to all images: `pool_sv2`, `jd_server`, `jd_client_sv2`, and `translator_sv2`.
+This applies to all images: `pool_sv2`, `jd_client_sv2`, and `translator_sv2`.

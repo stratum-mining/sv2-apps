@@ -27,13 +27,6 @@ impl ServerMonitoring for ChannelManager {
                     let user_identity = upstream_channel.get_user_identity();
                     let share_accounting = upstream_channel.get_share_accounting();
 
-                    // Get the count of shares submitted to the upstream.
-                    // Counter starts at 1, so subtract 1 to get shares submitted.
-                    let shares_submitted = d
-                        .sequence_number_factory
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        .saturating_sub(1);
-
                     extended_channels.push(ServerExtendedChannelInfo {
                         channel_id,
                         user_identity: user_identity.clone(),
@@ -43,9 +36,10 @@ impl ServerMonitoring for ChannelManager {
                         full_extranonce_size: upstream_channel.get_full_extranonce_size(),
                         rollable_extranonce_size: upstream_channel.get_rollable_extranonce_size(),
                         version_rolling: upstream_channel.is_version_rolling(),
-                        shares_accepted: share_accounting.get_shares_accepted(),
+                        shares_acknowledged: share_accounting.get_acknowledged_shares(),
+                        shares_submitted: share_accounting.get_validated_shares(),
+                        shares_rejected: share_accounting.get_rejected_shares(),
                         share_work_sum: share_accounting.get_share_work_sum(),
-                        shares_submitted,
                         best_diff: share_accounting.get_best_diff(),
                         blocks_found: share_accounting.get_blocks_found(),
                     });

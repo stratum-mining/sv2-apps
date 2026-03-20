@@ -3,9 +3,9 @@ use stratum_core::bitcoin::{
     block::ValidationError, consensus, consensus::encode::Error as ConsensusEncodeError,
 };
 
-/// Error type for [`crate::BitcoinCoreSv2`]
+/// Error type for [`crate::BitcoinCoreSv2TDP`]
 #[derive(Debug)]
-pub enum BitcoinCoreSv2Error {
+pub enum BitcoinCoreSv2TDPError {
     CapnpError(capnp::Error),
     CannotConnectToUnixSocket(Box<Path>, String),
     InvalidTemplateHeader(consensus::encode::Error),
@@ -27,15 +27,15 @@ pub enum BitcoinCoreSv2Error {
     FailedToWaitForMonitorIpcTemplatesTask,
 }
 
-impl From<capnp::Error> for BitcoinCoreSv2Error {
+impl From<capnp::Error> for BitcoinCoreSv2TDPError {
     fn from(error: capnp::Error) -> Self {
-        BitcoinCoreSv2Error::CapnpError(error)
+        BitcoinCoreSv2TDPError::CapnpError(error)
     }
 }
 
-impl From<consensus::encode::Error> for BitcoinCoreSv2Error {
+impl From<consensus::encode::Error> for BitcoinCoreSv2TDPError {
     fn from(error: consensus::encode::Error) -> Self {
-        BitcoinCoreSv2Error::InvalidTemplateHeader(error)
+        BitcoinCoreSv2TDPError::InvalidTemplateHeader(error)
     }
 }
 
@@ -54,12 +54,12 @@ pub enum TemplateDataError {
     FailedToSerializeEmptyCoinbaseOutputs,
     FailedToConvertMerklePathHashToU256,
     FailedToCreateMerklePathSeq,
-    BitcoinCoreSv2Error(BitcoinCoreSv2Error),
+    BitcoinCoreSv2TDPError(BitcoinCoreSv2TDPError),
 }
 
-impl From<BitcoinCoreSv2Error> for TemplateDataError {
-    fn from(error: BitcoinCoreSv2Error) -> Self {
-        TemplateDataError::BitcoinCoreSv2Error(error)
+impl From<BitcoinCoreSv2TDPError> for TemplateDataError {
+    fn from(error: BitcoinCoreSv2TDPError) -> Self {
+        TemplateDataError::BitcoinCoreSv2TDPError(error)
     }
 }
 
@@ -107,7 +107,7 @@ impl std::fmt::Display for TemplateDataError {
             TemplateDataError::FailedToCreateMerklePathSeq => {
                 write!(f, "Failed to create merkle path sequence")
             }
-            TemplateDataError::BitcoinCoreSv2Error(error) => {
+            TemplateDataError::BitcoinCoreSv2TDPError(error) => {
                 write!(f, "Bitcoin Core Sv2 error: {:?}", error)
             }
         }

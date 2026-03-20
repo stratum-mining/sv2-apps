@@ -38,3 +38,11 @@ network = "mainnet"
 # data_dir = "/custom/bitcoin/data"  # Optional: override default data directory
 fee_threshold = 100
 min_interval = 5
+
+# Optional: Embedded Job Declaration Server (JDS)
+# When enabled, Pool runs a JDS subserver that listens for JDP connections from JDC.
+# Requires template_provider_type = BitcoinCoreIpc (JDS backend is selected by Pool startup).
+# Shared fields (authority keys, cert_validity, coinbase_reward_script) are inherited
+# from the Pool config above.
+# [jds]
+# listen_address = "0.0.0.0:34254"

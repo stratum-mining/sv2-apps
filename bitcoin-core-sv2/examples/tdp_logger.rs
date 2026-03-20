@@ -1,19 +1,20 @@
-//! A simple example of how to use `BitcoinCoreSv2`.
+//! A simple example of how to use `BitcoinCoreSv2TDP`.
 //!
-//! This example demonstrates the pattern used in applications where `BitcoinCoreSv2` is
+//! This example demonstrates the pattern used in applications where `BitcoinCoreSv2TDP` is
 //! spawned in a dedicated thread with its own Tokio runtime and `LocalSet`. This allows the
-//! main application to run in a separate async context while `BitcoinCoreSv2` runs in its
+//! main application to run in a separate async context while `BitcoinCoreSv2TDP` runs in its
 //! own isolated thread.
 //!
 //! We connect to the Bitcoin Core UNIX socket, and log the received Sv2 Template Distribution
 //! Protocol messages.
 //!
-//! We send a `CoinbaseOutputConstraints` message to the `BitcoinCoreSv2` instance once at startup.
+//! We send a `CoinbaseOutputConstraints` message to the `BitcoinCoreSv2TDP` instance once at
+//! startup.
 //!
-//! `BitcoinCoreSv2` will not start distributing new templates until it receives the first
+//! `BitcoinCoreSv2TDP` will not start distributing new templates until it receives the first
 //! `CoinbaseOutputConstraints` message.
 
-use bitcoin_core_sv2::BitcoinCoreSv2;
+use bitcoin_core_sv2::template_distribution_protocol::BitcoinCoreSv2TDP;
 use std::path::Path;
 
 use async_channel::unbounded;
@@ -38,7 +39,7 @@ async fn main() {
 
     let bitcoin_core_unix_socket_path = Path::new(&args[1]);
 
-    // `BitcoinCoreSv2` uses this to cancel internally spawned tasks
+    // `BitcoinCoreSv2TDP` uses this to cancel internally spawned tasks
     let cancellation_token = CancellationToken::new();
 
     // get new templates whenever the mempool has changed by more than 100 sats
@@ -47,16 +48,16 @@ async fn main() {
     // the minimum interval between template updates in seconds
     let min_interval = 5;
 
-    // these messages are sent into the `BitcoinCoreSv2` instance
+    // these messages are sent into the `BitcoinCoreSv2TDP` instance
     let (msg_sender_into_bitcoin_core_sv2, msg_receiver_into_bitcoin_core_sv2) = unbounded();
-    // these messages are received from the `BitcoinCoreSv2` instance
+    // these messages are received from the `BitcoinCoreSv2TDP` instance
     let (msg_sender_from_bitcoin_core_sv2, msg_receiver_from_bitcoin_core_sv2) = unbounded();
 
     // clone so we can move it into the thread
     let cancellation_token_clone = cancellation_token.clone();
     let bitcoin_core_unix_socket_path_clone = bitcoin_core_unix_socket_path.to_path_buf();
 
-    // spawn a dedicated thread to run the BitcoinCoreSv2 instance
+    // spawn a dedicated thread to run the BitcoinCoreSv2TDP instance
     // because we're limited to tokio::task::LocalSet
     //
     // please note that it's important to keep a reference to the join handle so we can wait for it
@@ -75,8 +76,8 @@ async fn main() {
         let tokio_local_set = tokio::task::LocalSet::new();
 
         tokio_local_set.block_on(&rt, async move {
-            // create a new `BitcoinCoreSv2` instance
-            let mut sv2_bitcoin_core = match BitcoinCoreSv2::new(
+            // create a new `BitcoinCoreSv2TDP` instance
+            let mut sv2_bitcoin_core = match BitcoinCoreSv2TDP::new(
                 &bitcoin_core_unix_socket_path_clone,
                 fee_threshold,
                 min_interval,
@@ -94,8 +95,8 @@ async fn main() {
                 }
             };
 
-            // run the `BitcoinCoreSv2` instance, which will block until the cancellation token is
-            // activated
+            // run the `BitcoinCoreSv2TDP` instance, which will block until the cancellation token
+            // is activated
             sv2_bitcoin_core.run().await;
         });
     });
@@ -122,7 +123,7 @@ async fn main() {
                     return;
                 }
                 // monitor for Sv2 Template Distribution Protocol messages
-                // coming from `BitcoinCoreSv2`
+                // coming from `BitcoinCoreSv2TDP`
                 Ok(template_distribution_message) = msg_receiver_from_bitcoin_core_sv2.recv() => {
                     // log the message
                     info!("Message received: {}", template_distribution_message);
@@ -150,7 +151,7 @@ async fn main() {
 
     // send CoinbaseOutputConstraints once at startup
     //
-    // `BitcoinCoreSv2` will not start distributing new templates until it receives the first
+    // `BitcoinCoreSv2TDP` will not start distributing new templates until it receives the first
     // `CoinbaseOutputConstraints` message.
     let new_coinbase_output_constraints =
         TemplateDistribution::CoinbaseOutputConstraints(CoinbaseOutputConstraints {
@@ -173,5 +174,5 @@ async fn main() {
 
     // wait for the dedicated thread to finish shutdown
     join_handle.join().unwrap();
-    info!("BitcoinCoreSv2 dedicated thread shutdown complete.");
+    info!("BitcoinCoreSv2TDP dedicated thread shutdown complete.");
 }

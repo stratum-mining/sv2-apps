@@ -51,7 +51,13 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 }
 
                 let messages_: Vec<RouteMessageTo<'_>> = downstream.downstream_data.super_safe_lock(|data| {
-                    data.group_channel.on_new_template(msg.clone().into_static(), coinbase_output.clone()).map_err(|e| {
+                    let downstream_coinbase_outputs = if let Some(ref payout_mode) = data.payout_mode {
+                        payout_mode.coinbase_outputs(msg.coinbase_tx_value_remaining, &self.coinbase_reward_script)
+                    } else {
+                        coinbase_output.clone()
+                    };
+
+                    data.group_channel.on_new_template(msg.clone().into_static(), downstream_coinbase_outputs.clone()).map_err(|e| {
                         tracing::error!("Error while adding template to group channel");
                         PoolError::shutdown(e)
                     })?;
@@ -92,7 +98,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                                 PoolError::shutdown(e)
                             })?;
                         } else {
-                            standard_channel.on_new_template(msg.clone().into_static(), coinbase_output.clone()).map_err(|e| {
+                            standard_channel.on_new_template(msg.clone().into_static(), downstream_coinbase_outputs.clone()).map_err(|e| {
                                 tracing::error!("Error while adding template to standard channel");
                                 PoolError::shutdown(e)
                             })?;

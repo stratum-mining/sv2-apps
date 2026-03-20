@@ -73,7 +73,6 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           cargo build --release --locked --manifest-path=miner-apps/jd-client/Cargo.toml --target ${{ matrix.target }}
-          cargo build --release --locked --manifest-path=pool-apps/jd-server/Cargo.toml --target ${{ matrix.target }}
           cargo build --release --locked --manifest-path=pool-apps/pool/Cargo.toml --target ${{ matrix.target }}
           cargo build --release --locked --manifest-path=miner-apps/translator/Cargo.toml --target ${{ matrix.target }}
 
@@ -81,7 +80,6 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: |
           cargo build --release --locked --manifest-path=miner-apps/jd-client/Cargo.toml
-          cargo build --release --locked --manifest-path=pool-apps/jd-server/Cargo.toml
           cargo build --release --locked --manifest-path=pool-apps/pool/Cargo.toml
           cargo build --release --locked --manifest-path=miner-apps/translator/Cargo.toml
 
@@ -98,10 +96,8 @@ jobs:
       - name: Package Pool Apps (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          mkdir -p pool-apps-release/jd-server pool-apps-release/pool
-          cp pool-apps/jd-server/target/${{ matrix.target }}/release/jd_server pool-apps-release/jd-server/
+          mkdir -p pool-apps-release/pool
           cp pool-apps/target/${{ matrix.target }}/release/pool_sv2 pool-apps-release/pool/
-          cp -r pool-apps/jd-server/config-examples/mainnet/jds-config-local-example.toml pool-apps-release/jd-server/jds-config.toml
           cp -r pool-apps/pool/config-examples/mainnet/pool-config-bitcoin-core-ipc-example.toml pool-apps-release/pool/pool-config.toml
           tar -czvf pool-apps-${{ matrix.target }}.tar.gz -C pool-apps-release .
 
@@ -119,10 +115,8 @@ jobs:
       - name: Package Pool Apps (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          mkdir -p pool-apps-release/jd-server pool-apps-release/pool
-          cp pool-apps/jd-server/target/release/jd_server pool-apps-release/jd-server/
+          mkdir -p pool-apps-release/pool
           cp pool-apps/target/release/pool_sv2 pool-apps-release/pool/
-          cp -r pool-apps/jd-server/config-examples/mainnet/jds-config-local-example.toml pool-apps-release/jd-server/jds-config.toml
           cp -r pool-apps/pool/config-examples/mainnet/pool-config-bitcoin-core-ipc-example.toml pool-apps-release/pool/pool-config.toml
           tar -czvf pool-apps-${{ matrix.target }}.tar.gz -C pool-apps-release .
 

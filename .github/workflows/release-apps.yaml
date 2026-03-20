@@ -25,6 +25,9 @@ jobs:
       - name: Install Rust (1.85)
         uses: dtolnay/rust-toolchain@1.85
 
+      - name: Install capnp dependencies
+        run: sudo apt-get install -y capnproto libcapnp-dev
+
       - name: Login
         run: cargo login ${{ secrets.CRATES_IO_DEPLOY_KEY }}
 
@@ -40,14 +43,11 @@ jobs:
       - name: Publish translator-sv2 crate
         run: ./scripts/release-apps.sh miner-apps/translator
 
+      - name: Publish jd-server-sv2 crate
+        run: ./scripts/release-apps.sh pool-apps/jd-server
+
       - name: Publish pool-sv2 crate
         run: ./scripts/release-apps.sh pool-apps/pool
 
-      # todo: uncomment after https://github.com/stratum-mining/sv2-apps/issues/24
-      # - name: Publish jd-server crate
-      #   run: ./scripts/release-apps.sh jd-server
-
       - name: Publish integration-tests-sv2 crate
         run: ./scripts/release-apps.sh integration-tests
-
-

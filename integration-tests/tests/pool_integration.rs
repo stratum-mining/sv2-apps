@@ -8,6 +8,7 @@ use integration_tests_sv2::{
     *,
 };
 use stratum_apps::stratum_core::{
+    binary_sv2::{Seq0255, U256},
     common_messages_sv2::{has_work_selection, Protocol, SetupConnection, *},
     mining_sv2::*,
     parsers_sv2::{self, AnyMessage, CommonMessages, Mining, TemplateDistribution},
@@ -23,7 +24,7 @@ async fn success_pool_template_provider_connection() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     let (sniffer, sniffer_addr) = start_sniffer("", tp_addr, true, vec![], None);
-    let (pool, _) = start_pool(sv2_tp_config(sniffer_addr), vec![], vec![]).await;
+    let (pool, _, _) = start_pool(sv2_tp_config(sniffer_addr), vec![], vec![], false).await;
     // here we assert that the downstream(pool in this case) have sent `SetupConnection` message
     // with the correct parameters, protocol, flags, min_version and max_version.  Note that the
     // macro can take any number of arguments after the message argument, but the order is
@@ -101,7 +102,8 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
         "header_timestamp_value_assertion_in_new_extended_mining_job tp_pool sniffer";
     let (tp_pool_sniffer, tp_pool_sniffer_addr) =
         start_sniffer(tp_pool_sniffer_identifier, tp_addr, false, vec![], None);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_pool_sniffer_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) =
+        start_pool(sv2_tp_config(tp_pool_sniffer_addr), vec![], vec![], false).await;
     let pool_translator_sniffer_identifier =
         "header_timestamp_value_assertion_in_new_extended_mining_job pool_translator sniffer";
     let (pool_translator_sniffer, pool_translator_sniffer_addr) = start_sniffer(
@@ -118,8 +120,15 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
         ],
         None,
     );
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[pool_translator_sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) = start_sv2_translator(
+        &[pool_translator_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
     let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
 
     tp_pool_sniffer
@@ -184,7 +193,7 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
 async fn pool_standard_channel_receives_share() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
     let (sniffer, sniffer_addr) = start_sniffer("A", pool_addr, false, vec![], None);
     start_mining_device_sv2(sniffer_addr, None, None, None, 1, None, true);
     sniffer
@@ -241,15 +250,16 @@ async fn pool_does_not_send_jobs_to_jdc() {
     let sv2_interval = Some(5);
     let (tp, tp_addr) = start_template_provider(sv2_interval, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
     let (pool_jdc_sniffer, pool_jdc_sniffer_addr) =
         start_sniffer("pool_jdc", pool_addr, false, vec![], None);
-    let (_jds, jds_addr) = start_jds(tp.rpc_info());
-    let (jdc, jdc_addr) = start_jdc(
+    let (jdc, jdc_addr, _) = start_jdc(
         &[(pool_jdc_sniffer_addr, jds_addr)],
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
+        false,
     );
     // Block NewExtendedMiningJob and SetNewPrevHash messages between JDC and translator proxy
     let (_tproxy_jdc_sniffer, tproxy_jdc_sniffer_addr) = start_sniffer(
@@ -270,8 +280,15 @@ async fn pool_does_not_send_jobs_to_jdc() {
         ],
         None,
     );
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[tproxy_jdc_sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) = start_sv2_translator(
+        &[tproxy_jdc_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
 
     // Add SV1 sniffer between translator and miner
     let (_sv1_sniffer, sv1_sniffer_addr) = start_sv1_sniffer(tproxy_addr);
@@ -366,7 +383,7 @@ async fn pool_does_not_send_jobs_to_jdc() {
 async fn pool_reject_setup_connection_with_non_mining_protocol() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
     let endpoint_host = "127.0.0.1".to_string().into_bytes().try_into().unwrap();
     let vendor = String::new().try_into().unwrap();
     let hardware_version = String::new().try_into().unwrap();
@@ -398,8 +415,15 @@ async fn pool_reject_setup_connection_with_non_mining_protocol() {
         vec![setup_connection_replace.into()],
         None,
     );
-    let (translator, _) =
-        start_sv2_translator(&[pool_translator_sniffer_addr], false, vec![], vec![], None).await;
+    let (translator, _, _) = start_sv2_translator(
+        &[pool_translator_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -425,6 +449,79 @@ async fn pool_reject_setup_connection_with_non_mining_protocol() {
     shutdown_all!(translator, pool);
 }
 
+// This test verifies that pool rejects SetCustomMiningJob when it is started without embedded JDS
+// (`start_pool` with no `[jds]` config).
+#[tokio::test]
+async fn pool_without_jds_rejects_set_custom_mining_job() {
+    start_tracing();
+    let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+
+    // no JDS
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+
+    let (sniffer, sniffer_addr) = start_sniffer("mock-pool", pool_addr, false, vec![], None);
+    let send_to_pool = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0b0010),
+    )
+    .start()
+    .await;
+
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    let set_custom_mining_job =
+        AnyMessage::Mining(Mining::SetCustomMiningJob(SetCustomMiningJob {
+            channel_id: 1,
+            request_id: 7,
+            token: 42_u64.to_le_bytes().to_vec().try_into().unwrap(),
+            version: 0,
+            prev_hash: U256::Owned(vec![0_u8; 32]),
+            min_ntime: 0,
+            nbits: 0,
+            coinbase_tx_version: 0,
+            coinbase_prefix: Vec::<u8>::new().try_into().unwrap(),
+            coinbase_tx_input_n_sequence: 0,
+            coinbase_tx_outputs: Vec::<u8>::new().try_into().unwrap(),
+            coinbase_tx_locktime: 0,
+            merkle_path: Seq0255::new(Vec::new()).unwrap(),
+        }));
+    send_to_pool.send(set_custom_mining_job).await.unwrap();
+
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR,
+        )
+        .await;
+
+    let set_custom_mining_job_error = loop {
+        match sniffer.next_message_from_upstream() {
+            Some((_, AnyMessage::Mining(Mining::SetCustomMiningJobError(msg)))) => break msg,
+            _ => continue,
+        }
+    };
+    assert_eq!(set_custom_mining_job_error.request_id, 7);
+    assert_eq!(set_custom_mining_job_error.channel_id, 1);
+    assert_eq!(
+        set_custom_mining_job_error.error_code.as_utf8_or_hex(),
+        "jd-not-supported",
+        "SetCustomMiningJobError should use jd-not-supported when pool has no embedded JDS"
+    );
+
+    shutdown_all!(pool);
+}
+
 // This test launches a Pool and leverages a MockDownstream to test the correct functionalities of
 // grouping extended channels.
 #[tokio::test]
@@ -433,7 +530,7 @@ async fn pool_group_extended_channels() {
     let sv2_interval = Some(5);
     let (tp, tp_addr) = start_template_provider(sv2_interval, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
     let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
 
@@ -601,7 +698,7 @@ async fn pool_group_standard_channels() {
     let sv2_interval = Some(5);
     let (tp, tp_addr) = start_template_provider(sv2_interval, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
     let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
 
@@ -782,7 +879,7 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
     let sv2_interval = Some(5);
     let (tp, tp_addr) = start_template_provider(sv2_interval, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
-    let (pool, pool_addr) = start_pool(sv2_tp_config(tp_addr), vec![], vec![]).await;
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
     let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
 

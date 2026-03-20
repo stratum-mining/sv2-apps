@@ -1,7 +1,7 @@
 use std::sync::Arc;
 mod common_message_handler;
 use async_channel::{unbounded, Receiver, Sender};
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     network_helpers::{self, connect_with_noise, resolve_host_port},

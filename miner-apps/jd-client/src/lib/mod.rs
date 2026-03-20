@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_channel::{unbounded, Receiver, Sender};
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     stratum_core::{bitcoin::consensus::Encodable, parsers_sv2::JobDeclaration},
@@ -27,7 +27,7 @@ use crate::{
     job_declarator::JobDeclarator,
     status::{State, Status},
     template_receiver::{
-        bitcoin_core::{connect_to_bitcoin_core, BitcoinCoreSv2Config},
+        bitcoin_core::{connect_to_bitcoin_core, BitcoinCoreSv2TDPConfig},
         sv2_tp::Sv2Tp,
     },
     upstream::Upstream,
@@ -135,7 +135,9 @@ impl JobDeclaratorClient {
                 monitoring_addr,
                 Some(Arc::new(channel_manager.clone())), // SV2 channels opened with servers
                 Some(Arc::new(channel_manager.clone())), // SV2 channels opened with clients
-                std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs()),
+                std::time::Duration::from_secs(
+                    self.config.monitoring_cache_refresh_secs().unwrap_or(15),
+                ),
             )
             .expect("Failed to initialize monitoring server");
 
@@ -222,11 +224,11 @@ impl JobDeclaratorClient {
                     unix_socket_path.display()
                 );
 
-                // incoming and outgoing TDP channels from the perspective of BitcoinCoreSv2
+                // incoming and outgoing TDP channels from the perspective of BitcoinCoreSv2TDP
                 let incoming_tdp_receiver = channel_manager_to_tp_receiver.clone();
                 let outgoing_tdp_sender = tp_to_channel_manager_sender.clone();
 
-                let bitcoin_core_config = BitcoinCoreSv2Config {
+                let bitcoin_core_config = BitcoinCoreSv2TDPConfig {
                     unix_socket_path,
                     fee_threshold,
                     min_interval,
@@ -493,7 +495,7 @@ impl JobDeclaratorClient {
                                         monitoring_addr,
                                         Some(Arc::new(channel_manager_clone.clone())),
                                         Some(Arc::new(channel_manager_clone.clone())),
-                                        std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs()),
+                                        std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs().unwrap_or(15)),
                                     )
                                     .expect("Failed to initialize monitoring server");
 
@@ -551,10 +553,10 @@ impl JobDeclaratorClient {
         }
 
         if let Some(bitcoin_core_sv2_join_handle) = bitcoin_core_sv2_join_handle {
-            info!("Waiting for BitcoinCoreSv2 dedicated thread to shutdown...");
+            info!("Waiting for BitcoinCoreSv2TDP dedicated thread to shutdown...");
             match bitcoin_core_sv2_join_handle.join() {
-                Ok(_) => info!("BitcoinCoreSv2 dedicated thread shutdown complete."),
-                Err(e) => error!("BitcoinCoreSv2 dedicated thread error: {e:?}"),
+                Ok(_) => info!("BitcoinCoreSv2TDP dedicated thread shutdown complete."),
+                Err(e) => error!("BitcoinCoreSv2TDP dedicated thread error: {e:?}"),
             }
         }
 

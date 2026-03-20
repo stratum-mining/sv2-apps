@@ -23,7 +23,6 @@ COPY stratum-apps/src/lib.rs stratum-apps/src/lib.rs
 COPY pool-apps/pool/Cargo.toml pool-apps/pool/Cargo.toml
 
 COPY pool-apps/jd-server/Cargo.toml pool-apps/jd-server/Cargo.toml
-COPY pool-apps/jd-server/Cargo.lock pool-apps/jd-server/Cargo.lock
 
 COPY miner-apps/jd-client/Cargo.toml miner-apps/jd-client/Cargo.toml
 COPY miner-apps/translator/Cargo.toml miner-apps/translator/Cargo.toml
@@ -31,7 +30,6 @@ COPY miner-apps/translator/Cargo.toml miner-apps/translator/Cargo.toml
 RUN echo "Fetching deps for ${APP}" && \
     case "$APP" in \
         pool_sv2) cargo fetch --manifest-path=pool-apps/pool/Cargo.toml ;; \
-        jd_server) cargo fetch --manifest-path=pool-apps/jd-server/Cargo.toml ;; \
         jd_client_sv2) cargo fetch --manifest-path=miner-apps/jd-client/Cargo.toml ;; \
         translator_sv2) cargo fetch --manifest-path=miner-apps/translator/Cargo.toml ;; \
         *) echo "Unknown APP: $APP" && exit 1 ;; \
@@ -49,7 +47,6 @@ COPY stratum-apps/ stratum-apps/
 RUN echo "Building ${APP}" && \
     case "$APP" in \
         pool_sv2) cargo build --release --manifest-path pool-apps/pool/Cargo.toml --target-dir ./ ;; \
-        jd_server) cargo build --release --manifest-path pool-apps/jd-server/Cargo.toml --target-dir ./ ;; \
         jd_client_sv2) cargo build --release --manifest-path miner-apps/jd-client/Cargo.toml --target-dir ./ ;; \
         translator_sv2) cargo build --release --manifest-path miner-apps/translator/Cargo.toml --target-dir ./ ;; \
         *) echo "Unknown APP: $APP" && exit 1 ;; \

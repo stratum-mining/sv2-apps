@@ -1,147 +1,207 @@
-//! ## Error Module
+//! Error types and recovery actions for the Job Declaration Server.
 //!
-//! Defines [`JdsError`], the central error enum used throughout the Job Declarator Server (JDS).
+//! Every fallible operation in `jd-server` returns a [`JDSError`] that bundles an
+//! [`Action`] describing how the caller should recover:
 //!
-//! It unifies errors from:
-//! - I/O operations
-//! - Channels (send/recv)
-//! - SV2 stack: Binary, Codec, Noise, Framing, RolesLogic
-//! - Mempool layer
-//! - Locking logic (PoisonError)
-//! - Domain-specific issues (e.g., missing job, invalid URL, reconstruction failures)
+//! | Action | Meaning |
+//! |---|---|
+//! | [`Action::Log`] | Non-fatal — log and continue. |
+//! | [`Action::Disconnect`] | A specific downstream misbehaved or disconnected — clean it up. |
+//! | [`Action::Shutdown`] | Unrecoverable — shut down the whole server. |
 //!
-//! This module ensures that all errors can be passed around consistently, including across async
-//! boundaries.
+//! The `Owner` type parameter is a zero-sized marker (e.g. [`JobDeclarator`], [`Downstream`])
+//! that controls which constructors (`shutdown`, `disconnect`) are available at the type level.
 
-use std::{
-    convert::From,
-    fmt::Debug,
-    sync::{MutexGuard, PoisonError},
+use std::{fmt::Debug, marker::PhantomData};
+
+use stratum_apps::{
+    stratum_core::{
+        binary_sv2, codec_sv2, framing_sv2, handlers_sv2::HandlerErrorType, noise_sv2,
+        parsers_sv2::ParserError,
+    },
+    utils::types::{
+        CanDisconnect, CanShutdown, DownstreamId, ExtensionType, MessageType, RequestId,
+    },
 };
 
-use stratum_common::roles_logic_sv2::{
-    self,
-    codec_sv2::{self, binary_sv2, noise_sv2},
-    parsers_sv2::Mining,
-};
+/// Convenience alias for `Result<T, JDSError<Owner>>`.
+pub type JDSResult<T, Owner> = Result<T, JDSError<Owner>>;
 
-use crate::mempool::error::JdsMempoolError;
+/// An error paired with an [`Action`] that tells the caller how to recover.
+///
+/// The `Owner` phantom constrains which constructor methods are available.
+#[derive(Debug)]
+pub struct JDSError<Owner> {
+    pub kind: JDSErrorKind,
+    pub action: Action,
+    _owner: PhantomData<Owner>,
+}
 
-#[derive(std::fmt::Debug)]
-pub enum JdsError {
+/// Recovery action attached to every [`JDSError`].
+#[derive(Debug, Clone, Copy)]
+pub enum Action {
+    /// Non-fatal — log the error and continue processing.
+    Log,
+    /// A single downstream client should be cleaned up.
+    Disconnect(DownstreamId),
+    /// Unrecoverable — the server must shut down.
+    Shutdown,
+}
+
+/// Marker type for errors originating from the [`crate::job_declarator::JobDeclarator`] layer.
+#[derive(Debug)]
+pub struct JobDeclarator;
+
+impl CanShutdown for JobDeclarator {}
+impl CanDisconnect for JobDeclarator {}
+
+impl<O> JDSError<O>
+where
+    O: CanShutdown,
+{
+    /// Constructs a [`JDSError`] with [`Action::Shutdown`].
+    pub fn shutdown<E: Into<JDSErrorKind>>(kind: E) -> Self {
+        Self {
+            kind: kind.into(),
+            action: Action::Shutdown,
+            _owner: PhantomData,
+        }
+    }
+}
+
+/// Marker type for errors originating from the `Downstream` layer.
+#[derive(Debug)]
+pub struct Downstream;
+
+impl CanDisconnect for Downstream {}
+impl CanShutdown for Downstream {}
+
+impl<O> JDSError<O>
+where
+    O: CanDisconnect,
+{
+    /// Constructs a [`JDSError`] with [`Action::Disconnect`] for the given downstream.
+    pub fn disconnect<E: Into<JDSErrorKind>>(kind: E, downstream_id: DownstreamId) -> Self {
+        Self {
+            kind: kind.into(),
+            action: Action::Disconnect(downstream_id),
+            _owner: PhantomData,
+        }
+    }
+}
+
+/// Underlying error kind without a recovery action.
+///
+/// Wraps the various protocol, I/O, and domain-specific errors that can occur inside JDS.
+#[derive(Debug)]
+pub enum JDSErrorKind {
     Io(std::io::Error),
     ChannelSend(Box<dyn std::marker::Send + Debug>),
     ChannelRecv(async_channel::RecvError),
     BinarySv2(binary_sv2::Error),
     Codec(codec_sv2::Error),
     Noise(noise_sv2::Error),
-    RolesLogic(roles_logic_sv2::Error),
-    Framing(codec_sv2::framing_sv2::Error),
-    PoisonLock(String),
-    Custom(String),
-    Sv2ProtocolError((u32, Mining<'static>)),
-    MempoolError(JdsMempoolError),
-    ImpossibleToReconstructBlock(String),
-    NoLastDeclaredJob,
-    InvalidRPCUrl,
-    BadCliArgs,
+    Parser(ParserError),
+    BitcoinCoreIPC(String),
+    Framing(framing_sv2::Error),
+    UnexpectedMessage(ExtensionType, MessageType),
+    ClientNotFound(DownstreamId),
+    ClientSenderNotFound(DownstreamId),
+    PendingDeclareMiningJobNotFound(RequestId),
+    UnsupportedProtocol,
+    UnsupportedConnectionFlags,
+    OneshotRecv(tokio::sync::oneshot::error::RecvError),
+    InvalidConfig(String),
 }
 
-impl std::fmt::Display for JdsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use JdsError::*;
-        match self {
-            Io(ref e) => write!(f, "I/O error: `{e:?}"),
-            ChannelSend(ref e) => write!(f, "Channel send failed: `{e:?}`"),
-            ChannelRecv(ref e) => write!(f, "Channel recv failed: `{e:?}`"),
-            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{e:?}`"),
-            Codec(ref e) => write!(f, "Codec SV2 error: `{e:?}"),
-            Framing(ref e) => write!(f, "Framing SV2 error: `{e:?}`"),
-            Noise(ref e) => write!(f, "Noise SV2 error: `{e:?}"),
-            RolesLogic(ref e) => write!(f, "Roles Logic SV2 error: `{e:?}`"),
-            PoisonLock(ref e) => write!(f, "Poison lock: {e:?}"),
-            Custom(ref e) => write!(f, "Custom SV2 error: `{e:?}`"),
-            Sv2ProtocolError(ref e) => {
-                write!(f, "Received Sv2 Protocol Error from upstream: `{e:?}`")
-            }
-            MempoolError(ref e) => write!(f, "Mempool error: `{e:?}`"),
-            ImpossibleToReconstructBlock(e) => {
-                write!(f, "Error in reconstructing the block: {e:?}")
-            }
-            NoLastDeclaredJob => write!(f, "Last declared job not found"),
-            InvalidRPCUrl => write!(f, "Invalid Template Provider RPC URL"),
-            BadCliArgs => write!(f, "Bad CLI arg input"),
+impl<Owner> From<JDSError<Owner>> for JDSErrorKind {
+    fn from(value: JDSError<Owner>) -> Self {
+        value.kind
+    }
+}
+
+impl<Owner> JDSError<Owner> {
+    /// Constructs a [`JDSError`] with [`Action::Log`].
+    pub fn log<E: Into<JDSErrorKind>>(kind: E) -> Self {
+        Self {
+            kind: kind.into(),
+            action: Action::Log,
+            _owner: PhantomData,
         }
     }
 }
 
-impl From<std::io::Error> for JdsError {
-    fn from(e: std::io::Error) -> JdsError {
-        JdsError::Io(e)
+impl From<std::io::Error> for JDSErrorKind {
+    fn from(e: std::io::Error) -> Self {
+        JDSErrorKind::Io(e)
     }
 }
 
-impl From<async_channel::RecvError> for JdsError {
-    fn from(e: async_channel::RecvError) -> JdsError {
-        JdsError::ChannelRecv(e)
+impl From<async_channel::RecvError> for JDSErrorKind {
+    fn from(e: async_channel::RecvError) -> Self {
+        JDSErrorKind::ChannelRecv(e)
     }
 }
 
-impl From<binary_sv2::Error> for JdsError {
-    fn from(e: binary_sv2::Error) -> JdsError {
-        JdsError::BinarySv2(e)
+impl From<binary_sv2::Error> for JDSErrorKind {
+    fn from(e: binary_sv2::Error) -> Self {
+        JDSErrorKind::BinarySv2(e)
     }
 }
 
-impl From<codec_sv2::Error> for JdsError {
-    fn from(e: codec_sv2::Error) -> JdsError {
-        JdsError::Codec(e)
+impl From<codec_sv2::Error> for JDSErrorKind {
+    fn from(e: codec_sv2::Error) -> Self {
+        JDSErrorKind::Codec(e)
     }
 }
 
-impl From<noise_sv2::Error> for JdsError {
-    fn from(e: noise_sv2::Error) -> JdsError {
-        JdsError::Noise(e)
+impl From<framing_sv2::Error> for JDSErrorKind {
+    fn from(e: framing_sv2::Error) -> Self {
+        JDSErrorKind::Framing(e)
     }
 }
 
-impl From<roles_logic_sv2::Error> for JdsError {
-    fn from(e: roles_logic_sv2::Error) -> JdsError {
-        JdsError::RolesLogic(e)
+impl From<noise_sv2::Error> for JDSErrorKind {
+    fn from(e: noise_sv2::Error) -> Self {
+        JDSErrorKind::Noise(e)
     }
 }
 
-impl<T: 'static + std::marker::Send + Debug> From<async_channel::SendError<T>> for JdsError {
-    fn from(e: async_channel::SendError<T>) -> JdsError {
-        JdsError::ChannelSend(Box::new(e))
+impl From<ParserError> for JDSErrorKind {
+    fn from(e: ParserError) -> Self {
+        JDSErrorKind::Parser(e)
     }
 }
 
-impl From<String> for JdsError {
-    fn from(e: String) -> JdsError {
-        JdsError::Custom(e)
-    }
-}
-impl From<codec_sv2::framing_sv2::Error> for JdsError {
-    fn from(e: codec_sv2::framing_sv2::Error) -> JdsError {
-        JdsError::Framing(e)
+impl From<tokio::sync::oneshot::error::RecvError> for JDSErrorKind {
+    fn from(e: tokio::sync::oneshot::error::RecvError) -> Self {
+        JDSErrorKind::OneshotRecv(e)
     }
 }
 
-impl<T> From<PoisonError<MutexGuard<'_, T>>> for JdsError {
-    fn from(e: PoisonError<MutexGuard<T>>) -> JdsError {
-        JdsError::PoisonLock(e.to_string())
+impl<T> From<async_channel::SendError<T>> for JDSErrorKind
+where
+    T: std::marker::Send + Debug + 'static,
+{
+    fn from(e: async_channel::SendError<T>) -> Self {
+        JDSErrorKind::ChannelSend(Box::new(e))
     }
 }
 
-impl From<(u32, Mining<'static>)> for JdsError {
-    fn from(e: (u32, Mining<'static>)) -> Self {
-        JdsError::Sv2ProtocolError(e)
+impl<Owner> HandlerErrorType for JDSError<Owner> {
+    fn parse_error(error: ParserError) -> Self {
+        Self {
+            kind: JDSErrorKind::Parser(error),
+            action: Action::Log,
+            _owner: PhantomData,
+        }
     }
-}
 
-impl From<JdsMempoolError> for JdsError {
-    fn from(error: JdsMempoolError) -> Self {
-        JdsError::MempoolError(error)
+    fn unexpected_message(extension_type: ExtensionType, message_type: MessageType) -> Self {
+        Self {
+            kind: JDSErrorKind::UnexpectedMessage(extension_type, message_type),
+            action: Action::Log,
+            _owner: PhantomData,
+        }
     }
 }

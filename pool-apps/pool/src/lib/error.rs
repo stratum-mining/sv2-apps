@@ -175,8 +175,8 @@ pub enum PoolErrorKind {
     FailedToCreateBitcoinCoreTokioRuntime,
     /// Failed to send CoinbaseOutputConstraints message
     FailedToSendCoinbaseOutputConstraints,
-    /// BitcoinCoreSv2 cancellation token activated
-    BitcoinCoreSv2CancellationTokenActivated,
+    /// BitcoinCoreSv2TDP cancellation token activated
+    BitcoinCoreSv2TDPCancellationTokenActivated,
     /// Unsupported Protocol
     UnsupportedProtocol,
     /// Setup connection error
@@ -191,6 +191,10 @@ pub enum PoolErrorKind {
     JobNotFound,
     /// Invalid Key
     InvalidKey,
+    ///Error when parsing the PayoutMode for Solo Mining Mode
+    PayoutModeError(String),
+    /// JDS error (from embedded Job Declaration Server)
+    Jds(jd_server_sv2::error::JDSErrorKind),
 }
 
 impl std::fmt::Display for PoolErrorKind {
@@ -267,8 +271,8 @@ impl std::fmt::Display for PoolErrorKind {
             FailedToSendCoinbaseOutputConstraints => {
                 write!(f, "Failed to send CoinbaseOutputConstraints message")
             }
-            BitcoinCoreSv2CancellationTokenActivated => {
-                write!(f, "BitcoinCoreSv2 cancellation token activated")
+            BitcoinCoreSv2TDPCancellationTokenActivated => {
+                write!(f, "BitcoinCoreSv2TDP cancellation token activated")
             },
             UnsupportedProtocol => write!(f, "Protocol not supported"),
             SetupConnectionError => {
@@ -280,7 +284,9 @@ impl std::fmt::Display for PoolErrorKind {
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
             Configuration(e) => write!(f, "Configuration error: {e}"),
             JobNotFound => write!(f, "Job not found"),
-            InvalidKey => write!(f, "Invalid key used during noise handshake")
+            InvalidKey => write!(f, "Invalid key used during noise handshake"),
+            PayoutModeError(e) => write!(f, "Unable to parse the PayoutMode: {e}"),
+            Jds(e) => write!(f, "JDS error: {e:?}"),
         }
     }
 }
@@ -395,6 +401,12 @@ impl From<ParserError> for PoolErrorKind {
 impl From<ShareValidationError> for PoolErrorKind {
     fn from(value: ShareValidationError) -> Self {
         PoolErrorKind::ChannelSv2(ChannelSv2Error::ShareValidationError(value))
+    }
+}
+
+impl From<jd_server_sv2::error::JDSErrorKind> for PoolErrorKind {
+    fn from(value: jd_server_sv2::error::JDSErrorKind) -> Self {
+        PoolErrorKind::Jds(value)
     }
 }
 

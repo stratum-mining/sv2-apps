@@ -2,18 +2,20 @@ services:
   pool_sv2:
     image: stratumv2/pool_sv2:main
     container_name: pool_sv2
+    stop_signal: SIGINT
     env_file:
       - docker_env
     volumes:
-      - ./config/pool-config.toml.template:/app/pool-config.toml.template:ro
+      - ./config/pool-jds-config.toml.template:/app/pool-jds-config.toml.template:ro
       - "${BITCOIN_SOCKET_PATH?}:/root/.bitcoin/node.sock"
     entrypoint: >
       sh -c '
-        envsubst < /app/pool-config.toml.template> /app/pool-config.toml &&
+        envsubst < /app/pool-jds-config.toml.template> /app/pool-config.toml &&
         exec /app/pool_sv2
       '
     ports:
-      - "34254:34254"
+      - "3333:3333"
+      - "3334:3334"
       - "127.0.0.1:9090:9090"  # Monitoring HTTP API & Prometheus metrics (localhost only)
     restart: unless-stopped
     profiles:
@@ -21,31 +23,10 @@ services:
       - pool_apps
       - pool_and_miner_apps
 
-
-  jd_server_sv2:
-    image: stratumv2/jd_server:main
-    container_name: jd_server_sv2
-    env_file:
-      - docker_env
-    volumes:
-      - ./config/jds-config.toml.template:/app/jds-config.toml.template:ro
-    entrypoint: >
-      sh -c '
-        envsubst < /app/jds-config.toml.template > /app/jds-config.toml &&
-        exec /app/jd_server
-      '
-    ports:
-      - "34264:34264"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-    profiles:
-      - pool_apps
-      - pool_and_miner_apps
-
   jd_client_sv2:
     image: stratumv2/jd_client_sv2:main
     container_name: jd_client_sv2
+    stop_signal: SIGINT
     env_file:
       - docker_env
     volumes:
@@ -67,6 +48,7 @@ services:
   tproxy_sv2:
     image: stratumv2/translator_sv2:main
     container_name: tproxy_sv2
+    stop_signal: SIGINT
     env_file:
       - docker_env
     volumes:

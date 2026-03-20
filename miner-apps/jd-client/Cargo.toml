@@ -16,14 +16,14 @@ name = "jd_client_sv2"
 path = "src/lib/mod.rs"
 
 [dependencies]
-stratum-apps = { path = "../../stratum-apps", features = ["jd_client"] }
+stratum-apps = { version = "0.3.0", path = "../../stratum-apps", features = ["jd_client"] }
 async-channel = "1.5.1"
 serde = { version = "1.0.89", default-features = false, features = ["derive", "alloc"] }
 tokio = { version = "1.44.1", features = ["full"] }
 ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
 tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
-bitcoin_core_sv2 = { path = "../../bitcoin-core-sv2" }
+bitcoin_core_sv2 = { version = "0.1.0", path = "../../bitcoin-core-sv2" }
 hex = "0.4.3"
 hotpath = "0.9"
 

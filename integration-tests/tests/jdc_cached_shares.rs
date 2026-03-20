@@ -26,7 +26,8 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
     // Otherwise, a discovered block would trigger a chain tip change,
     // causing `SetCustomMiningJob.Success` to fail.
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::High);
-    let (_jds, jds_addr) = start_jds(tp.rpc_info());
+    let (_pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
 
     let mock_pool_addr = get_available_address();
     let mock_pool = MockUpstream::new(
@@ -38,14 +39,15 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
     let (pool_sniffer, pool_sniffer_addr) =
         start_sniffer("pool", mock_pool_addr, false, vec![], None);
 
-    let (jdc, jdc_addr) = start_jdc(
+    let (jdc, jdc_addr, _) = start_jdc(
         &[(pool_sniffer_addr, jds_addr)],
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
+        false,
     );
-    let (translator, tproxy_addr) =
-        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None).await;
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None, false).await;
 
     let (sv1_sniffer, sv1_sniffer_addr) = start_sv1_sniffer(tproxy_addr);
     let (_minerd, _minerd_addr) = start_minerd(sv1_sniffer_addr, None, None, false).await;

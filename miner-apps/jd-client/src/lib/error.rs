@@ -224,9 +224,9 @@ pub enum JDCErrorKind {
     RequiredExtensionsNotSupported(Vec<u16>),
     /// Server requires extensions that the translator doesn't support
     ServerRequiresUnsupportedExtensions(Vec<u16>),
-    /// BitcoinCoreSv2 cancellation token activated
-    BitcoinCoreSv2CancellationTokenActivated,
-    /// Failed to create BitcoinCoreSv2 tokio runtime
+    /// BitcoinCoreSv2TDP cancellation token activated
+    BitcoinCoreSv2TDPCancellationTokenActivated,
+    /// Failed to create BitcoinCoreSv2TDP tokio runtime
     FailedToCreateBitcoinCoreTokioRuntime,
     /// Failed to send CoinbaseOutputConstraints message
     FailedToSendCoinbaseOutputConstraints,
@@ -368,11 +368,11 @@ impl fmt::Display for JDCErrorKind {
             ServerRequiresUnsupportedExtensions(extensions) => {
                 write!(f, "Server requires extensions that the translator doesn't support: {extensions:?}")
             }
-            BitcoinCoreSv2CancellationTokenActivated => {
-                write!(f, "BitcoinCoreSv2 cancellation token activated")
+            BitcoinCoreSv2TDPCancellationTokenActivated => {
+                write!(f, "BitcoinCoreSv2TDP cancellation token activated")
             }
             FailedToCreateBitcoinCoreTokioRuntime => {
-                write!(f, "Failed to create BitcoinCoreSv2 tokio runtime")
+                write!(f, "Failed to create BitcoinCoreSv2TDP tokio runtime")
             }
             FailedToSendCoinbaseOutputConstraints => {
                 write!(f, "Failed to send CoinbaseOutputConstraints message")

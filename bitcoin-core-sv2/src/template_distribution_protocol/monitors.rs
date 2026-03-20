@@ -1,10 +1,10 @@
-use crate::BitcoinCoreSv2;
+use crate::template_distribution_protocol::BitcoinCoreSv2TDP;
 
 use std::collections::HashSet;
 use stratum_core::parsers_sv2::TemplateDistribution;
 use tracing::info;
 
-impl BitcoinCoreSv2 {
+impl BitcoinCoreSv2TDP {
     /// Spawns a new task to monitor the IPC templates
     ///
     /// This task is responsible for:

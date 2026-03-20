@@ -3,12 +3,12 @@ use crate::{
     status::{handle_error, State, Status, StatusSender},
 };
 use async_channel::{Receiver, Sender};
-use bitcoin_core_sv2::{BitcoinCoreSv2, CancellationToken};
+use bitcoin_core_sv2::template_distribution_protocol::{BitcoinCoreSv2TDP, CancellationToken};
 use std::{path::PathBuf, sync::Arc, thread::JoinHandle};
 use stratum_apps::{stratum_core::parsers_sv2::TemplateDistribution, task_manager::TaskManager};
 
 #[derive(Clone)]
-pub struct BitcoinCoreSv2Config {
+pub struct BitcoinCoreSv2TDPConfig {
     pub unix_socket_path: PathBuf,
     pub fee_threshold: u64,
     pub min_interval: u8,
@@ -19,7 +19,7 @@ pub struct BitcoinCoreSv2Config {
 
 #[cfg_attr(not(test), hotpath::measure)]
 pub async fn connect_to_bitcoin_core(
-    bitcoin_core_config: BitcoinCoreSv2Config,
+    bitcoin_core_config: BitcoinCoreSv2TDPConfig,
     cancellation_token: CancellationToken,
     task_manager: Arc<TaskManager>,
     status_sender: Sender<Status>,
@@ -39,7 +39,7 @@ pub async fn connect_to_bitcoin_core(
 
                 handle_error::<error::TemplateProvider>(
                     &status_sender,
-                    PoolError::shutdown(PoolErrorKind::BitcoinCoreSv2CancellationTokenActivated),
+                    PoolError::shutdown(PoolErrorKind::BitcoinCoreSv2TDPCancellationTokenActivated),
                 )
                 .await;
             }
@@ -48,7 +48,7 @@ pub async fn connect_to_bitcoin_core(
 
     let status_sender_clone = status_sender.clone();
 
-    // spawn a dedicated thread to run the BitcoinCoreSv2 instance
+    // spawn a dedicated thread to run the BitcoinCoreSv2TDP instance
     // because we're limited to tokio::task::LocalSet due to the use of `capnp` clients on
     // `bitcoin-core-sv2`, which are not `Send`
     std::thread::spawn(move || {
@@ -70,8 +70,8 @@ pub async fn connect_to_bitcoin_core(
         let tokio_local_set = tokio::task::LocalSet::new();
 
         tokio_local_set.block_on(&rt, async move {
-            // create a new BitcoinCoreSv2 instance
-            let mut sv2_bitcoin_core = match BitcoinCoreSv2::new(
+            // create a new BitcoinCoreSv2TDP instance
+            let mut sv2_bitcoin_core = match BitcoinCoreSv2TDP::new(
                 &bitcoin_core_config.unix_socket_path,
                 bitcoin_core_config.fee_threshold,
                 bitcoin_core_config.min_interval,
@@ -89,7 +89,7 @@ pub async fn connect_to_bitcoin_core(
                 }
             };
 
-            // run the BitcoinCoreSv2 instance, which will block until the cancellation token is
+            // run the BitcoinCoreSv2TDP instance, which will block until the cancellation token is
             // activated
             sv2_bitcoin_core.run().await;
         });

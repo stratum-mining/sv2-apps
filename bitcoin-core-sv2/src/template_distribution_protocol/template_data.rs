@@ -1,4 +1,4 @@
-use crate::error::TemplateDataError;
+use crate::template_distribution_protocol::error::TemplateDataError;
 
 use bitcoin_capnp_types::{
     mining_capnp::block_template::Client as BlockTemplateIpcClient,
@@ -395,6 +395,7 @@ impl TemplateData {
         let tx_data: Vec<B016M<'static>> = block
             .txdata
             .iter()
+            .skip(1) // skip coinbase tx
             .map(|tx| {
                 serialize(tx)
                     .try_into()

@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_channel::{Receiver, Sender};
-use bitcoin_core_sv2::CancellationToken;
+use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use stratum_apps::{
     coinbase_output_constraints::coinbase_output_constraints_message,
     custom_mutex::Mutex,
@@ -476,11 +476,19 @@ impl ChannelManager {
         })?;
 
         let task_manager_clone = task_manager.clone();
+        // Register the listener task in fallback coordination, so fallback waits
+        // for this accept loop to stop before attempting to re-bind the same port.
+        let fallback_handler = fallback_coordinator.register();
+        let fallback_token = fallback_coordinator.token();
         task_manager.spawn(async move {
             loop {
                 select! {
                     _ = cancellation_token.cancelled() => {
                         info!("Downstream Server: received shutdown signal");
+                        break;
+                    }
+                    _ = fallback_token.cancelled() => {
+                        info!("Downstream Server: received fallback signal");
                         break;
                     }
                     res = server.accept() => {
@@ -568,6 +576,7 @@ impl ChannelManager {
                 }
             }
             info!("Downstream server: Unified loop break");
+            fallback_handler.done();
         });
         Ok(())
     }
