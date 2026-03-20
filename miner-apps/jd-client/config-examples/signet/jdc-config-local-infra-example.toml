@@ -6,8 +6,8 @@ max_supported_version = 2
 min_supported_version = 2
 
 # Auth keys for open encrypted connection downstream
-authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
+authority_public_key = "<AUTHORITY_PUBLIC_KEY>"
+authority_secret_key = "<AUTHORITY_SECRET_KEY>"
 cert_validity_sec = 3600
 
 
@@ -56,7 +56,7 @@ monitoring_cache_refresh_secs = 15
 # List of upstreams (Pool and JDS) used as backup endpoints
 # In case of shares refused by the Pool or JDS, the fallback system will propose the same job to the next upstream in this list
 [[upstreams]]
-authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_pubkey = "<AUTHORITY_PUBLIC_KEY>"
 # pool_address and jds_address accept IP addresses or hostnames (e.g. "pool.example.com")
 pool_address = "127.0.0.1"
 pool_port = 33333
@@ -64,7 +64,7 @@ jds_address = "127.0.0.1"
 jds_port = 33334
 
 [[upstreams]]
-authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_pubkey = "<AUTHORITY_PUBLIC_KEY>"
 pool_address = "75.119.150.111"
 pool_port = 33333
 jds_address = "75.119.150.111"

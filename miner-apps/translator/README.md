@@ -53,12 +53,12 @@ enable_vardiff = true  # Set to false when using with Job Declarator Client (JDC
 [[upstreams]]
 address = "127.0.0.1"
 port = 34254
-authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_pubkey = "<AUTHORITY_PUBLIC_KEY>"
 
 [[upstreams]]
 address = "backup.pool.com"
 port = 34254
-authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_pubkey = "<AUTHORITY_PUBLIC_KEY>"
 ```
 
 ### Configuration Parameters
@@ -154,7 +154,7 @@ enable_vardiff = true
 [[upstreams]]
 address = "127.0.0.1"
 port = 34254
-authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_pubkey = "<AUTHORITY_PUBLIC_KEY>"
 ```
 
 ### Example 2: High-Availability Setup

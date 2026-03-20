@@ -4,8 +4,9 @@ use jd_client_sv2::JobDeclaratorClient;
 use mining_device::Secp256k1PublicKey as MiningDeviceSecp256k1PublicKey;
 use once_cell::sync::OnceCell;
 use pool_sv2::PoolSv2;
+use rand;
+use secp256k1;
 use std::{
-    convert::TryFrom,
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -49,6 +50,19 @@ const POOL_COINBASE_REWARD_DESCRIPTOR: &str = "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwl
 const JDC_COINBASE_REWARD_DESCRIPTOR: &str = "addr(tb1qpusf5256yxv50qt0pm0tue8k952fsu5lzsphft)";
 
 static LOGGER: OnceCell<()> = OnceCell::new();
+static AUTHORITY_KEYPAIR: OnceCell<(Secp256k1PublicKey, Secp256k1SecretKey)> = OnceCell::new();
+
+/// Get or initialize the shared authority keypair for integration tests.
+pub fn get_authority_keypair() -> &'static (Secp256k1PublicKey, Secp256k1SecretKey) {
+    AUTHORITY_KEYPAIR.get_or_init(|| {
+        let mut rng = rand::thread_rng();
+        let secp = secp256k1::Secp256k1::new();
+        let (secret_key, public_key) = secp.generate_keypair(&mut rng);
+        let (x_only, _) = public_key.x_only_public_key();
+
+        (Secp256k1PublicKey(x_only), Secp256k1SecretKey(secret_key))
+    })
+}
 
 /// Helper to create Sv2Tp config for Pool/JDC with default public key.
 pub fn sv2_tp_config(address: SocketAddr) -> TemplateProviderType {
@@ -121,14 +135,7 @@ pub async fn start_pool(
 ) -> (PoolSv2, SocketAddr, Option<SocketAddr>) {
     use pool_sv2::config::PoolConfig;
     let listening_address = get_available_address();
-    let authority_public_key = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .expect("failed");
-    let authority_secret_key = Secp256k1SecretKey::try_from(
-        "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-    )
-    .expect("failed");
+    let (authority_public_key, authority_secret_key) = get_authority_keypair().clone();
     let cert_validity_sec = 3600;
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(POOL_COINBASE_REWARD_DESCRIPTOR).unwrap();
@@ -199,20 +206,11 @@ pub fn start_jdc(
     let jdc_address = get_available_address();
     let max_supported_version = 2;
     let min_supported_version = 2;
-    let authority_public_key = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .unwrap();
-    let authority_secret_key = Secp256k1SecretKey::try_from(
-        "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-    )
-    .unwrap();
+    let (authority_public_key, authority_secret_key) = get_authority_keypair().clone();
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(JDC_COINBASE_REWARD_DESCRIPTOR).unwrap();
-    let authority_pubkey = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .unwrap();
+    let (authority_pubkey, _) = get_authority_keypair();
+    let authority_pubkey = authority_pubkey.clone();
     let upstreams = pool
         .iter()
         .map(|(pool_addr, jds_addr)| {
@@ -275,14 +273,7 @@ pub async fn start_pool_with_jds(
     let pool_address = get_available_address();
     let jds_address = get_available_address();
 
-    let authority_public_key = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .expect("failed");
-    let authority_secret_key = Secp256k1SecretKey::try_from(
-        "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-    )
-    .expect("failed");
+    let (authority_public_key, authority_secret_key) = get_authority_keypair().clone();
     let cert_validity_sec = 3600;
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(POOL_COINBASE_REWARD_DESCRIPTOR).unwrap();
@@ -341,15 +332,12 @@ pub async fn start_sv2_translator(
         .map(|upstream| {
             let upstream_address = upstream.ip().to_string();
             let upstream_port = upstream.port();
-            let upstream_authority_pubkey = Secp256k1PublicKey::try_from(
-                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-            )
-            .expect("failed");
+            let (upstream_authority_pubkey, _) = get_authority_keypair();
 
             translator_sv2::config::Upstream::new(
                 upstream_address,
                 upstream_port,
-                upstream_authority_pubkey,
+                upstream_authority_pubkey.clone(),
             )
         })
         .collect();

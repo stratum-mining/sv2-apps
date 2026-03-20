@@ -13,7 +13,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use stratum_apps::{
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::noise_connection::Connection,
     stratum_core::{
         codec_sv2::{HandshakeRole, StandardEitherFrame},
@@ -71,16 +70,9 @@ pub async fn wait_for_client(listen_socket: SocketAddr) -> tokio::net::TcpStream
 pub async fn create_downstream(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<MessageFrame>, Sender<MessageFrame>)> {
-    let pub_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-        .to_string()
-        .parse::<Secp256k1PublicKey>()
-        .unwrap()
-        .into_bytes();
-    let prv_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
-        .to_string()
-        .parse::<Secp256k1SecretKey>()
-        .unwrap()
-        .into_bytes();
+    let (pubkey, seckey) = crate::get_authority_keypair();
+    let pub_key = pubkey.clone().into_bytes();
+    let prv_key = seckey.clone().into_bytes();
     let responder =
         Responder::from_authority_kp(&pub_key, &prv_key, std::time::Duration::from_secs(10000))
             .unwrap();

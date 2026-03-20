@@ -52,4 +52,4 @@ job_keepalive_interval_secs = 60
 # address accepts IP addresses or hostnames (e.g. "pool.example.com")
 address = "75.119.150.111"
 port = 43333
-authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_pubkey = "<AUTHORITY_PUBLIC_KEY>"
