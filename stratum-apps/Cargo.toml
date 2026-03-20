@@ -16,7 +16,7 @@ keywords = ["stratum", "mining", "bitcoin", "protocol", "sv2"]
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before stratum-apps is published to crates.io
 # with the proper version of stratum-core being fetched from crates.io as well
-stratum = { version = "0.2.1", git = "https://github.com/Alkamal01/stratum", branch = "fix/issue-2092-share-accounting", package = "stratum-core", optional = true }
+stratum-core = { version = "0.2.1", git = "https://github.com/Alkamal01/stratum", branch = "fix/issue-2092-share-accounting", optional = true }
 
 # External dependencies needed by the modules
 # Network helpers dependencies
@@ -65,11 +65,11 @@ config = []
 rpc = ["serde_json", "hex", "base64", "hyper", "hyper-util", "http-body-util"]
 monitoring = ["serde_json", "axum", "prometheus", "utoipa", "utoipa-swagger-ui"]
 std = ["bs58/std", "secp256k1/rand-std", "rand/std", "rand/std_rng"]
-core = ["stratum"]
+core = ["stratum-core"]
 
 # Protocol features passed through to stratum-core
-sv1 = ["stratum/sv1", "stratum/translation", "tokio-util", "serde_json"]
-with_buffer_pool = ["stratum/with_buffer_pool"]
+sv1 = ["stratum-core/sv1", "stratum-core/translation", "tokio-util", "serde_json"]
+with_buffer_pool = ["stratum-core/with_buffer_pool"]
 
 # Convenience feature bundles for different role types
 pool = ["network", "config", "with_buffer_pool", "core"]
