@@ -57,8 +57,30 @@ pub struct JobDeclaratorClientConfig {
     /// Optional monitoring server bind address
     #[serde(default)]
     monitoring_address: Option<SocketAddr>,
+    #[serde(default = "default_monitoring_cache_refresh_secs")]
+    monitoring_cache_refresh_secs: u64,
+
+    /// Starting derivation index for coinbase rotation (default: 0).
+    ///
+    /// Only used when `coinbase_reward_script` contains a wildcard descriptor
+    /// (e.g., `wpkh(xpub.../0/*)`). Ignored for static addresses.
     #[serde(default)]
-    monitoring_cache_refresh_secs: Option<u64>,
+    coinbase_start_index: u32,
+
+    /// Path to persist the current coinbase derivation index.
+    ///
+    /// Required when `coinbase_reward_script` contains a wildcard descriptor.
+    /// The index is persisted after each block found, allowing address derivation
+    /// to resume at the correct index after restarts.
+    ///
+    /// Parent directories will be created if they don't exist.
+    #[serde(default, deserialize_with = "opt_path_from_toml")]
+    coinbase_index_file: Option<PathBuf>,
+}
+
+fn default_monitoring_cache_refresh_secs() -> u64 {
+    15
+}
 }
 
 impl JobDeclaratorClientConfig {
@@ -99,7 +121,9 @@ impl JobDeclaratorClientConfig {
             supported_extensions,
             required_extensions,
             monitoring_address,
-            monitoring_cache_refresh_secs,
+            monitoring_cache_refresh_secs: monitoring_cache_refresh_secs.unwrap_or(15),
+            coinbase_start_index: 0,
+            coinbase_index_file: None,
         }
     }
 
@@ -109,7 +133,7 @@ impl JobDeclaratorClientConfig {
     }
 
     /// Returns the monitoring cache refresh interval in seconds.
-    pub fn monitoring_cache_refresh_secs(&self) -> Option<u64> {
+    pub fn monitoring_cache_refresh_secs(&self) -> u64 {
         self.monitoring_cache_refresh_secs
     }
 
@@ -195,6 +219,21 @@ impl JobDeclaratorClientConfig {
     /// Returns the required extensions.
     pub fn required_extensions(&self) -> &[u16] {
         &self.required_extensions
+    }
+
+    /// Returns the coinbase reward script.
+    pub fn coinbase_reward_script(&self) -> &CoinbaseRewardScript {
+        &self.coinbase_reward_script
+    }
+
+    /// Returns the starting derivation index for coinbase rotation.
+    pub fn coinbase_start_index(&self) -> u32 {
+        self.coinbase_start_index
+    }
+
+    /// Returns the path to the coinbase derivation index file.
+    pub fn coinbase_index_file(&self) -> Option<&Path> {
+        self.coinbase_index_file.as_deref()
     }
 }
 

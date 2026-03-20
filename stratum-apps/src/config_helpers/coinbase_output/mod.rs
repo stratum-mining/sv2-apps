@@ -3,6 +3,7 @@ mod serde_types;
 
 use miniscript::{
     bitcoin::{address::NetworkUnchecked, Address, Network, ScriptBuf},
+    descriptor::DescriptorPublicKey,
     DefiniteDescriptorKey, Descriptor,
 };
 
@@ -11,16 +12,54 @@ pub use errors::Error;
 /// Coinbase output transaction.
 ///
 /// Typically used for parsing coinbase outputs defined in SRI role configuration files.
+///
+/// Supports two modes:
+/// 1. **Static address**: A fixed address (e.g., `addr(bc1q...)`) - `script_pubkey` is set directly
+/// 2. **Wildcard descriptor**: A derivable descriptor (e.g., `wpkh(xpub.../0/*)`) - stores the
+///    descriptor string for later derivation via [`XpubDerivator`](crate::config_helpers::XpubDerivator)
+///
+/// Use [`has_wildcard()`](Self::has_wildcard) to check which mode is active.
 #[derive(Debug, serde::Deserialize, Clone)]
 #[serde(try_from = "serde_types::SerdeCoinbaseOutput")]
 pub struct CoinbaseRewardScript {
+    /// The script pubkey for static addresses, or the index-0 derived script for wildcards.
     script_pubkey: ScriptBuf,
+    /// Whether this output is valid for mainnet.
     ok_for_mainnet: bool,
+    /// For wildcard descriptors, stores the original descriptor string for later derivation.
+    /// None for static addresses.
+    /// Note: We store the string instead of `Descriptor<DescriptorPublicKey>` because the latter
+    /// is not `Send + Sync` due to internal `RefCell` usage for taproot caching.
+    wildcard_descriptor_str: Option<String>,
 }
 
 impl CoinbaseRewardScript {
     /// Creates a new [`CoinbaseRewardScript`] from a descriptor string.
+    ///
+    /// Supports both static descriptors (e.g., `addr(bc1q...)`) and wildcard descriptors
+    /// (e.g., `wpkh(xpub.../0/*)`).
+    ///
+    /// For wildcard descriptors, the initial `script_pubkey` is derived at index 0.
+    /// Use [`has_wildcard()`](Self::has_wildcard) and [`wildcard_descriptor_str()`](Self::wildcard_descriptor_str)
+    /// to access the underlying descriptor for runtime derivation.
     pub fn from_descriptor(s: &str) -> Result<Self, Error> {
+        // First, try to parse as a wildcard descriptor (DescriptorPublicKey).
+        // This handles descriptors like wpkh(xpub.../0/*).
+        if let Ok(wildcard_desc) = s.parse::<Descriptor<DescriptorPublicKey>>() {
+            if wildcard_desc.has_wildcard() {
+                // Derive at index 0 to get the initial script_pubkey
+                let definite = wildcard_desc
+                    .at_derivation_index(0)
+                    .map_err(|e| Error::Miniscript(miniscript::Error::Unexpected(e.to_string())))?;
+
+                return Ok(Self {
+                    script_pubkey: definite.script_pubkey(),
+                    ok_for_mainnet: true,
+                    wildcard_descriptor_str: Some(s.to_string()),
+                });
+            }
+        }
+
         // Taproot descriptors cannot be parsed with `expression::Tree::from_str` and
         // need special handling. So we special-case them early and just pass to
         // rust-miniscript. In Miniscript 13 we will not need to do this.
@@ -31,6 +70,7 @@ impl CoinbaseRewardScript {
                 // Descriptors don't have a way to specify a network, so we assume
                 // they are OK to be used on mainnet.
                 ok_for_mainnet: true,
+                wildcard_descriptor_str: None,
             });
         }
 
@@ -45,6 +85,7 @@ impl CoinbaseRewardScript {
                 Ok(Self {
                     script_pubkey: addr.assume_checked_ref().script_pubkey(),
                     ok_for_mainnet: addr.is_valid_for_network(Network::Bitcoin),
+                    wildcard_descriptor_str: None,
                 })
             }
             "raw" => {
@@ -59,6 +100,7 @@ impl CoinbaseRewardScript {
                     script_pubkey: ScriptBuf::from_hex(&script_hex)?,
                     // Users of hex scriptpubkeys are on their own.
                     ok_for_mainnet: true,
+                    wildcard_descriptor_str: None,
                 })
             }
             _ => {
@@ -70,6 +112,7 @@ impl CoinbaseRewardScript {
                     // Descriptors don't have a way to specify a network, so we assume
                     // they are OK to be used on mainnet.
                     ok_for_mainnet: true,
+                    wildcard_descriptor_str: None,
                 })
             }
         }
@@ -84,9 +127,31 @@ impl CoinbaseRewardScript {
         self.ok_for_mainnet
     }
 
-    /// The `scriptPubKey` associated with the coinbase output
+    /// The `scriptPubKey` associated with the coinbase output.
+    ///
+    /// For wildcard descriptors, this returns the script derived at index 0.
+    /// To get scripts at other indices, use [`wildcard_descriptor_str()`](Self::wildcard_descriptor_str)
+    /// with [`XpubDerivator`](crate::config_helpers::XpubDerivator).
     pub fn script_pubkey(&self) -> ScriptBuf {
         self.script_pubkey.clone()
+    }
+
+    /// Returns `true` if this is a wildcard descriptor that supports rotation.
+    ///
+    /// Wildcard descriptors contain `/*` in the derivation path (e.g., `wpkh(xpub.../0/*)`).
+    /// When rotation is enabled, a new address should be derived for each block found.
+    pub fn has_wildcard(&self) -> bool {
+        self.wildcard_descriptor_str.is_some()
+    }
+
+    /// Returns the underlying wildcard descriptor string, if any.
+    ///
+    /// Use this with [`XpubDerivator`](crate::config_helpers::XpubDerivator) to derive
+    /// addresses at specific indices for coinbase rotation.
+    ///
+    /// Returns `None` for static addresses (non-wildcard descriptors).
+    pub fn wildcard_descriptor_str(&self) -> Option<&str> {
+        self.wildcard_descriptor_str.as_deref()
     }
 }
 
@@ -326,12 +391,15 @@ mod tests {
             CoinbaseRewardScript::from_descriptor("pkh(xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/1'/2/3)").unwrap_err().to_string(),
             "Miniscript: key with hardened derivation steps cannot be a DerivedDescriptorKey",
         );
-        // no wildcards allowed (at least for now; gmax thinks it would be cool if we would
-        // instantiate it with the blockheight or something, but need to work out UX)
-        assert_eq!(
-            CoinbaseRewardScript::from_descriptor("pkh(xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/*)").unwrap_err().to_string(),
-            "Miniscript: key with a wildcard cannot be a DerivedDescriptorKey",
-        );
+        // wildcards ARE now allowed - they create a wildcard descriptor for rotation
+        let wildcard_desc = CoinbaseRewardScript::from_descriptor(
+            "pkh(xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/*)"
+        ).unwrap();
+        assert!(wildcard_desc.has_wildcard());
+        assert!(wildcard_desc.wildcard_descriptor_str().is_some());
+        // script_pubkey should be derived at index 0
+        assert!(!wildcard_desc.script_pubkey().is_empty());
+
         // No multipath descriptors allowed; this is not a wallet with change
         assert_eq!(
             CoinbaseRewardScript::from_descriptor("pkh(xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/<0;1>)").unwrap_err().to_string(),
@@ -351,5 +419,70 @@ mod tests {
             CoinbaseRewardScript::from_descriptor("pkh(xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi)").unwrap_err().to_string(),
             "Miniscript: public keys must be 64, 66 or 130 characters in size",
         );
+    }
+
+    #[test]
+    fn test_wildcard_wpkh_descriptor() {
+        // wpkh with wildcard - common format for BIP84 wallets
+        let desc = CoinbaseRewardScript::from_descriptor(
+            "wpkh(tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp/0/*)"
+        ).unwrap();
+
+        assert!(desc.has_wildcard());
+        assert!(desc.wildcard_descriptor_str().is_some());
+
+        // script_pubkey should be a valid p2wpkh script (starts with 0x0014)
+        let script = desc.script_pubkey();
+        assert!(script.to_hex_string().starts_with("0014"));
+    }
+
+    #[test]
+    fn test_wildcard_tr_descriptor() {
+        // Taproot with wildcard
+        let desc = CoinbaseRewardScript::from_descriptor(
+            "tr(tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp/0/*)"
+        ).unwrap();
+
+        assert!(desc.has_wildcard());
+        assert!(desc.wildcard_descriptor_str().is_some());
+
+        // script_pubkey should be a valid p2tr script (starts with 0x5120)
+        let script = desc.script_pubkey();
+        assert!(script.to_hex_string().starts_with("5120"));
+    }
+
+    #[test]
+    fn test_non_wildcard_has_no_descriptor() {
+        // Static address - no wildcard
+        let desc = CoinbaseRewardScript::from_descriptor(
+            "addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)",
+        )
+        .unwrap();
+
+        assert!(!desc.has_wildcard());
+        assert!(desc.wildcard_descriptor_str().is_none());
+    }
+
+    #[test]
+    fn test_xpub_without_wildcard_has_no_descriptor() {
+        // xpub with fixed path (no wildcard)
+        let desc = CoinbaseRewardScript::from_descriptor(
+            "wpkh(xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/0/0)"
+        ).unwrap();
+
+        assert!(!desc.has_wildcard());
+        assert!(desc.wildcard_descriptor_str().is_none());
+    }
+
+    #[test]
+    fn test_mainnet_xpub_wildcard() {
+        // Mainnet xpub with wildcard
+        let desc = CoinbaseRewardScript::from_descriptor(
+            "wpkh(xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8/0/*)"
+        ).unwrap();
+
+        assert!(desc.has_wildcard());
+        // Mainnet xpubs are allowed
+        assert!(desc.ok_for_mainnet());
     }
 }

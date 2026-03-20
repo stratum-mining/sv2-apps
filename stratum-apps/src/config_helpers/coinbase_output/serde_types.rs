@@ -99,6 +99,8 @@ impl TryFrom<LegacyCoinbaseOutput> for super::CoinbaseRewardScript {
             script_pubkey,
             // legacy encoding gives no way to specify testnet or mainnet
             ok_for_mainnet: true,
+            // Legacy format doesn't support wildcards
+            wildcard_descriptor_str: None,
         })
     }
 }

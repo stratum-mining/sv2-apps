@@ -574,7 +574,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
-        let messages = self.channel_manager_data.super_safe_lock(|channel_manager_data| {
+        let (messages, block_found) = self.channel_manager_data.super_safe_lock(|channel_manager_data| {
             let channel_id = msg.channel_id;
 
             let Some(downstream) = channel_manager_data.downstream.get(&downstream_id) else {
@@ -583,6 +583,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
 
             downstream.downstream_data.super_safe_lock(|downstream_data| {
                 let mut messages: Vec<RouteMessageTo> = Vec::new();
+                let mut block_found = false;
                 let Some(standard_channel) = downstream_data.standard_channels.get_mut(&channel_id) else {
                     let submit_shares_error = SubmitSharesError {
                         channel_id,
@@ -593,11 +594,11 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                             .expect("error code must be valid string"),
                     };
                     error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: invalid-channel-id ❌", downstream_id, channel_id, msg.sequence_number);
-                    return Ok(vec![(downstream_id, Mining::SubmitSharesError(submit_shares_error)).into()]);
+                    return Ok((vec![(downstream_id, Mining::SubmitSharesError(submit_shares_error)).into()], false));
                 };
 
                 let Some(vardiff) = channel_manager_data.vardiff.get_mut(&(downstream_id, channel_id).into()) else {
-                    return Ok(vec![(downstream_id, Mining::CloseChannel(create_close_channel_msg(channel_id, "invalid-channel-id"))).into()]);
+                    return Ok((vec![(downstream_id, Mining::CloseChannel(create_close_channel_msg(channel_id, "invalid-channel-id"))).into()], false));
                 };
 
                 let res = standard_channel.validate_share(msg.clone());
@@ -627,6 +628,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                     }
                     Ok(ShareValidationResult::BlockFound(share_hash, template_id, coinbase)) => {
                         info!("SubmitSharesStandard: 💰 Block Found!!! 💰{share_hash}");
+                        block_found = true;
                         // if we have a template id (i.e.: this was not a custom job)
                         // we can propagate the solution to the TP
                         if let Some(template_id) = template_id {
@@ -715,7 +717,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                     }
                 }
 
-                Ok(messages)
+                Ok((messages, block_found))
             })
         })?;
 
@@ -726,6 +728,11 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             if let Err(e) = message.forward(&self.channel_manager_channel).await {
                 error!("Failed to forward message {e:?}");
             }
+        }
+
+        // Rotate coinbase address after block found
+        if block_found {
+            self.rotate_coinbase_address();
         }
 
         Ok(())
@@ -759,7 +766,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             None
         };
 
-        let messages = self.channel_manager_data.super_safe_lock(|channel_manager_data| {
+        let (messages, block_found) = self.channel_manager_data.super_safe_lock(|channel_manager_data| {
             let channel_id = msg.channel_id;
             let Some(downstream) = channel_manager_data.downstream.get(&downstream_id) else {
                 return Err(PoolError::disconnect(PoolErrorKind::DownstreamNotFound(downstream_id), downstream_id));
@@ -767,6 +774,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
 
             downstream.downstream_data.super_safe_lock(|downstream_data| {
                 let mut messages: Vec<RouteMessageTo> = Vec::new();
+                let mut block_found = false;
                 let Some(extended_channel) = downstream_data.extended_channels.get_mut(&channel_id) else {
                     let error = SubmitSharesError {
                         channel_id,
@@ -777,7 +785,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                             .expect("error code must be valid string"),
                     };
                     error!("SubmitSharesError: downstream_id: {}, channel_id: {}, sequence_number: {}, error_code: invalid-channel-id ❌", downstream_id, channel_id, msg.sequence_number);
-                    return Ok(vec![(downstream_id, Mining::SubmitSharesError(error)).into()]);
+                    return Ok((vec![(downstream_id, Mining::SubmitSharesError(error)).into()], false));
                 };
 
                 if let Some(_user_identity) = user_identity {
@@ -785,7 +793,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                 }
 
                 let Some(vardiff) = channel_manager_data.vardiff.get_mut(&(downstream_id, channel_id).into()) else {
-                    return Ok(vec![(downstream_id, Mining::CloseChannel(create_close_channel_msg(channel_id, "invalid-channel-id"))).into()]);
+                    return Ok((vec![(downstream_id, Mining::CloseChannel(create_close_channel_msg(channel_id, "invalid-channel-id"))).into()], false));
                 };
 
                 let res = extended_channel.validate_share(msg.clone());
@@ -813,6 +821,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                     }
                     Ok(ShareValidationResult::BlockFound(share_hash, template_id, coinbase)) => {
                         info!("SubmitSharesExtended: 💰 Block Found!!! 💰{share_hash}");
+                        block_found = true;
                         // if we have a template id (i.e.: this was not a custom job)
                         // we can propagate the solution to the TP
                         if let Some(template_id) = template_id {
@@ -912,7 +921,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                     }
                 }
 
-                Ok(messages)
+                Ok((messages, block_found))
             })
         })?;
 
@@ -923,6 +932,11 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             if let Err(e) = message.forward(&self.channel_manager_channel).await {
                 error!("Failed to forward message {e:?}");
             }
+        }
+
+        // Rotate coinbase address after block found
+        if block_found {
+            self.rotate_coinbase_address();
         }
 
         Ok(())

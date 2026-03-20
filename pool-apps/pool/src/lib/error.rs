@@ -187,6 +187,8 @@ pub enum PoolErrorKind {
     CouldNotInitiateSystem,
     /// Configuration error
     Configuration(String),
+    /// Invalid configuration (validation failed at runtime)
+    InvalidConfiguration,
     /// Job not found
     JobNotFound,
     /// Invalid Key
@@ -283,6 +285,7 @@ impl std::fmt::Display for PoolErrorKind {
             }
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
             Configuration(e) => write!(f, "Configuration error: {e}"),
+            InvalidConfiguration => write!(f, "Invalid configuration"),
             JobNotFound => write!(f, "Job not found"),
             InvalidKey => write!(f, "Invalid key used during noise handshake"),
             PayoutModeError(e) => write!(f, "Unable to parse the PayoutMode: {e}"),

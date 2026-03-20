@@ -250,6 +250,8 @@ pub enum JDCErrorKind {
     InvalidKey,
     /// Upstream not found
     UpstreamNotFound,
+    /// Invalid configuration
+    InvalidConfiguration(String),
 }
 
 impl std::error::Error for JDCErrorKind {}
@@ -389,6 +391,7 @@ impl fmt::Display for JDCErrorKind {
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
             InvalidKey => write!(f, "Invalid key used during noise handshake"),
             UpstreamNotFound => write!(f, "Upstream not found"),
+            InvalidConfiguration(ref msg) => write!(f, "Invalid configuration: {msg}"),
         }
     }
 }

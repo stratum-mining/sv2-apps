@@ -27,7 +27,7 @@ tokio-util = { version = "0.7.10", default-features = false, features = ["codec"
 
 # Config helpers dependencies
 serde = { version = "1.0.89", features = ["derive", "alloc"], default-features = false }
-miniscript = { version = "13.0.0", default-features = false }
+miniscript = { version = "13.0.0", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = { version = "0.1" }
 
@@ -84,6 +84,7 @@ mining_device = ["config"]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = "1.1.0"
+tempfile = "3.10"
 
 [package.metadata.docs.rs]
 features = ["pool", "jd_client", "jd_server", "translator", "sv1", "rpc"]
