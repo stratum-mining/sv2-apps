@@ -65,7 +65,7 @@ config = []
 rpc = ["serde_json", "hex", "base64", "hyper", "hyper-util", "http-body-util"]
 monitoring = ["serde_json", "axum", "prometheus", "utoipa", "utoipa-swagger-ui"]
 std = ["bs58/std", "secp256k1/rand-std", "rand/std", "rand/std_rng"]
-core = ["stratum-core"]
+core = ["stratum"]
 
 # Protocol features passed through to stratum-core
 sv1 = ["stratum-core/sv1", "stratum-core/translation", "tokio-util", "serde_json"]
