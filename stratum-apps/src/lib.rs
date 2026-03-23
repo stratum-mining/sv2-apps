@@ -78,3 +78,6 @@ pub mod coinbase_output_constraints;
 
 /// Fallback coordinator
 pub mod fallback_coordinator;
+
+/// Synchronous and shared data structure wrapper
+pub mod shared;

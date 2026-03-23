@@ -1,16 +1,13 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, AtomicU32},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, AtomicU32},
+    Arc,
 };
 
 use async_channel::{unbounded, Receiver, Sender};
 use bitcoin_core_sv2::template_distribution_protocol::CancellationToken;
 use stratum_apps::{
-    custom_mutex::Mutex,
     network_helpers::noise_stream::NoiseTcpStream,
+    shared::{Shared, SharedMap},
     stratum_core::{
         channels_sv2::server::{
             extended::ExtendedChannel,
@@ -42,27 +39,6 @@ use crate::{
 mod common_message_handler;
 mod extensions_message_handler;
 
-/// Holds state related to a downstream connection's mining channels.
-///
-/// This includes:
-/// - Whether the downstream requires a standard job (`require_std_job`).
-/// - A [`GroupChannel`].
-/// - Active [`ExtendedChannel`]s keyed by channel ID.
-/// - Active [`StandardChannel`]s keyed by channel ID.
-/// - Extensions that have been successfully negotiated with this client
-pub struct DownstreamData {
-    pub group_channel: GroupChannel<'static, DefaultJobStore<ExtendedJob<'static>>>,
-    pub extended_channels:
-        HashMap<ChannelId, ExtendedChannel<'static, DefaultJobStore<ExtendedJob<'static>>>>,
-    pub standard_channels:
-        HashMap<ChannelId, StandardChannel<'static, DefaultJobStore<StandardJob<'static>>>>,
-    pub channel_id_factory: AtomicU32,
-    /// Extensions that have been successfully negotiated with this client
-    pub negotiated_extensions: Vec<u16>,
-    /// Payout mode derived from user_identity (None until channel is opened)
-    pub payout_mode: Option<PayoutMode>,
-}
-
 /// Communication layer for a downstream connection.
 ///
 /// Provides the messaging primitives for interacting with the
@@ -86,7 +62,6 @@ pub struct DownstreamChannel {
 /// Represents a downstream client connected to this node.
 #[derive(Clone)]
 pub struct Downstream {
-    pub downstream_data: Arc<Mutex<DownstreamData>>,
     downstream_channel: DownstreamChannel,
     pub downstream_id: usize,
     pub requires_standard_jobs: Arc<AtomicBool>,
@@ -95,6 +70,19 @@ pub struct Downstream {
     pub supported_extensions: Vec<u16>,
     /// Extensions that the pool requires
     pub required_extensions: Vec<u16>,
+    /// Channel id factory
+    pub channel_id_factory: Arc<AtomicU32>,
+    /// Extended Channels
+    pub extended_channels:
+        SharedMap<ChannelId, ExtendedChannel<'static, DefaultJobStore<ExtendedJob<'static>>>>,
+    /// Standard Channels
+    pub standard_channels:
+        SharedMap<ChannelId, StandardChannel<'static, DefaultJobStore<StandardJob<'static>>>>,
+    /// Group Channel
+    pub group_channel: Shared<GroupChannel<'static, DefaultJobStore<ExtendedJob<'static>>>>,
+    /// Extensions that have been successfully negotiated with this client
+    pub negotiated_extensions: Shared<Vec<u16>>,
+    pub payout_mode: Shared<Option<PayoutMode>>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -141,23 +129,19 @@ impl Downstream {
             connection_token,
         };
 
-        let downstream_data = Arc::new(Mutex::new(DownstreamData {
-            extended_channels: HashMap::new(),
-            standard_channels: HashMap::new(),
-            group_channel,
-            channel_id_factory,
-            negotiated_extensions: vec![],
-            payout_mode: None,
-        }));
-
         Downstream {
             downstream_channel,
-            downstream_data,
             downstream_id,
             requires_standard_jobs: Arc::new(AtomicBool::new(false)),
             requires_custom_work: Arc::new(AtomicBool::new(false)),
+            channel_id_factory: Arc::new(channel_id_factory),
+            extended_channels: SharedMap::new(),
+            standard_channels: SharedMap::new(),
+            group_channel: Shared::new(group_channel),
+            negotiated_extensions: Shared::new(vec![]),
             supported_extensions,
             required_extensions,
+            payout_mode: Shared::new(None),
         }
     }
 
@@ -310,9 +294,7 @@ impl Downstream {
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Mining => {
                 debug!("Received mining SV2 frame from downstream.");
-                let negotiated_extensions = self
-                    .downstream_data
-                    .super_safe_lock(|data| data.negotiated_extensions.clone());
+                let negotiated_extensions = self.negotiated_extensions.get();
                 let (any_message, tlv_fields) = parse_message_frame_with_tlvs(
                     header,
                     sv2_frame.payload(),

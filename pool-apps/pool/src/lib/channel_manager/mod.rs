@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     sync::{
         atomic::{AtomicU32, AtomicUsize},
@@ -13,9 +12,9 @@ use core::sync::atomic::Ordering;
 use stratum_apps::{
     coinbase_output_constraints::coinbase_output_constraints_message_with_offset,
     config_helpers::CoinbaseRewardScript,
-    custom_mutex::Mutex,
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::accept_noise_connection,
+    shared::{Shared, SharedMap},
     stratum_core::{
         bitcoin::{Amount, TxOut},
         channels_sv2::{
@@ -56,29 +55,6 @@ const POOL_ALLOCATION_BYTES: usize = 4;
 const CLIENT_SEARCH_SPACE_BYTES: usize = 16;
 pub const FULL_EXTRANONCE_SIZE: usize = POOL_ALLOCATION_BYTES + CLIENT_SEARCH_SPACE_BYTES;
 
-pub struct ChannelManagerData {
-    // Mapping of `downstream_id` → `Downstream` object,
-    // used by the channel manager to locate and interact with downstream clients.
-    pub(crate) downstream: HashMap<DownstreamId, Downstream>,
-    // Extranonce prefix factory for **extended downstream channels**.
-    // Each new extended downstream receives a unique extranonce prefix.
-    extranonce_prefix_factory_extended: ExtendedExtranonce,
-    // Extranonce prefix factory for **standard downstream channels**.
-    // Each new standard downstream receives a unique extranonce prefix.
-    extranonce_prefix_factory_standard: ExtendedExtranonce,
-    // Factory that assigns a unique ID to each new **downstream connection**.
-    downstream_id_factory: AtomicUsize,
-    // Mapping of `(downstream_id, channel_id)` → vardiff controller.
-    // Each entry manages variable difficulty for a specific downstream channel.
-    vardiff: HashMap<VardiffKey, VardiffState>,
-    // Coinbase outputs
-    coinbase_outputs: Vec<u8>,
-    // Last new prevhash
-    last_new_prev_hash: Option<SetNewPrevHash<'static>>,
-    // Last future template
-    last_future_template: Option<NewTemplate<'static>>,
-}
-
 #[derive(Clone)]
 pub struct ChannelManagerChannel {
     tp_sender: Sender<TemplateDistribution<'static>>,
@@ -92,7 +68,6 @@ pub struct ChannelManagerChannel {
 /// to perform message traversal.
 #[derive(Clone)]
 pub struct ChannelManager {
-    pub(crate) channel_manager_data: Arc<Mutex<ChannelManagerData>>,
     channel_manager_channel: ChannelManagerChannel,
     pool_tag_string: String,
     share_batch_size: usize,
@@ -102,6 +77,26 @@ pub struct ChannelManager {
     supported_extensions: Vec<u16>,
     /// Protocol extensions that the pool requires (clients must support these).
     required_extensions: Vec<u16>,
+    // Factory that assigns a unique ID to each new **downstream connection**.
+    downstream_id_factory: Arc<AtomicUsize>,
+    // Mapping of `downstream_id` → `Downstream` object,
+    // used by the channel manager to locate and interact with downstream clients.
+    pub(crate) downstream: SharedMap<DownstreamId, Downstream>,
+    // Mapping of `(downstream_id, channel_id)` → vardiff controller.
+    // Each entry manages variable difficulty for a specific downstream channel.
+    vardiff: SharedMap<VardiffKey, VardiffState>,
+    // Coinbase outputs
+    coinbase_outputs: Shared<Vec<u8>>,
+    // Last future template
+    last_future_template: Shared<Option<NewTemplate<'static>>>,
+    // Last new prevhash
+    last_new_prev_hash: Shared<Option<SetNewPrevHash<'static>>>,
+    // Extranonce prefix factory for **extended downstream channels**.
+    // Each new extended downstream receives a unique extranonce prefix.
+    extranonce_prefix_factory_extended: Shared<ExtendedExtranonce>,
+    // Extranonce prefix factory for **standard downstream channels**.
+    // Each new standard downstream receives a unique extranonce prefix.
+    extranonce_prefix_factory_standard: Shared<ExtendedExtranonce>,
     /// Embedded Job Declaration engine (present when `[jds]` config is set).
     job_declarator: Option<JobDeclarator>,
 }
@@ -141,17 +136,6 @@ impl ChannelManager {
         let extranonce_prefix_factory_extended = make_extranonce_factory();
         let extranonce_prefix_factory_standard = make_extranonce_factory();
 
-        let channel_manager_data = Arc::new(Mutex::new(ChannelManagerData {
-            downstream: HashMap::new(),
-            extranonce_prefix_factory_extended,
-            extranonce_prefix_factory_standard,
-            downstream_id_factory: AtomicUsize::new(1),
-            vardiff: HashMap::new(),
-            coinbase_outputs,
-            last_future_template: None,
-            last_new_prev_hash: None,
-        }));
-
         let channel_manager_channel = ChannelManagerChannel {
             tp_sender,
             tp_receiver,
@@ -160,7 +144,6 @@ impl ChannelManager {
         };
 
         let channel_manager = ChannelManager {
-            channel_manager_data,
             channel_manager_channel,
             share_batch_size: config.share_batch_size(),
             shares_per_minute: config.shares_per_minute(),
@@ -168,6 +151,14 @@ impl ChannelManager {
             coinbase_reward_script: config.coinbase_reward_script().clone(),
             supported_extensions: config.supported_extensions().to_vec(),
             required_extensions: config.required_extensions().to_vec(),
+            downstream_id_factory: Arc::new(AtomicUsize::new(1)),
+            downstream: SharedMap::new(),
+            vardiff: SharedMap::new(),
+            coinbase_outputs: Shared::new(coinbase_outputs),
+            last_future_template: Shared::new(None),
+            last_new_prev_hash: Shared::new(None),
+            extranonce_prefix_factory_extended: Shared::new(extranonce_prefix_factory_extended),
+            extranonce_prefix_factory_standard: Shared::new(extranonce_prefix_factory_standard),
             job_declarator,
         };
 
@@ -182,17 +173,14 @@ impl ChannelManager {
         &self,
         channel_id: ChannelId,
     ) -> Option<GroupChannel<'static, DefaultJobStore<ExtendedJob<'static>>>> {
-        let (last_future_template, last_set_new_prev_hash) =
-            self.channel_manager_data.super_safe_lock(|data| {
-                (
-                    data.last_future_template
-                        .clone()
-                        .expect("No future template found after readiness check"),
-                    data.last_new_prev_hash
-                        .clone()
-                        .expect("No new prevhash found after readiness check"),
-                )
-            });
+        let (last_future_template, last_set_new_prev_hash) = (
+            self.last_future_template
+                .get()
+                .expect("No future template found after readiness check"),
+            self.last_new_prev_hash
+                .get()
+                .expect("No new prevhash found after readiness check"),
+        );
         let mut group_channel = match GroupChannel::new_for_pool(
             channel_id,
             DefaultJobStore::new(),
@@ -247,9 +235,8 @@ impl ChannelManager {
 
         // Wait for initial template and prevhash before accepting connections
         loop {
-            let has_required_data = this.channel_manager_data.super_safe_lock(|data| {
-                data.last_future_template.is_some() && data.last_new_prev_hash.is_some()
-            });
+            let has_required_data = this.last_future_template.with(|data| data.is_some())
+                && this.last_new_prev_hash.with(|data| data.is_some());
 
             if has_required_data {
                 info!("Required template data received, ready to accept connections");
@@ -313,9 +300,7 @@ impl ChannelManager {
                                         }
                                     };
 
-                                    let downstream_id = this.channel_manager_data
-                                        .super_safe_lock(|data| data.downstream_id_factory.fetch_add(1, Ordering::SeqCst));
-
+                                    let downstream_id = this.downstream_id_factory.fetch_add(1, Ordering::SeqCst);
                                     let channel_id_factory = AtomicU32::new(1);
                                     let group_channel_id = channel_id_factory.fetch_add(1, Ordering::SeqCst);
 
@@ -342,9 +327,7 @@ impl ChannelManager {
                                         this.required_extensions.clone(),
                                     );
 
-                                    this.channel_manager_data.super_safe_lock(|data| {
-                                        data.downstream.insert(downstream_id, downstream.clone());
-                                    });
+                                    this.downstream.insert(downstream_id, downstream.clone());
 
                                     downstream
                                         .start(
@@ -431,12 +414,9 @@ impl ChannelManager {
         &self,
         downstream_id: DownstreamId,
     ) -> PoolResult<(), error::ChannelManager> {
-        self.channel_manager_data.super_safe_lock(|cm_data| {
-            cm_data.downstream.remove(&downstream_id);
-            cm_data
-                .vardiff
-                .retain(|key, _| key.downstream_id != downstream_id);
-        });
+        self.downstream.remove(&downstream_id);
+        self.vardiff
+            .retain(|key, _| key.downstream_id != downstream_id);
         Ok(())
     }
 
@@ -471,10 +451,10 @@ impl ChannelManager {
 
     // Runs the vardiff on extended channel.
     fn run_vardiff_on_extended_channel(
+        &self,
         downstream_id: DownstreamId,
         channel_id: ChannelId,
         channel_state: &mut ExtendedChannel<'static, DefaultJobStore<ExtendedJob<'static>>>,
-        vardiff_state: &mut VardiffState,
         updates: &mut Vec<RouteMessageTo>,
     ) {
         let (hashrate, target, shares_per_minute) = (
@@ -483,12 +463,20 @@ impl ChannelManager {
             channel_state.get_shares_per_minute(),
         );
 
-        let Ok(new_hashrate_opt) = vardiff_state.try_vardiff(hashrate, target, shares_per_minute)
-        else {
+        let result = self
+            .vardiff
+            .with_mut(&(downstream_id, channel_id).into(), |vardiff_state| {
+                vardiff_state.try_vardiff(hashrate, target, shares_per_minute)
+            });
+
+        let Some(result) = result else {
+            debug!("Vardiff might be removed");
+            return;
+        };
+        let Ok(new_hashrate_opt) = result else {
             debug!("Vardiff computation failed for extended channel {channel_id}");
             return;
         };
-
         let Some(new_hashrate) = new_hashrate_opt else {
             return;
         };
@@ -516,44 +504,54 @@ impl ChannelManager {
 
     // Runs the vardiff on the standard channel.
     fn run_vardiff_on_standard_channel(
+        &self,
         downstream_id: DownstreamId,
         channel_id: ChannelId,
         channel: &mut StandardChannel<'static, DefaultJobStore<StandardJob<'static>>>,
-        vardiff_state: &mut VardiffState,
         updates: &mut Vec<RouteMessageTo>,
     ) {
         let hashrate = channel.get_nominal_hashrate();
         let target = channel.get_target();
         let shares_per_minute = channel.get_shares_per_minute();
 
-        let Ok(new_hashrate_opt) = vardiff_state.try_vardiff(hashrate, target, shares_per_minute)
-        else {
+        let result = self
+            .vardiff
+            .with_mut(&(downstream_id, channel_id).into(), |vardiff_state| {
+                vardiff_state.try_vardiff(hashrate, target, shares_per_minute)
+            });
+
+        let Some(result) = result else {
+            debug!("Vardiff might be removed");
+            return;
+        };
+        let Ok(new_hashrate_opt) = result else {
             debug!("Vardiff computation failed for standard channel {channel_id}");
             return;
         };
+        let Some(new_hashrate) = new_hashrate_opt else {
+            return;
+        };
 
-        if let Some(new_hashrate) = new_hashrate_opt {
-            match channel.update_channel(new_hashrate, None) {
-                Ok(()) => {
-                    let updated_target = channel.get_target();
-                    updates.push(
-                        (
-                            downstream_id,
-                            Mining::SetTarget(SetTarget {
-                                channel_id,
-                                maximum_target: updated_target.to_le_bytes().into(),
-                            }),
-                        )
-                            .into(),
-                    );
-                    debug!(
-                        "Updated target for standard channel channel_id={channel_id} to {updated_target:?}"
-                    );
-                }
-                Err(e) => warn!(
-                    "Failed to update standard channel channel_id={channel_id} during vardiff {e:?}"
-                ),
+        match channel.update_channel(new_hashrate, None) {
+            Ok(()) => {
+                let updated_target = channel.get_target();
+                updates.push(
+                    (
+                        downstream_id,
+                        Mining::SetTarget(SetTarget {
+                            channel_id,
+                            maximum_target: updated_target.to_le_bytes().into(),
+                        }),
+                    )
+                        .into(),
+                );
+                debug!(
+                    "Updated target for standard channel channel_id={channel_id} to {updated_target:?}"
+                );
             }
+            Err(e) => warn!(
+                "Failed to update standard channel channel_id={channel_id} during vardiff {e:?}"
+            ),
         }
     }
 
@@ -583,38 +581,36 @@ impl ChannelManager {
     //   upstream if applicable.
     async fn run_vardiff(&self) -> PoolResult<(), error::ChannelManager> {
         let mut messages: Vec<RouteMessageTo> = vec![];
-        self.channel_manager_data
-            .super_safe_lock(|channel_manager_data| {
-                for (vardiff_key, vardiff_state) in channel_manager_data.vardiff.iter_mut() {
-                    let downstream_id = &vardiff_key.downstream_id;
-                    let channel_id = &vardiff_key.channel_id;
+        // This is done to make sure lock ordering is consistent
+        // Downstream -> Channels -> Vardiff as in handlers
+        let vardiff_keys = self.vardiff.keys();
+        for vardiff_key in vardiff_keys {
+            let downstream_id = vardiff_key.downstream_id;
+            let channel_id = vardiff_key.channel_id;
 
-                    let Some(downstream) = channel_manager_data.downstream.get_mut(downstream_id)
-                    else {
-                        continue;
-                    };
-                    downstream.downstream_data.super_safe_lock(|data| {
-                        if let Some(standard_channel) = data.standard_channels.get_mut(channel_id) {
-                            Self::run_vardiff_on_standard_channel(
-                                *downstream_id,
-                                *channel_id,
-                                standard_channel,
-                                vardiff_state,
-                                &mut messages,
-                            );
-                        }
-                        if let Some(extended_channel) = data.extended_channels.get_mut(channel_id) {
-                            Self::run_vardiff_on_extended_channel(
-                                *downstream_id,
-                                *channel_id,
-                                extended_channel,
-                                vardiff_state,
-                                &mut messages,
-                            );
-                        }
+            self.downstream.with_mut(&downstream_id, |downstream| {
+                downstream
+                    .standard_channels
+                    .with_mut(&channel_id, |channel| {
+                        self.run_vardiff_on_standard_channel(
+                            downstream_id,
+                            channel_id,
+                            channel,
+                            &mut messages,
+                        );
                     });
-                }
+                downstream
+                    .extended_channels
+                    .with_mut(&channel_id, |channel| {
+                        self.run_vardiff_on_extended_channel(
+                            downstream_id,
+                            channel_id,
+                            channel,
+                            &mut messages,
+                        );
+                    });
             });
+        }
 
         for message in messages {
             message.forward(&self.channel_manager_channel).await;

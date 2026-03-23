@@ -2666,6 +2666,7 @@ dependencies = [
  "axum",
  "bs58",
  "config",
+ "dashmap",
  "dirs",
  "futures",
  "miniscript",

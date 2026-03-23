@@ -18,7 +18,7 @@ pub type JdToken = u64;
 pub type Message = AnyMessage<'static>;
 pub type Sv2Frame = StandardSv2Frame<Message>;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct VardiffKey {
     pub downstream_id: DownstreamId,
     pub channel_id: ChannelId,
