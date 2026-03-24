@@ -16,7 +16,7 @@ keywords = ["stratum", "mining", "bitcoin", "protocol", "sv2"]
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before stratum-apps is published to crates.io
 # with the proper version of stratum-core being fetched from crates.io as well
-stratum-core = { version = "0.2.1", git = "https://github.com/Alkamal01/stratum", branch = "fix/issue-2092-share-accounting", optional = true }
+stratum-core = { version = "0.2.1", git = "https://github.com/stratum-mining/stratum", branch = "main", optional = true }
 
 # External dependencies needed by the modules
 # Network helpers dependencies
