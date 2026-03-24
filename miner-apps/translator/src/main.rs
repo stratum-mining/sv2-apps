@@ -20,7 +20,7 @@ async fn main() {
 ///
 /// Loads the configuration from TOML and initializes the main runtime
 /// defined in `translator_sv2::TranslatorSv2`. Errors during startup are logged.
-#[cfg_attr(not(test), hotpath::main)]
+#[cfg_attr(not(test), hotpath::main(limit = 0))]
 async fn inner_main() {
     let proxy_config = process_cli_args().unwrap_or_else(|e| {
         eprintln!("Translator proxy config error: {e}");

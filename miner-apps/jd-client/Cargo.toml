@@ -25,7 +25,7 @@ tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
 bitcoin_core_sv2 = { version = "0.1.0", path = "../../bitcoin-core-sv2" }
 hex = "0.4.3"
-hotpath = "0.9"
+hotpath = "0.14.0"
 
 [features]
 default = ["monitoring"]

@@ -201,13 +201,22 @@ impl BitcoinCoreSv2TDP {
             .parent()
             .expect("unix_socket_path must have a parent");
 
+        let solutions_dir = solution_block_dir.join("solutions");
+
+        if !solutions_dir.exists() {
+            std::fs::create_dir_all(&solutions_dir).map_err(|e| {
+                tracing::error!("Failed to create solutions directory: {:?}", e);
+                BitcoinCoreSv2TDPError::FailedToCreateSolutionDir
+            })?;
+        }
+
         tracing::debug!("Submitting solution to Bitcoin Core");
         match template_data
             .submit_solution(
                 submit_solution,
                 self.thread_ipc_client.clone(),
                 self.thread_map.clone(),
-                solution_block_dir,
+                &solutions_dir,
             )
             .await
         {

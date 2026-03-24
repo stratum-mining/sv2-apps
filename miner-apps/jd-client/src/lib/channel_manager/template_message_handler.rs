@@ -300,6 +300,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 "No token available, discarding template id: {}",
                 msg.template_id
             );
+            _ = self.allocate_tokens(1).await;
             return Ok(());
         };
         _ = self.allocate_tokens(1).await;

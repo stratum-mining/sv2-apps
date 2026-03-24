@@ -17,7 +17,7 @@ async fn main() {
     inner_main().await;
 }
 
-#[cfg_attr(not(test), hotpath::main)]
+#[cfg_attr(not(test), hotpath::main(limit = 0))]
 async fn inner_main() {
     let config = process_cli_args();
     init_logging(config.log_dir());

@@ -253,7 +253,6 @@ impl BitcoinCoreSv2JDP {
         tracing::debug!("Deserializing block ({} bytes)", block_bytes.len());
         let block: Block =
             deserialize(&block_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)?;
-        tracing::debug!("Block deserialized: {:?}", block);
 
         self.mempool_mirror.borrow_mut().update(&block);
 

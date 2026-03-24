@@ -17,7 +17,7 @@ async fn main() {
     inner_main().await;
 }
 
-#[cfg_attr(not(test), hotpath::main)]
+#[cfg_attr(not(test), hotpath::main(limit = 0))]
 async fn inner_main() {
     let jdc_config = process_cli_args().unwrap_or_else(|e| {
         eprintln!("Job Declarator Client config error: {e}");
