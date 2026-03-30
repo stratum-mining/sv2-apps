@@ -75,6 +75,7 @@ pub struct Sv1Server {
     pub(crate) request_id_factory: Arc<AtomicU32>,
     pub(crate) downstreams: Arc<DashMap<DownstreamId, Downstream>>,
     pub(crate) request_id_to_downstream_id: Arc<DashMap<RequestId, DownstreamId>>,
+    pub(crate) channel_id_to_downstream_id: Arc<Mutex<HashMap<ChannelId, DownstreamId>>>,
     pub(crate) vardiff: Arc<DashMap<DownstreamId, Arc<Mutex<VardiffState>>>>,
     /// HashMap to store the SetNewPrevHash for each channel
     /// Used in both aggregated and non-aggregated mode
@@ -88,6 +89,56 @@ pub struct Sv1Server {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Sv1Server {
+    /// Sends a message to downstream(s) for the given channel_id.
+    ///
+    /// In aggregated mode the channel manager rewrites the job's channel_id to
+    /// `AGGREGATED_CHANNEL_ID` before forwarding, which signals a broadcast: send to every
+    /// connected downstream.
+    async fn send_to_channel(
+        &self,
+        channel_id: ChannelId,
+        msg: stratum_apps::stratum_core::sv1_api::json_rpc::Message,
+    ) {
+        if channel_id == AGGREGATED_CHANNEL_ID {
+            let downstream_senders = self
+                .sv1_server_channel_state
+                .sv1_server_to_downstream_sender
+                .super_safe_lock(|downstream_channels| downstream_channels.clone());
+            // Broadcast to every connected downstream.
+            for (downstream_id, sender) in downstream_senders {
+                if let Err(e) = sender.send(msg.clone()).await {
+                    warn!(
+                        "Failed to send notify to downstream {}: channel closed: {}",
+                        downstream_id, e
+                    );
+                }
+            }
+        } else {
+            // Non-aggregated: send to the single downstream that owns this channel_id.
+            let downstream_id = match self
+                .channel_id_to_downstream_id
+                .super_safe_lock(|map| map.get(&channel_id).cloned())
+            {
+                Some(id) => id,
+                None => return,
+            };
+
+            let sender = self
+                .sv1_server_channel_state
+                .sv1_server_to_downstream_sender
+                .super_safe_lock(|ch| ch.get(&downstream_id).cloned());
+
+            let Some(sender) = sender else { return };
+
+            if let Err(e) = sender.send(msg).await {
+                warn!(
+                    "Failed to send notify to downstream {}: channel closed: {}",
+                    downstream_id, e
+                );
+            }
+        }
+    }
+
     /// Cleans up server state and closes communication channels.
     pub fn cleanup(&self) {
         self.prevhashes.clear();
@@ -96,6 +147,8 @@ impl Sv1Server {
             self.vardiff.clear();
         }
         self.downstreams.clear();
+        self.channel_id_to_downstream_id
+            .super_safe_lock(|map| map.clear());
         self.request_id_to_downstream_id.clear();
         self.pending_target_updates
             .safe_lock(|updates| updates.clear())
@@ -134,6 +187,7 @@ impl Sv1Server {
             request_id_factory: Arc::new(AtomicU32::new(1)),
             downstreams: Arc::new(DashMap::new()),
             request_id_to_downstream_id: Arc::new(DashMap::new()),
+            channel_id_to_downstream_id: Arc::new(Mutex::new(HashMap::new())),
             vardiff: Arc::new(DashMap::new()),
             prevhashes: Arc::new(DashMap::new()),
             pending_target_updates: Arc::new(Mutex::new(Vec::new())),
@@ -235,12 +289,15 @@ impl Sv1Server {
                                     connection_token.clone(),
                                 ).await;
                                 let downstream_id = self.downstream_id_factory.fetch_add(1, Ordering::Relaxed);
+                                let (sv1_server_sender, sv1_server_receiver) = async_channel::unbounded();
+                                self.sv1_server_channel_state.sv1_server_to_downstream_sender.super_safe_lock(|map| map.insert(downstream_id, sv1_server_sender));
+
                                 let downstream = Downstream::new(
                                     downstream_id,
                                     connection.sender().clone(),
                                     connection.receiver().clone(),
                                     self.sv1_server_channel_state.downstream_to_sv1_server_sender.clone(),
-                                    self.sv1_server_channel_state.sv1_server_to_downstream_sender.clone(),
+                                    sv1_server_receiver,
                                     first_target,
                                     Some(self.config.downstream_difficulty_config.min_individual_miner_hashrate),
                                     connection_token,
@@ -323,78 +380,79 @@ impl Sv1Server {
             .await
             .map_err(TproxyError::shutdown)?;
 
-        let downstream = self.downstreams.get(&downstream_id);
+        let Some(downstream) = self
+            .downstreams
+            .get(&downstream_id)
+            .map(|r| r.value().clone())
+        else {
+            return Ok(());
+        };
 
-        if let Some(downstream) = downstream {
-            let channel_id = downstream
+        let channel_id = downstream
+            .downstream_data
+            .super_safe_lock(|data| data.channel_id);
+        if channel_id.is_none() {
+            let is_first_message = downstream
                 .downstream_data
-                .super_safe_lock(|data| data.channel_id);
-            if channel_id.is_none() {
-                let is_first_message = downstream
-                    .downstream_data
-                    .super_safe_lock(|d| d.queued_sv1_handshake_messages.is_empty());
-                if is_first_message {
-                    self.handle_open_channel_request(downstream_id).await?;
-                    debug!(
-                        "Down: Sent OpenChannel request for downstream {}",
-                        downstream_id
-                    );
-                }
-                debug!("Down: Queuing Sv1 message until channel is established");
-                downstream.downstream_data.super_safe_lock(|data| {
-                    data.queued_sv1_handshake_messages
-                        .push(downstream_message.clone())
-                });
-                return Ok(());
+                .super_safe_lock(|d| d.queued_sv1_handshake_messages.is_empty());
+            if is_first_message {
+                self.handle_open_channel_request(downstream_id).await?;
+                debug!(
+                    "Down: Sent OpenChannel request for downstream {}",
+                    downstream_id
+                );
             }
+            debug!("Down: Queuing Sv1 message until channel is established");
+            downstream.downstream_data.super_safe_lock(|data| {
+                data.queued_sv1_handshake_messages
+                    .push(downstream_message.clone())
+            });
+            return Ok(());
+        }
 
-            let is_authorize = is_mining_authorize(&downstream_message);
+        let is_authorize = is_mining_authorize(&downstream_message);
 
-            let response = self
-                .clone()
-                .handle_message(Some(downstream_id), downstream_message);
+        let response = self
+            .clone()
+            .handle_message(Some(downstream_id), downstream_message);
 
-            match response {
-                Ok(Some(response_msg)) => {
-                    debug!("Down: Sending Sv1 message to downstream: {}", response_msg);
-                    downstream
-                        .downstream_channel_state
-                        .downstream_sv1_sender
-                        .send(response_msg.into())
-                        .await
-                        .map_err(|error| {
-                            error!("Down: Failed to send message to downstream: {error:?}");
-                            TproxyError::disconnect(
-                                TproxyErrorKind::ChannelErrorSender,
-                                downstream_id,
-                            )
-                        })?;
+        match response {
+            Ok(Some(response_msg)) => {
+                debug!("Down: Sending Sv1 message to downstream: {}", response_msg);
+                downstream
+                    .downstream_channel_state
+                    .downstream_sv1_sender
+                    .send(response_msg.into())
+                    .await
+                    .map_err(|error| {
+                        error!("Down: Failed to send message to downstream: {error:?}");
+                        TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+                    })?;
 
-                    // Check if this was an authorize message and handle sv1 handshake completion
-                    if is_authorize {
-                        info!("Down: Handling mining.authorize after handshake completion");
-                        if let Err(e) = downstream.handle_sv1_handshake_completion().await {
-                            error!("Down: Failed to handle handshake completion: {:?}", e);
-                            return Err(TproxyError::disconnect(e, downstream_id));
-                        }
+                // Check if this was an authorize message and handle sv1 handshake completion
+                if is_authorize {
+                    info!("Down: Handling mining.authorize after handshake completion");
+                    if let Err(e) = downstream.handle_sv1_handshake_completion().await {
+                        error!("Down: Failed to handle handshake completion: {:?}", e);
+                        return Err(TproxyError::disconnect(e, downstream_id));
                     }
                 }
-                Ok(None) => {
-                    // Message was handled but no response needed
-                }
-                Err(e) => {
-                    error!("Down: Error handling downstream message: {:?}", e);
-                    return Err(TproxyError::disconnect(e, downstream_id));
-                }
             }
+            Ok(None) => {
+                // Message was handled but no response needed
+            }
+            Err(e) => {
+                error!("Down: Error handling downstream message: {:?}", e);
+                return Err(TproxyError::disconnect(e, downstream_id));
+            }
+        }
 
-            // Check if there's a pending share to send to the Sv1Server
-            let pending_share = downstream
-                .downstream_data
-                .super_safe_lock(|d| d.pending_share.take());
-            if let Some(share) = pending_share {
-                self.handle_submit_shares(share).await?;
-            }
+        // Check if there's a pending share to send to the Sv1Server
+        let pending_share = downstream
+            .downstream_data
+            .super_safe_lock(|d| d.pending_share.take());
+        if let Some(share) = pending_share {
+            self.handle_submit_shares(share).await?;
         }
 
         Ok(())
@@ -453,11 +511,16 @@ impl Sv1Server {
 
         // Only add TLV fields with user identity in non-aggregated mode
         let tlv_fields = if is_non_aggregated() {
-            let Some(downstream) = self.downstreams.get(&message.downstream_id) else {
-                return Err(TproxyError::disconnect(
-                    TproxyErrorKind::DownstreamNotPresent(message.downstream_id),
-                    message.downstream_id,
-                ));
+            let Some(downstream) = self
+                .downstreams
+                .get(&message.downstream_id)
+                .map(|r| r.value().clone())
+            else {
+                warn!(
+                    "Downstream {} disconnected before share could be submitted, dropping share",
+                    message.downstream_id
+                );
+                return Ok(());
             };
             let user_identity = downstream
                 .downstream_data
@@ -577,13 +640,16 @@ impl Sv1Server {
                             d.set_upstream_target(initial_target, downstream_id);
                         })
                         .map_err(TproxyError::shutdown)?;
+                    self.channel_id_to_downstream_id
+                        .super_safe_lock(|map| map.insert(m.channel_id, downstream_id));
 
                     // Process all queued messages now that channel is established
-                    let queued_messages = downstream
-                        .downstream_data
-                        .safe_lock(|d| std::mem::take(&mut d.queued_sv1_handshake_messages))
-                        .ok();
-                    if let Some(queued_messages) = queued_messages {
+                    let queued_messages = downstream.downstream_data.super_safe_lock(|d| {
+                        let messages = d.queued_sv1_handshake_messages.clone();
+                        d.queued_sv1_handshake_messages.clear();
+                        messages
+                    });
+                    {
                         if !queued_messages.is_empty() {
                             info!(
                                 "Processing {} queued Sv1 messages for downstream {}",
@@ -647,10 +713,18 @@ impl Sv1Server {
                             ))
                         })?;
                     // send the set_difficulty message to the downstream
-                    self.sv1_server_channel_state
+                    if let Some(sender) = self
+                        .sv1_server_channel_state
                         .sv1_server_to_downstream_sender
-                        .send((m.channel_id, None, set_difficulty))
-                        .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
+                        .super_safe_lock(|map| map.get(&downstream_id).cloned())
+                    {
+                        sender.send(set_difficulty).await.map_err(|_| {
+                            TproxyError::disconnect(
+                                TproxyErrorKind::ChannelErrorSender,
+                                downstream_id,
+                            )
+                        })?;
+                    }
                 } else {
                     error!("Downstream not found for downstream_id: {}", downstream_id);
                 }
@@ -661,7 +735,12 @@ impl Sv1Server {
                     "Received NewExtendedMiningJob for channel id: {}",
                     m.channel_id
                 );
-                if let Some(prevhash) = self.prevhashes.get(&m.channel_id) {
+                // Clone the prevhash immediately so the DashMap guard is not held across .await.
+                if let Some(prevhash) = self
+                    .prevhashes
+                    .get(&m.channel_id)
+                    .map(|r| r.value().clone())
+                {
                     let prevhash = prevhash.as_static();
                     let clean_jobs = m.job_id == prevhash.job_id;
                     let notify =
@@ -676,16 +755,18 @@ impl Sv1Server {
                         AGGREGATED_CHANNEL_ID
                     };
 
-                    let mut channel_jobs = self.valid_sv1_jobs.entry(job_channel_id).or_default();
-                    if clean_jobs {
-                        channel_jobs.clear();
+                    {
+                        let mut channel_jobs =
+                            self.valid_sv1_jobs.entry(job_channel_id).or_default();
+                        if clean_jobs {
+                            channel_jobs.clear();
+                        }
+                        channel_jobs.push(notify_parsed);
                     }
-                    channel_jobs.push(notify_parsed);
 
-                    let _ = self
-                        .sv1_server_channel_state
-                        .sv1_server_to_downstream_sender
-                        .send((m.channel_id, None, notify.into()));
+                    let notify_msg: stratum_apps::stratum_core::sv1_api::json_rpc::Message =
+                        notify.into();
+                    self.send_to_channel(job_channel_id, notify_msg).await;
                 }
             }
 
@@ -734,7 +815,17 @@ impl Sv1Server {
         downstream_id: DownstreamId,
     ) -> TproxyResult<(), error::Sv1Server> {
         let config = &self.config.downstream_difficulty_config;
-        let downstream = self.downstreams.get(&downstream_id).unwrap();
+        let Some(downstream) = self
+            .downstreams
+            .get(&downstream_id)
+            .map(|r| r.value().clone())
+        else {
+            warn!(
+                "Downstream {} disconnected before channel could be opened, skipping",
+                downstream_id
+            );
+            return Ok(());
+        };
 
         let hashrate = config.min_individual_miner_hashrate as f64;
         let shares_per_min = config.shares_per_minute as f64;
@@ -783,22 +874,6 @@ impl Sv1Server {
         Ok(())
     }
 
-    /// Retrieves a downstream connection by ID from the provided map.
-    ///
-    /// # Arguments
-    /// * `downstream_id` - The ID of the downstream connection to find
-    /// * `downstream` - HashMap containing downstream connections
-    ///
-    /// # Returns
-    /// * `Some(Downstream)` - If a downstream with the given ID exists
-    /// * `None` - If no downstream with the given ID is found
-    pub fn get_downstream(
-        downstream_id: DownstreamId,
-        downstream: HashMap<DownstreamId, Downstream>,
-    ) -> Option<Downstream> {
-        downstream.get(&downstream_id).cloned()
-    }
-
     /// Extracts the downstream ID from a Downstream instance.
     ///
     /// # Arguments
@@ -826,6 +901,10 @@ impl Sv1Server {
             // Only remove from vardiff map if vardiff is enabled
             self.vardiff.remove(&downstream_id);
         }
+        self.sv1_server_channel_state
+            .sv1_server_to_downstream_sender
+            .super_safe_lock(|map| map.remove(&downstream_id));
+
         let current_downstream = self.downstreams.remove(&downstream_id);
 
         if let Some((downstream_id, downstream)) = current_downstream {
@@ -838,6 +917,8 @@ impl Sv1Server {
 
             let channel_id = downstream.downstream_data.super_safe_lock(|d| d.channel_id);
             if let Some(channel_id) = channel_id {
+                self.channel_id_to_downstream_id
+                    .super_safe_lock(|map| map.remove(&channel_id));
                 if !self.config.aggregate_channels {
                     info!("Sending CloseChannel message: {channel_id} for downstream: {downstream_id}");
                     let reason_code =
@@ -922,31 +1003,36 @@ impl Sv1Server {
         target: Target,
         derived_hashrate: Option<f64>,
     ) -> TproxyResult<(), error::Sv1Server> {
-        for downstream in self.downstreams.iter() {
-            let downstream_id = downstream.key();
-            let downstream = downstream.value();
-            let channel_id = downstream.downstream_data.super_safe_lock(|d| {
-                let channel_id = d.channel_id?;
-
-                d.set_upstream_target(target, *downstream_id);
-                d.set_pending_target(target, *downstream_id);
-
-                // Update pending hashrate derived from the upstream target
-                if let Some(hr) = derived_hashrate {
-                    d.set_pending_hashrate(Some(hr as f32), *downstream_id);
+        let tasks: Vec<(DownstreamId, _)> = self
+            .downstreams
+            .iter()
+            .filter_map(|entry| {
+                let downstream_id = *entry.key();
+                let has_channel = entry.value().downstream_data.super_safe_lock(|d| {
+                    let channel_id = d.channel_id?;
+                    d.set_upstream_target(target, downstream_id);
+                    d.set_pending_target(target, downstream_id);
+                    if let Some(hr) = derived_hashrate {
+                        d.set_pending_hashrate(Some(hr as f32), downstream_id);
+                    }
+                    Some(channel_id)
+                });
+                if has_channel.is_none() {
+                    trace!(
+                        "Skipping downstream {}: no channel_id set (vardiff disabled)",
+                        downstream_id
+                    );
+                    return None;
                 }
+                let sender = self
+                    .sv1_server_channel_state
+                    .sv1_server_to_downstream_sender
+                    .super_safe_lock(|map| map.get(&downstream_id).cloned())?;
+                Some((downstream_id, sender))
+            })
+            .collect();
 
-                Some(channel_id)
-            });
-
-            let Some(channel_id) = channel_id else {
-                trace!(
-                    "Skipping downstream {}: no channel_id set (vardiff disabled)",
-                    downstream_id
-                );
-                continue;
-            };
-
+        for (downstream_id, sender) in tasks {
             let set_difficulty_msg = match build_sv1_set_difficulty_from_sv2_target(target) {
                 Ok(msg) => msg,
                 Err(e) => {
@@ -957,12 +1043,7 @@ impl Sv1Server {
                     return Err(TproxyError::shutdown(e));
                 }
             };
-
-            if let Err(e) = self
-                .sv1_server_channel_state
-                .sv1_server_to_downstream_sender
-                .send((channel_id, Some(*downstream_id), set_difficulty_msg))
-            {
+            if let Err(e) = sender.send(set_difficulty_msg).await {
                 error!(
                     "Failed to send SetDifficulty to downstream {}: {:?}",
                     downstream_id, e
@@ -987,13 +1068,10 @@ impl Sv1Server {
         target: Target,
         derived_hashrate: Option<f64>,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let affected = self.downstreams.iter().find(|downstream| {
-            downstream
-                .downstream_data
-                .super_safe_lock(|d| d.channel_id == Some(channel_id))
-        });
-
-        let Some(downstream) = affected else {
+        let Some(downstream_id) = self
+            .channel_id_to_downstream_id
+            .super_safe_lock(|map| map.get(&channel_id).cloned())
+        else {
             warn!(
                 "No downstream found for channel {} when vardiff is disabled",
                 channel_id
@@ -1016,16 +1094,15 @@ impl Sv1Server {
             ));
         };
 
-        let downstream_id = downstream.key();
-        let downstream = downstream.value();
-
+        let Some(downstream) = self.downstreams.get(&downstream_id) else {
+            return Ok(());
+        };
         downstream.downstream_data.super_safe_lock(|d| {
-            d.set_upstream_target(target, *downstream_id);
-            d.set_pending_target(target, *downstream_id);
-
+            d.set_upstream_target(target, downstream_id);
+            d.set_pending_target(target, downstream_id);
             // Update pending hashrate derived from the upstream target
             if let Some(hr) = derived_hashrate {
-                d.set_pending_hashrate(Some(hr as f32), *downstream_id);
+                d.set_pending_hashrate(Some(hr as f32), downstream_id);
             }
         });
 
@@ -1040,21 +1117,24 @@ impl Sv1Server {
             }
         };
 
-        if let Err(e) = self
+        let sender = self
             .sv1_server_channel_state
             .sv1_server_to_downstream_sender
-            .send((channel_id, Some(*downstream_id), set_difficulty_msg))
-        {
-            error!(
-                "Failed to send SetDifficulty to downstream {}: {:?}",
-                downstream_id, e
-            );
-            return Err(TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender));
-        } else {
-            debug!(
-                "Sent SetDifficulty to downstream {} for channel {} (vardiff disabled)",
-                downstream_id, channel_id
-            );
+            .super_safe_lock(|map| map.get(&downstream_id).cloned());
+
+        if let Some(sender) = sender {
+            if let Err(e) = sender.send(set_difficulty_msg).await {
+                error!(
+                    "Failed to send SetDifficulty to downstream {}: {:?}",
+                    downstream_id, e
+                );
+                return Err(TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender));
+            } else {
+                debug!(
+                    "Sent SetDifficulty to downstream {} for channel {} (vardiff disabled)",
+                    downstream_id, channel_id
+                );
+            }
         }
         Ok(())
     }
@@ -1169,14 +1249,18 @@ impl Sv1Server {
                         downstream_id, notify.job_id, notify.time.0
                     );
 
-                    if let Err(e) = self
+                    let sent = match self
                         .sv1_server_channel_state
                         .sv1_server_to_downstream_sender
-                        .send((channel_id.unwrap_or(0), Some(downstream_id), notify.into()))
+                        .super_safe_lock(|map| map.get(&downstream_id).cloned())
                     {
+                        Some(sender) => sender.send(notify.into()).await.is_ok(),
+                        None => false,
+                    };
+                    if !sent {
                         warn!(
-                            "Failed to send keepalive job to downstream {}: {:?}",
-                            downstream_id, e
+                            "Failed to send keepalive job to downstream {}",
+                            downstream_id
                         );
                     } else if let Some(downstream) = self.downstreams.get(&downstream_id) {
                         downstream.downstream_data.super_safe_lock(|d| {
@@ -1263,7 +1347,7 @@ mod tests {
     use super::*;
     use crate::config::{DownstreamDifficultyConfig, TranslatorConfig, Upstream};
     use async_channel::unbounded;
-    use std::{collections::HashMap, str::FromStr};
+    use std::str::FromStr;
     use stratum_apps::key_utils::Secp256k1PublicKey;
 
     fn create_test_config() -> TranslatorConfig {
@@ -1321,15 +1405,6 @@ mod tests {
         let server = Sv1Server::new(addr, cm_receiver, cm_sender, config);
 
         assert!(server.config.downstream_difficulty_config.enable_vardiff);
-    }
-
-    #[test]
-    fn test_get_downstream_basic() {
-        let downstreams = HashMap::new();
-
-        // Test non-existing downstream
-        let not_found = Sv1Server::get_downstream(999, downstreams);
-        assert!(not_found.is_none());
     }
 
     #[tokio::test]

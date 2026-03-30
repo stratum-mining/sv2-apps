@@ -151,24 +151,26 @@ impl Sv1Server {
         }
 
         // Process immediate set_difficulty updates (for new_target >= upstream_target)
-        for (channel_id, downstream_id, target) in immediate_updates {
+        for (_channel_id, downstream_id, target) in immediate_updates {
             // Send set_difficulty message immediately
             if let Ok(set_difficulty_msg) = build_sv1_set_difficulty_from_sv2_target(target) {
-                if let Err(e) = self
+                let downstream_id = downstream_id.unwrap_or(0);
+                if let Some(sender) = self
                     .sv1_server_channel_state
                     .sv1_server_to_downstream_sender
-                    .send((channel_id, downstream_id, set_difficulty_msg))
+                    .super_safe_lock(|downstream| downstream.get(&downstream_id).cloned())
                 {
-                    error!(
-                        "Failed to send immediate SetDifficulty message to downstream {}: {:?}",
-                        downstream_id.unwrap_or(0),
-                        e
-                    );
-                } else {
-                    trace!(
-                        "Sent immediate SetDifficulty to downstream {} (new_target >= upstream_target)",
-                        downstream_id.unwrap_or(0)
-                    );
+                    if let Err(e) = sender.send(set_difficulty_msg).await {
+                        error!(
+                            "Failed to send immediate SetDifficulty message to downstream {}: {:?}",
+                            downstream_id, e
+                        );
+                    } else {
+                        trace!(
+                            "Sent immediate SetDifficulty to downstream {} (new_target >= upstream_target)",
+                            downstream_id
+                        );
+                    }
                 }
             }
         }
@@ -347,22 +349,23 @@ impl Sv1Server {
             channel_id
         );
 
-        let affected = self.downstreams.iter().find(|downstream| {
-            downstream
-                .downstream_data
-                .super_safe_lock(|d| d.channel_id == Some(channel_id))
-        });
-
-        let Some(downstream) = affected else {
+        let Some(downstream_id) = self
+            .channel_id_to_downstream_id
+            .super_safe_lock(|map| map.get(&channel_id).cloned())
+        else {
             warn!("No downstream found for channel {}", channel_id);
             return;
         };
 
-        let downstream_id = downstream.downstream_id;
-
-        downstream.downstream_data.super_safe_lock(|d| {
-            d.set_upstream_target(new_upstream_target, downstream_id);
-        });
+        {
+            let Some(downstream) = self.downstreams.get(&downstream_id) else {
+                warn!("No downstream found for downstream_id {}", downstream_id);
+                return;
+            };
+            downstream.downstream_data.super_safe_lock(|d| {
+                d.set_upstream_target(new_upstream_target, downstream_id);
+            });
+        }
 
         trace!("Updated upstream target for downstream {}", downstream_id);
 
@@ -422,19 +425,6 @@ impl Sv1Server {
         difficulty_updates: Vec<PendingTargetUpdate>,
     ) {
         for update in difficulty_updates {
-            let channel_id = self
-                .downstreams
-                .get(&update.downstream_id)
-                .and_then(|ds| ds.downstream_data.super_safe_lock(|d| d.channel_id));
-
-            let Some(channel_id) = channel_id else {
-                trace!(
-                    "Skipping SetDifficulty for downstream {}: no channel_id yet",
-                    update.downstream_id
-                );
-                continue;
-            };
-
             let set_difficulty_msg =
                 match build_sv1_set_difficulty_from_sv2_target(update.new_target) {
                     Ok(msg) => msg,
@@ -447,17 +437,19 @@ impl Sv1Server {
                     }
                 };
 
-            if let Err(e) = self
+            if let Some(sender) = self
                 .sv1_server_channel_state
                 .sv1_server_to_downstream_sender
-                .send((channel_id, Some(update.downstream_id), set_difficulty_msg))
+                .super_safe_lock(|downstream| downstream.get(&update.downstream_id).cloned())
             {
-                error!(
-                    "Failed to send SetDifficulty to downstream {}: {:?}",
-                    update.downstream_id, e
-                );
-            } else {
-                trace!("Sent SetDifficulty to downstream {}", update.downstream_id);
+                if let Err(e) = sender.send(set_difficulty_msg).await {
+                    error!(
+                        "Failed to send SetDifficulty to downstream {}: {:?}",
+                        update.downstream_id, e
+                    );
+                } else {
+                    trace!("Sent SetDifficulty to downstream {}", update.downstream_id);
+                }
             }
         }
     }

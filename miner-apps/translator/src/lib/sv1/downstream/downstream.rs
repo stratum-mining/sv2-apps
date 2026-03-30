@@ -2,7 +2,6 @@ use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
     status::{handle_error, StatusSender},
     sv1::downstream::{channel::DownstreamChannelState, data::DownstreamData},
-    utils::AGGREGATED_CHANNEL_ID,
 };
 use async_channel::{Receiver, Sender};
 use std::{
@@ -23,9 +22,8 @@ use stratum_apps::{
         },
     },
     task_manager::TaskManager,
-    utils::types::{ChannelId, DownstreamId, Hashrate},
+    utils::types::{DownstreamId, Hashrate},
 };
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -60,11 +58,7 @@ impl Downstream {
         downstream_sv1_sender: Sender<json_rpc::Message>,
         downstream_sv1_receiver: Receiver<json_rpc::Message>,
         sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
-        sv1_server_broadcast: broadcast::Sender<(
-            ChannelId,
-            Option<DownstreamId>,
-            json_rpc::Message,
-        )>,
+        sv1_server_receiver: Receiver<json_rpc::Message>,
         target: Target,
         hashrate: Option<Hashrate>,
         connection_token: CancellationToken,
@@ -74,7 +68,7 @@ impl Downstream {
             downstream_sv1_sender,
             downstream_sv1_receiver,
             sv1_server_sender,
-            sv1_server_broadcast,
+            sv1_server_receiver,
             connection_token,
         );
         Self {
@@ -103,10 +97,6 @@ impl Downstream {
         status_sender: StatusSender,
         task_manager: Arc<TaskManager>,
     ) {
-        let mut sv1_server_receiver = self
-            .downstream_channel_state
-            .sv1_server_broadcast
-            .subscribe();
         let downstream_id = self.downstream_id;
         task_manager.spawn(async move {
             // we just spawned a new task that's relevant to fallback coordination
@@ -138,7 +128,7 @@ impl Downstream {
                     }
 
                     // Handle server -> downstream message
-                    res = self.handle_sv1_server_message(&mut sv1_server_receiver) => {
+                    res = self.handle_sv1_server_message() => {
                         if let Err(e) = res {
                             error!("Downstream {downstream_id}: error in server message handler: {e:?}");
                             if handle_error(&status_sender, e).await {
@@ -178,25 +168,16 @@ impl Downstream {
     ///   complete
     /// - On handshake completion: sends cached messages in correct order (set_difficulty first,
     ///   then notify)
-    pub async fn handle_sv1_server_message(
-        &self,
-        sv1_server_receiver: &mut broadcast::Receiver<(
-            ChannelId,
-            Option<DownstreamId>,
-            json_rpc::Message,
-        )>,
-    ) -> TproxyResult<(), error::Downstream> {
-        match sv1_server_receiver.recv().await {
-            Ok((channel_id, downstream_id, message)) => {
-                let my_channel_id = self.downstream_data.super_safe_lock(|d| d.channel_id);
-                let my_downstream_id = self.downstream_id;
+    pub async fn handle_sv1_server_message(&self) -> TproxyResult<(), error::Downstream> {
+        match self
+            .downstream_channel_state
+            .sv1_server_receiver
+            .recv()
+            .await
+        {
+            Ok(message) => {
+                let downstream_id = self.downstream_id;
                 let handshake_complete = self.sv1_handshake_complete.load(Ordering::SeqCst);
-                let id_matches = (my_channel_id == Some(channel_id)
-                    || channel_id == AGGREGATED_CHANNEL_ID)
-                    && (downstream_id.is_none() || downstream_id == Some(my_downstream_id));
-                if !id_matches {
-                    return Ok(()); // Message not intended for this downstream
-                }
 
                 // Handle messages based on message type and handshake state
                 if let Message::Notification(notification) = &message {
@@ -259,7 +240,7 @@ impl Downstream {
                                                 "Down: Failed to send mining.set_difficulty to downstream: {:?}",
                                                 e
                                             );
-                                            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id.unwrap_or(0))
+                                            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
                                         })?;
                                 }
 
@@ -271,7 +252,7 @@ impl Downstream {
                                         .await
                                         .map_err(|e| {
                                             error!("Down: Failed to send mining.notify to downstream: {:?}", e);
-                                            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id.unwrap_or(0))
+                                            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
                                         })?;
                                 }
                                 return Ok(());
@@ -289,7 +270,7 @@ impl Downstream {
                                         );
                                         TproxyError::disconnect(
                                             TproxyErrorKind::ChannelErrorSender,
-                                            downstream_id.unwrap_or(0),
+                                            downstream_id,
                                         )
                                     })?;
                             }
@@ -326,12 +307,11 @@ impl Downstream {
                 }
             }
             Err(e) => {
-                let downstream_id = self.downstream_id;
                 error!(
                     "Sv1 message handler error for downstream {}: {:?}",
-                    downstream_id, e
+                    self.downstream_id, e
                 );
-                return Err(TproxyError::disconnect(e, downstream_id));
+                return Err(TproxyError::shutdown(e));
             }
         }
 

@@ -29,7 +29,6 @@ use stratum_apps::{
         MessageType,
     },
 };
-use tokio::sync::broadcast;
 
 pub type TproxyResult<T, Owner> = Result<T, TproxyError<Owner>>;
 
@@ -158,10 +157,6 @@ pub enum TproxyErrorKind {
     ChannelErrorReceiver(async_channel::RecvError),
     /// Channel sender error
     ChannelErrorSender,
-    /// Broadcast channel receiver error
-    BroadcastChannelErrorReceiver(broadcast::error::RecvError),
-    /// Tokio channel receiver error
-    TokioChannelErrorRecv(tokio::sync::broadcast::error::RecvError),
     /// Error converting SetDifficulty to Message
     SetDifficultyToMessage(SetDifficulty),
     /// Received an unexpected message type
@@ -225,11 +220,7 @@ impl fmt::Display for TproxyErrorKind {
             ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
             PoisonLock => write!(f, "Poison Lock error"),
             ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: `{e:?}`"),
-            BroadcastChannelErrorReceiver(ref e) => {
-                write!(f, "Broadcast channel receive error: {e:?}")
-            }
             ChannelErrorSender => write!(f, "Sender error"),
-            TokioChannelErrorRecv(ref e) => write!(f, "Channel receive error: `{e:?}`"),
             SetDifficultyToMessage(ref e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
             }
@@ -336,12 +327,6 @@ impl From<ConfigError> for TproxyErrorKind {
 impl From<async_channel::RecvError> for TproxyErrorKind {
     fn from(e: async_channel::RecvError) -> Self {
         TproxyErrorKind::ChannelErrorReceiver(e)
-    }
-}
-
-impl From<tokio::sync::broadcast::error::RecvError> for TproxyErrorKind {
-    fn from(e: tokio::sync::broadcast::error::RecvError) -> Self {
-        TproxyErrorKind::TokioChannelErrorRecv(e)
     }
 }
 
