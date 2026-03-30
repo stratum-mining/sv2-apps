@@ -17,7 +17,7 @@ use stratum_apps::stratum_core::mining_sv2::*;
 async fn pool_monitoring_with_sv2_mining_device() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (_pool, pool_addr, pool_monitoring) =
+    let (pool, pool_addr, pool_monitoring) =
         start_pool(sv2_tp_config(tp_addr), vec![], vec![], true).await;
     let (sniffer, sniffer_addr) = start_sniffer("A", pool_addr, false, vec![], None);
     start_mining_device_sv2(sniffer_addr, None, None, None, 1, None, true);
@@ -57,6 +57,8 @@ async fn pool_monitoring_with_sv2_mining_device() {
 
     // Pool should see 1 SV2 client (the mining device) with a standard channel
     assert_metric_eq(&pool_metrics, "sv2_clients_total", 1.0);
+
+    shutdown_all!(pool);
 }
 
 // ---------------------------------------------------------------------------
@@ -68,10 +70,10 @@ async fn pool_monitoring_with_sv2_mining_device() {
 async fn pool_and_tproxy_monitoring_with_sv1_miner() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (_pool, pool_addr, pool_monitoring) =
+    let (pool, pool_addr, pool_monitoring) =
         start_pool(sv2_tp_config(tp_addr), vec![], vec![], true).await;
     let (sniffer, sniffer_addr) = start_sniffer("0", pool_addr, false, vec![], None);
-    let (_tproxy, tproxy_addr, tproxy_monitoring) =
+    let (tproxy, tproxy_addr, tproxy_monitoring) =
         start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None, true).await;
     let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
 
@@ -119,6 +121,8 @@ async fn pool_and_tproxy_monitoring_with_sv1_miner() {
     assert_metric_eq(&tproxy_metrics, "sv1_clients_total", 1.0);
     // tProxy has no SV2 downstreams
     assert_metric_not_present(&tproxy_metrics, "sv2_clients_total");
+
+    shutdown_all!(pool, tproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,11 +133,11 @@ async fn pool_and_tproxy_monitoring_with_sv1_miner() {
 async fn jd_aggregated_topology_monitoring() {
     start_tracing();
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (_pool, pool_addr, jds_addr, pool_monitoring) =
+    let (pool, pool_addr, jds_addr, pool_monitoring) =
         start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], true).await;
     let (jdc_pool_sniffer, jdc_pool_sniffer_addr) =
         start_sniffer("0", pool_addr, false, vec![], None);
-    let (_jdc, jdc_addr, _jdc_monitoring) = start_jdc(
+    let (jdc, jdc_addr, _jdc_monitoring) = start_jdc(
         &[(jdc_pool_sniffer_addr, jds_addr)],
         sv2_tp_config(tp_addr),
         vec![],
@@ -143,7 +147,7 @@ async fn jd_aggregated_topology_monitoring() {
     );
     let (_tproxy_jdc_sniffer, tproxy_jdc_sniffer_addr) =
         start_sniffer("1", jdc_addr, false, vec![], None);
-    let (_tproxy, tproxy_addr, tproxy_monitoring) =
+    let (tproxy, tproxy_addr, tproxy_monitoring) =
         start_sv2_translator(&[tproxy_jdc_sniffer_addr], true, vec![], vec![], None, true).await;
 
     // Start two minerd processes
@@ -190,6 +194,8 @@ async fn jd_aggregated_topology_monitoring() {
     );
     assert_metric_eq(&tproxy_metrics, "sv1_clients_total", 2.0);
     assert_metric_not_present(&tproxy_metrics, "sv2_clients_total");
+
+    shutdown_all!(pool, jdc, tproxy);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,13 +208,13 @@ async fn block_found_detected_in_pool_metrics() {
 
     start_tracing();
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let (_pool, pool_addr, jds_addr, pool_monitoring) =
+    let (pool, pool_addr, jds_addr, pool_monitoring) =
         start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], true).await;
 
     let (_jdc_jds_sniffer, jdc_jds_sniffer_addr) =
         start_sniffer("0", jds_addr, false, vec![], None);
     let (jdc_tp_sniffer, jdc_tp_sniffer_addr) = start_sniffer("1", tp_addr, false, vec![], None);
-    let (_jdc, jdc_addr, _) = start_jdc(
+    let (jdc, jdc_addr, _) = start_jdc(
         &[(pool_addr, jdc_jds_sniffer_addr)],
         sv2_tp_config(jdc_tp_sniffer_addr),
         vec![],
@@ -216,7 +222,7 @@ async fn block_found_detected_in_pool_metrics() {
         false,
         None,
     );
-    let (_tproxy, tproxy_addr, _) =
+    let (tproxy, tproxy_addr, _) =
         start_sv2_translator(&[jdc_addr], false, vec![], vec![], None, false).await;
     let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
 
@@ -236,4 +242,6 @@ async fn block_found_detected_in_pool_metrics() {
     .await;
     assert_uptime(&pool_metrics);
     assert_metric_eq(&pool_metrics, "sv2_clients_total", 1.0);
+
+    shutdown_all!(pool, jdc, tproxy);
 }
