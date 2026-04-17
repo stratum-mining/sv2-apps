@@ -18,7 +18,7 @@ use stratum_apps::{
     config_helpers::{opt_path_from_toml, CoinbaseRewardScript},
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     stratum_core::bitcoin::{Amount, TxOut},
-    tp_type::TemplateProviderType,
+    tp_type::{TemplateProviderType, VALID_NETWORKS},
     utils::types::{SharesBatchSize, SharesPerMinute},
 };
 
@@ -50,6 +50,13 @@ pub struct PoolConfig {
     jds: Option<JDSPartialConfig>,
     #[serde(default)]
     monitoring_cache_refresh_secs: Option<u64>,
+    /// Optional override for the Bitcoin network name exposed via `GET /api/v1/global`.
+    /// When absent the network is inferred from the sv2-tp port in `template_provider_type`
+    /// using well-known default ports (see `network_from_tp_port`).
+    /// Values follow bitcoin-cli convention: `"main"`, `"test"`, `"testnet4"`,
+    /// `"signet"`, `"regtest"`.
+    #[serde(default)]
+    network: Option<String>,
 }
 
 impl PoolConfig {
@@ -90,6 +97,7 @@ impl PoolConfig {
             monitoring_address,
             monitoring_cache_refresh_secs,
             jds,
+            network: None,
         }
     }
 
@@ -186,6 +194,39 @@ impl PoolConfig {
         self.monitoring_cache_refresh_secs
     }
 
+    /// Returns the explicit network override if set.
+    pub fn network(&self) -> Option<String> {
+        self.network.clone()
+    }
+
+    /// Returns the effective Bitcoin network name: the explicit `network` override if set,
+    /// otherwise inferred from the sv2-tp port in `template_provider_type`.
+    ///
+    /// Returns `None` if the explicit override is not one of the known values
+    /// (`"main"`, `"test"`, `"testnet4"`, `"signet"`, `"regtest"`) or if the tp_address
+    /// port is not a well-known sv2-tp default port.
+    pub fn effective_network(&self) -> Option<String> {
+        if let Some(ref n) = self.network {
+            if !VALID_NETWORKS.contains(&n.as_str()) {
+                tracing::warn!(
+                    "pool config: network {:?} is not a recognised value \
+                     (expected one of {:?}); network will not be reported.",
+                    n,
+                    VALID_NETWORKS
+                );
+                return None;
+            }
+            return Some(n.clone());
+        }
+        self.template_provider_type.infer_network().map(|s| s.to_string())
+    }
+
+    /// Set the Bitcoin network override (builder style).
+    pub fn with_network(mut self, network: Option<String>) -> Self {
+        self.network = network;
+        self
+    }
+
     /// Builds a complete [`JDSConfig`] from the partial `[jds]` TOML section
     /// plus shared fields inherited from Pool config.
     ///
@@ -236,6 +277,37 @@ impl ConnectionConfig {
             listen_address,
             cert_validity_sec,
             signature,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::tp_type::network_from_tp_port;
+
+    fn sv2_tp_type(address: &str) -> TemplateProviderType {
+        TemplateProviderType::Sv2Tp {
+            address: address.to_string(),
+            public_key: None,
+        }
+    }
+
+    #[test]
+    fn infer_network_standard_tp_ports() {
+        assert_eq!(sv2_tp_type("127.0.0.1:18447").infer_network(), Some("regtest"));
+        assert_eq!(sv2_tp_type("127.0.0.1:8442").infer_network(), Some("main"));
+        assert_eq!(sv2_tp_type("127.0.0.1:4444").infer_network(), None);
+    }
+
+    #[test]
+    fn valid_networks_covers_known_port_outputs() {
+        for port in [8442u16, 18442, 48442, 38442, 18447] {
+            let name = network_from_tp_port(port).unwrap();
+            assert!(
+                VALID_NETWORKS.contains(&name),
+                "port {port} maps to {name:?} which is not in VALID_NETWORKS"
+            );
         }
     }
 }

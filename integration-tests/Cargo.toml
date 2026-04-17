@@ -28,6 +28,7 @@ tracing = { version = "0.1.41", default-features = false }
 tracing-subscriber = { version = "0.3.19", default-features = false }
 hex = "0.4.3"
 clap = { version = "^4.5.4", features = ["derive"] }
+serde_json = "1"
 
 # Direct dependencies kept only for the embedded `mining_device` module.
 # Remove this block when removing:

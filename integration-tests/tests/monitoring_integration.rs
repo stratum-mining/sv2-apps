@@ -245,3 +245,139 @@ async fn block_found_detected_in_pool_metrics() {
 
     shutdown_all!(pool, jdc, tproxy);
 }
+
+// ---------------------------------------------------------------------------
+// 5. Pool exposes network via config override; translator inherits it on connect.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn global_info_network_from_config_override() {
+    start_tracing();
+    let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (_pool, pool_addr, pool_monitoring) = start_pool_with_network_override(
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        true,
+        Some("regtest".to_string()),
+    )
+    .await;
+    let pool_mon = pool_monitoring.expect("pool monitoring should be enabled");
+
+    // Pool global endpoint must report network = "regtest"
+    let body = fetch_api(pool_mon, "/api/v1/global").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["network"], "regtest",
+        "pool global info should expose network"
+    );
+
+    // Start translator with upstream_monitoring_url pointing at pool's monitoring server.
+    // MonitoringServer fetches network from pool once at startup (no polling loop).
+    let upstream_monitoring_url = format!("http://{}", pool_mon);
+    let (_tproxy, _tproxy_addr, tproxy_monitoring) = start_sv2_translator_with_upstream_monitoring(
+        &[pool_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        true,
+        Some(upstream_monitoring_url),
+    )
+    .await;
+    let tproxy_mon = tproxy_monitoring.expect("tproxy monitoring should be enabled");
+
+    // Wait up to 30 seconds for network to propagate (generous for slow CI machines).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let body = fetch_api(tproxy_mon, "/api/v1/global").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if json["network"] == "regtest" {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "tproxy global info did not propagate network within timeout; got: {}",
+                json
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. JDC exposes network via config override in GlobalInfo.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn global_info_network_jdc_from_config_override() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (_pool, pool_addr, jds_addr, _pool_monitoring) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    let (jdc, _jdc_addr, jdc_monitoring) = start_jdc_with_network_override(
+        &[(pool_addr, jds_addr)],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        true,
+        None,
+        Some("regtest".to_string()),
+    );
+    let jdc_mon = jdc_monitoring.expect("jdc monitoring should be enabled");
+
+    // Wait up to 30 seconds for JDC to connect and serve the monitoring endpoint.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let body = fetch_api(jdc_mon, "/api/v1/global").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if json["network"] == "regtest" {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "jdc global info did not expose network within timeout; got: {}",
+                json
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    shutdown_all!(jdc);
+}
+
+// ---------------------------------------------------------------------------
+// 7. Translator starts cleanly when upstream_monitoring_url is unreachable.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn global_info_network_unreachable_upstream() {
+    start_tracing();
+    let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (_pool, pool_addr, _pool_monitoring) =
+        start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+
+    // Point translator at a port where nothing is listening.
+    let dead_url = Some("http://127.0.0.1:19999".to_string());
+    let (_tproxy, _tproxy_addr, tproxy_monitoring) = start_sv2_translator_with_upstream_monitoring(
+        &[pool_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        true,
+        dead_url,
+    )
+    .await;
+    let tproxy_mon = tproxy_monitoring.expect("tproxy monitoring should be enabled");
+
+    // Give the fetch attempt time to fail and the server to stabilise.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Translator must still serve the monitoring endpoint; network must be null.
+    let body = fetch_api(tproxy_mon, "/api/v1/global").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        json["network"].is_null(),
+        "network should be null when upstream is unreachable; got: {}",
+        json
+    );
+}

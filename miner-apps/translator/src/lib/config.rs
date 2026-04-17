@@ -59,6 +59,13 @@ pub struct TranslatorConfig {
     monitoring_address: Option<SocketAddr>,
     #[serde(default)]
     monitoring_cache_refresh_secs: Option<u64>,
+    /// URL of the upstream pool's monitoring server.
+    /// When set, the translator fetches `GET <upstream_monitoring_url>/api/v1/global` once
+    /// per upstream connection and propagates the pool's reported `network` value into its
+    /// own `GET /api/v1/global` response.
+    /// Example: `"http://127.0.0.1:9108"`
+    #[serde(default)]
+    upstream_monitoring_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -116,6 +123,7 @@ impl TranslatorConfig {
             log_file: None,
             monitoring_address,
             monitoring_cache_refresh_secs,
+            upstream_monitoring_url: None,
         }
     }
 
@@ -127,6 +135,17 @@ impl TranslatorConfig {
     /// Returns the monitoring cache refresh interval in seconds.
     pub fn monitoring_cache_refresh_secs(&self) -> Option<u64> {
         self.monitoring_cache_refresh_secs
+    }
+
+    /// Returns the upstream pool monitoring URL (if configured).
+    pub fn upstream_monitoring_url(&self) -> Option<String> {
+        self.upstream_monitoring_url.clone()
+    }
+
+    /// Set the upstream pool monitoring URL (builder style).
+    pub fn with_upstream_monitoring_url(mut self, url: Option<String>) -> Self {
+        self.upstream_monitoring_url = url;
+        self
     }
 
     pub fn set_log_dir(&mut self, log_dir: Option<PathBuf>) {

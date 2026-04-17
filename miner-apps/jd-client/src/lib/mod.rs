@@ -136,7 +136,8 @@ impl JobDeclaratorClient {
                     self.config.monitoring_cache_refresh_secs().unwrap_or(15),
                 ),
             )
-            .expect("Failed to initialize monitoring server");
+            .expect("Failed to initialize monitoring server")
+            .with_network(self.config.effective_network());
 
             // Create shutdown signal using cancellation token
             let cancellation_token_clone = self.cancellation_token.clone();
@@ -506,7 +507,8 @@ impl JobDeclaratorClient {
                                         Some(Arc::new(channel_manager_clone.clone())),
                                         std::time::Duration::from_secs(self.config.monitoring_cache_refresh_secs().unwrap_or(15)),
                                     )
-                                    .expect("Failed to initialize monitoring server");
+                                    .expect("Failed to initialize monitoring server")
+                                    .with_network(self.config.effective_network());
 
                                     let cancellation_token_clone = self.cancellation_token.clone();
                                     let fallback_coordinator_token = fallback_coordinator.token();

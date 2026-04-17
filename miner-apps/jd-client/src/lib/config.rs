@@ -8,7 +8,7 @@ use stratum_apps::{
     config_helpers::{opt_path_from_toml, CoinbaseRewardScript},
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     stratum_core::bitcoin::{Amount, TxOut},
-    tp_type::TemplateProviderType,
+    tp_type::{TemplateProviderType, VALID_NETWORKS},
     utils::types::{SharesBatchSize, SharesPerMinute},
 };
 
@@ -59,6 +59,15 @@ pub struct JobDeclaratorClientConfig {
     monitoring_address: Option<SocketAddr>,
     #[serde(default)]
     monitoring_cache_refresh_secs: Option<u64>,
+    /// Optional override for the Bitcoin network name exposed via `GET /api/v1/global`.
+    /// When absent the network is inferred from the template provider config:
+    /// - `Sv2Tp`: mapped from the sv2-tp port using well-known defaults (see
+    ///   `stratum_apps::tp_type::network_from_tp_port`). Returns `None` for non-standard ports.
+    /// - `BitcoinCoreIpc`: taken directly from the `BitcoinNetwork` enum value.
+    /// Values follow bitcoin-cli convention: `"main"`, `"test"`, `"testnet4"`,
+    /// `"signet"`, `"regtest"`.
+    #[serde(default)]
+    network: Option<String>,
 }
 
 impl JobDeclaratorClientConfig {
@@ -100,6 +109,7 @@ impl JobDeclaratorClientConfig {
             required_extensions,
             monitoring_address,
             monitoring_cache_refresh_secs,
+            network: None,
         }
     }
 
@@ -195,6 +205,35 @@ impl JobDeclaratorClientConfig {
     /// Returns the required extensions.
     pub fn required_extensions(&self) -> &[u16] {
         &self.required_extensions
+    }
+
+    /// Set the Bitcoin network override (builder style).
+    /// Only needed for non-standard sv2-tp port setups; `BitcoinCoreIpc` configs derive the
+    /// network automatically from the `BitcoinNetwork` enum value.
+    pub fn with_network(mut self, network: Option<String>) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Returns the effective Bitcoin network name: the explicit `network` override if set,
+    /// otherwise inferred from `template_provider_type`.
+    ///
+    /// Returns `None` if the explicit override is not one of the known values, or if using
+    /// `Sv2Tp` with a non-standard port (set `network` explicitly for non-standard port setups).
+    pub fn effective_network(&self) -> Option<String> {
+        if let Some(ref n) = self.network {
+            if !VALID_NETWORKS.contains(&n.as_str()) {
+                tracing::warn!(
+                    "jdc config: network {:?} is not a recognised value \
+                     (expected one of {:?}); network will not be reported.",
+                    n,
+                    VALID_NETWORKS
+                );
+                return None;
+            }
+            return Some(n.clone());
+        }
+        self.template_provider_type.infer_network().map(|s| s.to_string())
     }
 }
 
@@ -300,5 +339,49 @@ impl Upstream {
             jds_address,
             jds_port,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stratum_apps::tp_type::{BitcoinNetwork, TemplateProviderType};
+
+    fn sv2_tp(address: &str) -> TemplateProviderType {
+        TemplateProviderType::Sv2Tp {
+            address: address.to_string(),
+            public_key: None,
+        }
+    }
+
+    fn ipc_tp(network: BitcoinNetwork) -> TemplateProviderType {
+        TemplateProviderType::BitcoinCoreIpc {
+            network,
+            data_dir: None,
+            fee_threshold: 0,
+            min_interval: 5,
+        }
+    }
+
+    #[test]
+    fn infer_network_sv2tp_standard_ports() {
+        assert_eq!(sv2_tp("127.0.0.1:18447").infer_network(), Some("regtest"));
+        assert_eq!(sv2_tp("127.0.0.1:8442").infer_network(), Some("main"));
+        assert_eq!(sv2_tp("127.0.0.1:18442").infer_network(), Some("test"));
+        assert_eq!(sv2_tp("127.0.0.1:48442").infer_network(), Some("testnet4"));
+        assert_eq!(sv2_tp("127.0.0.1:38442").infer_network(), Some("signet"));
+    }
+
+    #[test]
+    fn infer_network_sv2tp_nonstandard_port_returns_none() {
+        assert_eq!(sv2_tp("127.0.0.1:4444").infer_network(), None);
+        assert_eq!(sv2_tp("127.0.0.1:3333").infer_network(), None);
+    }
+
+    #[test]
+    fn infer_network_bitcoin_core_ipc() {
+        assert_eq!(ipc_tp(BitcoinNetwork::Regtest).infer_network(), Some("regtest"));
+        assert_eq!(ipc_tp(BitcoinNetwork::Mainnet).infer_network(), Some("main"));
+        assert_eq!(ipc_tp(BitcoinNetwork::Testnet4).infer_network(), Some("testnet4"));
+        assert_eq!(ipc_tp(BitcoinNetwork::Signet).infer_network(), Some("signet"));
     }
 }

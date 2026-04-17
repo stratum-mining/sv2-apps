@@ -193,7 +193,8 @@ impl TranslatorSv2 {
             )
             .expect("Failed to initialize monitoring server")
             .with_sv1_monitoring(sv1_server.clone()) // SV1 client connections
-            .expect("Failed to add SV1 monitoring");
+            .expect("Failed to add SV1 monitoring")
+            .with_upstream_monitoring_url(self.config.upstream_monitoring_url());
 
             // Create shutdown signal using cancellation token
             let cancellation_token_clone = cancellation_token.clone();
@@ -337,7 +338,8 @@ impl TranslatorSv2 {
                                     )
                                     .expect("Failed to initialize monitoring server")
                                     .with_sv1_monitoring(sv1_server.clone())
-                                    .expect("Failed to add SV1 monitoring");
+                                    .expect("Failed to add SV1 monitoring")
+                                    .with_upstream_monitoring_url(self.config.upstream_monitoring_url());
 
                                     let cancellation_token_clone = cancellation_token.clone();
                                     let fallback_coordinator_token = fallback_coordinator.token();
@@ -619,3 +621,4 @@ impl Drop for TranslatorSv2 {
         self.cancellation_token.cancel();
     }
 }
+
