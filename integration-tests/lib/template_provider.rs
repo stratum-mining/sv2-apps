@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
 };
-use stratum_apps::stratum_core::bitcoin::{Address, Amount, Txid};
+use stratum_apps::stratum_core::bitcoin::{Address, Amount, Block, BlockHash, Txid};
 use tracing::warn;
 
 use crate::utils::{fs_utils, http, tarball};
@@ -300,6 +300,12 @@ impl BitcoinCore {
         Ok(block_hash)
     }
 
+    /// Fetch a full block by its hash.
+    pub fn get_block(&self, hash: BlockHash) -> Result<Block, corepc_node::Error> {
+        let client = &self.bitcoind.client;
+        Ok(client.get_block(hash)?)
+    }
+
     /// Return the IPC socket path for connecting to this node.
     pub fn ipc_socket_path(&self) -> PathBuf {
         let network_dir = if self.is_signet { "signet" } else { "regtest" };
@@ -439,6 +445,11 @@ impl TemplateProvider {
     /// Return the hash of the most recent block.
     pub fn get_best_block_hash(&self) -> Result<String, corepc_node::Error> {
         self.bitcoin_core.get_best_block_hash()
+    }
+
+    /// Fetch a full block by its hash.
+    pub fn get_block(&self, hash: BlockHash) -> Result<Block, corepc_node::Error> {
+        self.bitcoin_core.get_block(hash)
     }
 
     /// Return the sv2 port that sv2-tp is listening on.
