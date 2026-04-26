@@ -12,6 +12,9 @@ fn downstream_to_sv1_client_info(downstream: &Downstream) -> Option<Sv1ClientInf
         .safe_lock(|dd| Sv1ClientInfo {
             client_id: downstream.downstream_id,
             channel_id: dd.channel_id,
+            peer_ip: Some(downstream.peer_addr.ip().to_string()),
+            peer_port: Some(downstream.peer_addr.port()),
+            asic: None,
             authorized_worker_name: dd.authorized_worker_name.clone(),
             user_identity: dd.user_identity.clone(),
             target_hex: hex::encode(dd.target.to_be_bytes()),

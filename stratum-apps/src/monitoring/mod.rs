@@ -9,6 +9,9 @@
 //! - **Clients**: Downstream connections (miners) - multiple per app
 //! - **SV1 clients**: Legacy SV1 connections (Translator only)
 
+#[cfg(feature = "asic-monitoring")]
+pub mod asic;
+pub mod asic_types;
 pub mod client;
 pub mod http_server;
 pub mod prometheus_metrics;
@@ -16,6 +19,13 @@ pub mod server;
 pub mod snapshot_cache;
 pub mod sv1;
 
+#[cfg(feature = "asic-monitoring")]
+pub use asic::{AsicMonitor, AsicScanRequest, AsicUpdatePoolsRequest};
+pub use asic_types::{
+    AsicDiscoveredMiner, AsicFanTelemetry, AsicHashboardTelemetry, AsicMinerCapabilities,
+    AsicMinerMessage, AsicMinerTelemetry, AsicPoolConfig, AsicPoolData, AsicPoolGroupConfig,
+    AsicPoolGroupData, AsicScanError, AsicScanResponse,
+};
 pub use client::{
     ExtendedChannelInfo, StandardChannelInfo, Sv2ClientInfo, Sv2ClientMetadata,
     Sv2ClientsMonitoring, Sv2ClientsSummary,

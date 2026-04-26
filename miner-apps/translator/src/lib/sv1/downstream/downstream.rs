@@ -5,6 +5,7 @@ use crate::{
 };
 use async_channel::{Receiver, Sender};
 use std::{
+    net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -43,6 +44,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Clone, Debug)]
 pub struct Downstream {
     pub downstream_id: DownstreamId,
+    pub peer_addr: SocketAddr,
     pub downstream_data: Arc<Mutex<DownstreamData>>,
     pub downstream_channel_state: DownstreamChannelState,
     // Flag to track if SV1 handshake is complete (subscribe + authorize)
@@ -55,6 +57,7 @@ impl Downstream {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         downstream_id: DownstreamId,
+        peer_addr: SocketAddr,
         downstream_sv1_sender: Sender<json_rpc::Message>,
         downstream_sv1_receiver: Receiver<json_rpc::Message>,
         sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
@@ -73,6 +76,7 @@ impl Downstream {
         );
         Self {
             downstream_id,
+            peer_addr,
             downstream_data,
             downstream_channel_state,
             sv1_handshake_complete: Arc::new(AtomicBool::new(false)),

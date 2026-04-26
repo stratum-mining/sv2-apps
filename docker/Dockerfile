@@ -1,7 +1,7 @@
 ###
 # ---- Builder Stage ----
 ###
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     capnproto libcapnp-dev curl && \
