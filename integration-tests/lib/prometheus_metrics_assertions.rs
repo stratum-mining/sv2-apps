@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 /// Fetch the raw Prometheus text-format metrics from a component's `/metrics` endpoint.
 /// Uses `spawn_blocking` to avoid blocking the tokio runtime with synchronous HTTP calls.
 pub async fn fetch_metrics(monitoring_addr: SocketAddr) -> String {
-    let url = format!("http://{}/metrics", monitoring_addr);
+    let url = format!("http://{monitoring_addr}/metrics");
     tokio::task::spawn_blocking(move || {
         let bytes = crate::utils::http::make_get_request(&url, 5);
         String::from_utf8(bytes).expect("metrics response should be valid UTF-8")
@@ -18,7 +18,7 @@ pub async fn fetch_metrics(monitoring_addr: SocketAddr) -> String {
 /// Fetch the JSON body from a component's API endpoint (e.g. `/api/v1/health`).
 /// Uses `spawn_blocking` to avoid blocking the tokio runtime with synchronous HTTP calls.
 pub async fn fetch_api(monitoring_addr: SocketAddr, path: &str) -> String {
-    let url = format!("http://{}{}", monitoring_addr, path);
+    let url = format!("http://{monitoring_addr}{path}");
     tokio::task::spawn_blocking(move || {
         let bytes = crate::utils::http::make_get_request(&url, 5);
         String::from_utf8(bytes).expect("api response should be valid UTF-8")
@@ -64,17 +64,11 @@ pub(crate) fn assert_metric<F: Fn(f64) -> bool>(
         Some(v) => {
             assert!(
                 predicate(v),
-                "Metric '{}' has value {} but expected: {}",
-                metric_name,
-                v,
-                description
+                "Metric '{metric_name}' has value {v} but expected: {description}"
             );
         }
         None => {
-            panic!(
-                "Metric '{}' not found in metrics output. Expected: {}",
-                metric_name, description
-            );
+            panic!("Metric '{metric_name}' not found in metrics output. Expected: {description}");
         }
     }
 }
@@ -85,7 +79,7 @@ pub fn assert_metric_gte(metrics_text: &str, metric_name: &str, min: f64) {
         metrics_text,
         metric_name,
         |v| v >= min,
-        &format!(">= {}", min),
+        &format!(">= {min}"),
     );
 }
 
@@ -95,7 +89,7 @@ pub fn assert_metric_eq(metrics_text: &str, metric_name: &str, expected: f64) {
         metrics_text,
         metric_name,
         |v| (v - expected).abs() < f64::EPSILON,
-        &format!("== {}", expected),
+        &format!("== {expected}"),
     );
 }
 
@@ -109,8 +103,7 @@ pub fn assert_metric_not_present(metrics_text: &str, metric_name: &str) {
             // Make sure it's an exact match (not a prefix of another metric name)
             if rest.starts_with(' ') || rest.starts_with('{') {
                 panic!(
-                    "Metric '{}' was found in metrics output but was expected to be absent. Line: {}",
-                    metric_name, line
+                    "Metric '{metric_name}' was found in metrics output but was expected to be absent. Line: {line}"
                 );
             }
         }
@@ -129,10 +122,7 @@ pub fn assert_metric_present(metrics_text: &str, metric_name: &str) {
             }
         }
     }
-    panic!(
-        "Metric '{}' was expected to be present but was not found in metrics output",
-        metric_name
-    );
+    panic!("Metric '{metric_name}' was expected to be present but was not found in metrics output");
 }
 
 /// Poll the `/metrics` endpoint until any line matching `metric_name` (with any labels) has a
@@ -180,8 +170,7 @@ pub async fn poll_until_metric_gte(
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
-                "Metric '{}' never reached >= {} within {:?}. Last /metrics response:\n{}",
-                metric_name, min, timeout, metrics
+                "Metric '{metric_name}' never reached >= {min} within {timeout:?}. Last /metrics response:\n{metrics}"
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -193,8 +182,7 @@ pub async fn assert_api_health(monitoring_addr: SocketAddr) {
     let body = fetch_api(monitoring_addr, "/api/v1/health").await;
     assert!(
         body.contains("\"status\":\"ok\""),
-        "Health endpoint should return ok status, got: {}",
-        body
+        "Health endpoint should return ok status, got: {body}"
     );
 }
 

@@ -6,7 +6,7 @@ on:
     branches:
       - main
 
-name: MSRV 1.85 Check
+name: MSRV 1.88 Check
 
 jobs:
   build:
@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v1.2.0
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
 
       - name: Install capnp dependencies
         run: sudo apt-get install -y capnproto libcapnp-dev

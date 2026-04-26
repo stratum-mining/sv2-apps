@@ -633,7 +633,7 @@ async fn handle_client_by_id(
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Sv2 client {} not found", client_id),
+                error: format!("Sv2 client {client_id} not found"),
             }),
         )
             .into_response(),
@@ -693,7 +693,7 @@ async fn handle_client_channels(
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Sv2 client {} not found", client_id),
+                error: format!("Sv2 client {client_id} not found"),
             }),
         )
             .into_response(),
@@ -793,7 +793,7 @@ async fn handle_sv1_client_by_id(
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Sv1 client {} not found", client_id),
+                error: format!("Sv1 client {client_id} not found"),
             }),
         )
             .into_response(),
@@ -825,7 +825,7 @@ async fn handle_asic_telemetry(
     };
     let ip = match parse_ip(&ip) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.telemetry(ip, None).await {
@@ -841,7 +841,7 @@ async fn handle_asic_pools(Path(ip): Path<String>, State(state): State<ServerSta
     };
     let ip = match parse_ip(&ip) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.pools(ip, None).await {
@@ -861,7 +861,7 @@ async fn handle_asic_update_pools(
     };
     let ip = match parse_ip(&ip) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.update_pools(ip, request).await {
@@ -887,7 +887,7 @@ async fn handle_asic_action(
     };
     let ip = match parse_ip(&ip) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.action(ip, &action, request.auth).await {
@@ -906,7 +906,7 @@ async fn handle_sv1_client_asic(
     };
     let ip = match sv1_client_ip(&state, client_id) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.telemetry(ip, None).await {
@@ -925,7 +925,7 @@ async fn handle_sv1_client_pools(
     };
     let ip = match sv1_client_ip(&state, client_id) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.pools(ip, None).await {
@@ -945,7 +945,7 @@ async fn handle_sv1_client_update_pools(
     };
     let ip = match sv1_client_ip(&state, client_id) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.update_pools(ip, request).await {
@@ -965,7 +965,7 @@ async fn handle_sv1_client_action(
     };
     let ip = match sv1_client_ip(&state, client_id) {
         Ok(ip) => ip,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match monitor.action(ip, &action, request.auth).await {
@@ -1015,39 +1015,43 @@ async fn enrich_sv1_client_with_asic(state: &ServerState, client: &mut Sv1Client
 }
 
 #[cfg(feature = "asic-monitoring")]
-fn sv1_client_ip(state: &ServerState, client_id: usize) -> Result<IpAddr, Response> {
+fn sv1_client_ip(state: &ServerState, client_id: usize) -> Result<IpAddr, Box<Response>> {
     let snapshot = state.cache.get_snapshot();
     let Some(clients) = snapshot.sv1_clients else {
-        return Err(monitoring_error(
+        return Err(Box::new(monitoring_error(
             StatusCode::NOT_FOUND,
             "Sv1 client monitoring not available",
-        ));
+        )));
     };
     let Some(client) = clients.iter().find(|client| client.client_id == client_id) else {
-        return Err(monitoring_error(
+        return Err(Box::new(monitoring_error(
             StatusCode::NOT_FOUND,
             format!("Sv1 client {client_id} not found"),
-        ));
+        )));
     };
     let Some(peer_ip) = client.peer_ip.as_ref() else {
-        return Err(monitoring_error(
+        return Err(Box::new(monitoring_error(
             StatusCode::BAD_REQUEST,
             format!("Sv1 client {client_id} has no peer IP"),
-        ));
+        )));
     };
 
     peer_ip.parse::<IpAddr>().map_err(|_| {
-        monitoring_error(
+        Box::new(monitoring_error(
             StatusCode::BAD_REQUEST,
             format!("Sv1 client {client_id} peer IP is invalid: {peer_ip}"),
-        )
+        ))
     })
 }
 
 #[cfg(feature = "asic-monitoring")]
-fn parse_ip(ip: &str) -> Result<IpAddr, Response> {
-    ip.parse::<IpAddr>()
-        .map_err(|_| monitoring_error(StatusCode::BAD_REQUEST, format!("Invalid IP: {ip}")))
+fn parse_ip(ip: &str) -> Result<IpAddr, Box<Response>> {
+    ip.parse::<IpAddr>().map_err(|_| {
+        Box::new(monitoring_error(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid IP: {ip}"),
+        ))
+    })
 }
 
 #[cfg(feature = "asic-monitoring")]
@@ -1239,7 +1243,7 @@ async fn handle_prometheus_metrics(State(state): State<ServerState>) -> Response
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("UTF-8 error: {}", e),
+                    error: format!("UTF-8 error: {e}"),
                 }),
             )
                 .into_response(),
@@ -1247,7 +1251,7 @@ async fn handle_prometheus_metrics(State(state): State<ServerState>) -> Response
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Encoding error: {}", e),
+                error: format!("Encoding error: {e}"),
             }),
         )
             .into_response(),

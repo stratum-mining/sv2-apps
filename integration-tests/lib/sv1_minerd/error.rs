@@ -28,19 +28,19 @@ pub enum MinerdError {
 impl fmt::Display for MinerdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MinerdError::Io(e) => write!(f, "IO error: {}", e),
-            MinerdError::ProcessSpawn(e) => write!(f, "Failed to spawn minerd process: {}", e),
+            MinerdError::Io(e) => write!(f, "IO error: {e}"),
+            MinerdError::ProcessSpawn(e) => write!(f, "Failed to spawn minerd process: {e}"),
             MinerdError::ProcessAlreadyRunning => write!(f, "Minerd process is already running"),
             MinerdError::ProcessNotRunning => write!(f, "Minerd process is not running"),
-            MinerdError::NetworkConnection(e) => write!(f, "Network connection failed: {}", e),
-            MinerdError::ProxySetup(e) => write!(f, "Proxy setup failed: {}", e),
-            MinerdError::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {}", msg),
+            MinerdError::NetworkConnection(e) => write!(f, "Network connection failed: {e}"),
+            MinerdError::ProxySetup(e) => write!(f, "Proxy setup failed: {e}"),
+            MinerdError::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {msg}"),
             MinerdError::HashrateParseError => {
                 write!(f, "Failed to parse hashrate from minerd benchmark output")
             }
             MinerdError::MutexPoisoned => write!(f, "Mutex was poisoned"),
             MinerdError::OsArchNotSupported(msg) => {
-                write!(f, "OS or architecture not supported: {}", msg)
+                write!(f, "OS or architecture not supported: {msg}")
             }
         }
     }

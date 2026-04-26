@@ -41,7 +41,7 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.85
+        uses: dtolnay/rust-toolchain@1.88
       - name: Test stratum-apps workspace
         run: cargo test --manifest-path=stratum-apps/Cargo.toml --all-features
       - name: Test pool

@@ -216,7 +216,7 @@ impl BitcoinCoreIPCEngine {
                 None => {
                     // Use OS default Bitcoin data directory
                     let home = std::env::var("HOME").map_err(|e| {
-                        JDSErrorKind::BitcoinCoreIPC(format!("Cannot get HOME directory: {}", e))
+                        JDSErrorKind::BitcoinCoreIPC(format!("Cannot get HOME directory: {e}"))
                     })?;
 
                     #[cfg(target_os = "macos")]

@@ -60,7 +60,7 @@ impl fmt::Display for Error {
                 write!(f, "Invalid handshake message received from remote peer")
             }
 
-            Error::CodecError(e) => write!(f, "{}", e),
+            Error::CodecError(e) => write!(f, "{e}"),
 
             Error::RecvError => write!(f, "Error receiving from async channel"),
 

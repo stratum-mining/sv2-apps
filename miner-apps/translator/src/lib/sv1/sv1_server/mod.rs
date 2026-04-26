@@ -1307,7 +1307,7 @@ impl Sv1Server {
         let counter = self
             .keepalive_job_id_counter
             .fetch_add(1, Ordering::Relaxed);
-        format!("{}#{}", original_job_id, counter)
+        format!("{original_job_id}#{counter}")
     }
 
     /// Extracts the original upstream job ID from a keepalive job ID.

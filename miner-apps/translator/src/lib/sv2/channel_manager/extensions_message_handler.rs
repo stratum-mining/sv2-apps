@@ -50,8 +50,7 @@ impl HandleExtensionsFromServerAsync for ChannelManager {
                 missing_required
             );
             return Err(TproxyError::fallback(TproxyErrorKind::General(format!(
-                "Server does not support required extensions: {:?}",
-                missing_required
+                "Server does not support required extensions: {missing_required:?}"
             ))));
         }
 

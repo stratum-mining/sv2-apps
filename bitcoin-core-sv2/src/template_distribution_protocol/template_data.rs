@@ -221,7 +221,7 @@ impl TemplateData {
 
             let solution_block_bytes = serialize(&solution_block);
             let solution_block_hash = solution_block.block_hash().to_string();
-            let solution_block_path = path_dir.join(format!("{}.dat", solution_block_hash));
+            let solution_block_path = path_dir.join(format!("{solution_block_hash}.dat"));
 
             let mut file =
                 File::create(&solution_block_path).expect("Failed to create solution block file");

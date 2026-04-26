@@ -23,7 +23,7 @@ jobs:
         run: sudo apt-get install -y capnproto libcapnp-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.85
+        uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy
 

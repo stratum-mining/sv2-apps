@@ -33,8 +33,7 @@ fn get_minerd_filename(os: &str, arch: &str) -> Result<String, MinerdError> {
             "pooler-cpuminer-{VERSION_MINERD}-linux-arm64.tar.gz"
         )),
         _ => Err(MinerdError::OsArchNotSupported(format!(
-            "OS or architecture not supported: {} {}",
-            os, arch
+            "OS or architecture not supported: {os} {arch}"
         ))),
     }
 }

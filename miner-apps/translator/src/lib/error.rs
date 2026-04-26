@@ -233,20 +233,18 @@ impl fmt::Display for TproxyErrorKind {
             JobNotFound => write!(f, "Job not found during share validation"),
             InvalidMerkleRoot => write!(f, "Invalid merkle root during share validation"),
             PendingChannelNotFound(request_id) => {
-                write!(f, "No pending channel found for request_id: {}", request_id)
+                write!(f, "No pending channel found for request_id: {request_id}")
             }
             RequiredExtensionsNotSupported(extensions) => {
                 write!(
                     f,
-                    "Server does not support required extensions: {:?}",
-                    extensions
+                    "Server does not support required extensions: {extensions:?}"
                 )
             }
             ServerRequiresUnsupportedExtensions(extensions) => {
                 write!(
                     f,
-                    "Server requires extensions that we don't support: {:?}",
-                    extensions
+                    "Server requires extensions that we don't support: {extensions:?}"
                 )
             }
             SV1Error => write!(f, "Sv1 error"),
