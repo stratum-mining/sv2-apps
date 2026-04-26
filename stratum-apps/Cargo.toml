@@ -51,6 +51,8 @@ axum = { version = "0.8.7", optional = true }
 prometheus = { version = "0.13", optional = true }
 utoipa = { version = "5.4.0", features = ["axum_extras"], optional = true }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
+asic-rs = { git = "https://github.com/256foundation/asic-rs.git", tag = "v0.5.0", optional = true }
+asic-rs-core = { git = "https://github.com/256foundation/asic-rs.git", tag = "v0.5.0", optional = true }
 
 # Common external dependencies that roles always need
 ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
@@ -64,6 +66,7 @@ network = ["tokio-util", "core"]
 config = []
 rpc = ["serde_json", "hex", "base64", "hyper", "hyper-util", "http-body-util"]
 monitoring = ["serde_json", "axum", "prometheus", "utoipa", "utoipa-swagger-ui"]
+asic-monitoring = ["monitoring", "asic-rs", "asic-rs-core"]
 std = ["bs58/std", "secp256k1/rand-std", "rand/std", "rand/std_rng"]
 core = ["stratum-core"]
 

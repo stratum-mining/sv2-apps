@@ -6,11 +6,16 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use super::AsicMinerTelemetry;
+
 /// Information about a single SV1 client connection
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Sv1ClientInfo {
     pub client_id: usize,
     pub channel_id: Option<u32>,
+    pub peer_ip: Option<String>,
+    pub peer_port: Option<u16>,
+    pub asic: Option<AsicMinerTelemetry>,
     pub authorized_worker_name: String,
     pub user_identity: String,
     pub target_hex: String,
@@ -62,6 +67,9 @@ mod tests {
         Sv1ClientInfo {
             client_id: id,
             channel_id: Some(id as u32),
+            peer_ip: Some("192.0.2.10".into()),
+            peer_port: Some(4028),
+            asic: None,
             authorized_worker_name: format!("worker-{}", id),
             user_identity: format!("miner-{}", id),
             target_hex: "00ff".into(),

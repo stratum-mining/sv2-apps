@@ -11,8 +11,11 @@ use super::{
     },
     snapshot_cache::SnapshotCache,
     sv1::{Sv1ClientInfo, Sv1ClientsMonitoring, Sv1ClientsSummary},
-    GlobalInfo,
+    AsicDiscoveredMiner, AsicMinerCapabilities, AsicMinerTelemetry, AsicPoolConfig, AsicPoolData,
+    AsicPoolGroupConfig, AsicPoolGroupData, AsicScanError, AsicScanResponse, GlobalInfo,
 };
+#[cfg(feature = "asic-monitoring")]
+use axum::routing::post;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -20,8 +23,12 @@ use axum::{
     routing::get,
     Router,
 };
+#[cfg(feature = "asic-monitoring")]
+use futures::future::join_all;
 use prometheus::{Encoder, TextEncoder};
 use serde::Deserialize;
+#[cfg(feature = "asic-monitoring")]
+use std::net::IpAddr;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -63,6 +70,15 @@ use utoipa_swagger_ui::SwaggerUi;
         StandardChannelInfo,
         Sv1ClientInfo,
         Sv1ClientsSummary,
+        AsicMinerCapabilities,
+        AsicMinerTelemetry,
+        AsicDiscoveredMiner,
+        AsicPoolData,
+        AsicPoolGroupData,
+        AsicPoolConfig,
+        AsicPoolGroupConfig,
+        AsicScanError,
+        AsicScanResponse,
         HealthResponse,
         ErrorResponse,
         ServerResponse,
@@ -88,6 +104,8 @@ struct ServerState {
     cache: Arc<SnapshotCache>,
     start_time: u64,
     metrics: PrometheusMetrics,
+    #[cfg(feature = "asic-monitoring")]
+    asic_monitor: Option<Arc<super::AsicMonitor>>,
 }
 
 const DEFAULT_LIMIT: usize = 25;
@@ -101,6 +119,10 @@ struct Pagination {
     /// Limit for pagination (default: 25, max: 100)
     #[serde(default)]
     limit: Option<usize>,
+    /// Include ASIC telemetry where available (SV1 endpoints only).
+    #[cfg_attr(not(feature = "asic-monitoring"), allow(dead_code))]
+    #[serde(default)]
+    include_asic: bool,
 }
 
 impl Pagination {
@@ -180,6 +202,8 @@ impl MonitoringServer {
                 cache,
                 start_time,
                 metrics,
+                #[cfg(feature = "asic-monitoring")]
+                asic_monitor: None,
             },
         })
     }
@@ -211,6 +235,13 @@ impl MonitoringServer {
         self.state.cache = cache;
 
         Ok(self)
+    }
+
+    /// Enable ASIC miner discovery, telemetry, and control endpoints via `asic-rs`.
+    #[cfg(feature = "asic-monitoring")]
+    pub fn with_asic_monitoring(mut self) -> Self {
+        self.state.asic_monitor = Some(Arc::new(super::AsicMonitor::new()));
+        self
     }
 
     /// Run the monitoring server until the shutdown signal completes
@@ -252,6 +283,25 @@ impl MonitoringServer {
             .route("/clients/{client_id}/channels", get(handle_client_channels))
             .route("/sv1/clients", get(handle_sv1_clients))
             .route("/sv1/clients/{client_id}", get(handle_sv1_client_by_id));
+
+        #[cfg(feature = "asic-monitoring")]
+        let api_v1 = api_v1
+            .route("/asic/scan", post(handle_asic_scan))
+            .route("/asic/{ip}/telemetry", get(handle_asic_telemetry))
+            .route(
+                "/asic/{ip}/pools",
+                get(handle_asic_pools).put(handle_asic_update_pools),
+            )
+            .route("/asic/{ip}/actions/{action}", post(handle_asic_action))
+            .route("/sv1/clients/{client_id}/asic", get(handle_sv1_client_asic))
+            .route(
+                "/sv1/clients/{client_id}/pools",
+                get(handle_sv1_client_pools).put(handle_sv1_client_update_pools),
+            )
+            .route(
+                "/sv1/clients/{client_id}/actions/{action}",
+                post(handle_sv1_client_action),
+            );
 
         let app = Router::new()
             .route("/", get(handle_root))
@@ -670,6 +720,14 @@ async fn handle_sv1_clients(
     match snapshot.sv1_clients {
         Some(ref sv1_clients) => {
             let (total, items) = paginate(sv1_clients, &params);
+            #[cfg(feature = "asic-monitoring")]
+            let items = {
+                let mut items = items;
+                if params.include_asic {
+                    enrich_sv1_clients_with_asic(&state, &mut items).await;
+                }
+                items
+            };
 
             Json(Sv1ClientsResponse {
                 offset: params.offset,
@@ -722,7 +780,16 @@ async fn handle_sv1_client_by_id(
     };
 
     match sv1_clients.iter().find(|c| c.client_id == client_id) {
-        Some(client) => Json(client.clone()).into_response(),
+        Some(client) => {
+            let client = client.clone();
+            #[cfg(feature = "asic-monitoring")]
+            let client = {
+                let mut client = client;
+                enrich_sv1_client_with_asic(&state, &mut client).await;
+                client
+            };
+            Json(client).into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -731,6 +798,267 @@ async fn handle_sv1_client_by_id(
         )
             .into_response(),
     }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_asic_scan(
+    State(state): State<ServerState>,
+    Json(request): Json<super::AsicScanRequest>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+
+    match monitor.scan(request).await {
+        Ok(scan) => Json(scan).into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_asic_telemetry(
+    Path(ip): Path<String>,
+    State(state): State<ServerState>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match parse_ip(&ip) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.telemetry(ip, None).await {
+        Ok(telemetry) => Json(telemetry).into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_asic_pools(Path(ip): Path<String>, State(state): State<ServerState>) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match parse_ip(&ip) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.pools(ip, None).await {
+        Ok(pools) => Json(pools).into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_asic_update_pools(
+    Path(ip): Path<String>,
+    State(state): State<ServerState>,
+    Json(request): Json<super::AsicUpdatePoolsRequest>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match parse_ip(&ip) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.update_pools(ip, request).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+#[derive(Deserialize)]
+struct AsicActionRequest {
+    auth: Option<super::asic::AsicCredentials>,
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_asic_action(
+    Path((ip, action)): Path<(String, String)>,
+    State(state): State<ServerState>,
+    Json(request): Json<AsicActionRequest>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match parse_ip(&ip) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.action(ip, &action, request.auth).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_sv1_client_asic(
+    Path(client_id): Path<usize>,
+    State(state): State<ServerState>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match sv1_client_ip(&state, client_id) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.telemetry(ip, None).await {
+        Ok(telemetry) => Json(telemetry).into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_sv1_client_pools(
+    Path(client_id): Path<usize>,
+    State(state): State<ServerState>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match sv1_client_ip(&state, client_id) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.pools(ip, None).await {
+        Ok(pools) => Json(pools).into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_sv1_client_update_pools(
+    Path(client_id): Path<usize>,
+    State(state): State<ServerState>,
+    Json(request): Json<super::AsicUpdatePoolsRequest>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match sv1_client_ip(&state, client_id) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.update_pools(ip, request).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn handle_sv1_client_action(
+    Path((client_id, action)): Path<(usize, String)>,
+    State(state): State<ServerState>,
+    Json(request): Json<AsicActionRequest>,
+) -> Response {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return monitoring_error(StatusCode::NOT_FOUND, "ASIC monitoring not available");
+    };
+    let ip = match sv1_client_ip(&state, client_id) {
+        Ok(ip) => ip,
+        Err(response) => return response,
+    };
+
+    match monitor.action(ip, &action, request.auth).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => monitoring_error(StatusCode::BAD_GATEWAY, error),
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn enrich_sv1_clients_with_asic(state: &ServerState, clients: &mut [Sv1ClientInfo]) {
+    let Some(monitor) = state.asic_monitor.as_ref().cloned() else {
+        return;
+    };
+    let futures = clients
+        .iter()
+        .enumerate()
+        .filter_map(|(index, client)| {
+            let ip = client.peer_ip.as_ref()?.parse::<IpAddr>().ok()?;
+            let monitor = monitor.clone();
+            Some(async move { (index, monitor.telemetry(ip, None).await.ok()) })
+        })
+        .collect::<Vec<_>>();
+
+    for (index, telemetry) in join_all(futures).await {
+        if let Some(telemetry) = telemetry {
+            clients[index].asic = Some(telemetry);
+        }
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+async fn enrich_sv1_client_with_asic(state: &ServerState, client: &mut Sv1ClientInfo) {
+    let Some(monitor) = state.asic_monitor.as_ref() else {
+        return;
+    };
+    let Some(ip) = client
+        .peer_ip
+        .as_ref()
+        .and_then(|peer_ip| peer_ip.parse::<IpAddr>().ok())
+    else {
+        return;
+    };
+
+    if let Ok(telemetry) = monitor.telemetry(ip, None).await {
+        client.asic = Some(telemetry);
+    }
+}
+
+#[cfg(feature = "asic-monitoring")]
+fn sv1_client_ip(state: &ServerState, client_id: usize) -> Result<IpAddr, Response> {
+    let snapshot = state.cache.get_snapshot();
+    let Some(clients) = snapshot.sv1_clients else {
+        return Err(monitoring_error(
+            StatusCode::NOT_FOUND,
+            "Sv1 client monitoring not available",
+        ));
+    };
+    let Some(client) = clients.iter().find(|client| client.client_id == client_id) else {
+        return Err(monitoring_error(
+            StatusCode::NOT_FOUND,
+            format!("Sv1 client {client_id} not found"),
+        ));
+    };
+    let Some(peer_ip) = client.peer_ip.as_ref() else {
+        return Err(monitoring_error(
+            StatusCode::BAD_REQUEST,
+            format!("Sv1 client {client_id} has no peer IP"),
+        ));
+    };
+
+    peer_ip.parse::<IpAddr>().map_err(|_| {
+        monitoring_error(
+            StatusCode::BAD_REQUEST,
+            format!("Sv1 client {client_id} peer IP is invalid: {peer_ip}"),
+        )
+    })
+}
+
+#[cfg(feature = "asic-monitoring")]
+fn parse_ip(ip: &str) -> Result<IpAddr, Response> {
+    ip.parse::<IpAddr>()
+        .map_err(|_| monitoring_error(StatusCode::BAD_REQUEST, format!("Invalid IP: {ip}")))
+}
+
+#[cfg(feature = "asic-monitoring")]
+fn monitoring_error(status: StatusCode, error: impl Into<String>) -> Response {
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for Prometheus metrics endpoint
@@ -1028,6 +1356,9 @@ mod tests {
         Sv1ClientInfo {
             client_id: id,
             channel_id: Some(id as u32),
+            peer_ip: Some("192.0.2.10".into()),
+            peer_port: Some(4028),
+            asic: None,
             authorized_worker_name: format!("worker-{}", id),
             user_identity: format!("miner-{}", id),
             target_hex: "00ff".into(),
@@ -1095,6 +1426,8 @@ mod tests {
             cache,
             start_time,
             metrics,
+            #[cfg(feature = "asic-monitoring")]
+            asic_monitor: None,
         };
 
         let api_v1 = Router::new()
@@ -1135,6 +1468,7 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: None,
+            include_asic: false,
         };
         assert_eq!(p.effective_limit(), DEFAULT_LIMIT);
     }
@@ -1144,6 +1478,7 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: Some(500),
+            include_asic: false,
         };
         assert_eq!(p.effective_limit(), MAX_LIMIT);
     }
@@ -1153,6 +1488,7 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: Some(5),
+            include_asic: false,
         };
         assert_eq!(p.effective_limit(), 5);
     }
@@ -1163,6 +1499,7 @@ mod tests {
         let params = Pagination {
             offset: 0,
             limit: Some(10),
+            include_asic: false,
         };
         let (total, result) = paginate(&items, &params);
         assert_eq!(total, 0);
@@ -1175,6 +1512,7 @@ mod tests {
         let params = Pagination {
             offset: 10,
             limit: Some(5),
+            include_asic: false,
         };
         let (total, result) = paginate(&items, &params);
         assert_eq!(total, 50);
@@ -1187,6 +1525,7 @@ mod tests {
         let params = Pagination {
             offset: 100,
             limit: Some(10),
+            include_asic: false,
         };
         let (total, result) = paginate(&items, &params);
         assert_eq!(total, 3);
@@ -1199,6 +1538,7 @@ mod tests {
         let params = Pagination {
             offset: 3,
             limit: Some(10),
+            include_asic: false,
         };
         let (total, result) = paginate(&items, &params);
         assert_eq!(total, 5);

@@ -35,7 +35,7 @@ dashmap = "6.1.0"
 
 [features]
 default = ["monitoring"]
-monitoring = ["stratum-apps/monitoring"]
+monitoring = ["stratum-apps/asic-monitoring"]
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
