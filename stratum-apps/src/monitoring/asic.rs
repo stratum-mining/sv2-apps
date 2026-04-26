@@ -11,12 +11,14 @@ use asic_rs::MinerFactory;
 use asic_rs_core::{
     config::pools::{PoolConfig, PoolGroupConfig},
     data::{
+        collector::DataField,
         hashrate::{HashRate, HashRateUnit},
         miner::MinerData,
         pool::PoolURL,
     },
     traits::miner::{Miner, MinerAuth},
 };
+use measurements::Temperature;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
 use utoipa::ToSchema;
@@ -28,6 +30,8 @@ use super::{
 };
 
 const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const FALLBACK_TELEMETRY_TIMEOUT: Duration = Duration::from_secs(6);
+const FALLBACK_FIELD_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_SCAN_CONCURRENCY: usize = 32;
 const MAX_SCAN_CONCURRENCY: usize = 64;
@@ -88,9 +92,14 @@ impl AsicMonitor {
     ) -> Result<AsicMinerTelemetry, String> {
         let handle = self.miner_for_ip(ip, auth).await?;
         let guard = handle.lock().await;
-        let data = tokio::time::timeout(DEFAULT_OPERATION_TIMEOUT, guard.get_data())
+        let mut data = tokio::time::timeout(DEFAULT_OPERATION_TIMEOUT, guard.get_data())
             .await
             .map_err(|_| format!("Timed out reading telemetry from {ip}"))?;
+        let _ = tokio::time::timeout(
+            FALLBACK_TELEMETRY_TIMEOUT,
+            fill_missing_telemetry_fields(&mut data, guard.as_ref()),
+        )
+        .await;
 
         Ok(miner_data_to_telemetry(data, guard.as_ref()))
     }
@@ -387,7 +396,212 @@ fn expand_ipv4_cidr(target: &str) -> Result<Vec<IpAddr>, String> {
         .collect())
 }
 
+async fn fill_missing_telemetry_fields(data: &mut MinerData, miner: &dyn Miner) {
+    if !has_missing_telemetry_fields(data) {
+        return;
+    }
+
+    if data.mac.is_none() {
+        data.mac = field_timeout(miner.get_mac()).await.flatten();
+    }
+    if data.serial_number.is_none() {
+        data.serial_number = field_timeout(miner.get_serial_number()).await.flatten();
+    }
+    if data.hostname.is_none() {
+        data.hostname = field_timeout(miner.get_hostname()).await.flatten();
+    }
+    if data.api_version.is_none() {
+        data.api_version = field_timeout(miner.get_api_version()).await.flatten();
+    }
+    if data.firmware_version.is_none() {
+        data.firmware_version = field_timeout(miner.get_firmware_version()).await.flatten();
+    }
+    if data.control_board_version.is_none() {
+        data.control_board_version = field_timeout(miner.get_control_board_version())
+            .await
+            .flatten();
+    }
+
+    if data.hashboards.is_empty() || !hashboards_have_runtime_data(&data.hashboards) {
+        let hashboards = field_timeout(miner.get_hashboards())
+            .await
+            .unwrap_or_default();
+        if !hashboards.is_empty()
+            && (data.hashboards.is_empty() || hashboards_have_runtime_data(&hashboards))
+        {
+            data.hashboards = hashboards;
+        }
+    }
+
+    if data.hashrate.is_none() {
+        data.hashrate = field_timeout(miner.get_hashrate()).await.flatten();
+    }
+    if data.expected_hashrate.is_none() {
+        data.expected_hashrate = field_timeout(miner.get_expected_hashrate()).await.flatten();
+    }
+    if data.fans.is_empty() {
+        data.fans = field_timeout(miner.get_fans()).await.unwrap_or_default();
+    }
+    if data.psu_fans.is_empty() {
+        data.psu_fans = field_timeout(miner.get_psu_fans())
+            .await
+            .unwrap_or_default();
+    }
+    if data.fluid_temperature.is_none() {
+        data.fluid_temperature = field_timeout(miner.get_fluid_temperature()).await.flatten();
+    }
+    if data.wattage.is_none() {
+        data.wattage = field_timeout(miner.get_wattage()).await.flatten();
+    }
+    if data.tuning_target.is_none() {
+        data.tuning_target = field_timeout(miner.get_tuning_target()).await.flatten();
+    }
+    if data.light_flashing.is_none() {
+        data.light_flashing = field_timeout(miner.get_light_flashing()).await.flatten();
+    }
+    if data.messages.is_empty() {
+        data.messages = field_timeout(miner.get_messages())
+            .await
+            .unwrap_or_default();
+    }
+    if data.uptime.is_none() {
+        data.uptime = field_timeout(miner.get_uptime()).await.flatten();
+    }
+    if data.pools.is_empty() || pools_are_empty_defaults(&data.pools) {
+        data.pools = field_timeout(miner.get_pools()).await.unwrap_or_default();
+    }
+
+    if data.average_temperature.is_none() {
+        data.average_temperature = match average_temperature_from_hashboards(data) {
+            Some(temperature) => Some(temperature),
+            None => field_timeout(collect_average_temperature(miner))
+                .await
+                .flatten(),
+        };
+    }
+    if data.efficiency.is_none() {
+        data.efficiency = efficiency_from_miner_data(data);
+    }
+
+    if !data.is_mining {
+        data.is_mining = field_timeout(miner.get_is_mining()).await.unwrap_or(false)
+            || data
+                .hashrate
+                .as_ref()
+                .is_some_and(|hashrate| hashrate_as_hs(hashrate) > 0.0)
+            || hashboard_hashrate_hs(data).is_some_and(|hashrate| hashrate > 0.0);
+    }
+}
+
+async fn field_timeout<T>(future: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(FALLBACK_FIELD_TIMEOUT, future)
+        .await
+        .ok()
+}
+
+async fn collect_average_temperature(miner: &dyn Miner) -> Option<Temperature> {
+    let mut collector = miner.get_collector();
+    let values = collector.collect(&[DataField::AverageTemperature]).await;
+    values
+        .get(&DataField::AverageTemperature)
+        .and_then(|value| value.as_f64())
+        .map(Temperature::from_celsius)
+}
+
+fn has_missing_telemetry_fields(data: &MinerData) -> bool {
+    data.hashrate.is_none()
+        || data.wattage.is_none()
+        || data.average_temperature.is_none()
+        || data.uptime.is_none()
+        || !hashboards_have_runtime_data(&data.hashboards)
+}
+
+fn hashboards_have_runtime_data(hashboards: &[asic_rs_core::data::board::BoardData]) -> bool {
+    hashboards.iter().any(|board| {
+        board.hashrate.is_some()
+            || board.expected_hashrate.is_some()
+            || board.board_temperature.is_some()
+            || board.intake_temperature.is_some()
+            || board.outlet_temperature.is_some()
+            || board.working_chips.is_some()
+            || board.voltage.is_some()
+            || board.frequency.is_some()
+            || board.active.is_some()
+    })
+}
+
+fn pools_are_empty_defaults(pools: &[asic_rs_core::data::pool::PoolGroupData]) -> bool {
+    pools.iter().all(|group| {
+        group.pools.iter().all(|pool| {
+            pool.url
+                .as_ref()
+                .is_none_or(|url| url.host.is_empty() || url.port == 0)
+        })
+    })
+}
+
+fn average_temperature_from_hashboards(data: &MinerData) -> Option<Temperature> {
+    let temperatures = data
+        .hashboards
+        .iter()
+        .filter_map(|board| {
+            board
+                .board_temperature
+                .as_ref()
+                .map(|temperature| temperature.as_celsius())
+        })
+        .collect::<Vec<_>>();
+
+    if temperatures.is_empty() {
+        None
+    } else {
+        Some(Temperature::from_celsius(
+            temperatures.iter().sum::<f64>() / temperatures.len() as f64,
+        ))
+    }
+}
+
+fn efficiency_from_miner_data(data: &MinerData) -> Option<f64> {
+    let hashrate_th = data
+        .hashrate
+        .as_ref()
+        .map(|hashrate| hashrate.clone().as_unit(HashRateUnit::TeraHash).value)?;
+    if hashrate_th <= 0.0 {
+        return None;
+    }
+
+    data.wattage
+        .as_ref()
+        .map(|power| power.as_watts() / hashrate_th)
+}
+
 fn miner_data_to_telemetry(data: MinerData, miner: &dyn Miner) -> AsicMinerTelemetry {
+    let hashrate_hs = data
+        .hashrate
+        .as_ref()
+        .map(hashrate_as_hs)
+        .or_else(|| hashboard_hashrate_hs(&data));
+    let expected_hashrate_hs = data
+        .expected_hashrate
+        .as_ref()
+        .map(hashrate_as_hs)
+        .or_else(|| hashboard_expected_hashrate_hs(&data));
+    let average_temperature_c = data
+        .average_temperature
+        .as_ref()
+        .map(|temperature| temperature.as_celsius())
+        .or_else(|| hashboard_average_temperature_c(&data));
+    let efficiency_j_th = data.efficiency.or_else(|| {
+        data.wattage.as_ref().and_then(|power| {
+            let hashrate_th = hashrate_hs? / 1_000_000_000_000.0;
+            if hashrate_th > 0.0 {
+                Some(power.as_watts() / hashrate_th)
+            } else {
+                None
+            }
+        })
+    });
+
     AsicMinerTelemetry {
         ip: data.ip.to_string(),
         make: data.device_info.make,
@@ -401,14 +615,11 @@ fn miner_data_to_telemetry(data: MinerData, miner: &dyn Miner) -> AsicMinerTelem
         control_board_version: data
             .control_board_version
             .map(|version| version.to_string()),
-        hashrate_hs: data.hashrate.as_ref().map(hashrate_as_hs),
-        expected_hashrate_hs: data.expected_hashrate.as_ref().map(hashrate_as_hs),
+        hashrate_hs,
+        expected_hashrate_hs,
         power_w: data.wattage.as_ref().map(|power| power.as_watts()),
-        efficiency_j_th: data.efficiency,
-        average_temperature_c: data
-            .average_temperature
-            .as_ref()
-            .map(|temperature| temperature.as_celsius()),
+        efficiency_j_th,
+        average_temperature_c,
         fluid_temperature_c: data
             .fluid_temperature
             .as_ref()
@@ -549,6 +760,53 @@ fn pool_group_config_to_asic(group: AsicPoolGroupConfig) -> PoolGroupConfig {
                 password: pool.password,
             })
             .collect(),
+    }
+}
+
+fn hashboard_hashrate_hs(data: &MinerData) -> Option<f64> {
+    sum_hashboard_hashrates(data, |board| board.hashrate.as_ref())
+}
+
+fn hashboard_expected_hashrate_hs(data: &MinerData) -> Option<f64> {
+    sum_hashboard_hashrates(data, |board| board.expected_hashrate.as_ref())
+}
+
+fn sum_hashboard_hashrates<'a>(
+    data: &'a MinerData,
+    select: impl Fn(&'a asic_rs_core::data::board::BoardData) -> Option<&'a HashRate>,
+) -> Option<f64> {
+    let values = data
+        .hashboards
+        .iter()
+        .filter_map(select)
+        .map(hashrate_as_hs)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect::<Vec<_>>();
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum())
+    }
+}
+
+fn hashboard_average_temperature_c(data: &MinerData) -> Option<f64> {
+    let temperatures = data
+        .hashboards
+        .iter()
+        .filter_map(|board| {
+            board
+                .board_temperature
+                .as_ref()
+                .map(|temperature| temperature.as_celsius())
+        })
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+
+    if temperatures.is_empty() {
+        None
+    } else {
+        Some(temperatures.iter().sum::<f64>() / temperatures.len() as f64)
     }
 }
 

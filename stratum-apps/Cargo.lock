@@ -3230,6 +3230,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "measurements",
  "miniscript",
  "prometheus",
  "rand 0.8.5",
