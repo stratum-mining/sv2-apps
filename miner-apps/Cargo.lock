@@ -3599,6 +3599,7 @@ dependencies = [
  "config",
  "dirs",
  "futures",
+ "measurements",
  "miniscript",
  "prometheus",
  "rand 0.8.5",
