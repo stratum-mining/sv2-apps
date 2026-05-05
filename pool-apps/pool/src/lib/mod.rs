@@ -280,6 +280,7 @@ impl PoolSv2 {
         info!("Spawning status listener task...");
 
         tokio::select! {
+            biased;
             _ = tokio::signal::ctrl_c() => {
                 info!("Ctrl+C received — initiating graceful shutdown...");
                 cancellation_token.cancel();
