@@ -396,7 +396,9 @@ impl JobDeclaratorClient {
             tokio::select! {
                 biased;
 
-                _ = self.cancellation_token.cancelled() => {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl+C received — initiating graceful shutdown...");
+                    self.cancellation_token.cancel();
                     break;
                 }
                 _ = fallback_token.cancelled() => {
@@ -591,9 +593,7 @@ impl JobDeclaratorClient {
                         }
                     });
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Ctrl+C received — initiating graceful shutdown...");
-                    self.cancellation_token.cancel();
+                _ = self.cancellation_token.cancelled() => {
                     break;
                 }
             }
@@ -680,11 +680,11 @@ impl JobDeclaratorClient {
 
             tokio::select! {
                 biased;
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 _ = cancellation_token.cancelled() => {
                     info!("Shutdown requested while waiting to initialize upstream, aborting retries");
                     return Err(JDCErrorKind::CouldNotInitiateSystem);
                 }
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
 
             if upstream_entry.tried_or_flagged {
@@ -727,11 +727,11 @@ impl JobDeclaratorClient {
 
                         tokio::select! {
                             biased;
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                             _ = cancellation_token.cancelled() => {
                                 info!("Shutdown requested after upstream initialization failure, aborting retries");
                                 return Err(JDCErrorKind::CouldNotInitiateSystem);
                             }
-                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                         }
 
                         warn!(

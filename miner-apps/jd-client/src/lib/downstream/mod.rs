@@ -253,15 +253,7 @@ impl Downstream {
                 let self_clone_2 = self.clone();
                 tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => {
-                        debug!("Downstream {downstream_id}: received shutdown signal");
-                        break;
-                    }
-                    _ = fallback_token.cancelled() => {
-                        debug!("Downstream {downstream_id}: received fallback signal");
-                        break;
-                    }
-                    res = self_clone_1.handle_downstream_message() => {
+                    res = self_clone_1.handle_downstream_message(), if !self_clone_1.downstream_io.downstream_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(?e, "Error handling downstream message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
@@ -274,7 +266,7 @@ impl Downstream {
                             }
                         }
                     }
-                    res = self_clone_2.handle_channel_manager_message() => {
+                    res = self_clone_2.handle_channel_manager_message(), if !self_clone_2.downstream_io.channel_manager_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(?e, "Error handling channel manager message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
@@ -286,6 +278,14 @@ impl Downstream {
                                 break;
                             }
                         }
+                    }
+                    _ = fallback_token.cancelled() => {
+                        debug!("Downstream {downstream_id}: received fallback signal");
+                        break;
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        debug!("Downstream {downstream_id}: received shutdown signal");
+                        break;
                     }
 
                 }

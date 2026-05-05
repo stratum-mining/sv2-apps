@@ -154,15 +154,15 @@ impl Upstream {
 
         let (noise_stream_reader, noise_stream_writer) = tokio::select! {
             biased;
-            _ = cancellation_token.cancelled() => {
-                info!("Shutdown received during handshake, dropping connection");
-                Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem))
-            }
             result = connect_with_noise(stream, Some(upstream_entry.authority_pubkey)) => {
                 match result {
                     Ok(noise_stream) => Ok(noise_stream.into_split()),
                     Err(e) => Err(JDCError::fallback(e))
                 }
+            }
+            _ = cancellation_token.cancelled() => {
+                info!("Shutdown received during handshake, dropping connection");
+                Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem))
             }
         }?;
 
@@ -335,16 +335,7 @@ impl Upstream {
             loop {
                 tokio::select! {
                     biased;
-
-                    _ = cancellation_token.cancelled() => {
-                        info!("Upstream: received shutdown signal");
-                        break;
-                    }
-                    _ = fallback_token.cancelled() => {
-                        info!("Upstream: fallback triggered");
-                        break;
-                    }
-                    res = self_clone_1.handle_pool_message_frame() => {
+                    res = self_clone_1.handle_pool_message_frame(), if !self_clone_1.upstream_io.upstream_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(error = ?e, "Upstream: error handling pool message.");
                             if let LoopControl::Break = Self::handle_error_action(
@@ -357,7 +348,7 @@ impl Upstream {
                             }
                         }
                     }
-                    res = self_clone_2.handle_channel_manager_message_frame() => {
+                    res = self_clone_2.handle_channel_manager_message_frame(), if !self_clone_2.upstream_io.channel_manager_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(error = ?e, "Upstream: error handling channel manager message.");
                             if let LoopControl::Break = Self::handle_error_action(
@@ -369,6 +360,14 @@ impl Upstream {
                                 break;
                             }
                         }
+                    }
+                    _ = fallback_token.cancelled() => {
+                        info!("Upstream: fallback triggered");
+                        break;
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        info!("Upstream: received shutdown signal");
+                        break;
                     }
 
                 }

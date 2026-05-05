@@ -142,12 +142,12 @@ impl JobDeclarator {
 
         let (noise_stream_reader, noise_stream_writer) = tokio::select! {
             biased;
+            result = connect_with_noise(stream, Some(upstream_entry.authority_pubkey)) => {
+                result.map_err(JDCError::fallback)?.into_split()
+            }
             _ = cancellation_token.cancelled() => {
                 info!("Shutdown received during handshake, dropping connection");
                 return Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem));
-            }
-            result = connect_with_noise(stream, Some(upstream_entry.authority_pubkey)) => {
-                result.map_err(JDCError::fallback)?.into_split()
             }
         };
 
@@ -211,15 +211,7 @@ impl JobDeclarator {
                 let self_clone_2 = self.clone();
                 tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => {
-                        info!("Job Declarator: received shutdown signal");
-                        break;
-                    }
-                    _ = fallback_token.cancelled() => {
-                        info!("Job Declarator: fallback triggered");
-                        break;
-                    }
-                    res = self_clone_1.handle_job_declarator_message() => {
+                    res = self_clone_1.handle_job_declarator_message(), if !self_clone_1.job_declarator_io.jds_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(error = ?e, "Job Declarator message handling failed");
                             if let LoopControl::Break = Self::handle_error_action(
@@ -232,7 +224,7 @@ impl JobDeclarator {
                             }
                         }
                     }
-                    res = self_clone_2.handle_channel_manager_message() => {
+                    res = self_clone_2.handle_channel_manager_message(), if !self_clone_2.job_declarator_io.channel_manager_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(error = ?e, "Channel Manager message handling failed");
                             if let LoopControl::Break = Self::handle_error_action(
@@ -245,6 +237,14 @@ impl JobDeclarator {
                             }
                         }
                     },
+                    _ = fallback_token.cancelled() => {
+                        info!("Job Declarator: fallback triggered");
+                        break;
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        info!("Job Declarator: received shutdown signal");
+                        break;
+                    }
                 }
             }
             warn!("JobDeclarator: unified message loop exited.");
