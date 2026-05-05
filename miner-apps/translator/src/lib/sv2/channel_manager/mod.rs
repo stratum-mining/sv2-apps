@@ -313,6 +313,22 @@ impl ChannelManager {
             loop {
                 tokio::select! {
                     biased;
+                    _ = fallback_token.cancelled() => {
+                        info!("ChannelManager: fallback triggered, resetting state");
+                        self.pending_downstream_channels.clear();
+                        self.extended_channels.clear();
+                        self.group_channels.clear();
+                        self.share_sequence_counters.clear();
+                        self.negotiated_extensions.super_safe_lock(|data| data.clear());
+                        self.aggregated_extranonce_allocator
+                            .super_safe_lock(|allocator| *allocator = None);
+                        self.aggregated_channel_state.set(AggregatedState::NoChannel);
+                        break;
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        info!("ChannelManager: received shutdown signal.");
+                        break;
+                    }
                     res = self.clone().handle_upstream_frame(), if !self.channel_manager_io.upstream_receiver.is_closed() => {
                         if let Err(e) = res {
                             if let LoopControl::Break = self.handle_error_action(
@@ -337,22 +353,6 @@ impl ChannelManager {
                             }
                         }
                     },
-                    _ = fallback_token.cancelled() => {
-                        info!("ChannelManager: fallback triggered, resetting state");
-                        self.pending_downstream_channels.clear();
-                        self.extended_channels.clear();
-                        self.group_channels.clear();
-                        self.share_sequence_counters.clear();
-                        self.negotiated_extensions.super_safe_lock(|data| data.clear());
-                        self.aggregated_extranonce_allocator
-                            .super_safe_lock(|allocator| *allocator = None);
-                        self.aggregated_channel_state.set(AggregatedState::NoChannel);
-                        break;
-                    }
-                    _ = cancellation_token.cancelled() => {
-                        info!("ChannelManager: received shutdown signal.");
-                        break;
-                    }
                     else => {
                         warn!("All channel manager message streams closed. Exiting...");
                         break;

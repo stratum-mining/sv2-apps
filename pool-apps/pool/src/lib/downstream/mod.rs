@@ -234,6 +234,10 @@ impl Downstream {
                 let self_clone_2 = self.clone();
                 tokio::select! {
                     biased;
+                    _ = cancellation_token.cancelled() => {
+                        debug!("Downstream {downstream_id}: received shutdown signal");
+                        break;
+                    }
                     res = self_clone_1.handle_downstream_message(), if !self_clone_1.downstream_io.downstream_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(?e, "Error handling downstream message for {downstream_id}");
@@ -257,10 +261,6 @@ impl Downstream {
                                 break;
                             }
                         }
-                    }
-                    _ = cancellation_token.cancelled() => {
-                        debug!("Downstream {downstream_id}: received shutdown signal");
-                        break;
                     }
                 }
             }

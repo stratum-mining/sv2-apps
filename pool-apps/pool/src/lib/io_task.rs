@@ -34,6 +34,11 @@ pub fn spawn_io_tasks(
                 loop {
                     tokio::select! {
                         biased;
+                        _ = cancellation_token.cancelled() => {
+                            trace!("Received shutdown");
+                            inbound_tx.close();
+                            break;
+                        }
                         res = reader.read_frame(), if !inbound_tx.is_closed() => {
                             match res {
                                 Ok(frame) => {
@@ -60,11 +65,6 @@ pub fn spawn_io_tasks(
                                 }
                             }
                         }
-                        _ = cancellation_token.cancelled() => {
-                            trace!("Received shutdown");
-                            inbound_tx.close();
-                            break;
-                        }
                     }
                 }
                 inbound_tx.close();
@@ -88,18 +88,23 @@ pub fn spawn_io_tasks(
                 loop {
                     tokio::select! {
                         biased;
+                        _ = cancellation_token.cancelled() => {
+                            trace!("Received shutdown");
+                            outbound_rx.close();
+                            break;
+                        }
                         res = outbound_rx.recv(), if !outbound_rx.is_closed() => {
                             match res {
                                 Ok(frame) => {
                                     trace!("Sending outbound frame");
                                     let write_result = tokio::select! {
                                         biased;
-                                        result = writer.write_frame(frame.into()), if !inbound_tx_clone.is_closed() => result,
                                         _ = cancellation_token.cancelled() => {
                                             trace!("Received shutdown during write");
                                             outbound_rx.close();
                                             break;
                                         }
+                                        result = writer.write_frame(frame.into()), if !inbound_tx_clone.is_closed() => result,
                                     };
                                     if let Err(e) = write_result {
                                         error!(error=?e, "Writer error");
@@ -113,11 +118,6 @@ pub fn spawn_io_tasks(
                                     break;
                                 }
                             }
-                        }
-                        _ = cancellation_token.cancelled() => {
-                            trace!("Received shutdown");
-                            outbound_rx.close();
-                            break;
                         }
                     }
                 }

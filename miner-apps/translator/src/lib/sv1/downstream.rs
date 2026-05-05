@@ -287,6 +287,15 @@ impl Downstream {
             loop {
                 tokio::select! {
                     biased;
+                    _ = fallback_token.cancelled() => {
+                        info!("Downstream {downstream_id}: fallback triggered");
+                        break;
+                    }
+
+                    _ = cancellation_token.cancelled() => {
+                        info!("Downstream {downstream_id}: received app shutdown signal");
+                        break;
+                    }
                     // Handle downstream -> server message
                     res = self.handle_downstream_message(), if !self.downstream_io.downstream_sv1_receiver.is_closed() => {
                         if let Err(e) = res {
@@ -315,16 +324,6 @@ impl Downstream {
                                 break;
                             }
                         }
-                    }
-
-                    _ = fallback_token.cancelled() => {
-                        info!("Downstream {downstream_id}: fallback triggered");
-                        break;
-                    }
-
-                    _ = cancellation_token.cancelled() => {
-                        info!("Downstream {downstream_id}: received app shutdown signal");
-                        break;
                     }
 
                     else => {

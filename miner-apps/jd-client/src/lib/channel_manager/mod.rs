@@ -531,7 +531,6 @@ impl ChannelManager {
             warn!("Is the Bitcoin node undergoing IBD?");
             select! {
                 biased;
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
                 _ = fallback_token.cancelled() => {
                     info!("Channel Manager: received fallback while waiting for templates");
                     return Ok(());
@@ -540,6 +539,7 @@ impl ChannelManager {
                     info!("Channel Manager: received shutdown while waiting for templates");
                     return Ok(());
                 }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
             }
         }
 
@@ -581,6 +581,10 @@ impl ChannelManager {
                                 task_manager_clone.spawn(async move {
                                     let noise_stream = tokio::select! {
                                         biased;
+                                        _ = cancellation_token_inner.cancelled() => {
+                                            info!("Shutdown received during handshake, dropping connection");
+                                            return;
+                                        }
                                         result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
                                             match result {
                                                 Ok(r) => r,
@@ -589,10 +593,6 @@ impl ChannelManager {
                                                     return;
                                                 }
                                             }
-                                        }
-                                        _ = cancellation_token_inner.cancelled() => {
-                                            info!("Shutdown received during handshake, dropping connection");
-                                            return;
                                         }
                                     };
 
@@ -703,6 +703,17 @@ impl ChannelManager {
                 let mut cm_downstreams = cm.clone();
                 tokio::select! {
                     biased;
+                    _ = fallback_token.cancelled() => {
+                        info!("Channel Manager: fallback triggered, resetting state");
+                        self.upstream_state.set(UpstreamState::SoloMining);
+                        self.channel_manager_data.super_safe_lock(|data| data.reset(serialized_coinbase_outputs.clone()));
+
+                        break;
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        info!("Channel Manager: received shutdown signal");
+                        break;
+                    }
                     res = &mut vardiff_future => {
                         info!("Vardiff loop completed with: {res:?}");
                     }
@@ -767,17 +778,6 @@ impl ChannelManager {
                                 break;
                             }
                         }
-                    }
-                    _ = fallback_token.cancelled() => {
-                        info!("Channel Manager: fallback triggered, resetting state");
-                        self.upstream_state.set(UpstreamState::SoloMining);
-                        self.channel_manager_data.super_safe_lock(|data| data.reset(serialized_coinbase_outputs.clone()));
-
-                        break;
-                    }
-                    _ = cancellation_token.cancelled() => {
-                        info!("Channel Manager: received shutdown signal");
-                        break;
                     }
                 }
             }

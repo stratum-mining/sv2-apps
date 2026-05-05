@@ -43,6 +43,16 @@ pub fn spawn_io_tasks(
                 loop {
                     tokio::select! {
                         biased;
+                        _ = fallback_token.cancelled() => {
+                            trace!("Received fallback signal");
+                            inbound_tx.close();
+                            break;
+                        }
+                        _ = cancellation_token_clone.cancelled() => {
+                            trace!("Received app shutdown signal");
+                            inbound_tx.close();
+                            break;
+                        }
                         res = reader.read_frame(), if !inbound_tx.is_closed() => {
                             match res {
                                 Ok(frame) => {
@@ -68,16 +78,6 @@ pub fn spawn_io_tasks(
                                     break;
                                 }
                             }
-                        }
-                        _ = fallback_token.cancelled() => {
-                            trace!("Received fallback signal");
-                            inbound_tx.close();
-                            break;
-                        }
-                        _ = cancellation_token_clone.cancelled() => {
-                            trace!("Received app shutdown signal");
-                            inbound_tx.close();
-                            break;
                         }
                     }
                 }
@@ -112,13 +112,22 @@ pub fn spawn_io_tasks(
                 loop {
                     tokio::select! {
                         biased;
+                        _ = fallback_token.cancelled() => {
+                            trace!("Received fallback signal");
+                            inbound_tx_clone.close();
+                            break;
+                        }
+                        _ = cancellation_token.cancelled() => {
+                            trace!("Received app shutdown signal");
+                            inbound_tx_clone.close();
+                            break;
+                        }
                         res = outbound_rx.recv(), if !outbound_rx.is_closed() => {
                             match res {
                                 Ok(frame) => {
                                     trace!("Sending outbound frame");
                                     let write_result = tokio::select! {
                                         biased;
-                                        result = writer.write_frame(frame.into()), if !inbound_tx_clone.is_closed() => result,
                                         _ = fallback_token.cancelled() => {
                                             trace!("Received fallback signal during write");
                                             inbound_tx_clone.close();
@@ -129,6 +138,7 @@ pub fn spawn_io_tasks(
                                             inbound_tx_clone.close();
                                             break;
                                         }
+                                        result = writer.write_frame(frame.into()), if !inbound_tx_clone.is_closed() => result,
                                     };
                                     if let Err(e) = write_result {
                                         error!(error=?e, "Writer error");
@@ -142,16 +152,6 @@ pub fn spawn_io_tasks(
                                     break;
                                 }
                             }
-                        }
-                        _ = fallback_token.cancelled() => {
-                            trace!("Received fallback signal");
-                            inbound_tx_clone.close();
-                            break;
-                        }
-                        _ = cancellation_token.cancelled() => {
-                            trace!("Received app shutdown signal");
-                            inbound_tx_clone.close();
-                            break;
                         }
                     }
                 }

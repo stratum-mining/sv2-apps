@@ -253,6 +253,14 @@ impl Downstream {
                 let self_clone_2 = self.clone();
                 tokio::select! {
                     biased;
+                    _ = fallback_token.cancelled() => {
+                        debug!("Downstream {downstream_id}: received fallback signal");
+                        break;
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        debug!("Downstream {downstream_id}: received shutdown signal");
+                        break;
+                    }
                     res = self_clone_1.handle_downstream_message(), if !self_clone_1.downstream_io.downstream_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!(?e, "Error handling downstream message for {downstream_id}");
@@ -279,15 +287,6 @@ impl Downstream {
                             }
                         }
                     }
-                    _ = fallback_token.cancelled() => {
-                        debug!("Downstream {downstream_id}: received fallback signal");
-                        break;
-                    }
-                    _ = cancellation_token.cancelled() => {
-                        debug!("Downstream {downstream_id}: received shutdown signal");
-                        break;
-                    }
-
                 }
             }
             if !cancellation_token.is_cancelled() && !fallback_token.is_cancelled() {

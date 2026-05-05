@@ -358,6 +358,19 @@ impl Sv1Server {
             loop {
                 tokio::select! {
                     biased;
+                    // Handle fallback trigger
+                    _ = fallback_token.cancelled() => {
+                        info!("SV1 Server: fallback triggered, clearing state");
+                        self.cleanup();
+                        break;
+                    }
+
+                    // Handle app shutdown signal
+                    _ = cancellation_token.cancelled() => {
+                        debug!("SV1 Server: received shutdown signal. Exiting.");
+                        self.cleanup();
+                        break;
+                    }
                     res = self.handle_downstream_message(), if !self.sv1_server_io.downstream_to_sv1_server_receiver.is_closed() => {
                         if let Err(e) = res {
                             if let LoopControl::Break = self.handle_error_action(
@@ -386,20 +399,6 @@ impl Sv1Server {
                             }
                         }
                     }
-                    // Handle fallback trigger
-                    _ = fallback_token.cancelled() => {
-                        info!("SV1 Server: fallback triggered, clearing state");
-                        self.cleanup();
-                        break;
-                    }
-
-                    // Handle app shutdown signal
-                    _ = cancellation_token.cancelled() => {
-                        debug!("SV1 Server: received shutdown signal. Exiting.");
-                        self.cleanup();
-                        break;
-                    }
-
                     result = listener.accept() => {
                         match result {
                             Ok((stream, addr)) => {
