@@ -126,7 +126,21 @@ pub fn spawn_io_tasks(
                             match res {
                                 Ok(frame) => {
                                     trace!("Sending outbound frame");
-                                    if let Err(e) = writer.write_frame(frame.into()).await {
+                                    let write_result = tokio::select! {
+                                        biased;
+                                        _ = cancellation_token.cancelled() => {
+                                            trace!("Received app shutdown signal during write");
+                                            inbound_tx_clone.close();
+                                            break;
+                                        }
+                                        _ = fallback_token.cancelled() => {
+                                            trace!("Received fallback signal during write");
+                                            inbound_tx_clone.close();
+                                            break;
+                                        }
+                                        result = writer.write_frame(frame.into()) => result,
+                                    };
+                                    if let Err(e) = write_result {
                                         error!(error=?e, "Writer error");
                                         outbound_rx.close();
                                         break;

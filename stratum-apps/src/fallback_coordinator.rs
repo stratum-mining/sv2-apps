@@ -65,14 +65,21 @@ impl FallbackCoordinator {
         tracing::debug!("FallbackCoordinator: triggering fallback");
         self.signal.cancel();
 
-        if self.pending_tasks.load(Ordering::Acquire) == 0 {
-            return; // all tasks already done
-        }
+        loop {
+            let notified = self.notify.notified();
 
-        // there's still some tasks running,
-        // wait for the last task to notify us
-        self.notify.notified().await;
-        tracing::debug!("FallbackCoordinator: finished waiting for components to complete cleanup");
+            if self.pending_tasks.load(Ordering::Acquire) == 0 {
+                tracing::debug!(
+                    "FallbackCoordinator: finished waiting for components to complete cleanup"
+                );
+                return; // all tasks already done
+            }
+
+            // There's still some tasks running, wait for the next completion
+            // signal. Creating the Notified future before checking the counter
+            // avoids losing the final wakeup if a task exits concurrently.
+            notified.await;
+        }
     }
 }
 
