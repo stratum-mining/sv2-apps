@@ -204,10 +204,6 @@ impl Upstream {
 
                 tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => {
-                        info!("Shutdown received during handshake, dropping connection");
-                        Err(TproxyError::shutdown(TproxyErrorKind::CouldNotInitiateSystem))
-                    }
                     result = connect_with_noise(socket, Some(upstream.authority_pubkey)) => {
                         match result {
                             Ok(stream) => {
@@ -257,6 +253,10 @@ impl Upstream {
                             }
                         }
                     }
+                    _ = cancellation_token.cancelled() => {
+                        info!("Shutdown received during handshake, dropping connection");
+                        Err(TproxyError::shutdown(TproxyErrorKind::CouldNotInitiateSystem))
+                    }
                 }
             }
             Err(e) => {
@@ -287,20 +287,19 @@ impl Upstream {
         // wait for connection setup or cancellation signal
         tokio::select! {
             biased;
-
-            _ = cancellation_token.cancelled() => {
-                info!("Upstream: shutdown signal received during connection setup.");
-                return Ok(());
-            }
-            _ = fallback_token.cancelled() => {
-                info!("Upstream: fallback signal received during connection setup.");
-                return Ok(());
-            }
             result = self.setup_connection() => {
                 if let Err(e) = result {
                     error!("Upstream: failed to set up SV2 connection: {e:?}");
                     return Err(e);
                 }
+            }
+            _ = fallback_token.cancelled() => {
+                info!("Upstream: fallback signal received during connection setup.");
+                return Ok(());
+            }
+            _ = cancellation_token.cancelled() => {
+                info!("Upstream: shutdown signal received during connection setup.");
+                return Ok(());
             }
         }
 
@@ -489,20 +488,7 @@ impl Upstream {
             loop {
                 tokio::select! {
                     biased;
-
-                    // Handle app shutdown signal
-                    _ = cancellation_token.cancelled() => {
-                        info!("Upstream: received shutdown signal. Exiting loop.");
-                        break;
-                    }
-
-                    // Handle fallback trigger
-                    _ = fallback_token.cancelled() => {
-                        info!("Upstream: fallback triggered");
-                        break;
-                    }
-
-                    res = self.clone().handle_upstream_message() => {
+                    res = self.clone().handle_upstream_message(), if !self.upstream_io.upstream_receiver.is_closed() => {
                         if let Err(e) = res {
                             if let LoopControl::Break = Self::handle_error_action(
                                 "Upstream::handle_upstream_message",
@@ -514,7 +500,7 @@ impl Upstream {
                             }
                         }
                     }
-                    res = self.handle_channel_manager_message() => {
+                    res = self.handle_channel_manager_message(), if !self.upstream_io.channel_manager_receiver.is_closed() => {
                         if let Err(e) = res {
                             if let LoopControl::Break = Self::handle_error_action(
                                 "Upstream::handle_channel_manager_message",
@@ -525,6 +511,17 @@ impl Upstream {
                                 break;
                             }
                         }
+                    }
+                    // Handle fallback trigger
+                    _ = fallback_token.cancelled() => {
+                        info!("Upstream: fallback triggered");
+                        break;
+                    }
+
+                    // Handle app shutdown signal
+                    _ = cancellation_token.cancelled() => {
+                        info!("Upstream: received shutdown signal. Exiting loop.");
+                        break;
                     }
                 }
             }

@@ -354,9 +354,45 @@ impl Sv1Server {
 
             tokio::pin!(vardiff_future);
             tokio::pin!(keepalive_future);
+
             loop {
                 tokio::select! {
                     biased;
+                    res = self.handle_downstream_message(), if !self.sv1_server_io.downstream_to_sv1_server_receiver.is_closed() => {
+                        if let Err(e) = res {
+                            if let LoopControl::Break = self.handle_error_action(
+                                "Sv1Server::handle_downstream_message",
+                                &e,
+                                &cancellation_token,
+                                &fallback_token,
+                            ).await {
+                                self.cleanup();
+                                break;
+                            }
+                        }
+                    }
+                    res = self.handle_upstream_message(
+                        first_target,
+                    ), if !self.sv1_server_io.channel_manager_receiver.is_closed() => {
+                        if let Err(e) = res {
+                            if let LoopControl::Break = self.handle_error_action(
+                                "Sv1Server::handle_upstream_message",
+                                &e,
+                                &cancellation_token,
+                                &fallback_token,
+                            ).await {
+                                self.cleanup();
+                                break;
+                            }
+                        }
+                    }
+                    // Handle fallback trigger
+                    _ = fallback_token.cancelled() => {
+                        info!("SV1 Server: fallback triggered, clearing state");
+                        self.cleanup();
+                        break;
+                    }
+
                     // Handle app shutdown signal
                     _ = cancellation_token.cancelled() => {
                         debug!("SV1 Server: received shutdown signal. Exiting.");
@@ -364,12 +400,6 @@ impl Sv1Server {
                         break;
                     }
 
-                    // Handle fallback trigger
-                    _ = fallback_token.cancelled() => {
-                        info!("SV1 Server: fallback triggered, clearing state");
-                        self.cleanup();
-                        break;
-                    }
                     result = listener.accept() => {
                         match result {
                             Ok((stream, addr)) => {
@@ -418,36 +448,9 @@ impl Sv1Server {
                             }
                         }
                     }
-                    res = self.handle_downstream_message() => {
-                        if let Err(e) = res {
-                            if let LoopControl::Break = self.handle_error_action(
-                                "Sv1Server::handle_downstream_message",
-                                &e,
-                                &cancellation_token,
-                                &fallback_token,
-                            ).await {
-                                self.cleanup();
-                                break;
-                            }
-                        }
-                    }
-                    res = self.handle_upstream_message(
-                        first_target,
-                    ) => {
-                        if let Err(e) = res {
-                            if let LoopControl::Break = self.handle_error_action(
-                                "Sv1Server::handle_upstream_message",
-                                &e,
-                                &cancellation_token,
-                                &fallback_token,
-                            ).await {
-                                self.cleanup();
-                                break;
-                            }
-                        }
-                    }
                     _ = &mut vardiff_future, if vardiff_enabled => {}
                     _ = &mut keepalive_future, if keepalive_enabled => {}
+
                 }
             }
             debug!("SV1 Server main listener loop exited.");

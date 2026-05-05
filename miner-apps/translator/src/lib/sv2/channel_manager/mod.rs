@@ -313,10 +313,30 @@ impl ChannelManager {
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => {
-                        info!("ChannelManager: received shutdown signal.");
-                        break;
-                    }
+                    res = self.clone().handle_upstream_frame(), if !self.channel_manager_io.upstream_receiver.is_closed() => {
+                        if let Err(e) = res {
+                            if let LoopControl::Break = self.handle_error_action(
+                                "ChannelManager::handle_upstream_frame",
+                                &e,
+                                &cancellation_token,
+                                &fallback_token,
+                            ) {
+                                break;
+                            }
+                        }
+                    },
+                    res = self.clone().handle_downstream_message(), if !self.channel_manager_io.sv1_server_receiver.is_closed() => {
+                        if let Err(e) = res {
+                            if let LoopControl::Break = self.handle_error_action(
+                                "ChannelManager::handle_downstream_message",
+                                &e,
+                                &cancellation_token,
+                                &fallback_token,
+                            ) {
+                                break;
+                            }
+                        }
+                    },
                     _ = fallback_token.cancelled() => {
                         info!("ChannelManager: fallback triggered, resetting state");
                         self.pending_downstream_channels.clear();
@@ -329,30 +349,10 @@ impl ChannelManager {
                         self.aggregated_channel_state.set(AggregatedState::NoChannel);
                         break;
                     }
-                    res = self.clone().handle_upstream_frame() => {
-                        if let Err(e) = res {
-                            if let LoopControl::Break = self.handle_error_action(
-                                "ChannelManager::handle_upstream_frame",
-                                &e,
-                                &cancellation_token,
-                                &fallback_token,
-                            ) {
-                                break;
-                            }
-                        }
-                    },
-                    res = self.clone().handle_downstream_message() => {
-                        if let Err(e) = res {
-                            if let LoopControl::Break = self.handle_error_action(
-                                "ChannelManager::handle_downstream_message",
-                                &e,
-                                &cancellation_token,
-                                &fallback_token,
-                            ) {
-                                break;
-                            }
-                        }
-                    },
+                    _ = cancellation_token.cancelled() => {
+                        info!("ChannelManager: received shutdown signal.");
+                        break;
+                    }
                     else => {
                         warn!("All channel manager message streams closed. Exiting...");
                         break;

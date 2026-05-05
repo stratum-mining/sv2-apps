@@ -287,17 +287,8 @@ impl Downstream {
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => {
-                        info!("Downstream {downstream_id}: received app shutdown signal");
-                        break;
-                    }
-                    _ = fallback_token.cancelled() => {
-                        info!("Downstream {downstream_id}: fallback triggered");
-                        break;
-                    }
-
                     // Handle downstream -> server message
-                    res = self.handle_downstream_message() => {
+                    res = self.handle_downstream_message(), if !self.downstream_io.downstream_sv1_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!("Downstream {downstream_id}: error in downstream message handler: {e:?}");
                             if let LoopControl::Break = self.handle_error_action(
@@ -312,7 +303,7 @@ impl Downstream {
                     }
 
                     // Handle server -> downstream message
-                    res = self.handle_sv1_server_message() => {
+                    res = self.handle_sv1_server_message(), if !self.downstream_io.sv1_server_receiver.is_closed() => {
                         if let Err(e) = res {
                             error!("Downstream {downstream_id}: error in server message handler: {e:?}");
                             if let LoopControl::Break = self.handle_error_action(
@@ -324,6 +315,16 @@ impl Downstream {
                                 break;
                             }
                         }
+                    }
+
+                    _ = fallback_token.cancelled() => {
+                        info!("Downstream {downstream_id}: fallback triggered");
+                        break;
+                    }
+
+                    _ = cancellation_token.cancelled() => {
+                        info!("Downstream {downstream_id}: received app shutdown signal");
+                        break;
                     }
 
                     else => {
