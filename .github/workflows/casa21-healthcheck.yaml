@@ -1,0 +1,79 @@
+name: Casa21 CI Runner Health Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-org-membership:
+    name: verify-org-membership
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.membership.outputs.allowed }}
+    steps:
+      - name: Verify triggering actor is a stratum-mining member
+        id: membership
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const org = "stratum-mining";
+            const actor = context.actor;
+
+            try {
+              await github.rest.orgs.checkMembershipForUser({
+                org,
+                username: actor,
+              });
+              core.notice(`${actor} is a member of ${org}.`);
+              core.setOutput("allowed", "true");
+            } catch (_error) {
+              core.setOutput("allowed", "false");
+              core.setFailed(
+                `${actor} is not a member of ${org}. This workflow is restricted to org members.`
+              );
+            }
+
+  casa21-healthcheck:
+    name: casa21-healthcheck
+    needs: verify-org-membership
+    if: needs.verify-org-membership.outputs.allowed == 'true'
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - casa21
+    timeout-minutes: 10
+    steps:
+      - name: Add user cargo bin to PATH
+        run: echo "/home/gha/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Runner identity
+        run: |
+          whoami
+          hostname
+          uname -a
+
+      - name: CPU and memory snapshot
+        run: |
+          nproc
+          free -h
+
+      - name: Basic tooling
+        run: |
+          git --version
+          curl --version
+          capnp --version
+
+      - name: Verify preinstalled Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+          rustup show active-toolchain
+          rustup run 1.88.0 rustc --version | grep -q "1.88.0"
+
+      - name: Verify preinstalled cargo-nextest
+        run: |
+          cargo nextest --version
+          cargo nextest --version | grep -q "0.9.100"
