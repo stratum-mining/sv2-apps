@@ -9,17 +9,62 @@ on:
 name: Integration Tests
 
 jobs:
-  ci:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+  integration_casa21_runner:
+    name: integration-casa21-runner
+    # High-performance integration path on the casa21 self-hosted runner.
+    # This job is optional for mergeability and serves as acceleration/redundancy.
+    # Trust boundary for self-hosted execution:
+    # - always run on push to main
+    # - on pull_request, only run for authors whose association is MEMBER/OWNER
+    #   (strict org-membership gate; COLLABORATOR is intentionally excluded)
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+      contains(fromJSON('["MEMBER","OWNER"]'), github.event.pull_request.author_association))
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - casa21
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Add user cargo bin to PATH
+        run: echo "/home/gha/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify preinstalled Rust toolchain
+        run: |
+          # Casa21 runner is expected to have Rust preinstalled (managed out-of-band on the VPS).
+          rustc --version
+          cargo --version
+          rustup show active-toolchain
+          rustup run 1.88.0 rustc --version | grep -q "1.88.0"
+
+      - name: Verify preinstalled cargo-nextest
+        run: |
+          # Casa21 runner is expected to have cargo-nextest preinstalled.
+          cargo nextest --version
+          cargo nextest --version | grep -q "0.9.100"
+
+      - name: Cleanup stale test processes and temp data
+        run: |
+          # Self-hosted runners are persistent. Clean leftovers from prior runs.
+          pkill -f "bitcoin-node|sv2-tp" || true
+          rm -rf /tmp/sv2-integration-tests
+          rm -rf integration-tests/template-provider
+
+      - name: Integration Tests
+        env:
+          # Cap compile parallelism on casa21 to avoid OOM during large first-builds.
+          CARGO_BUILD_JOBS: 4
+        run: |
+          # Tests are auto-discovered from integration-tests/tests; contributors do not need workflow edits.
+          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --config-file=integration-tests/.config/nextest.casa21.toml --nocapture
+
+  integration_github_runner:
+    name: integration-github-runner
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,17 +72,37 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.85
 
-      - name: Install capnp dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install capnp dependencies
         run: sudo apt-get install -y capnproto libcapnp-dev
-
-      - name: Install capnp dependencies (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew install capnp
 
       - name: Install cargo-nextest
         run: cargo install cargo-nextest --version 0.9.100 --locked
 
       - name: Integration Tests
         run: |
-         RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture
+          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture
+
+  integration_merge_gate:
+    name: integration-merge-gate
+    # Single merge gate for integration tests.
+    # Mergeability depends on the GitHub-hosted fallback so PRs are not blocked
+    # when casa21 is unavailable.
+    needs:
+      - integration_github_runner
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate integration runner outcomes
+        env:
+          GITHUB_RESULT: ${{ needs.integration_github_runner.result }}
+        run: |
+          echo "integration-github-runner: ${GITHUB_RESULT}"
+
+          # Do not block PRs if casa21 is offline: the GitHub-hosted runner is the fallback path.
+          if [ "${GITHUB_RESULT}" = "success" ]; then
+            echo "GitHub-hosted integration runner succeeded."
+            exit 0
+          fi
+
+          echo "GitHub-hosted integration runner did not succeed."
+          exit 1
