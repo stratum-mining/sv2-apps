@@ -9,16 +9,16 @@ on:
 name: Integration Tests
 
 jobs:
-  ci:
+  # Standard integration path on GitHub-hosted runners.
+  # Runs on both Ubuntu and macOS.
+  integration_github_runner:
+    name: integration-github-runner (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os:
           - ubuntu-latest
           - macos-latest
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
 
     steps:
       - name: Checkout repository
@@ -41,3 +41,219 @@ jobs:
       - name: Integration Tests
         run: |
          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture
+
+  # High-performance integration path on the casa21 self-hosted runner.
+  # Used only for trusted PR merge gating.
+  # Trust boundary for self-hosted execution:
+  # - on pull_request, only run for authors whose association is MEMBER/OWNER
+  #   (strict org-membership gate; COLLABORATOR is intentionally excluded)
+  integration_casa21_runner:
+    name: integration-casa21-runner
+    if: >
+      github.event_name == 'pull_request' &&
+      contains(fromJSON('["MEMBER","OWNER"]'), github.event.pull_request.author_association)
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - casa21
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Add user cargo bin to PATH
+        run: echo "/home/sri/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify preinstalled Rust toolchain
+        run: |
+          # Casa21 runner is expected to have Rust preinstalled (managed out-of-band on the VPS).
+          rustc --version
+          cargo --version
+          rustup show active-toolchain
+          rustup run 1.85.0 rustc --version | grep -q "1.85.0"
+
+      - name: Verify preinstalled cargo-nextest
+        run: |
+          # Casa21 runner is expected to have cargo-nextest preinstalled.
+          cargo nextest --version
+          cargo nextest --version | grep -q "0.9.100"
+
+      - name: Cleanup stale test processes and temp data
+        run: |
+          # Self-hosted runners are persistent. Clean leftovers from prior runs.
+          pkill -f "[b]itcoin-node|[s]v2-tp" || true
+          rm -rf /tmp/sv2-integration-tests
+
+      - name: Integration Tests
+        env:
+          # Use 24 build jobs to parallelize first-build compilation on casa21.
+          CARGO_BUILD_JOBS: 24
+          # Reuse build artifacts across runs on the persistent self-hosted runner.
+          CARGO_TARGET_DIR: /home/sri/.cache/sv2-apps/target-integration-tests
+        run: |
+          # Tests are auto-discovered from integration-tests/tests; contributors do not need workflow edits.
+          # NOTE: do not pass --nocapture with nextest; it serializes test execution.
+          RUST_BACKTRACE=1 RUST_LOG=info cargo nextest run --manifest-path=integration-tests/Cargo.toml --config-file=integration-tests/.config/nextest.casa21.toml
+
+  # Single branch-protection target that implements the full truth table.
+  # Configure branch protection to require ONLY this check.
+  #
+  # Truth table:
+  # | integration_github_runner | integration_casa21_runner        | integration_required (PR blocked?) |
+  # |---------------------------|----------------------------------|-------------|
+  # | passed ✅                  | passed ✅                         | unblocked ✅ |
+  # | failed ❌                  | passed ✅                         | unblocked ✅ |
+  # | running 💫                 | passed ✅                         | unblocked ✅ |
+  # | passed ✅                  | failed ❌                         | blocked ❌   |
+  # | failed ❌                  | failed ❌                         | blocked ❌   |
+  # | running 💫                 | failed ❌                         | blocked ❌   |
+  # | passed ✅                  | absent (PR is not from org member) | unblocked ✅ |
+  # | failed ❌                  | absent (PR is not from org member) | blocked ❌   |
+  # | running 💫                 | absent (PR is not from org member) | waiting 💫   |
+  #
+  # Why this polls via API instead of `needs` fan-in:
+  # - with `needs`, GitHub keeps the final job pending until *all* upstream jobs settle,
+  #   even when one path is irrelevant for the current trust mode.
+  # - this implementation gates only on the relevant path:
+  #   * trusted PR        -> integration-casa21-runner
+  #   * all other events  -> both integration-github-runner matrix jobs
+  integration_required:
+    name: integration-required
+    if: always()
+    runs-on: ubuntu-latest
+    # Minimum token scope for the github-script gate:
+    # - actions:read  -> list jobs in this workflow run via Actions API
+    # - contents:read -> baseline read access for repository metadata/content APIs
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Enforce integration truth-table gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // This is the single required status check used by branch protection.
+            //
+            // Design goals:
+            // 1) Select the relevant integration path based on trust mode.
+            // 2) Pass/fail/wait exactly as defined by the truth table above.
+            // 3) Avoid `needs` fan-in deadlocks on irrelevant jobs.
+            //
+            // Trust mode:
+            // - trusted: PRs authored by MEMBER/OWNER
+            // - untrusted: all other events (including push and non-member PRs)
+            //
+            // Required path by mode:
+            // - trusted -> integration-casa21-runner (single job)
+            // - untrusted -> integration-github-runner matrix (ubuntu + macos)
+
+            // Associations that are considered trusted for self-hosted execution.
+            const trustedAssociations = ['MEMBER', 'OWNER'];
+
+            // Detect trust mode from event payload.
+            const trusted =
+              context.eventName === 'pull_request' &&
+              trustedAssociations.includes(
+                context.payload.pull_request?.author_association || ''
+              );
+
+            // Canonical job names as shown in the Actions UI for matrix legs.
+            // Keep these in sync with `integration_github_runner.name`.
+            const githubMatrixJobs = [
+              'integration-github-runner (ubuntu-latest)',
+              'integration-github-runner (macos-latest)',
+            ];
+
+            // Canonical job name for trusted path.
+            const casa21JobName = 'integration-casa21-runner';
+
+            // Human-readable target used in logs.
+            const targetLabel = trusted
+              ? casa21JobName
+              : githubMatrixJobs.join(', ');
+
+            // Polling parameters:
+            // - interval: how often to refresh job states
+            // - timeout: hard stop to avoid an infinite wait on API/job anomalies
+            const timeoutMs = 45 * 60 * 1000;
+            const intervalMs = 10 * 1000;
+            const start = Date.now();
+
+            core.info(`Gating merge status on path: ${targetLabel}`);
+
+            while (true) {
+              // Fetch jobs for THIS workflow run.
+              // We poll instead of wiring `needs` so this gate can ignore irrelevant paths.
+              const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              });
+
+              if (trusted) {
+                // Trusted path semantics:
+                // - Pass only when casa21 is completed+success.
+                // - Fail immediately on any non-success completion.
+                // - Wait while in-progress or not yet visible.
+                const job = data.jobs.find((j) => j.name === casa21JobName);
+
+                if (job) {
+                  core.info(`Observed ${casa21JobName}: status=${job.status}, conclusion=${job.conclusion}`);
+
+                  if (job.status === 'completed') {
+                    if (job.conclusion === 'success') {
+                      core.info(`Passing: ${casa21JobName}=success`);
+                      return;
+                    }
+
+                    core.setFailed(`Blocking: ${casa21JobName}=${job.conclusion}`);
+                    return;
+                  }
+                } else {
+                  // Eventual consistency in job listing can briefly hide newly-started jobs.
+                  core.info(`Job ${casa21JobName} not visible yet; waiting...`);
+                }
+              } else {
+                // Untrusted path semantics:
+                // - Require BOTH github matrix legs.
+                // - Fail fast if any leg completes with non-success.
+                // - Pass only when all legs are completed+success.
+                // - Otherwise keep waiting.
+                const jobs = githubMatrixJobs.map((name) => data.jobs.find((j) => j.name === name));
+                const allPresent = jobs.every(Boolean);
+
+                if (!allPresent) {
+                  core.info('Not all integration-github-runner matrix jobs are visible yet; waiting...');
+                } else {
+                  for (const job of jobs) {
+                    core.info(`Observed ${job.name}: status=${job.status}, conclusion=${job.conclusion}`);
+                  }
+
+                  const failedJob = jobs.find(
+                    (job) => job.status === 'completed' && job.conclusion !== 'success'
+                  );
+
+                  if (failedJob) {
+                    core.setFailed(`Blocking: ${failedJob.name}=${failedJob.conclusion}`);
+                    return;
+                  }
+
+                  const allCompleted = jobs.every((job) => job.status === 'completed');
+                  if (allCompleted) {
+                    core.info('Passing: all integration-github-runner matrix jobs=success');
+                    return;
+                  }
+                }
+              }
+
+              // Safety valve: fail closed if we waited too long.
+              // This prevents a permanently pending required check.
+              if (Date.now() - start > timeoutMs) {
+                core.setFailed(`Timed out waiting for required integration path: ${targetLabel}`);
+                return;
+              }
+
+              // Sleep before next poll.
+              await new Promise((resolve) => setTimeout(resolve, intervalMs));
+            }
