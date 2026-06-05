@@ -286,11 +286,49 @@ impl BitcoinCore {
     /// Fund the node's wallet.
     ///
     /// This can be useful before using [`BitcoinCore::create_mempool_transaction`].
+    ///
+    /// We intentionally generate blocks in smaller batches instead of a single
+    /// `generatetoaddress(101, ...)` call. On slower or contended CI hosts,
+    /// generating 101 blocks in one RPC request can exceed the JSON-RPC client
+    /// timeout and fail even though partial mining progress is happening.
+    ///
+    /// To absorb transient Bitcoin Core warmup/RPC startup conditions in CI,
+    /// this method retries the full funding flow a few times with a short delay.
     pub fn fund_wallet(&self) -> Result<(), corepc_node::Error> {
-        let client = &self.bitcoind.client;
-        let address = client.new_address()?;
-        client.generate_to_address(101, &address)?;
-        Ok(())
+        const ATTEMPTS: u8 = 6;
+        const RETRY_DELAY_SECS: u64 = 2;
+        const FUNDING_BLOCKS_TOTAL: usize = 101;
+        const FUNDING_BLOCKS_BATCH_SIZE: usize = 16;
+
+        let mut last_error = None;
+
+        for attempt in 1..=ATTEMPTS {
+            let client = &self.bitcoind.client;
+
+            let result = (|| -> Result<(), corepc_node::Error> {
+                let address = client.new_address()?;
+                let mut remaining = FUNDING_BLOCKS_TOTAL;
+
+                while remaining > 0 {
+                    let to_generate = remaining.min(FUNDING_BLOCKS_BATCH_SIZE);
+                    client.generate_to_address(to_generate, &address)?;
+                    remaining -= to_generate;
+                }
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_secs(RETRY_DELAY_SECS));
+                    }
+                }
+            }
+        }
+
+        Err(last_error.expect("fund_wallet must produce an error before exhausting retries"))
     }
 
     /// Return the hash of the most recent block.
@@ -432,6 +470,9 @@ impl TemplateProvider {
     /// Fund the node's wallet.
     ///
     /// This can be useful before using [`TemplateProvider::create_mempool_transaction`].
+    ///
+    /// This delegates to [`BitcoinCore::fund_wallet`], including its built-in
+    /// block-batch generation and retry behavior for transient CI startup issues.
     pub fn fund_wallet(&self) -> Result<(), corepc_node::Error> {
         self.bitcoin_core.fund_wallet()
     }
