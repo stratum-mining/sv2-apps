@@ -479,14 +479,31 @@ impl Drop for TemplateProvider {
 #[cfg(test)]
 mod tests {
     use super::{DifficultyLevel, TemplateProvider};
+    use corepc_node::Error as CorepcNodeError;
     use crate::utils::get_available_address;
+
+    /// Panic with detailed inner RPC transport information for diagnosis.
+    fn panic_with_corepc_error(context: &str, err: CorepcNodeError) -> ! {
+        match err {
+            CorepcNodeError::Rpc(rpc_err) => {
+                panic!("{context}: corepc RPC error: {rpc_err:?}");
+            }
+            other => {
+                panic!("{context}: corepc node error: {other:?}");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_create_mempool_transaction() {
         let address = get_available_address();
         let port = address.port();
         let tp = TemplateProvider::start(port, 1, DifficultyLevel::Low);
-        assert!(tp.fund_wallet().is_ok());
-        assert!(tp.create_mempool_transaction().is_ok());
+        if let Err(err) = tp.fund_wallet() {
+            panic_with_corepc_error("tp.fund_wallet failed", err);
+        }
+        if let Err(err) = tp.create_mempool_transaction() {
+            panic_with_corepc_error("tp.create_mempool_transaction failed", err);
+        }
     }
 }
