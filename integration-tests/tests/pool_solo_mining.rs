@@ -28,7 +28,7 @@ use integration_tests_sv2::{
     POOL_COINBASE_REWARD_ADDRESS, *,
 };
 use stratum_apps::stratum_core::{
-    bitcoin::{consensus::deserialize, params::TESTNET4, Address, Transaction},
+    bitcoin::{consensus::deserialize, params::TESTNET4, Address, BlockHash, Transaction},
     common_messages_sv2::*,
     mining_sv2::*,
     parsers_sv2::{self, AnyMessage, Mining},
@@ -1293,4 +1293,93 @@ async fn pool_solo_mining_partial_donation() {
         .await;
 
     shutdown_all!(pool);
+}
+
+#[tokio::test]
+async fn pool_solo_mining_partial_donation_end_to_end() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(Some(5), DifficultyLevel::Low);
+    tp.fund_wallet().unwrap();
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+
+    let (_address, mempool_txid) = tp.create_mempool_transaction().unwrap();
+    let start_hash: BlockHash = tp
+        .get_best_block_hash()
+        .unwrap()
+        .parse()
+        .expect("invalid block hash");
+
+    let donate_identity = format!("sri/donate/5/{}/worker.1", MINER_COINBASE_REWARD_ADDR);
+    let (translator, tproxy_addr, _) = start_sv2_translator_with_user_identity(
+        &[pool_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        donate_identity,
+        false,
+        false,
+    )
+    .await;
+    let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
+
+    // Mine until a block includes the mempool transaction, proving the round-trip
+    // worked against a template carrying real txdata (non-empty merkle path). Each
+    // poll walks the chain back to the starting tip so no mined block is missed.
+    let timeout = tokio::time::Duration::from_secs(60);
+    let poll_interval = tokio::time::Duration::from_secs(2);
+    let start_time = tokio::time::Instant::now();
+    let block = 'outer: loop {
+        if start_time.elapsed() > timeout {
+            panic!("no block including the mempool transaction was mined within 60 seconds");
+        }
+        tokio::time::sleep(poll_interval).await;
+        let mut cursor: BlockHash = tp
+            .get_best_block_hash()
+            .unwrap()
+            .parse()
+            .expect("invalid block hash");
+        while cursor != start_hash {
+            let block = tp.get_block(cursor).expect("failed to fetch mined block");
+            if block
+                .txdata
+                .iter()
+                .any(|tx| tx.compute_txid() == mempool_txid)
+            {
+                break 'outer block;
+            }
+            cursor = block.header.prev_blockhash;
+        }
+    };
+
+    let coinbase = &block.txdata[0];
+    assert_eq!(
+        coinbase.output.len(),
+        3,
+        "coinbase should have 3 outputs (pool 5%, miner 95%, witness commitment)"
+    );
+
+    let payout = extract_payout_info(coinbase);
+    assert_eq!(
+        payout.addresses.len(),
+        2,
+        "coinbase should pay exactly two addresses"
+    );
+    assert_eq!(
+        payout.addresses[0], POOL_COINBASE_REWARD_ADDRESS,
+        "pool payout should be the first coinbase output"
+    );
+    assert_eq!(
+        payout.addresses[1], MINER_COINBASE_REWARD_ADDR,
+        "miner payout should be the second coinbase output"
+    );
+    assert_payout_percentage(
+        &payout,
+        &[
+            (POOL_COINBASE_REWARD_ADDRESS.to_string(), 5.0),
+            (MINER_COINBASE_REWARD_ADDR.to_string(), 95.0),
+        ],
+    );
+
+    shutdown_all!(pool, translator);
 }
