@@ -1,0 +1,153 @@
+# Nix-driven reproducible OCI image build pipeline.
+#
+# Runs alongside .github/workflows/docker-release.yaml — does NOT replace it.
+# Status: experimental / opt-in. Do not gate releases on this until reproducibility
+# is verified end-to-end (see docker/REPRODUCIBILITY.md).
+#
+# Pattern (modeled on Fedimint's ci-nix.yml):
+#   - Native runners per arch: ubuntu-latest (amd64) + ubuntu-24.04-arm (arm64).
+#     Avoids QEMU emulation entirely. ubuntu-24.04-arm has been free for public
+#     repos since 2025-08 GA.
+#   - Each (runner, app) cell builds a single-arch OCI image via `nix build`,
+#     then `docker load`s and pushes a per-arch tag.
+#   - A separate `manifest` job stitches per-arch tags into a multi-arch manifest
+#     using `docker manifest create`. No QEMU, no buildx.
+#
+# TODOs before this workflow is useful in CI:
+#   - Resolve flake.nix first-build TODOs (toolchain hash, git-dep hashes, flake.lock).
+#   - Decide whether to wire a binary cache (Cachix or self-hosted attic) — left as
+#     a commented-out step below. Without one, every CI run rebuilds Rust from scratch.
+
+name: Nix CI / Reproducible OCI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/ci-nix.yml"
+      - "rust-toolchain.toml"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/src/**"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Only one run per ref at a time; cancel superseded ones on PRs.
+concurrency:
+  group: ci-nix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  build-image:
+    name: Build ${{ matrix.app }} (${{ matrix.oci_arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    oci_arch: amd64, nix_system: x86_64-linux }
+          - { runner: ubuntu-24.04-arm, oci_arch: arm64, nix_system: aarch64-linux }
+        app: [pool_sv2, jd_client_sv2, translator_sv2]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            # Larger build log buffer; sv2 builds are chatty.
+            max-jobs = auto
+
+      # Optional: binary cache. Uncomment + configure once you've decided on a host.
+      # - name: Configure Cachix
+      #   uses: cachix/cachix-action@v15
+      #   with:
+      #     name: stratumv2
+      #     authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Sanity-check flake
+        run: nix flake check --no-build
+
+      - name: Build OCI image
+        # `-L` streams build logs to stdout; useful when debugging in CI.
+        run: nix build .#container.${{ matrix.app }} -L
+
+      - name: Load image into local docker
+        run: |
+          docker load < ./result
+          docker images stratumv2/${{ matrix.app }}
+
+      - name: Record image digest
+        id: digest
+        run: |
+          digest=$(sha256sum ./result | cut -d' ' -f1)
+          echo "result_sha256=${digest}" >> "$GITHUB_OUTPUT"
+          echo "OCI tarball sha256: ${digest}"
+
+      - name: Upload image tarball as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oci-${{ matrix.app }}-${{ matrix.oci_arch }}
+          path: ./result
+          retention-days: 7
+
+      - name: Tag and push per-arch image
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}-${{ matrix.oci_arch }}"
+          docker tag stratumv2/${{ matrix.app }}:latest \
+            stratumv2/${{ matrix.app }}:"${tag}"
+          echo "${DOCKERHUB_TOKEN}" | docker login -u stratumv2 --password-stdin
+          docker push stratumv2/${{ matrix.app }}:"${tag}"
+
+  manifest:
+    name: Multi-arch manifest (${{ matrix.app }})
+    needs: build-image
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [pool_sv2, jd_client_sv2, translator_sv2]
+    steps:
+      - name: Login to Docker Hub
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u stratumv2 --password-stdin
+
+      - name: Create and push multi-arch manifest
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF_NAME}"
+          docker manifest create stratumv2/${{ matrix.app }}:"${ref}" \
+            stratumv2/${{ matrix.app }}:"${ref}-amd64" \
+            stratumv2/${{ matrix.app }}:"${ref}-arm64"
+          docker manifest push stratumv2/${{ matrix.app }}:"${ref}"
+
+  # TODO: reproducibility verification job.
+  # Idea: rebuild the OCI tarball on a separate clean runner and compare sha256.
+  # Skeleton below — finish once the first end-to-end build succeeds, since the
+  # exact output paths and hashing strategy depend on dockerTools' current behavior.
+  #
+  # verify-reproducible:
+  #   needs: build-image
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     matrix:
+  #       app: [pool_sv2, jd_client_sv2, translator_sv2]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: cachix/install-nix-action@v30
+  #     - name: Rebuild and compare
+  #       run: |
+  #         nix build .#container.${{ matrix.app }} -L --rebuild
+  #         # Compare against the tarball uploaded by build-image (download-artifact).
