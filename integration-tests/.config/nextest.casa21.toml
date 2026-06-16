@@ -1,0 +1,13 @@
+[profile.default]
+
+# Same retry policy as local integration test runs.
+retries = { backoff = "fixed", count = 3, delay = "2s" }
+
+# SRI VM on Casa21 Server has 24 cores and 32 GB RAM.
+test-threads = 24
+
+# Match default timeout behavior to avoid changing failure semantics.
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+status-level = "all"
+final-status-level = "all"
