@@ -25,7 +25,6 @@ use stratum_apps::{
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
             Vardiff, VardiffState,
         },
-        framing_sv2,
         handlers_sv2::{
             HandleExtensionsFromServerAsync, HandleJobDeclarationMessagesFromServerAsync,
             HandleMiningMessagesFromClientAsync, HandleMiningMessagesFromServerAsync,
@@ -866,10 +865,7 @@ impl ChannelManager {
             .recv()
             .await
             .map_err(JDCError::fallback)?;
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.get_header();
         let message_type = header.msg_type();
         let extension_type = header.ext_type();
         let payload = sv2_frame.payload();

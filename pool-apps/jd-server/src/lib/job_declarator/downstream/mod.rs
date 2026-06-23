@@ -25,7 +25,6 @@ use stratum_apps::{
     network_helpers::noise_stream::NoiseTcpStream,
     stratum_core::{
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromClientAsync,
         job_declaration_sv2::DeclareMiningJob,
         parsers_sv2::{parse_message_frame_with_tlvs, AnyMessage},
@@ -278,10 +277,7 @@ impl Downstream {
             .await
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
 
-        let header = frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            error::JDSError::disconnect(framing_sv2::Error::MissingHeader, self.downstream_id)
-        })?;
+        let header = frame.get_header();
 
         if header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
             self.handle_common_message_frame_from_client(
@@ -341,10 +337,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            error::JDSError::disconnect(framing_sv2::Error::MissingHeader, self.downstream_id)
-        })?;
+        let header = sv2_frame.get_header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::JobDeclaration => {

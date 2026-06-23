@@ -357,10 +357,7 @@ impl Upstream {
             }
         };
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Expected handshake frame but no header found.");
-            TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(0, 0))
-        })?;
+        let header = incoming.get_header();
 
         let payload = incoming.payload();
 
@@ -408,11 +405,7 @@ impl Upstream {
             .map_err(TproxyError::fallback)?;
 
         debug!("Upstream: received frame.");
-        let Some(header) = sv2_frame.get_header() else {
-            return Err(TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(
-                0, 0,
-            )));
-        };
+        let header = sv2_frame.get_header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Common => {

@@ -291,39 +291,36 @@ pub fn message_from_frame_with_tlvs(
 ) -> (MsgType, AnyMessage<'static>, Option<Vec<Tlv>>) {
     match frame {
         Frame::Sv2(frame) => {
-            if let Some(header) = frame.get_header() {
-                let payload = frame.payload();
+            let header = frame.get_header();
+            let payload = frame.payload();
 
-                // Try to parse with TLV support if extensions are negotiated
-                if !negotiated_extensions.is_empty() {
-                    match parse_message_frame_with_tlvs(header, payload, negotiated_extensions) {
-                        Ok((message, tlv_fields)) => {
-                            let message = into_static(message);
-                            return (header.msg_type(), message, tlv_fields);
-                        }
-                        Err(e) => {
-                            println!("Failed to parse frame with TLVs: {e:?}, falling back to standard parsing");
-                        }
-                    }
-                }
-
-                // Fallback to standard parsing without TLV support
-                let mut payload = frame.payload().to_vec();
-                let message: Result<AnyMessage<'_>, _> =
-                    (header, payload.as_mut_slice()).try_into();
-                match message {
-                    Ok(message) => {
+            // Try to parse with TLV support if extensions are negotiated
+            if !negotiated_extensions.is_empty() {
+                match parse_message_frame_with_tlvs(header, payload, negotiated_extensions) {
+                    Ok((message, tlv_fields)) => {
                         let message = into_static(message);
-                        (header.msg_type(), message, None)
+                        return (header.msg_type(), message, tlv_fields);
                     }
-                    _ => {
-                        println!("Received frame with invalid payload or message type: {frame:?}");
-                        panic!();
+                    Err(e) => {
+                        println!(
+                            "Failed to parse frame with TLVs: {e:?}, falling back to standard parsing"
+                        );
                     }
                 }
-            } else {
-                println!("Received frame with invalid header: {frame:?}");
-                panic!();
+            }
+
+            // Fallback to standard parsing without TLV support
+            let mut payload = frame.payload().to_vec();
+            let message: Result<AnyMessage<'_>, _> = (header, payload.as_mut_slice()).try_into();
+            match message {
+                Ok(message) => {
+                    let message = into_static(message);
+                    (header.msg_type(), message, None)
+                }
+                _ => {
+                    println!("Received frame with invalid payload or message type: {frame:?}");
+                    panic!();
+                }
             }
         }
         Frame::HandShake(f) => {
