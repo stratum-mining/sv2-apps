@@ -218,7 +218,7 @@ impl SetupConnectionHandler {
         info!("Setup connection sent to {}", address);
 
         let mut incoming: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
-        let message_type = incoming.get_header().unwrap().msg_type();
+        let message_type = incoming.get_header().msg_type();
         let payload = incoming.payload();
         Self::handle_message_common(self_, message_type, payload).unwrap();
     }
@@ -388,7 +388,7 @@ impl Device {
 
         loop {
             let mut incoming: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
-            let message_type = incoming.get_header().unwrap().msg_type();
+            let message_type = incoming.get_header().msg_type();
             let payload = incoming.payload();
             Device::handle_message_mining(self_mutex.clone(), message_type, payload).unwrap();
             let mut notify_changes_to_mining_thread = self_mutex

@@ -7,7 +7,6 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{connect_with_noise, resolve_host, TCP_CONNECT_TIMEOUT},
     stratum_core::{
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromServerAsync,
         parsers_sv2::{AnyMessage, JobDeclaration},
     },
@@ -298,10 +297,7 @@ impl JobDeclarator {
                 JDCError::fallback(JDCErrorKind::ChannelErrorSender)
             })?;
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Handshake frame missing header.");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = incoming.get_header();
 
         debug!(ext_type = ?header.ext_type(),
             msg_type = ?header.msg_type(),
@@ -351,10 +347,7 @@ impl JobDeclarator {
             .map_err(JDCError::fallback)?;
 
         debug!("Received SV2 frame from JDS.");
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.get_header();
         let message_type = header.msg_type();
         let extension_type = header.ext_type();
 

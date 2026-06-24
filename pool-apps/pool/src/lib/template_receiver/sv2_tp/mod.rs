@@ -7,7 +7,6 @@ use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     network_helpers::{self, connect_with_noise, resolve_host_port, TCP_CONNECT_TIMEOUT},
     stratum_core::{
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromServerAsync,
         parsers_sv2::{AnyMessage, TemplateDistribution},
     },
@@ -253,10 +252,7 @@ impl Sv2Tp {
             .await
             .map_err(PoolError::shutdown)?;
         debug!("Received SV2 frame from Template provider.");
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            PoolError::shutdown(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.get_header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Common => {
@@ -346,10 +342,7 @@ impl Sv2Tp {
             PoolError::shutdown(e)
         })?;
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Handshake frame missing header");
-            PoolError::shutdown(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = incoming.get_header();
         debug!(
             ext_type = ?header.ext_type(),
             msg_type = ?header.msg_type(),

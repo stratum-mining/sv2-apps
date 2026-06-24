@@ -18,7 +18,7 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{connect_with_noise, resolve_host, TCP_CONNECT_TIMEOUT},
     stratum_core::{
-        binary_sv2::Seq064K, extensions_sv2::RequestExtensions, framing_sv2,
+        binary_sv2::Seq064K, extensions_sv2::RequestExtensions,
         handlers_sv2::HandleCommonMessagesFromServerAsync, parsers_sv2::AnyMessage,
     },
     task_manager::TaskManager,
@@ -242,10 +242,7 @@ impl Upstream {
         let mut incoming: Sv2Frame = incoming_frame;
         debug!(?incoming, "Decoded inbound handshake frame");
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Handshake frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = incoming.get_header();
 
         info!(ext_type = ?header.ext_type(), msg_type = ?header.msg_type(), "Dispatching inbound handshake message");
         self.handle_common_message_frame_from_server(None, header, incoming.payload())
@@ -407,10 +404,7 @@ impl Upstream {
             .recv()
             .await
             .map_err(JDCError::fallback)?;
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.get_header();
         let message_type = header.msg_type();
         let extension_type = header.ext_type();
 

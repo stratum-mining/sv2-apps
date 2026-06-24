@@ -415,10 +415,7 @@ impl ChannelManager {
             .map_err(TproxyError::fallback)?;
 
         let mut channel_manager: ChannelManager = (*self).clone();
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            TproxyError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.get_header();
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Mining => {
                 channel_manager

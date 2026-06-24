@@ -323,7 +323,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| JDCError::disconnect(error, self.downstream_id))?;
-        let header = frame.get_header().expect("frame header must be present");
+        let header = frame.get_header();
         if header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
             self.handle_common_message_frame_from_client(None, header, frame.payload())
                 .await?;
@@ -375,9 +375,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| JDCError::disconnect(error, self.downstream_id))?;
-        let header = sv2_frame
-            .get_header()
-            .expect("frame header must be present");
+        let header = sv2_frame.get_header();
         let payload = sv2_frame.payload();
         let negotiated_extensions = self
             .downstream_data

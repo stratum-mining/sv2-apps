@@ -13,7 +13,6 @@ use stratum_apps::{
             extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel,
         },
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
-        framing_sv2,
         handlers_sv2::{HandleCommonMessagesFromClientAsync, HandleExtensionsFromClientAsync},
         parsers_sv2::{parse_message_frame_with_tlvs, AnyMessage, Mining, Tlv},
     },
@@ -265,13 +264,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| PoolError::disconnect(error, self.downstream_id))?;
-        let Some(header) = frame.get_header() else {
-            error!("SV2 frame missing header");
-            return Err(PoolError::disconnect(
-                framing_sv2::Error::MissingHeader,
-                self.downstream_id,
-            ));
-        };
+        let header = frame.get_header();
         // The first ever message received on a new downstream connection
         // should always be a setup connection message.
         if header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
@@ -331,13 +324,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| PoolError::disconnect(error, self.downstream_id))?;
-        let Some(header) = sv2_frame.get_header() else {
-            error!("SV2 frame missing header");
-            return Err(PoolError::disconnect(
-                framing_sv2::Error::MissingHeader,
-                self.downstream_id,
-            ));
-        };
+        let header = sv2_frame.get_header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Mining => {
