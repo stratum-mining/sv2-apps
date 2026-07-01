@@ -1,7 +1,7 @@
 //! Request / response types exchanged between `jd-server` and the Bitcoin Core IPC thread.
 
 use stratum_core::{
-    bitcoin::{BlockHash, CompactTarget, Transaction, Txid, Wtxid, block::Version},
+    bitcoin::{BlockHash, CompactTarget, Transaction, Wtxid, block::Version},
     job_declaration_sv2::PushSolution,
 };
 use tokio::sync::oneshot;
@@ -46,10 +46,11 @@ pub enum JdResponse {
         prev_hash: BlockHash,
         nbits: CompactTarget,
         min_ntime: u32,
-        /// Txids for all transactions (excluding coinbase), in the same order as the declared
-        /// wtxid_list. Enables the caller to build the txid merkle tree for validating
-        /// SetCustomMiningJob.merkle_path.
-        txid_list: Vec<Txid>,
+        /// Full non-coinbase transaction list in declaration order.
+        ///
+        /// This is used by `jd-server` both to reconstruct solved blocks when handling
+        /// `PushSolution` and to derive txids for merkle-root/merkle-path validation.
+        txdata: Vec<Transaction>,
     },
     Error {
         error_code: &'static str,

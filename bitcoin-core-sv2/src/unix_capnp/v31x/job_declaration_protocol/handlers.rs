@@ -8,7 +8,7 @@ use crate::{
 };
 use stratum_core::{
     bitcoin::{
-        Block, Transaction, TxMerkleNode, Txid, Wtxid,
+        Block, Transaction, TxMerkleNode, Wtxid,
         block::{Header, Version},
         consensus::serialize,
         hashes::Hash,
@@ -111,7 +111,7 @@ impl BitcoinCoreSv2JDP {
             (initial_validation_context, initial_bip34_height, txdata)
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
-        let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
+        let txdata_for_response = txdata.clone();
 
         let valid_job = {
             let mut all_transactions = Vec::with_capacity(1 + txdata.len());
@@ -284,7 +284,7 @@ impl BitcoinCoreSv2JDP {
                 prev_hash: initial_validation_context.prev_hash,
                 nbits: initial_validation_context.nbits,
                 min_ntime: initial_validation_context.min_ntime,
-                txid_list,
+                txdata: txdata_for_response,
             }
         } else {
             let stale_at_arrival_by_bip34 = declared_bip34_height != latest_bip34_height;
