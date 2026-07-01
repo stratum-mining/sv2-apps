@@ -15,7 +15,7 @@ use stratum_core::{
     },
     job_declaration_sv2::{
         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
-        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, PushSolution,
+        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
     },
 };
 use tokio::sync::oneshot;
@@ -310,10 +310,10 @@ impl BitcoinCoreSv2JDP {
         let _ = response_tx.send(response);
     }
 
-    /// Submits a mining solution to Bitcoin Core.
+    /// Submits a solved block to Bitcoin Core.
     ///
-    /// Not yet implemented — deliberately left as a stub for future work.
-    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolution<'_>) {
+    /// Not yet implemented for v30.x IPC, which does not expose `submitBlock`.
+    pub(crate) async fn handle_push_solution(&self, _block: Block) {
         // todo
     }
 }

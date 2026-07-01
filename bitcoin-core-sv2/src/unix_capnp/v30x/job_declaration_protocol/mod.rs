@@ -369,8 +369,8 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { push_solution } => {
-                self.handle_push_solution(push_solution).await;
+            JdRequest::PushSolution { block } => {
+                self.handle_push_solution(block).await;
             }
         }
     }

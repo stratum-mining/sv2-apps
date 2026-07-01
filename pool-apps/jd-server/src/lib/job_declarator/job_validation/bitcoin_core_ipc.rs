@@ -26,10 +26,10 @@ use stratum_apps::{
     stratum_core::{
         bitcoin::{
             self,
-            block::Version,
+            block::{Header, Version},
             consensus::{Decodable, Encodable},
             hashes::Hash,
-            BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
+            Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
         },
         job_declaration_sv2::{
             DeclareMiningJob, ProvideMissingTransactionsSuccess, PushSolution,
@@ -677,12 +677,19 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         downstream_id: DownstreamId,
         push_solution: PushSolution<'_>,
     ) {
-        // Convert to static lifetime for channel transfer
-        let push_solution_static = push_solution.into_static();
-
-        // Send request to BitcoinCoreSv2JDP (fire-and-forget)
+        // TODO(#441): replace placeholder with full block reconstruction from declared job state.
         let request = JdRequest::PushSolution {
-            push_solution: push_solution_static,
+            block: Block {
+                header: Header {
+                    version: Version::from_consensus(push_solution.version as i32),
+                    prev_blockhash: BlockHash::from_byte_array(push_solution.prev_hash.to_array()),
+                    merkle_root: TxMerkleNode::all_zeros(),
+                    time: push_solution.ntime,
+                    bits: CompactTarget::from_consensus(push_solution.nbits),
+                    nonce: push_solution.nonce,
+                },
+                txdata: Vec::new(),
+            },
         };
 
         if let Err(e) = self.request_sender.send(request).await {

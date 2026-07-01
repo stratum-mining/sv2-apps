@@ -14,7 +14,7 @@ pub mod io;
 
 use crate::{
     common::{BitcoinCoreSv2Error, BitcoinCoreSv2Protocol, BitcoinCoreVersion},
-    unix_capnp::{v30x, v31x},
+    unix_capnp::{v30x, v31x, v32x},
 };
 use async_channel::Receiver;
 use io::JdRequest;
@@ -28,6 +28,7 @@ pub use tokio_util::sync::CancellationToken;
 pub enum BitcoinCoreSv2JDP {
     V30X(v30x::job_declaration_protocol::BitcoinCoreSv2JDP),
     V31X(v31x::job_declaration_protocol::BitcoinCoreSv2JDP),
+    V32X(v32x::job_declaration_protocol::BitcoinCoreSv2JDP),
 }
 
 impl BitcoinCoreSv2JDP {
@@ -35,6 +36,7 @@ impl BitcoinCoreSv2JDP {
         match self {
             Self::V30X(runtime) => runtime.run().await,
             Self::V31X(runtime) => runtime.run().await,
+            Self::V32X(runtime) => runtime.run().await,
         }
     }
 }
@@ -72,6 +74,17 @@ where
         )
         .await
         .map(BitcoinCoreSv2JDP::V31X)
+        .map_err(|error| {
+            BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
+        }),
+        BitcoinCoreVersion::V32X => v32x::job_declaration_protocol::BitcoinCoreSv2JDP::new(
+            bitcoin_core_unix_socket_path,
+            incoming_requests,
+            cancellation_token,
+            ready_tx,
+        )
+        .await
+        .map(BitcoinCoreSv2JDP::V32X)
         .map_err(|error| {
             BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
         }),
