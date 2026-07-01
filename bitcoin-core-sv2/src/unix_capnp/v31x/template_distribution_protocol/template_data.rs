@@ -246,7 +246,7 @@ impl TemplateData {
         thread_map: ThreadMapIpcClient,
         path_dir: &Path,
     ) -> Result<(), TemplateDataError> {
-        let solution_coinbase_tx_bytes = submit_solution.coinbase_tx.to_owned_bytes();
+        let solution_coinbase_tx_bytes = submit_solution.coinbase_tx.as_ref().to_vec();
 
         let solution_coinbase_tx: Transaction =
             deserialize(&solution_coinbase_tx_bytes).map_err(|e| {

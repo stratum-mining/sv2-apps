@@ -150,10 +150,10 @@ async fn assert_jdp_success_scenario(
     .await;
 
     match response {
-        JdResponse::Success { txid_list, .. } => {
+        JdResponse::Success { txdata, .. } => {
             assert!(
-                txid_list.is_empty(),
-                "txid_list should be empty when no non-coinbase txs were declared"
+                txdata.is_empty(),
+                "txdata should be empty when no non-coinbase txs were declared"
             );
         }
         response => panic!("expected Success, got: {response:?}"),

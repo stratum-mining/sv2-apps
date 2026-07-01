@@ -6,7 +6,7 @@ use crate::{
 };
 use stratum_core::{
     bitcoin::{
-        Block, Transaction, TxMerkleNode, Txid, Wtxid,
+        Block, Transaction, TxMerkleNode, Wtxid,
         block::{Header, Version},
         consensus::serialize,
         hashes::Hash,
@@ -86,7 +86,7 @@ impl BitcoinCoreSv2JDP {
             (initial_validation_context, ntime, txdata)
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
-        let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
+        let txdata_for_response = txdata.clone();
 
         let mut check_block_reason_for_stale: Option<String> = None;
 
@@ -259,7 +259,7 @@ impl BitcoinCoreSv2JDP {
             JdResponse::Success {
                 prev_hash: initial_validation_context.prev_hash,
                 nbits: initial_validation_context.nbits,
-                txid_list,
+                txdata: txdata_for_response,
             }
         } else {
             let context_drifted =

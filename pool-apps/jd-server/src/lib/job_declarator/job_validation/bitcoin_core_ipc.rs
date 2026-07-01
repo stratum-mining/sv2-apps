@@ -29,7 +29,7 @@ use stratum_apps::{
             block::Version,
             consensus::{Decodable, Encodable},
             hashes::Hash,
-            BlockHash, CompactTarget, Transaction, TxMerkleNode, Txid, Wtxid,
+            BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
         },
         job_declaration_sv2::{
             DeclareMiningJob, ProvideMissingTransactionsSuccess, PushSolution,
@@ -68,7 +68,7 @@ use stratum_apps::{
 struct DeclaredCustomJob {
     declare_mining_job: DeclareMiningJob<'static>,
     validation_context: ValidationContext, // committed at the time we receive DeclareMiningJob
-    txid_list: Option<Vec<Txid>>,          // populated only on JdResponse::Success
+    txdata: Option<Vec<Transaction>>,      // populated only on JdResponse::Success
     validated: bool,
 }
 
@@ -221,12 +221,12 @@ impl DeclaredCustomJob {
     /// Returns the sibling hashes at each level from leaf to root, needed to
     /// reconstruct the block header's merkle root from the coinbase position (index 0).
     ///
-    /// Requires `txid_list` to have been populated via `JdResponse::Success`.
+    /// Requires `txdata` to have been populated via `JdResponse::Success`.
     /// The coinbase txid is derived from the declared coinbase prefix/suffix.
     ///
     /// Used to compare with a `SetCustomMiningJob.merkle_path`.
     ///
-    /// Internally, errors may come from missing txid_list
+    /// Internally, errors may come from missing txdata
     /// so error_code = "declared-job-not-yet-validated"
     /// therefore () error type is sufficient.
     fn get_merkle_path(&self) -> Result<Vec<TxMerkleNode>, ()> {
@@ -234,17 +234,17 @@ impl DeclaredCustomJob {
             return Err(());
         }
 
-        let txid_list = self.txid_list.as_ref().ok_or(())?;
+        let txdata = self.txdata.as_ref().ok_or(())?;
 
         let coinbase_tx = self
             .get_coinbase_tx()
             .expect("coinbase tx already validated");
         let coinbase_txid: TxMerkleNode = coinbase_tx.compute_txid().into();
 
-        let mut hashes: Vec<TxMerkleNode> = Vec::with_capacity(1 + txid_list.len());
+        let mut hashes: Vec<TxMerkleNode> = Vec::with_capacity(1 + txdata.len());
         hashes.push(coinbase_txid);
-        for txid in txid_list {
-            hashes.push((*txid).into());
+        for tx in txdata {
+            hashes.push(tx.compute_txid().into());
         }
 
         if hashes.len() == 1 {
@@ -518,7 +518,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     nbits: CompactTarget::from_consensus(0), /* irrelevant for coinbase tx
                                                         * validation */
                 },
-                txid_list: None,  // irrelevant for coinbase tx validation
+                txdata: None,     // irrelevant for coinbase tx validation
                 validated: false, // irrelevant for coinbase tx validation
             };
 
@@ -618,12 +618,12 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             JdResponse::Success {
                 prev_hash,
                 nbits,
-                txid_list,
+                txdata,
             } => {
                 let declared_custom_job = DeclaredCustomJob {
                     declare_mining_job: declare_mining_job_static,
                     validation_context: ValidationContext { prev_hash, nbits },
-                    txid_list: Some(txid_list),
+                    txdata: Some(txdata),
                     validated: true,
                 };
                 let updated = self.downstream_states.with_mut(&downstream_id, |state| {
@@ -687,7 +687,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     let declared_custom_job = DeclaredCustomJob {
                         declare_mining_job: declare_mining_job_static,
                         validation_context,
-                        txid_list: None,
+                        txdata: None,
                         validated: false, // this is only set to true on JdResponse::Success
                     };
                     let updated = self.downstream_states.with_mut(&downstream_id, |state| {
