@@ -49,6 +49,11 @@ async fn jdp_io_integration_v31x() {
     assert_jdp_io_integration_for_version(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+async fn jdp_io_integration_v32x() {
+    assert_jdp_io_integration_for_version(BitcoinCoreVersion::V32X).await;
+}
+
 async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     start_tracing();
 
