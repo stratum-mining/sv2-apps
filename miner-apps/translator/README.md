@@ -139,6 +139,52 @@ name, telemetry is not assigned to either of them and the monitoring API reports
 - `address`/`port`: SV2 upstream server connection details
 - `authority_pubkey`: Public key for SV2 connection authentication
 
+### Environment Variables
+
+Every configuration value can also be supplied through the environment. Variables are prefixed
+with `TPROXY` and joined with a **double underscore** (`__`) between nested keys — a single
+underscore is just part of a field name (`TPROXY__DOWNSTREAM_PORT` sets `downstream_port`).
+
+Environment variables take precedence over the TOML file, and the file itself is optional: the
+translator can be configured entirely from the environment. If a mandatory parameter is supplied
+by neither source, the translator exits with an error.
+
+```bash
+TPROXY__DOWNSTREAM_ADDRESS=0.0.0.0
+TPROXY__DOWNSTREAM_PORT=34255
+# Nested fields join each level with `__`:
+TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__SHARES_PER_MINUTE=6.0
+# List fields (supported_extensions, required_extensions) are comma-separated.
+# A lone numeric value is read as a scalar, not a 1-element list, so list at
+# least two values:
+TPROXY__SUPPORTED_EXTENSIONS=2,3
+```
+
+#### Upstreams via the environment
+
+The `[[upstreams]]` array cannot be addressed with `__` paths alone, so it uses a dedicated
+form: `TPROXY__UPSTREAM_<NAME>__<FIELD>`. `<NAME>` groups one upstream's fields together. If any
+such variable is set, the resulting list **fully replaces** the `upstreams` array from the file.
+
+```bash
+TPROXY__UPSTREAM_01__ADDRESS=primary.pool.com
+TPROXY__UPSTREAM_01__PORT=34254
+TPROXY__UPSTREAM_01__AUTHORITY_PUBKEY=primary_pool_pubkey
+TPROXY__UPSTREAM_02__ADDRESS=backup.pool.com
+TPROXY__UPSTREAM_02__PORT=34254
+TPROXY__UPSTREAM_02__AUTHORITY_PUBKEY=backup_pool_pubkey
+```
+
+Upstreams are prioritized in **alphabetical order** of `<NAME>`. Watch out for these footguns:
+
+* Ordering is lexicographic, not numeric: `10` sorts before `2`. Zero-pad numbered upstreams
+  (`01`, `02`, …, `10`) to keep the intended order.
+* Names sort alphabetically, not by meaning: `BACKUP` sorts before `PRIMARY`.
+* Only a **double** underscore separates the name from the field; single underscores belong to
+  the name or field itself (`TPROXY__UPSTREAM_POOL_A__PORT` is upstream `POOL_A`'s `port`).
+
+See `docker/docker_env.example` for a complete working set of variables.
+
 ## Usage
 
 ### Installation & Build

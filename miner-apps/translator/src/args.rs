@@ -3,8 +3,8 @@
 //! It provides the `Args` struct to hold parsed arguments,
 //! and the `from_args` function to parse them from the command line.
 use clap::Parser;
-use ext_config::{Config, File, FileFormat};
 use std::path::PathBuf;
+use stratum_apps::config_helpers::load_config;
 use tracing::error;
 use translator_sv2::{config::TranslatorConfig, error::TproxyErrorKind};
 
@@ -33,18 +33,17 @@ pub fn process_cli_args() -> Result<TranslatorConfig, TproxyErrorKind> {
     // Parse CLI arguments
     let args = Args::parse();
 
-    // Build configuration from the provided file path
     let config_path = args.config_path.to_str().ok_or_else(|| {
         error!("Invalid configuration path.");
         TproxyErrorKind::BadCliArgs
     })?;
 
-    let settings = Config::builder()
-        .add_source(File::new(config_path, FileFormat::Toml))
-        .build()?;
-
-    // Deserialize settings into TranslatorConfig
-    let mut config = settings.try_deserialize::<TranslatorConfig>()?;
+    // Env vars prefixed `TPROXY__` override values from the optional TOML file.
+    let mut config: TranslatorConfig = load_config(
+        config_path,
+        "TPROXY",
+        &["supported_extensions", "required_extensions"],
+    )?;
 
     config.set_log_dir(args.log_file);
 
