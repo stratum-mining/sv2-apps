@@ -122,6 +122,54 @@ Keep pool usernames/worker names unique for connected miners. If two connected m
 name, telemetry is not assigned to either of them and the monitoring API reports
 `duplicate_worker_name`.
 
+### Environment Variables
+
+Every configuration value can also be supplied through the environment. Variables are prefixed
+with `JDC` and joined with a **double underscore** (`__`) between nested keys — a single
+underscore is just part of a field name (`JDC__LISTENING_ADDRESS` sets `listening_address`).
+
+Environment variables take precedence over the TOML file, and the file itself is optional: JDC
+can be configured entirely from the environment. If a mandatory parameter is supplied by neither
+source, JDC exits with an error.
+
+```bash
+JDC__LISTENING_ADDRESS=0.0.0.0:34265
+# Tagged enums (template_provider_type) take the variant as a path segment,
+# matched case-insensitively:
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
+# List fields (supported_extensions, required_extensions) are comma-separated.
+# A lone numeric value is read as a scalar, not a 1-element list, so list at
+# least two values:
+JDC__SUPPORTED_EXTENSIONS=2,3
+```
+
+#### Upstreams via the environment
+
+The `[[upstreams]]` array cannot be addressed with `__` paths alone, so it uses a dedicated
+form: `JDC__UPSTREAM_<NAME>__<FIELD>`. `<NAME>` groups one upstream's fields together. If any
+such variable is set, the resulting list **fully replaces** the `upstreams` array from the file.
+
+```bash
+JDC__UPSTREAM_01__AUTHORITY_PUBKEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
+JDC__UPSTREAM_01__POOL_ADDRESS=127.0.0.1
+JDC__UPSTREAM_01__POOL_PORT=34254
+JDC__UPSTREAM_01__JDS_ADDRESS=127.0.0.1
+JDC__UPSTREAM_01__JDS_PORT=34264
+JDC__UPSTREAM_01__USER_IDENTITY=your_username_here
+```
+
+Upstreams are prioritized in **alphabetical order** of `<NAME>`. Watch out for these footguns:
+
+* Ordering is lexicographic, not numeric: `10` sorts before `2`. Zero-pad numbered upstreams
+  (`01`, `02`, …, `10`) to keep the intended order.
+* Names sort alphabetically, not by meaning: `BACKUP` sorts before `PRIMARY`.
+* Only a **double** underscore separates the name from the field; single underscores belong to
+  the name or field itself (`JDC__UPSTREAM_POOL_A__POOL_PORT` is upstream `POOL_A`'s
+  `pool_port`).
+
+See `docker/docker_env.example` for a complete working set of variables.
+
 ### Run
 
 Example configuration files are available under `miner-apps/jd-client/config-examples/<network>/`.

@@ -1,6 +1,6 @@
 use clap::Parser;
-use ext_config::{Config, File, FileFormat};
 use jd_client_sv2::{config::JobDeclaratorClientConfig, error::JDCErrorKind};
+use stratum_apps::config_helpers::load_config;
 
 use std::path::PathBuf;
 use tracing::error;
@@ -31,11 +31,12 @@ pub fn process_cli_args() -> Result<JobDeclaratorClientConfig, JDCErrorKind> {
         JDCErrorKind::BadCliArgs
     })?;
 
-    let settings = Config::builder()
-        .add_source(File::new(config_path, FileFormat::Toml))
-        .build()?;
-
-    let mut config = settings.try_deserialize::<JobDeclaratorClientConfig>()?;
+    // Env vars prefixed `JDC__` override values from the optional TOML file.
+    let mut config: JobDeclaratorClientConfig = load_config(
+        config_path,
+        "JDC",
+        &["supported_extensions", "required_extensions"],
+    )?;
 
     config.set_log_file(args.log_file);
 
