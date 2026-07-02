@@ -1,7 +1,7 @@
 //! Helpers for loading application configuration from an optional TOML file
 //! and the process environment, with the environment taking precedence.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use ext_config::{Config, ConfigError, Environment, File, FileFormat, Map, Value, ValueKind};
 use serde::de::DeserializeOwned;
@@ -28,6 +28,17 @@ pub fn load_config<T: DeserializeOwned>(
     env_prefix: &str,
     list_keys: &[&str],
 ) -> Result<T, ConfigError> {
+    let prefix_marker = format!("{}__", env_prefix.to_uppercase());
+    if !Path::new(config_path).exists()
+        && !std::env::vars().any(|(key, _)| key.to_uppercase().starts_with(&prefix_marker))
+    {
+        return Err(ConfigError::Message(format!(
+            "no configuration found: `{config_path}` does not exist and no `{prefix_marker}*` \
+             environment variables are set. Supply a TOML file (-c/--config) or set \
+             `{prefix_marker}*` environment variables"
+        )));
+    }
+
     // `try_parsing` lets scalar environment values (numbers and booleans) be
     // coerced into their target types instead of staying raw strings.
     let mut environment = Environment::with_prefix(env_prefix)
@@ -217,6 +228,18 @@ mod tests {
         assert!(result.is_err());
 
         env::remove_var("PARTIAL__LISTEN_ADDRESS");
+    }
+
+    #[test]
+    fn no_config_sources_reports_helpful_error() {
+        // No file and no `EMPTY__*` env vars: the error must tell the user
+        // where configuration can come from.
+        let missing = env::temp_dir().join("loader-test-no-sources.toml");
+        let err = load_config::<TestConfig>(missing.to_str().unwrap(), "EMPTY", list_keys())
+            .expect_err("must fail without any config source");
+        let message = err.to_string();
+        assert!(message.contains("no configuration found"));
+        assert!(message.contains("EMPTY__*"));
     }
 
     #[derive(Debug, Deserialize)]
