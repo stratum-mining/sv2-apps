@@ -57,8 +57,9 @@ RUN echo "Building ${APP}" && \
 ###
 FROM debian:bookworm-slim AS runtime
 
+# CA certificates are needed for reqwest-based miner telemetry requests.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates gettext-base && \
+    ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -67,4 +68,7 @@ ENV APP=${APP}
 
 COPY --from=builder /app/release/${APP} /app/${APP}
 
+# There is no config file: each app is configured entirely from the environment
+# (<PREFIX>__<FIELD> variables supplied via docker_env). The optional config file
+# the binary would otherwise read from its working directory is simply absent.
 ENTRYPOINT ["/bin/sh", "-c", "/app/${APP}"]

@@ -3,16 +3,12 @@ services:
     image: stratumv2/pool_sv2:main
     container_name: pool_sv2
     stop_signal: SIGINT
+    # The pool is configured entirely from POOL__* variables in docker_env;
+    # there is no config file to mount.
     env_file:
       - docker_env
     volumes:
-      - ./config/pool-jds-config.toml.template:/app/pool-jds-config.toml.template:ro
       - "${BITCOIN_SOCKET_PATH?}:/root/.bitcoin/node.sock"
-    entrypoint: >
-      sh -c '
-        envsubst < /app/pool-jds-config.toml.template> /app/pool-config.toml &&
-        exec /app/pool_sv2
-      '
     ports:
       - "3333:3333"
       - "3334:3334"
@@ -27,16 +23,11 @@ services:
     image: stratumv2/jd_client_sv2:main
     container_name: jd_client_sv2
     stop_signal: SIGINT
+    # Configured entirely from JDC__* variables in docker_env.
     env_file:
       - docker_env
     volumes:
-      - ./config/jdc-config.toml.template:/app/jdc-config.toml.template:ro
       - "${BITCOIN_SOCKET_PATH?}:/root/.bitcoin/node.sock"
-    entrypoint: >
-      sh -c '
-        envsubst < /app/jdc-config.toml.template> /app/jdc-config.toml &&
-        exec /app/jd_client_sv2
-      '
     ports:
       - "34265:34265"
       - "9091:9091"  # Monitoring HTTP API & Prometheus metrics
@@ -49,15 +40,9 @@ services:
     image: stratumv2/translator_sv2:main
     container_name: tproxy_sv2
     stop_signal: SIGINT
+    # Configured entirely from TPROXY__* variables in docker_env.
     env_file:
       - docker_env
-    volumes:
-      - ./config/translator-proxy-config.toml.template:/app/proxy-config.toml.template:ro
-    entrypoint: >
-      sh -c '
-        envsubst < /app/proxy-config.toml.template > /app/translator-config.toml &&
-        exec /app/translator_sv2
-      '
     ports:
       - "34255:34255"
       - "9092:9092"  # Monitoring HTTP API & Prometheus metrics
@@ -70,4 +55,3 @@ services:
 
 networks:
   sv2_apps:
-
