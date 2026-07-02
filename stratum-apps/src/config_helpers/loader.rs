@@ -1,7 +1,9 @@
 //! Helpers for loading application configuration from an optional TOML file
 //! and the process environment, with the environment taking precedence.
 
-use ext_config::{Config, ConfigError, Environment, File, FileFormat};
+use std::collections::BTreeMap;
+
+use ext_config::{Config, ConfigError, Environment, File, FileFormat, Map, Value, ValueKind};
 use serde::de::DeserializeOwned;
 
 /// Loads configuration of type `T` from an optional TOML file and environment
@@ -16,6 +18,11 @@ use serde::de::DeserializeOwned;
 /// comma-separated lists, e.g. `POOL__SUPPORTED_EXTENSIONS=1,2,3`. A single
 /// numeric value is read as a scalar, not a 1-element list, so list at least
 /// two values.
+///
+/// Upstream arrays cannot be expressed with `__` paths, so they use the
+/// dedicated form `<PREFIX>__UPSTREAM_<NAME>__<FIELD>`. `<NAME>` groups one
+/// upstream's fields together and orders entries alphabetically; if any such
+/// variable is set, the resulting list replaces the file's `upstreams` array.
 pub fn load_config<T: DeserializeOwned>(
     config_path: &str,
     env_prefix: &str,
@@ -36,11 +43,75 @@ pub fn load_config<T: DeserializeOwned>(
         }
     }
 
-    let builder = Config::builder()
+    let mut builder = Config::builder()
         .add_source(File::new(config_path, FileFormat::Toml).required(false))
         .add_source(environment);
 
+    // Upstreams defined as `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` are assembled into
+    // an array and applied as a single override, which replaces the file's array.
+    if let Some(upstreams) = collect_env_upstreams(env_prefix) {
+        builder = builder.set_override("upstreams", upstreams)?;
+    }
+
     builder.build()?.try_deserialize()
+}
+
+/// Collects `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` environment variables into a
+/// `config` array value, or `None` if none are set.
+fn collect_env_upstreams(env_prefix: &str) -> Option<Value> {
+    let marker = format!("{}__UPSTREAM_", env_prefix.to_uppercase());
+
+    // name -> (field -> raw value); BTreeMaps keep a deterministic, sorted order.
+    let mut grouped: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (key, value) in std::env::vars() {
+        let Some(rest) = key.to_uppercase().strip_prefix(&marker).map(str::to_owned) else {
+            continue;
+        };
+        // Split the upstream name from the field path (the first `__` after the name).
+        let Some((name, field)) = rest.split_once("__") else {
+            continue;
+        };
+        if name.is_empty() || field.is_empty() {
+            continue;
+        }
+        grouped
+            .entry(name.to_owned())
+            .or_default()
+            .insert(field.to_lowercase().replace("__", "."), value);
+    }
+
+    if grouped.is_empty() {
+        return None;
+    }
+
+    let entries: Vec<Value> = grouped
+        .into_values()
+        .map(|fields| {
+            let mut table: Map<String, Value> = Map::new();
+            for (field, raw) in fields {
+                table.insert(field, parse_env_value(raw));
+            }
+            Value::new(None, ValueKind::Table(table))
+        })
+        .collect();
+
+    Some(Value::new(None, ValueKind::Array(entries)))
+}
+
+/// Parses a raw environment string into a typed `config` value, mirroring the
+/// `Environment` source's `try_parsing` behaviour (bool, then i64, then f64,
+/// else string).
+fn parse_env_value(raw: String) -> Value {
+    let kind = if let Ok(b) = raw.to_lowercase().parse::<bool>() {
+        ValueKind::Boolean(b)
+    } else if let Ok(i) = raw.parse::<i64>() {
+        ValueKind::I64(i)
+    } else if let Ok(f) = raw.parse::<f64>() {
+        ValueKind::Float(f)
+    } else {
+        ValueKind::String(raw)
+    };
+    Value::new(None, kind)
 }
 
 #[cfg(test)]
@@ -146,5 +217,84 @@ mod tests {
         assert!(result.is_err());
 
         env::remove_var("PARTIAL__LISTEN_ADDRESS");
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestUpstream {
+        address: String,
+        port: u16,
+        user_identity: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct UpstreamConfig {
+        #[serde(default)]
+        upstreams: Vec<TestUpstream>,
+    }
+
+    #[test]
+    fn env_upstreams_replace_file_array() {
+        // The file defines one upstream; the environment defines a different one.
+        let path = write_toml(
+            "upstream-replace",
+            r#"
+                [[upstreams]]
+                address = "from-file"
+                port = 1111
+                user_identity = "file-user"
+            "#,
+        );
+
+        env::set_var("UP__UPSTREAM_PRIMARY__ADDRESS", "jd_client_sv2");
+        env::set_var("UP__UPSTREAM_PRIMARY__PORT", "34265");
+        env::set_var("UP__UPSTREAM_PRIMARY__USER_IDENTITY", "env-user");
+
+        let cfg: UpstreamConfig =
+            load_config(path.to_str().unwrap(), "UP", &[]).expect("load config");
+
+        // The env-defined upstream fully replaces the file's array.
+        assert_eq!(cfg.upstreams.len(), 1);
+        assert_eq!(cfg.upstreams[0].address, "jd_client_sv2");
+        assert_eq!(cfg.upstreams[0].port, 34265); // parsed as a number
+        assert_eq!(cfg.upstreams[0].user_identity, "env-user");
+
+        for var in [
+            "UP__UPSTREAM_PRIMARY__ADDRESS",
+            "UP__UPSTREAM_PRIMARY__PORT",
+            "UP__UPSTREAM_PRIMARY__USER_IDENTITY",
+        ] {
+            env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn env_upstreams_ordered_by_name() {
+        let missing = env::temp_dir().join("loader-test-no-file.toml");
+
+        // Defined out of order; entries must come out sorted by <NAME> (A before B).
+        env::set_var("ORD__UPSTREAM_B__ADDRESS", "second");
+        env::set_var("ORD__UPSTREAM_B__PORT", "2");
+        env::set_var("ORD__UPSTREAM_B__USER_IDENTITY", "b");
+        env::set_var("ORD__UPSTREAM_A__ADDRESS", "first");
+        env::set_var("ORD__UPSTREAM_A__PORT", "1");
+        env::set_var("ORD__UPSTREAM_A__USER_IDENTITY", "a");
+
+        let cfg: UpstreamConfig =
+            load_config(missing.to_str().unwrap(), "ORD", &[]).expect("load config");
+
+        assert_eq!(cfg.upstreams.len(), 2);
+        assert_eq!(cfg.upstreams[0].address, "first");
+        assert_eq!(cfg.upstreams[1].address, "second");
+
+        for var in [
+            "ORD__UPSTREAM_B__ADDRESS",
+            "ORD__UPSTREAM_B__PORT",
+            "ORD__UPSTREAM_B__USER_IDENTITY",
+            "ORD__UPSTREAM_A__ADDRESS",
+            "ORD__UPSTREAM_A__PORT",
+            "ORD__UPSTREAM_A__USER_IDENTITY",
+        ] {
+            env::remove_var(var);
+        }
     }
 }
