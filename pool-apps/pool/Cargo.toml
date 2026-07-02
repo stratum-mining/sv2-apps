@@ -21,7 +21,6 @@ stratum-apps = { version = "0.8.0", path = "../../stratum-apps", features = ["po
 async-channel = "1.5.1"
 serde = { version = "1.0.89", features = ["derive", "alloc"], default-features = false }
 tokio = { version = "1.44.1", features = ["full"] }
-ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
 tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
 jd_server_sv2 = { version = "0.6.0", path = "../jd-server" }

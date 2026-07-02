@@ -1924,7 +1924,6 @@ version = "0.7.0"
 dependencies = [
  "async-channel",
  "clap",
- "config",
  "hex",
  "hotpath",
  "jd_server_sv2",

@@ -73,6 +73,32 @@ For connections with a Sv2 Template Provider, you may want to verify that your T
 
 Make sure the machine running the Pool application has its clock synced with an NTP server. Certificate validation is time-sensitive, and even a small drift of a few seconds can trigger an `InvalidCertificate` error.
 
+### Environment Variables
+
+Every configuration value can also be supplied through the environment. Variables are prefixed
+with `POOL` and joined with a **double underscore** (`__`) between nested keys — a single
+underscore is just part of a field name (`POOL__LISTEN_ADDRESS` sets `listen_address`).
+
+Environment variables take precedence over the TOML file, and the file itself is optional: the
+pool can be configured entirely from the environment. If a mandatory parameter is supplied by
+neither source, the pool exits with an error.
+
+```bash
+POOL__LISTEN_ADDRESS=0.0.0.0:3333
+# Nested fields join each level with `__`:
+POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
+# Tagged enums (template_provider_type) take the variant as a path segment,
+# matched case-insensitively:
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
+# List fields (supported_extensions, required_extensions) are comma-separated.
+# A lone numeric value is read as a scalar, not a 1-element list, so list at
+# least two values:
+POOL__SUPPORTED_EXTENSIONS=2,3
+```
+
+See `docker/docker_env.example` for a complete working set of variables.
+
 ### Run
 
 There are three example configuration files found in `pool-apps/pool/config-examples`:

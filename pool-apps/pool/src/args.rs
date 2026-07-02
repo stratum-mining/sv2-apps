@@ -3,9 +3,9 @@
 //! Defines the `Args` struct and a function to process CLI arguments into a PoolConfig.
 
 use clap::Parser;
-use ext_config::{Config, File, FileFormat};
 use pool_sv2::config::PoolConfig;
 use std::path::PathBuf;
+use stratum_apps::config_helpers::load_config;
 
 /// Holds the parsed CLI arguments for the Pool binary.
 #[derive(Parser, Debug)]
@@ -31,11 +31,17 @@ pub struct Args {
 pub fn process_cli_args() -> PoolConfig {
     let args = Args::parse();
     let config_path = args.config_path.to_str().expect("Invalid config path");
-    let mut config: PoolConfig = Config::builder()
-        .add_source(File::new(config_path, FileFormat::Toml))
-        .build()
-        .and_then(|settings| settings.try_deserialize::<PoolConfig>())
-        .expect("Failed to load or deserialize config");
+
+    // Env vars prefixed `POOL__` override values from the optional TOML file.
+    let mut config: PoolConfig = load_config(
+        config_path,
+        "POOL",
+        &["supported_extensions", "required_extensions"],
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to load config: {e}");
+        std::process::exit(1);
+    });
 
     config.set_log_dir(args.log_file);
 
