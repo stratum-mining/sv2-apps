@@ -55,7 +55,7 @@ use stratum_apps::{
         },
     },
     tp_type::BitcoinNetwork,
-    utils::types::{JdToken, RequestId},
+    utils::types::{DownstreamId, JdToken, RequestId},
 };
 
 /// Snapshot of a previously declared mining job, stored after a `DeclareMiningJob` is
@@ -432,6 +432,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     ///    `DeclaredCustomJob` for later `SetCustomMiningJob` validation.
     async fn handle_declare_mining_job(
         &self,
+        _downstream_id: DownstreamId,
         declare_mining_job: DeclareMiningJob<'_>,
         provide_missing_transactions_success: Option<ProvideMissingTransactionsSuccess<'_>>,
     ) -> DeclareMiningJobResult {
@@ -636,7 +637,11 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         }
     }
 
-    async fn handle_push_solution(&self, push_solution: PushSolution<'_>) {
+    async fn handle_push_solution(
+        &self,
+        downstream_id: DownstreamId,
+        push_solution: PushSolution<'_>,
+    ) {
         // Convert to static lifetime for channel transfer
         let push_solution_static = push_solution.into_static();
 
@@ -646,9 +651,9 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         };
 
         if let Err(e) = self.request_sender.send(request).await {
-            tracing::error!("Failed to send PushSolution request: {}", e);
+            tracing::error!(downstream_id, "Failed to send PushSolution request: {}", e);
         } else {
-            tracing::debug!("PushSolution request sent successfully");
+            tracing::debug!(downstream_id, "PushSolution request sent successfully");
         }
     }
 
@@ -663,6 +668,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     // DeclareMiningJob token.
     async fn handle_set_custom_mining_job(
         &self,
+        _downstream_id: DownstreamId,
         set_custom_mining_job: SetCustomMiningJob<'_>,
         allocated_token: JdToken, // Note: This is the corresponding DeclareMiningJob token
     ) -> SetCustomMiningJobResult {

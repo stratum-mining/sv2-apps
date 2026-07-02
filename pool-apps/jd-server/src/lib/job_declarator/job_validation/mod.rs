@@ -6,7 +6,7 @@ use stratum_apps::{
         job_declaration_sv2::{DeclareMiningJob, ProvideMissingTransactionsSuccess, PushSolution},
         mining_sv2::SetCustomMiningJob,
     },
-    utils::types::JdToken,
+    utils::types::{DownstreamId, JdToken},
 };
 
 pub mod bitcoin_core_ipc;
@@ -30,17 +30,23 @@ pub trait JobValidationEngine: Send + Sync {
     /// Handles a declare mining job request.
     async fn handle_declare_mining_job(
         &self,
+        downstream_id: DownstreamId,
         declare_mining_job: DeclareMiningJob<'_>,
         provide_missing_transactions_success: Option<ProvideMissingTransactionsSuccess<'_>>,
     ) -> DeclareMiningJobResult;
 
     /// Submits a mining solution to the backend.
-    async fn handle_push_solution(&self, push_solution: PushSolution<'_>);
+    async fn handle_push_solution(
+        &self,
+        downstream_id: DownstreamId,
+        push_solution: PushSolution<'_>,
+    );
 
     /// Validates a `SetCustomMiningJob` (Mining Protocol) against the previously declared job
     /// identified by `allocated_token`.
     async fn handle_set_custom_mining_job(
         &self,
+        downstream_id: DownstreamId,
         set_custom_mining_job: SetCustomMiningJob<'_>,
         allocated_token: JdToken,
     ) -> SetCustomMiningJobResult;
