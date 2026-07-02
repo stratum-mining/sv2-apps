@@ -51,6 +51,11 @@ pub trait JobValidationEngine: Send + Sync {
         allocated_token: JdToken,
     ) -> SetCustomMiningJobResult;
 
+    /// Removes validation state associated with a downstream connection.
+    ///
+    /// Called by [`crate::job_declarator::JobDeclarator`] when a downstream disconnects.
+    fn cleanup_downstream(&self, _downstream_id: DownstreamId) {}
+
     /// Performs backend-specific shutdown work.
     ///
     /// Default implementation is a no-op so non-threaded engines do not need to

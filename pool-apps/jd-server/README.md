@@ -40,4 +40,4 @@ Active tokens are single-use. During `SetCustomMiningJob` handling, the `JobDecl
 
 Malformed, unknown, expired, wrong-owner, or already consumed tokens are rejected with `invalid-mining-job-token`.
 
-Allocated and active tokens are periodically removed by a janitor task after their configured timeouts. When a downstream disconnects, its allocated tokens are removed immediately because they only authorize future `DeclareMiningJob` messages from that JDS connection. Active tokens are retained until they are consumed or expire, because they authorize a later `SetCustomMiningJob` sent through the Pool's Mining Protocol path, not through the JDS connection.
+Allocated and active tokens are periodically removed by a janitor task after their configured timeouts. When a downstream disconnects, both allocated and active tokens owned by that downstream are removed immediately.

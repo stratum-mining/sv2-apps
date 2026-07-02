@@ -361,6 +361,7 @@ impl JobDeclarator {
             .remove(&downstream_id)
             .is_some();
 
+        self.job_validator.cleanup_downstream(downstream_id);
         self.token_manager.remove_downstream(downstream_id);
 
         debug!(

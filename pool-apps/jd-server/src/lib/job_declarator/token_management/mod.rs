@@ -160,15 +160,15 @@ impl TokenManager {
     }
 
     /// Removes allocated tokens belonging to a given downstream.
-    ///
-    /// Active tokens are intentionally retained here and can still be consumed by
-    /// `SetCustomMiningJob` or evicted later by the janitor timeout.
+    /// Also removes active tokens that were activated by the same downstream.
     pub fn remove_downstream(&self, downstream_id: DownstreamId) {
         let allocated_tokens_before = self.allocated_tokens.len();
         let active_tokens_before = self.active_tokens.len();
 
         self.allocated_tokens
             .retain(|_, (_, owner)| *owner != downstream_id);
+        self.active_tokens
+            .retain(|_, (_, _, owner)| *owner != downstream_id);
 
         let allocated_tokens_after = self.allocated_tokens.len();
         let active_tokens_after = self.active_tokens.len();
@@ -178,11 +178,12 @@ impl TokenManager {
             downstream_id,
             removed_allocated_tokens =
                 allocated_tokens_before.saturating_sub(allocated_tokens_after),
+            removed_active_tokens = active_tokens_before.saturating_sub(active_tokens_after),
             allocated_tokens_before,
             allocated_tokens_after,
             active_tokens_before,
             active_tokens_after,
-            "TokenManager: removed downstream-allocated tokens and retained active tokens"
+            "TokenManager: removed downstream tokens"
         );
     }
 

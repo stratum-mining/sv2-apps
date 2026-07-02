@@ -434,6 +434,10 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         }
     }
 
+    fn cleanup_downstream(&self, downstream_id: DownstreamId) {
+        self.downstream_state.remove(&downstream_id);
+    }
+
     /// Validates a `DeclareMiningJob` by forwarding it to Bitcoin Core over IPC.
     ///
     /// Steps:
