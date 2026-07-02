@@ -7,8 +7,8 @@ use crate::{
         ALLOCATED_TOKEN_TIMEOUT_SECS, JANITOR_INTERVAL_SECS,
     },
 };
-use dashmap::DashMap;
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -54,6 +54,7 @@ use stratum_apps::{
             ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
         },
     },
+    sync::SharedMap,
     tp_type::BitcoinNetwork,
     utils::types::{DownstreamId, JdToken, RequestId},
 };
@@ -75,6 +76,12 @@ struct DeclaredCustomJob {
 struct AllocatedTokenEntry {
     request_id: RequestId,
     inserted_at: Instant,
+}
+
+#[derive(Default)]
+struct DownstreamState {
+    declared_custom_jobs: HashMap<RequestId, DeclaredCustomJob>,
+    allocated_token_entries: HashMap<JdToken, AllocatedTokenEntry>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -214,8 +221,7 @@ impl DeclaredCustomJob {
 #[derive(Clone)]
 pub struct BitcoinCoreIPCEngine {
     request_sender: async_channel::Sender<JdRequest>,
-    allocated_token_entries: Arc<DashMap<JdToken, AllocatedTokenEntry>>,
-    declared_custom_jobs: Arc<DashMap<RequestId, DeclaredCustomJob>>,
+    downstream_state: SharedMap<DownstreamId, DownstreamState>,
     cancellation_token: CancellationToken,
     jdp_thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -350,14 +356,11 @@ impl BitcoinCoreIPCEngine {
             }
         }
 
-        let allocated_token_to_request_id =
-            Arc::new(DashMap::<JdToken, AllocatedTokenEntry>::new());
-        let declared_custom_jobs = Arc::new(DashMap::<RequestId, DeclaredCustomJob>::new());
+        let downstream_state = SharedMap::<DownstreamId, DownstreamState>::new();
 
         // Spawn janitor task to clean up stale declared jobs that were never
         // consumed by SetCustomMiningJob.
-        let janitor_allocated_token_to_request_id = Arc::clone(&allocated_token_to_request_id);
-        let janitor_declared_custom_jobs = Arc::clone(&declared_custom_jobs);
+        let janitor_downstream_state = downstream_state.clone();
         let janitor_cancellation = cancellation_token.clone();
         tokio::spawn(async move {
             let janitor_interval = Duration::from_secs(JANITOR_INTERVAL_SECS);
@@ -367,23 +370,33 @@ impl BitcoinCoreIPCEngine {
                     _ = janitor_cancellation.cancelled() => break,
                     _ = tokio::time::sleep(janitor_interval) => {
                         let now = Instant::now();
-                        let expired_tokens: Vec<JdToken> = janitor_allocated_token_to_request_id
-                            .iter()
-                            .filter_map(|entry| {
-                                let inserted_at = entry.value().inserted_at;
-                                if now.saturating_duration_since(inserted_at) > token_timeout {
-                                    Some(*entry.key())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
+                        janitor_downstream_state.for_each_mut(|downstream_id, state| {
+                            let expired_tokens: Vec<JdToken> = state
+                                .allocated_token_entries
+                                .iter()
+                                .filter_map(|(token, entry)| {
+                                    if now.saturating_duration_since(entry.inserted_at)
+                                        > token_timeout
+                                    {
+                                        Some(*token)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
 
-                        for token in expired_tokens {
-                            if let Some((_, entry)) = janitor_allocated_token_to_request_id.remove(&token) {
-                                janitor_declared_custom_jobs.remove(&entry.request_id);
+                            for token in expired_tokens {
+                                if let Some(entry) = state.allocated_token_entries.remove(&token) {
+                                    state.declared_custom_jobs.remove(&entry.request_id);
+                                    tracing::debug!(
+                                        downstream_id,
+                                        token,
+                                        request_id = entry.request_id,
+                                        "Removed expired declared custom job state"
+                                    );
+                                }
                             }
-                        }
+                        });
                     }
                 }
             }
@@ -391,8 +404,7 @@ impl BitcoinCoreIPCEngine {
 
         Ok(Self {
             request_sender,
-            allocated_token_entries: allocated_token_to_request_id,
-            declared_custom_jobs,
+            downstream_state,
             cancellation_token,
             jdp_thread_handle: Arc::new(Mutex::new(Some(jdp_thread_handle))),
         })
@@ -432,7 +444,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     ///    `DeclaredCustomJob` for later `SetCustomMiningJob` validation.
     async fn handle_declare_mining_job(
         &self,
-        _downstream_id: DownstreamId,
+        downstream_id: DownstreamId,
         declare_mining_job: DeclareMiningJob<'_>,
         provide_missing_transactions_success: Option<ProvideMissingTransactionsSuccess<'_>>,
     ) -> DeclareMiningJobResult {
@@ -514,9 +526,14 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
         let previous_pending_validation_context =
             provide_missing_transactions_success.as_ref().and_then(|_| {
-                self.declared_custom_jobs
-                    .get(&declare_mining_job.request_id)
-                    .map(|job| job.validation_context)
+                self.downstream_state
+                    .with(&downstream_id, |state| {
+                        state
+                            .declared_custom_jobs
+                            .get(&declare_mining_job.request_id)
+                            .map(|job| job.validation_context)
+                    })
+                    .flatten()
             });
 
         // Create oneshot channel for response
@@ -565,24 +582,31 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     txid_list: Some(txid_list),
                     validated: true,
                 };
-                self.declared_custom_jobs
-                    .insert(declare_mining_job.request_id, declared_custom_job);
-                self.allocated_token_entries.insert(
-                    allocated_token,
-                    AllocatedTokenEntry {
-                        request_id: declare_mining_job.request_id,
-                        inserted_at: Instant::now(),
-                    },
-                );
+                self.downstream_state
+                    .with_mut_or_default(downstream_id, |state| {
+                        state
+                            .declared_custom_jobs
+                            .insert(declare_mining_job.request_id, declared_custom_job);
+                        state.allocated_token_entries.insert(
+                            allocated_token,
+                            AllocatedTokenEntry {
+                                request_id: declare_mining_job.request_id,
+                                inserted_at: Instant::now(),
+                            },
+                        );
+                    });
                 DeclareMiningJobResult::Success
             }
             JdResponse::Error {
                 error_code,
                 validation_context,
             } => {
-                self.declared_custom_jobs
-                    .remove(&declare_mining_job.request_id);
-                self.allocated_token_entries.remove(&allocated_token);
+                self.downstream_state.with_mut(&downstream_id, |state| {
+                    state
+                        .declared_custom_jobs
+                        .remove(&declare_mining_job.request_id);
+                    state.allocated_token_entries.remove(&allocated_token);
+                });
 
                 let tip_drifted = previous_pending_validation_context
                     .map(|previous_ctx| {
@@ -609,9 +633,12 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 // If this is a retry after ProvideMissingTransactionsSuccess and context drifted,
                 // classify as stale-chain-tip instead of asking for yet another missing-txs round.
                 if provide_missing_transactions_success.is_some() && tip_drifted {
-                    self.declared_custom_jobs
-                        .remove(&declare_mining_job.request_id);
-                    self.allocated_token_entries.remove(&allocated_token);
+                    self.downstream_state.with_mut(&downstream_id, |state| {
+                        state
+                            .declared_custom_jobs
+                            .remove(&declare_mining_job.request_id);
+                        state.allocated_token_entries.remove(&allocated_token);
+                    });
 
                     DeclareMiningJobResult::Error(ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP)
                 } else {
@@ -621,15 +648,19 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                         txid_list: None,
                         validated: false, // this is only set to true on JdResponse::Success
                     };
-                    self.declared_custom_jobs
-                        .insert(declare_mining_job.request_id, declared_custom_job);
-                    self.allocated_token_entries.insert(
-                        allocated_token,
-                        AllocatedTokenEntry {
-                            request_id: declare_mining_job.request_id,
-                            inserted_at: Instant::now(),
-                        },
-                    );
+                    self.downstream_state
+                        .with_mut_or_default(downstream_id, |state| {
+                            state
+                                .declared_custom_jobs
+                                .insert(declare_mining_job.request_id, declared_custom_job);
+                            state.allocated_token_entries.insert(
+                                allocated_token,
+                                AllocatedTokenEntry {
+                                    request_id: declare_mining_job.request_id,
+                                    inserted_at: Instant::now(),
+                                },
+                            );
+                        });
 
                     DeclareMiningJobResult::MissingTransactions(missing_wtxids)
                 }
@@ -668,17 +699,27 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     // DeclareMiningJob token.
     async fn handle_set_custom_mining_job(
         &self,
-        _downstream_id: DownstreamId,
+        downstream_id: DownstreamId,
         set_custom_mining_job: SetCustomMiningJob<'_>,
         allocated_token: JdToken, // Note: This is the corresponding DeclareMiningJob token
     ) -> SetCustomMiningJobResult {
         // Look up request_id using the allocated token
-        let request_id = match self.allocated_token_entries.get(&allocated_token) {
-            Some(entry) => entry.request_id,
+        let request_id = match self
+            .downstream_state
+            .with(&downstream_id, |state| {
+                state
+                    .allocated_token_entries
+                    .get(&allocated_token)
+                    .map(|entry| entry.request_id)
+            })
+            .flatten()
+        {
+            Some(request_id) => request_id,
             None => {
                 tracing::debug!(
-                    "Provided token {} is not associated with any DeclareMiningJob request",
-                    allocated_token
+                    downstream_id,
+                    allocated_token,
+                    "Provided token is not associated with any DeclareMiningJob request"
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
@@ -686,18 +727,26 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             }
         };
 
-        // Clean up immediately - the job is being consumed regardless of validation result
-        self.allocated_token_entries.remove(&allocated_token);
-
-        let declared_custom_job = {
-            match self.declared_custom_jobs.remove(&request_id) {
-                Some((_request_id, declared_custom_job)) => declared_custom_job,
-                None => {
-                    tracing::debug!("DeclaredCustomJob associated with allocated token {} and request id {} not found", allocated_token, request_id);
-                    return SetCustomMiningJobResult::Error(
-                        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-                    );
-                }
+        let declared_custom_job = match self
+            .downstream_state
+            .with_mut(&downstream_id, |state| {
+                // Clean up immediately - the job is being consumed regardless of validation result.
+                state.allocated_token_entries.remove(&allocated_token);
+                state.declared_custom_jobs.remove(&request_id)
+            })
+            .flatten()
+        {
+            Some(declared_custom_job) => declared_custom_job,
+            None => {
+                tracing::debug!(
+                    downstream_id,
+                    allocated_token,
+                    request_id,
+                    "DeclaredCustomJob associated with allocated token and request id not found"
+                );
+                return SetCustomMiningJobResult::Error(
+                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+                );
             }
         };
 
