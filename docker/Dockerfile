@@ -71,4 +71,7 @@ COPY --from=builder /app/release/${APP} /app/${APP}
 # There is no config file: each app is configured entirely from the environment
 # (<PREFIX>__<FIELD> variables supplied via docker_env). The optional config file
 # the binary would otherwise read from its working directory is simply absent.
-ENTRYPOINT ["/bin/sh", "-c", "/app/${APP}"]
+#
+# `exec` replaces the shell so the app runs as PID 1 and receives the container's
+# stop signal (SIGINT) directly, allowing graceful shutdown.
+ENTRYPOINT ["/bin/sh", "-c", "exec /app/${APP}"]
