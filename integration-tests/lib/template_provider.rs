@@ -17,11 +17,10 @@ const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
 const BITCOIN_CORE_V32X: &str = "32.0";
-// TEMPORARY: keep BITCOIN_CORE_V32_BINARY_ENV / BITCOIN_CORE_V32_BINARY_DEFAULT only
-// while v32 tests depend on a local Bitcoin Core build path. Remove once v32 follows the
-// standard binary resolution flow used by other versions.
+// TEMPORARY: keep BITCOIN_CORE_V32_BINARY_ENV only while v32 tests depend on a Bitcoin Core
+// build of https://github.com/bitcoin/bitcoin/pull/35671 (TxCollection). Remove once v32 is
+// released and follows the standard binary resolution flow used by other versions.
 const BITCOIN_CORE_V32_BINARY_ENV: &str = "BITCOIN_CORE_V32_BINARY";
-const BITCOIN_CORE_V32_BINARY_DEFAULT: &str = "/Users/plebhash/develop/bitcoin/build/bin/bitcoin";
 /// Allow static signet fixtures to leave IBD without freezing Bitcoin Core's
 /// clock, so mined blocks still use wall-clock timestamps.
 ///
@@ -77,7 +76,14 @@ fn release_version(version: BitcoinCoreVersion) -> &'static str {
 fn resolve_v32_node_binary() -> PathBuf {
     let configured_path = env::var(BITCOIN_CORE_V32_BINARY_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(BITCOIN_CORE_V32_BINARY_DEFAULT));
+        .unwrap_or_else(|_| {
+            panic!(
+                "Bitcoin Core v32 is not released yet. Build \
+                 https://github.com/bitcoin/bitcoin/pull/35671 from source and point \
+                 {BITCOIN_CORE_V32_BINARY_ENV} at the resulting bitcoin-node binary \
+                 (e.g. <bitcoin>/build/bin/bitcoin-node)."
+            )
+        });
 
     if configured_path.file_name().and_then(|name| name.to_str()) == Some("bitcoin") {
         if let Some(parent) = configured_path.parent() {
@@ -204,14 +210,15 @@ impl BitcoinCore {
         }
 
         // Download and setup Bitcoin Core with IPC support.
-        // During the v32 draft phase, we use a local placeholder binary until
-        // official Bitcoin Core v32 release artifacts are available.
+        // During the v32 draft phase, we use a locally built bitcoin/bitcoin#35671 binary
+        // (via BITCOIN_CORE_V32_BINARY) until official Bitcoin Core v32 release artifacts
+        // are available.
         let os = env::consts::OS;
         let bitcoin_node_bin = if node_version == BitcoinCoreVersion::V32X {
             let binary = resolve_v32_node_binary();
             assert!(
                 binary.exists(),
-                "Bitcoin Core v32 placeholder binary not found at {}. Set {} to override.",
+                "Bitcoin Core v32 binary not found at {} (from {}).",
                 binary.display(),
                 BITCOIN_CORE_V32_BINARY_ENV,
             );
