@@ -382,6 +382,64 @@ impl BitcoinCore {
         Ok(block_hash)
     }
 
+    /// Copy all blocks from `source` to this node via RPC.
+    ///
+    /// The integration test nodes are not connected over P2P, so this is the way to give
+    /// two nodes the same chain while keeping their mempools independent. The node reorgs
+    /// to the source chain, so the source must have more work than any leftover local
+    /// chain (test datadirs persist across runs).
+    pub fn sync_chain_from(&self, source: &BitcoinCore) -> Result<(), corepc_node::Error> {
+        let source_client = &source.bitcoind.client;
+        let target_client = &self.bitcoind.client;
+        let source_height: u64 = source_client.call("getblockcount", &[])?;
+        for height in 1..=source_height {
+            let hash: String = source_client.call("getblockhash", &[height.into()])?;
+            let block_hex: String = source_client.call("getblock", &[hash.into(), 0.into()])?;
+            let result: serde_json::Value =
+                target_client.call("submitblock", &[block_hex.into()])?;
+            // Blocks the node already knows about are reported as duplicates, and blocks
+            // that do not (yet) beat a leftover local chain as inconclusive.
+            assert!(
+                result.is_null()
+                    || result
+                        .as_str()
+                        .is_some_and(|r| r.starts_with("duplicate") || r == "inconclusive"),
+                "submitblock rejected block at height {height}: {result}"
+            );
+        }
+        assert_eq!(
+            self.get_best_block_hash()?,
+            source.get_best_block_hash()?,
+            "chain sync should leave both nodes on the same tip"
+        );
+        Ok(())
+    }
+
+    /// Return the hash of the block at the given height.
+    pub fn get_block_hash(&self, height: u64) -> Result<String, corepc_node::Error> {
+        Ok(self
+            .bitcoind
+            .client
+            .call("getblockhash", &[height.into()])?)
+    }
+
+    /// Return the txids of the block with the given hash.
+    pub fn get_block_txids(&self, block_hash: &str) -> Result<Vec<String>, corepc_node::Error> {
+        let block: serde_json::Value = self
+            .bitcoind
+            .client
+            .call("getblock", &[block_hash.into(), 1.into()])?;
+        Ok(block["tx"]
+            .as_array()
+            .map(|txids| {
+                txids
+                    .iter()
+                    .filter_map(|txid| txid.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Return the IPC socket path for connecting to this node.
     pub fn ipc_socket_path(&self) -> PathBuf {
         let network_dir = if self.is_signet { "signet" } else { "regtest" };

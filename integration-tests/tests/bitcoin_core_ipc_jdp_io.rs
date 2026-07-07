@@ -3,6 +3,8 @@
 //! Flow covered per Bitcoin Core Sv2 runtime behavior and Sv2 JDP expectations:
 //! - `DeclareMiningJob` returns `MissingTransactions` when unknown wtxids are declared.
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
+//! - `DeclareMiningJob` returns `Error(invalid-job)` when the declared coinbase pays more
+//!   than the block subsidy.
 //! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
 //!   intentionally mismatched.
 //!
@@ -30,7 +32,10 @@ use stratum_apps::{
             transaction::Version as TxVersion, Amount, OutPoint, ScriptBuf, Sequence, Transaction,
             TxIn, TxOut, Witness, Wtxid,
         },
-        job_declaration_sv2::ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        job_declaration_sv2::{
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        },
     },
 };
 
@@ -105,6 +110,7 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     assert_jdp_missing_transactions_scenario(&incoming_sender, coinbase_tx.clone(), missing_wtxid)
         .await;
     assert_jdp_success_scenario(&incoming_sender, coinbase_tx).await;
+    assert_jdp_overpaying_coinbase_scenario(&incoming_sender, next_height).await;
     assert_jdp_stale_chain_tip_scenario(&incoming_sender, next_height).await;
 
     cancellation_token.cancel();
@@ -156,6 +162,36 @@ async fn assert_jdp_success_scenario(
             );
         }
         response => panic!("expected Success, got: {response:?}"),
+    }
+}
+
+async fn assert_jdp_overpaying_coinbase_scenario(
+    incoming_sender: &Sender<JdRequest>,
+    next_height: u32,
+) {
+    // Regtest initial block subsidy is 50 BTC; with an empty transaction list there are no
+    // fees, so paying one extra satoshi must fail contextual coinbase validation
+    // (bad-cb-amount).
+    let mut coinbase_tx = build_valid_coinbase_tx(next_height);
+    coinbase_tx.output[0].value = Amount::from_sat(50 * 100_000_000 + 1);
+
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx,
+        vec![],
+        vec![],
+        "jdp/overpaying-coinbase",
+    )
+    .await;
+
+    match response {
+        JdResponse::Error { error_code, .. } => {
+            assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job error for overpaying coinbase"
+            );
+        }
+        response => panic!("expected Error(invalid-job), got: {response:?}"),
     }
 }
 
