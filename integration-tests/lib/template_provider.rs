@@ -60,10 +60,40 @@ fn get_bitcoin_core_filename(os: &str, arch: &str, bitcoin_core_version: &str) -
 
 pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V31X;
 
+fn parse_ipc_version(version: &str) -> Option<BitcoinCoreVersion> {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let major = version.split('.').next().unwrap_or(version);
+    match major {
+        "30" => Some(BitcoinCoreVersion::V30X),
+        "31" => Some(BitcoinCoreVersion::V31X),
+        _ => None,
+    }
+}
+
+pub fn selected_bitcoin_core_version() -> BitcoinCoreVersion {
+    if let Ok(version) = env::var("BITCOIN_CORE_VERSION") {
+        return parse_ipc_version(&version)
+            .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_VERSION release: {version}"));
+    }
+
+    BITCOIN_CORE_LATEST
+}
+
+pub fn should_run_bitcoin_core_version(version: BitcoinCoreVersion) -> bool {
+    env::var("BITCOIN_CORE_VERSION").is_err() || selected_bitcoin_core_version() == version
+}
+
 fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
+    }
+}
+
+fn selected_release_version(ipc_version: BitcoinCoreVersion) -> String {
+    match env::var("BITCOIN_CORE_VERSION") {
+        Ok(version) => version.strip_prefix('v').unwrap_or(&version).to_owned(),
+        _ => release_version(ipc_version).to_owned(),
     }
 }
 
@@ -175,10 +205,10 @@ impl BitcoinCore {
         }
 
         // Download and setup Bitcoin Core with IPC support
-        let bitcoin_core_version = release_version(node_version);
+        let bitcoin_core_version = selected_release_version(node_version);
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
-        let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
+        let bitcoin_filename = get_bitcoin_core_filename(os, arch, &bitcoin_core_version);
         let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
         let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
         let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
@@ -363,7 +393,8 @@ pub struct TemplateProvider {
 impl TemplateProvider {
     /// Start a new [`TemplateProvider`] instance with Bitcoin Core and standalone sv2-tp.
     pub fn start(port: u16, sv2_interval: u32, difficulty_level: DifficultyLevel) -> Self {
-        let bitcoin_core = BitcoinCore::start(port, difficulty_level, BITCOIN_CORE_LATEST);
+        let bitcoin_core =
+            BitcoinCore::start(port, difficulty_level, selected_bitcoin_core_version());
 
         let current_dir: PathBuf = std::env::current_dir().expect("failed to read current dir");
         let bin_dir = current_dir.join("template-provider");

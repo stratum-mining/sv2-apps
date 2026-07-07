@@ -75,7 +75,7 @@ pub fn ipc_config(
     } else {
         BitcoinNetwork::Regtest
     };
-    let version = BITCOIN_CORE_LATEST;
+    let version = selected_bitcoin_core_version();
 
     TemplateProviderType::BitcoinCoreIpc {
         version,
@@ -193,7 +193,7 @@ pub fn start_template_provider(
 }
 
 pub fn start_bitcoin_core_latest(difficulty_level: DifficultyLevel) -> BitcoinCore {
-    start_bitcoin_core(difficulty_level, BITCOIN_CORE_LATEST)
+    start_bitcoin_core(difficulty_level, selected_bitcoin_core_version())
 }
 
 pub fn start_bitcoin_core(
