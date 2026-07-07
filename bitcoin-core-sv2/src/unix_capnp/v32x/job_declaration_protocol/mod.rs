@@ -3,7 +3,10 @@
 
 use crate::{
     common::job_declaration_protocol::io::{DownstreamId, JdRequest, RequestId},
-    unix_capnp::v32x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
+    unix_capnp::v32x::job_declaration_protocol::{
+        error::BitcoinCoreSv2JDPError,
+        provided_tx_cache::{DEFAULT_PROVIDED_TX_CACHE_MAX_BYTES, ProvidedTxCache},
+    },
 };
 use async_channel::Receiver;
 use bitcoin_capnp_types::{
@@ -24,6 +27,7 @@ use tracing::{debug, error, info, warn};
 
 pub mod error;
 mod handlers;
+mod provided_tx_cache;
 
 /// How often to poll `isInitialBlockDownload` while waiting for IBD to finish during startup.
 const IBD_POLL_INTERVAL_SECS: u64 = 1;
@@ -48,6 +52,10 @@ const IBD_POLL_INTERVAL_SECS: u64 = 1;
 /// succeeds, a [`Success`] response with the template parameters is sent and the validated
 /// `BlockTemplate` is retained, keyed by `(downstream_id, request_id)`.
 ///
+/// Client-provided transactions are additionally remembered in a bounded
+/// [`ProvidedTxCache`], so later declarations of the same transactions — by any downstream —
+/// complete without another `ProvideMissingTransactions` round.
+///
 /// Incoming [`PushSolution`] requests submit mining solutions to Bitcoin Core via the
 /// retained template's `submitSolution` method; the block itself never leaves the node.
 /// [`ReleaseDeclaredJob`] and [`CleanupDownstream`] requests discard retained templates
@@ -63,6 +71,10 @@ pub struct BitcoinCoreSv2JDP {
     /// Dropping a client releases the corresponding `BlockTemplate` inside Bitcoin Core,
     /// but an explicit `destroy` is preferred for prompt cleanup.
     declared_templates: Rc<RefCell<HashMap<(DownstreamId, RequestId), BlockTemplateIpcClient>>>,
+    /// Client-provided transactions remembered across declarations, so other downstreams
+    /// (or retries) declaring the same transactions skip the `ProvideMissingTransactions`
+    /// round.
+    provided_txs: Rc<RefCell<ProvidedTxCache>>,
     incoming_requests: Receiver<JdRequest>,
 }
 
@@ -163,6 +175,9 @@ impl BitcoinCoreSv2JDP {
             mining_ipc_client,
             cancellation_token: cancellation_token.clone(),
             declared_templates: Rc::new(RefCell::new(HashMap::new())),
+            provided_txs: Rc::new(RefCell::new(ProvidedTxCache::new(
+                DEFAULT_PROVIDED_TX_CACHE_MAX_BYTES,
+            ))),
             incoming_requests,
         };
 

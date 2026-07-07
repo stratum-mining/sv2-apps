@@ -375,6 +375,78 @@ impl BitcoinCore {
         Ok(())
     }
 
+    /// Fund the node's wallet with spendable *legacy* (pre-segwit) outputs by mining 101
+    /// blocks to a legacy address, which is returned for later use.
+    ///
+    /// Useful for building witness-free transactions, which can be included in a block
+    /// whose coinbase carries no witness commitment.
+    pub fn fund_wallet_legacy(&self) -> Result<String, corepc_node::Error> {
+        let client = &self.bitcoind.client;
+        let address: String = client.call("getnewaddress", &["".into(), "legacy".into()])?;
+        // Mine in batches: a single 101-block generatetoaddress can exceed the RPC
+        // client's 15s timeout when several test nodes mine concurrently.
+        let mut remaining = 101u32;
+        while remaining > 0 {
+            let batch = remaining.min(20);
+            let _: serde_json::Value =
+                client.call("generatetoaddress", &[batch.into(), address.clone().into()])?;
+            remaining -= batch;
+        }
+        Ok(address)
+    }
+
+    /// Create and sign a legacy (witness-free) self-transfer WITHOUT broadcasting it, and
+    /// return its consensus-serialized bytes.
+    ///
+    /// Explicitly spends a mature coinbase output of `funded_address` (from
+    /// [`BitcoinCore::fund_wallet_legacy`]) so no segwit input sneaks in through wallet
+    /// coin selection, keeping the transaction free of witness data.
+    pub fn create_unbroadcast_legacy_transaction(
+        &self,
+        funded_address: &str,
+    ) -> Result<Vec<u8>, corepc_node::Error> {
+        let client = &self.bitcoind.client;
+        let unspent: serde_json::Value = client.call(
+            "listunspent",
+            &[
+                100.into(),
+                9_999_999.into(),
+                serde_json::json!([funded_address]),
+            ],
+        )?;
+        let utxo = unspent
+            .as_array()
+            .and_then(|utxos| utxos.first())
+            .unwrap_or_else(|| {
+                panic!("expected a mature UTXO on the legacy funding address {funded_address}")
+            })
+            .clone();
+        let txid = utxo["txid"].as_str().expect("listunspent entry has txid");
+        let vout = utxo["vout"].as_u64().expect("listunspent entry has vout");
+        let amount = utxo["amount"]
+            .as_f64()
+            .expect("listunspent entry has amount");
+
+        let destination: String = client.call("getnewaddress", &["".into(), "legacy".into()])?;
+        let raw: String = client.call(
+            "createrawtransaction",
+            &[
+                serde_json::json!([{ "txid": txid, "vout": vout }]),
+                serde_json::json!({ destination: amount - 0.0001 }),
+            ],
+        )?;
+        let signed: serde_json::Value =
+            client.call("signrawtransactionwithwallet", &[raw.into()])?;
+        assert!(
+            signed["complete"].as_bool().unwrap_or(false),
+            "wallet should fully sign the self-transfer: {signed}"
+        );
+        let signed_hex = signed["hex"]
+            .as_str()
+            .expect("signrawtransactionwithwallet should return hex");
+        Ok(hex::decode(signed_hex).expect("signed transaction should be valid hex"))
+    }
+
     /// Return the hash of the most recent block.
     pub fn get_best_block_hash(&self) -> Result<String, corepc_node::Error> {
         let client = &self.bitcoind.client;

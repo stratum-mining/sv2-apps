@@ -114,6 +114,16 @@ impl BitcoinCoreSv2JDP {
     ) -> Result<JdResponse, BitcoinCoreSv2JDPError> {
         let (tip_hash, tip_height) = self.get_tip().await?;
 
+        // Remember client-provided transactions before completing this request's collection
+        // with them, so other downstreams (and retries) declaring the same transactions can
+        // be served from the cache instead of another ProvideMissingTransactions round.
+        if !missing_txs.is_empty() {
+            let mut provided_txs = self.provided_txs.borrow_mut();
+            for tx in missing_txs {
+                provided_txs.insert(tx.clone());
+            }
+        }
+
         let collection = self.collect_txs(wtxid_list).await?;
 
         // Complete the collection with transactions from ProvideMissingTransactions.Success
@@ -121,15 +131,39 @@ impl BitcoinCoreSv2JDP {
             self.add_missing_txs(&collection, missing_txs).await?;
         }
 
-        // Ask Bitcoin Core which declared transactions it still doesn't know about
+        // Ask Bitcoin Core which declared transactions it still doesn't know about, and try
+        // to supply them from the provided-transaction cache before asking the client.
         let missing_positions = self.unknown_tx_pos(&collection).await?;
         if !missing_positions.is_empty() {
             let missing_wtxids = Self::wtxids_at_positions(wtxid_list, &missing_positions);
-            self.destroy_tx_collection(&collection).await;
-            return Ok(JdResponse::MissingTransactions {
-                missing_wtxids,
-                prev_hash: tip_hash,
-            });
+            let (cached_txs, missing_wtxids) = {
+                let mut provided_txs = self.provided_txs.borrow_mut();
+                let mut cached_txs = Vec::new();
+                let mut still_missing = Vec::new();
+                for wtxid in missing_wtxids {
+                    match provided_txs.get(&wtxid) {
+                        Some(tx) => cached_txs.push(tx),
+                        None => still_missing.push(wtxid),
+                    }
+                }
+                (cached_txs, still_missing)
+            };
+
+            if !cached_txs.is_empty() {
+                debug!(
+                    count = cached_txs.len(),
+                    "Supplying missing transactions from the provided-transaction cache"
+                );
+                self.add_missing_txs(&collection, &cached_txs).await?;
+            }
+
+            if !missing_wtxids.is_empty() {
+                self.destroy_tx_collection(&collection).await;
+                return Ok(JdResponse::MissingTransactions {
+                    missing_wtxids,
+                    prev_hash: tip_hash,
+                });
+            }
         }
 
         // A BIP34 height mismatch would also be caught by makeTemplate (bad-cb-height), but
