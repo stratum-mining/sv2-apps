@@ -93,7 +93,7 @@ impl BitcoinCoreSv2JDP {
                 // we don't care if the receiver dropped the channel
                 let _ = response_tx.send(JdResponse::MissingTransactions {
                     missing_wtxids,
-                    validation_context: initial_validation_context,
+                    prev_hash: initial_validation_context.prev_hash,
                 });
                 return;
             }
@@ -159,7 +159,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -177,7 +177,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -192,7 +192,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -301,7 +301,7 @@ impl BitcoinCoreSv2JDP {
 
             JdResponse::Error {
                 error_code,
-                validation_context: latest_validation_context,
+                prev_hash: Some(latest_validation_context.prev_hash),
             }
         };
 

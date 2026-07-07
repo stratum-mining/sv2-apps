@@ -3,9 +3,10 @@
 use stratum_core::bitcoin::{Block, BlockHash, CompactTarget, Transaction, Wtxid, block::Version};
 use tokio::sync::oneshot;
 
-/// Snapshot of the template parameters used by the validator at decision time.
+/// Snapshot of the template parameters used by the mirror-based validators (v30.x/v31.x)
+/// at decision time.
 ///
-/// This lets callers distinguish stale-tip races from other validation failures.
+/// This lets those backends distinguish stale-tip races from other validation failures.
 ///
 /// Please check https://github.com/stratum-mining/sv2-apps/issues/364
 /// for more details on the regression that motivated this field.
@@ -35,6 +36,10 @@ pub enum JdRequest {
 }
 
 /// The result of trying to handle a DeclareMiningJob request.
+///
+/// `Error` and `MissingTransactions` carry only the chain tip (`prev_hash`) the validator
+/// operated against: stale-tip classification is restricted to `prev_hash` comparison
+/// (see https://github.com/stratum-mining/sv2-apps/issues/597).
 #[derive(Debug, Clone)]
 pub enum JdResponse {
     Success {
@@ -49,10 +54,12 @@ pub enum JdResponse {
     },
     Error {
         error_code: &'static str,
-        validation_context: ValidationContext,
+        /// Chain tip at decision time; `None` when the failure happened before the validator
+        /// could establish one (e.g. internal IPC errors).
+        prev_hash: Option<BlockHash>,
     },
     MissingTransactions {
         missing_wtxids: Vec<Wtxid>,
-        validation_context: ValidationContext,
+        prev_hash: BlockHash,
     },
 }
