@@ -14,12 +14,13 @@ pub mod io;
 
 use crate::{
     common::{BitcoinCoreSv2Error, BitcoinCoreSv2Protocol, BitcoinCoreVersion},
-    unix_capnp::{v30x, v31x},
+    unix_capnp::{master, v30x, v31x},
 };
 use async_channel::Receiver;
 use io::JdRequest;
 use std::path::Path;
 pub use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 /// Version-agnostic JDP runtime handle.
 ///
@@ -28,6 +29,7 @@ pub use tokio_util::sync::CancellationToken;
 pub enum BitcoinCoreSv2JDP {
     V30X(v30x::job_declaration_protocol::BitcoinCoreSv2JDP),
     V31X(v31x::job_declaration_protocol::BitcoinCoreSv2JDP),
+    Master(master::job_declaration_protocol::BitcoinCoreSv2JDP),
 }
 
 impl BitcoinCoreSv2JDP {
@@ -35,6 +37,7 @@ impl BitcoinCoreSv2JDP {
         match self {
             Self::V30X(runtime) => runtime.run().await,
             Self::V31X(runtime) => runtime.run().await,
+            Self::Master(runtime) => runtime.run().await,
         }
     }
 }
@@ -75,5 +78,19 @@ where
         .map_err(|error| {
             BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
         }),
+        BitcoinCoreVersion::Master => {
+            info!("Using Bitcoin Core master JDP adapter backed by master IPC bindings");
+            master::job_declaration_protocol::BitcoinCoreSv2JDP::new(
+                bitcoin_core_unix_socket_path,
+                incoming_requests,
+                cancellation_token,
+                ready_tx,
+            )
+            .await
+            .map(BitcoinCoreSv2JDP::Master)
+            .map_err(|error| {
+                BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
+            })
+        }
     }
 }

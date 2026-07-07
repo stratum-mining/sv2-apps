@@ -48,6 +48,9 @@ jobs:
         with:
           github-token: ${{ github.token }}
 
+      - name: Update Bitcoin Core master IPC bindings
+        run: cargo update --manifest-path=integration-tests/Cargo.toml 'git+https://github.com/2140-dev/bitcoin-capnp-types?branch=master#0.2.1'
+
       - name: Build integration test binaries
         run: |
           cargo nextest archive --manifest-path=integration-tests/Cargo.toml --archive-file integration-test-binaries-${{ runner.os }}.tar.zst
@@ -116,21 +119,35 @@ jobs:
           if-no-files-found: error
 
   ci:
-    name: Integration tests (${{ matrix.os }})
-    needs: build
+    name: Integration tests (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os:
           - ubuntu-latest
           - macos-15
+        bitcoin_core_version:
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
 
       - name: Run archived integration tests
         uses: ./.github/actions/run-archived-nextest
         with:
           profile: default
           github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node

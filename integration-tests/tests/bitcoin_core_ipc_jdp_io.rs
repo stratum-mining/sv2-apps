@@ -51,6 +51,14 @@ async fn jdp_io_integration_v31x() {
     assert_jdp_io_integration_for_version(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+async fn jdp_io_integration_master() {
+    if !should_run_bitcoin_core_version(BitcoinCoreVersion::Master) {
+        return;
+    }
+    assert_jdp_io_integration_for_version(BitcoinCoreVersion::Master).await;
+}
+
 async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     start_tracing();
 

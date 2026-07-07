@@ -14,12 +14,13 @@
 
 use crate::{
     common::{BitcoinCoreSv2Error, BitcoinCoreSv2Protocol, BitcoinCoreVersion},
-    unix_capnp::{v30x, v31x},
+    unix_capnp::{master, v30x, v31x},
 };
 use async_channel::{Receiver, Sender};
 use std::path::Path;
 use stratum_core::parsers_sv2::TemplateDistribution;
 pub use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 /// Version-agnostic TDP runtime handle.
 ///
@@ -28,6 +29,7 @@ pub use tokio_util::sync::CancellationToken;
 pub enum BitcoinCoreSv2TDP {
     V30X(v30x::template_distribution_protocol::BitcoinCoreSv2TDP),
     V31X(v31x::template_distribution_protocol::BitcoinCoreSv2TDP),
+    Master(master::template_distribution_protocol::BitcoinCoreSv2TDP),
 }
 
 impl BitcoinCoreSv2TDP {
@@ -35,6 +37,7 @@ impl BitcoinCoreSv2TDP {
         match self {
             Self::V30X(runtime) => runtime.run().await,
             Self::V31X(runtime) => runtime.run().await,
+            Self::Master(runtime) => runtime.run().await,
         }
     }
 }
@@ -82,5 +85,21 @@ where
         .map_err(|error| {
             BitcoinCoreSv2TDPError::from_debug(version, BitcoinCoreSv2Protocol::TDP, error)
         }),
+        BitcoinCoreVersion::Master => {
+            info!("Using Bitcoin Core master TDP adapter backed by master IPC bindings");
+            master::template_distribution_protocol::BitcoinCoreSv2TDP::new(
+                bitcoin_core_unix_socket_path,
+                fee_threshold,
+                min_interval,
+                incoming_messages,
+                outgoing_messages,
+                global_cancellation_token,
+            )
+            .await
+            .map(BitcoinCoreSv2TDP::Master)
+            .map_err(|error| {
+                BitcoinCoreSv2TDPError::from_debug(version, BitcoinCoreSv2Protocol::TDP, error)
+            })
+        }
     }
 }

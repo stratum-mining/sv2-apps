@@ -61,6 +61,10 @@ fn get_bitcoin_core_filename(os: &str, arch: &str, bitcoin_core_version: &str) -
 pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V31X;
 
 fn parse_ipc_version(version: &str) -> Option<BitcoinCoreVersion> {
+    if version.contains('@') || version == "master" {
+        return Some(BitcoinCoreVersion::Master);
+    }
+
     let version = version.strip_prefix('v').unwrap_or(version);
     let major = version.split('.').next().unwrap_or(version);
     match major {
@@ -77,23 +81,26 @@ pub fn selected_bitcoin_core_version() -> BitcoinCoreVersion {
     }
 
     if let Ok(version) = env::var("BITCOIN_CORE_VERSION") {
-        if !version.contains('@') {
-            return parse_ipc_version(&version)
-                .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_VERSION release: {version}"));
-        }
+        return parse_ipc_version(&version)
+            .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_VERSION release: {version}"));
     }
 
     BITCOIN_CORE_LATEST
 }
 
 pub fn should_run_bitcoin_core_version(version: BitcoinCoreVersion) -> bool {
-    env::var("BITCOIN_CORE_VERSION").is_err() || selected_bitcoin_core_version() == version
+    if env::var("BITCOIN_CORE_VERSION").is_err() {
+        return version != BitcoinCoreVersion::Master;
+    }
+
+    selected_bitcoin_core_version() == version
 }
 
 fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
+        BitcoinCoreVersion::Master => BITCOIN_CORE_V31X,
     }
 }
 
