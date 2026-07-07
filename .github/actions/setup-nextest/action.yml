@@ -1,0 +1,21 @@
+name: Setup cargo-nextest
+description: Install cargo-nextest from upstream release artifacts.
+
+inputs:
+  github-token:
+    description: GitHub token used by cargo-binstall for release downloads.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@v1.20.0
+      with:
+        version: "1.20.0"
+
+    - name: Install cargo-nextest
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-nextest@0.9.100

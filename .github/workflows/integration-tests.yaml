@@ -9,16 +9,14 @@ on:
 name: Integration Tests
 
 jobs:
-  ci:
+  build:
+    name: Build integration test binaries (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os:
           - ubuntu-latest
           - macos-15
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
 
     steps:
       - name: Checkout repository
@@ -26,6 +24,16 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            integration-tests/target
+          key: integration-tests-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: integration-tests-cargo-${{ runner.os }}-
 
       - name: Install capnp dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -35,19 +43,38 @@ jobs:
         if: matrix.os == 'macos-15'
         run: brew install capnp
 
-      # Install cargo-binstall so tool installs below use prebuilt binaries.
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@v1.20.0
-        with:
-          version: "1.20.0"
-
-      # Install cargo-nextest via cargo-binstall (no source build).
-      # Keep quick-install disabled to only use upstream release artifacts.
       - name: Install cargo-nextest
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-nextest@0.9.100
+        uses: ./.github/actions/setup-nextest
+        with:
+          github-token: ${{ github.token }}
 
-      - name: Integration Tests
+      - name: Build integration test binaries
         run: |
-         RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture
+          cargo nextest archive --manifest-path=integration-tests/Cargo.toml --archive-file integration-test-binaries-${{ runner.os }}.tar.zst
+
+      - name: Upload compiled test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-test-binaries-${{ runner.os }}
+          path: integration-test-binaries-${{ runner.os }}.tar.zst
+          if-no-files-found: error
+
+  ci:
+    name: Integration tests (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: default
+          github-token: ${{ github.token }}
