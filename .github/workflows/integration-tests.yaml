@@ -130,6 +130,8 @@ jobs:
           - ubuntu-latest
           - macos-15
         bitcoin_core_version:
+          - v30.2
+          - v31.0
           - bitcoin/bitcoin@master
         include:
           - os: ubuntu-latest

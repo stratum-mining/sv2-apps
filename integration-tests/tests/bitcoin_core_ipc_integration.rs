@@ -55,10 +55,10 @@ async fn pool_propagates_block_with_bitcoin_core_ipc() {
 #[tokio::test]
 async fn jdc_propagates_block_with_bitcoin_core_ipc() {
     start_tracing();
-    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
-    let current_block_hash = tp.get_best_block_hash().unwrap();
+    let bitcoin_core = start_bitcoin_core_latest(DifficultyLevel::Low);
+    let current_block_hash = bitcoin_core.get_best_block_hash().unwrap();
     let (pool, pool_addr, jds_addr, _) =
-        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+        start_pool_with_jds(&bitcoin_core, vec![], vec![], false).await;
     let ignore_push_solution =
         IgnoreMessage::new(MessageDirection::ToUpstream, MESSAGE_TYPE_PUSH_SOLUTION);
     let (sniffer, sniffer_addr) = start_sniffer(
@@ -71,8 +71,8 @@ async fn jdc_propagates_block_with_bitcoin_core_ipc() {
     let (jdc, jdc_addr, _) = start_jdc(
         &[(pool_addr, sniffer_addr)],
         ipc_config(
-            tp.bitcoin_core().data_dir().clone(),
-            tp.bitcoin_core().is_signet(),
+            bitcoin_core.data_dir().clone(),
+            bitcoin_core.is_signet(),
             None,
         ),
         vec![],
@@ -109,7 +109,7 @@ async fn jdc_propagates_block_with_bitcoin_core_ipc() {
     let start_time = tokio::time::Instant::now();
     loop {
         tokio::time::sleep(poll_interval).await;
-        let new_block_hash = tp.get_best_block_hash().unwrap();
+        let new_block_hash = bitcoin_core.get_best_block_hash().unwrap();
         if new_block_hash != current_block_hash {
             sniffer
                 .assert_message_not_present(

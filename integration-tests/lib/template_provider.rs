@@ -13,7 +13,8 @@ use tracing::warn;
 
 use crate::utils::{fs_utils, http, tarball};
 
-const VERSION_SV2_TP: &str = "1.1.0";
+const VERSION_SV2_TP_V30X: &str = "1.0.6";
+const VERSION_SV2_TP_V31X: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
 /// Allow static signet fixtures to leave IBD without freezing Bitcoin Core's
@@ -28,17 +29,17 @@ const BITCOIN_CORE_V31X: &str = "31.0";
 /// stale-tip IBD threshold; it does not change Bitcoin Core's clock.
 const SIGNET_FIXTURE_MAX_TIP_AGE_SECS: u64 = 100 * 365 * 24 * 60 * 60;
 
-fn get_sv2_tp_filename(os: &str, arch: &str) -> String {
+fn get_sv2_tp_filename(os: &str, arch: &str, sv2_tp_version: &str) -> String {
     match (os, arch) {
         ("macos", "aarch64") => {
-            format!("sv2-tp-{VERSION_SV2_TP}-arm64-apple-darwin.tar.gz")
+            format!("sv2-tp-{sv2_tp_version}-arm64-apple-darwin.tar.gz")
         }
         ("macos", "x86_64") => {
-            format!("sv2-tp-{VERSION_SV2_TP}-x86_64-apple-darwin.tar.gz")
+            format!("sv2-tp-{sv2_tp_version}-x86_64-apple-darwin.tar.gz")
         }
-        ("linux", "x86_64") => format!("sv2-tp-{VERSION_SV2_TP}-x86_64-linux-gnu.tar.gz"),
-        ("linux", "aarch64") => format!("sv2-tp-{VERSION_SV2_TP}-aarch64-linux-gnu.tar.gz"),
-        _ => format!("sv2-tp-{VERSION_SV2_TP}-x86_64-apple-darwin.tar.gz"),
+        ("linux", "x86_64") => format!("sv2-tp-{sv2_tp_version}-x86_64-linux-gnu.tar.gz"),
+        ("linux", "aarch64") => format!("sv2-tp-{sv2_tp_version}-aarch64-linux-gnu.tar.gz"),
+        _ => format!("sv2-tp-{sv2_tp_version}-x86_64-apple-darwin.tar.gz"),
     }
 }
 
@@ -101,6 +102,22 @@ fn release_version(version: BitcoinCoreVersion) -> &'static str {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
         BitcoinCoreVersion::Master => BITCOIN_CORE_V31X,
+    }
+}
+
+fn sv2_tp_version(version: BitcoinCoreVersion) -> &'static str {
+    match version {
+        BitcoinCoreVersion::V30X => VERSION_SV2_TP_V30X,
+        BitcoinCoreVersion::V31X => VERSION_SV2_TP_V31X,
+        BitcoinCoreVersion::Master => VERSION_SV2_TP_V31X,
+    }
+}
+
+fn sv2_tp_template_interval_arg(version: BitcoinCoreVersion, sv2_interval: u32) -> String {
+    match version {
+        BitcoinCoreVersion::V30X => format!("-sv2interval={sv2_interval}"),
+        BitcoinCoreVersion::V31X => format!("-templateinterval={sv2_interval}"),
+        BitcoinCoreVersion::Master => format!("-templateinterval={sv2_interval}"),
     }
 }
 
@@ -430,8 +447,8 @@ pub struct TemplateProvider {
 impl TemplateProvider {
     /// Start a new [`TemplateProvider`] instance with Bitcoin Core and standalone sv2-tp.
     pub fn start(port: u16, sv2_interval: u32, difficulty_level: DifficultyLevel) -> Self {
-        let bitcoin_core =
-            BitcoinCore::start(port, difficulty_level, selected_bitcoin_core_version());
+        let bitcoin_core_version = selected_bitcoin_core_version();
+        let bitcoin_core = BitcoinCore::start(port, difficulty_level, bitcoin_core_version);
 
         let current_dir: PathBuf = std::env::current_dir().expect("failed to read current dir");
         let bin_dir = current_dir.join("template-provider");
@@ -439,8 +456,9 @@ impl TemplateProvider {
         // Download and setup sv2-tp binary
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
-        let sv2_tp_filename = get_sv2_tp_filename(os, arch);
-        let sv2_tp_home = bin_dir.join(format!("sv2-tp-{VERSION_SV2_TP}"));
+        let sv2_tp_version = sv2_tp_version(bitcoin_core_version);
+        let sv2_tp_filename = get_sv2_tp_filename(os, arch, sv2_tp_version);
+        let sv2_tp_home = bin_dir.join(format!("sv2-tp-{sv2_tp_version}"));
         let sv2_tp_bin = sv2_tp_home.join("bin").join("sv2-tp");
 
         if !sv2_tp_bin.exists() {
@@ -452,7 +470,7 @@ impl TemplateProvider {
                         env::var("SV2TP_DOWNLOAD_ENDPOINT").unwrap_or_else(|_| {
                             "https://github.com/stratum-mining/sv2-tp/releases/download".to_owned()
                         });
-                    let url = format!("{download_endpoint}/v{VERSION_SV2_TP}/{sv2_tp_filename}");
+                    let url = format!("{download_endpoint}/v{sv2_tp_version}/{sv2_tp_filename}");
                     http::make_get_request(&url, 5)
                 }
             };
@@ -486,7 +504,10 @@ impl TemplateProvider {
             .arg(network)
             .arg(format!("-datadir={}", datadir.display()))
             .arg(format!("-sv2port={port}"))
-            .arg(format!("-templateinterval={sv2_interval}"))
+            .arg(sv2_tp_template_interval_arg(
+                bitcoin_core_version,
+                sv2_interval,
+            ))
             .arg("-sv2feedelta=0")
             .arg("-debug=sv2")
             .arg("-loglevel=sv2:trace")
