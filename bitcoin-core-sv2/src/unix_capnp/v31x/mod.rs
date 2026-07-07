@@ -6,5 +6,7 @@
 //! It is wired against `bitcoin_capnp_types_v31`, which re-exports the matching `capnp`
 //! and `capnp-rpc` APIs.
 
+pub(crate) use bitcoin_capnp_types_v31 as capnp_types;
+
 pub mod job_declaration_protocol;
 pub mod template_distribution_protocol;

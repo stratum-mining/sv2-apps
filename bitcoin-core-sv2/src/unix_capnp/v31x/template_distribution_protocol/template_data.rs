@@ -1,13 +1,13 @@
 //! Template-data helpers for Bitcoin Core v31.x Sv2 Template Distribution Protocol via capnp over
 //! UNIX socket.
 
-use crate::unix_capnp::v31x::template_distribution_protocol::error::TemplateDataError;
+use super::error::TemplateDataError;
 
+use super::super::capnp_types as bitcoin_capnp_types;
 use bitcoin_capnp_types::{
     mining_capnp::block_template::Client as BlockTemplateIpcClient,
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v31 as bitcoin_capnp_types;
 use std::{fs::File, io::Write, path::Path};
 use stratum_core::bitcoin::{
     Target, Transaction, TxOut,

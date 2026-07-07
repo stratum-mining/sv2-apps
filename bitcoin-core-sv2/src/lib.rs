@@ -19,6 +19,7 @@
 //!   factories with enum dispatch across backend versions.
 //! - [`unix_capnp::v30x`] contains the Bitcoin Core v30.x IPC implementation.
 //! - [`unix_capnp::v31x`] contains the Bitcoin Core v31.x IPC implementation.
+//! - [`unix_capnp::master`] contains the Bitcoin Core master IPC implementation.
 //!
 //! ## Flavor direction
 //!
