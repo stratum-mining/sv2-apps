@@ -15,3 +15,25 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 # display status for all levels (pass, fail, flaky, slow, etc)
 status-level = "all"
 final-status-level = "all"
+
+[profile.ci-no-bitcoin]
+default-filter = 'binary(=integration_tests_sv2) | binary(=mining_device_fast_hasher_equivalence)'
+
+[profile.ci-bitcoin-core-ipc]
+default-filter = 'binary(~bitcoin_core_ipc)'
+
+# The standalone sv2-tp tests are split into three roughly equal-duration
+# buckets, grouped by role. New test binaries run in ci-sv2-tp-other unless
+# their name matches one of the more specific buckets below.
+
+# Job declaration stack: jd_*, jdc_*, jds_*
+# (bitcoin_core_ipc_jdp_io also matches ~jd, but belongs to ci-bitcoin-core-ipc)
+[profile.ci-sv2-tp-jd]
+default-filter = 'binary(~jd) and not binary(~bitcoin_core_ipc)'
+
+[profile.ci-sv2-tp-translator]
+default-filter = 'binary(~translator) | binary(~monitoring)'
+
+# Catch-all for the remaining sv2-tp tests (pool, sv1, sniffer, extensions, ...)
+[profile.ci-sv2-tp-other]
+default-filter = 'not (binary(~jd) | binary(~translator) | binary(~monitoring) | binary(=integration_tests_sv2) | binary(=mining_device_fast_hasher_equivalence) | binary(~bitcoin_core_ipc))'

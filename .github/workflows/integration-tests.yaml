@@ -118,8 +118,29 @@ jobs:
           path: bitcoin/build/bin/bitcoin-node
           if-no-files-found: error
 
-  ci:
-    name: Integration tests (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+  ci-no-bitcoin:
+    name: Integration tests without Bitcoin Core (${{ matrix.os }})
+    needs:
+      - build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-no-bitcoin
+          github-token: ${{ github.token }}
+
+  ci-bitcoin-core-ipc:
+    name: Integration tests BitcoinCoreIpc (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
     needs:
       - build
       - bitcoin-core
@@ -149,7 +170,115 @@ jobs:
       - name: Run archived integration tests
         uses: ./.github/actions/run-archived-nextest
         with:
-          profile: default
+          profile: ci-bitcoin-core-ipc
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
+
+  ci-sv2-tp-jd:
+    name: sv2-tp jd (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-sv2-tp-jd
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
+
+  ci-sv2-tp-translator:
+    name: sv2-tp translator (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-sv2-tp-translator
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
+
+  ci-sv2-tp-other:
+    name: sv2-tp other (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-sv2-tp-other
           github-token: ${{ github.token }}
           bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
           bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
