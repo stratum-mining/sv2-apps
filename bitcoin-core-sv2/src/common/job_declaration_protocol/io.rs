@@ -23,7 +23,11 @@ pub struct ValidationContext {
 /// Built from a `DeclareMiningJob` (plus an optional `ProvideMissingTransactionsSuccess`)
 /// or a `PushSolution`.
 pub enum JdRequest {
-    /// Validate a declared mining job via Bitcoin Core's `checkBlock`.
+    /// Validate a declared mining job.
+    ///
+    /// Invariants (enforced by `jd-server`): `wtxid_list` contains no duplicates and every
+    /// transaction in `missing_txs` is part of `wtxid_list`. The v32.x `TxCollection`
+    /// backend relies on these; Bitcoin Core rejects violations with RPC-level errors.
     DeclareMiningJob {
         version: Version,
         coinbase_tx: Transaction,

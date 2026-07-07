@@ -1,17 +1,21 @@
 //! Handlers for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
 
 use crate::{
-    common::job_declaration_protocol::io::{JdResponse, ValidationContext},
+    common::job_declaration_protocol::io::JdResponse,
     unix_capnp::v32x::job_declaration_protocol::{
         BitcoinCoreSv2JDP, error::BitcoinCoreSv2JDPError,
-        mempool::decode_bip34_height_from_coinbase_script_sig,
     },
 };
+use bitcoin_capnp_types::mining_capnp::{
+    block_template::Client as BlockTemplateIpcClient,
+    tx_collection::Client as TxCollectionIpcClient,
+};
+use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use stratum_core::{
     bitcoin::{
-        Block, Transaction, TxMerkleNode, Wtxid,
+        Block, BlockHash, Transaction, Wtxid,
         block::{Header, Version},
-        consensus::serialize,
+        consensus::{deserialize, serialize},
         hashes::Hash,
     },
     job_declaration_sv2::{
@@ -25,13 +29,21 @@ use tracing::{debug, error, info, warn};
 const MAX_SUBMIT_BLOCK_ATTEMPTS: usize = 3;
 const SUBMIT_BLOCK_RETRY_BACKOFF_MS: u64 = 15;
 
+/// `reason` returned by `TxCollection::makeTemplate` when the collection is still incomplete.
+const MAKE_TEMPLATE_REASON_MISSING_TXS: &str = "missing-txs";
+
 impl BitcoinCoreSv2JDP {
-    /// Validates a declared mining job by checking transaction availability and block structure.
+    /// Validates a declared mining job via Bitcoin Core's `TxCollection` interface.
     ///
-    /// Adds missing transactions to the mempool mirror, verifies all transactions are available,
-    /// assembles a test block, sets IPC thread context, and uses Bitcoin Core's `checkBlock` to
-    /// validate the block structure. Returns success with current template parameters or an error
-    /// if validation fails.
+    /// The declared wtxids are collected with `collectTxs`, completed with `addMissingTxs`
+    /// (transactions from `ProvideMissingTransactions.Success`), and checked with
+    /// `unknownTxPos`. Once complete, `makeTemplate` reconstructs the block inside Bitcoin
+    /// Core and validates it, so no local mempool mirror is needed. Returns success with the
+    /// template parameters or an error if validation fails.
+    ///
+    /// The declared coinbase (with a zeroed extranonce, which no contextual check depends
+    /// on) is passed to `makeTemplate`, so it is fully validated at declaration time (BIP34
+    /// height, output value, sigops, weight, witness commitment).
     pub(crate) async fn handle_declare_mining_job(
         &self,
         version: Version,
@@ -52,6 +64,63 @@ impl BitcoinCoreSv2JDP {
             coinbase_tx.input[0].script_sig
         );
 
+        let response = match self
+            .validate_declare_mining_job(&coinbase_tx, &wtxid_list, &missing_txs)
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                error!("DeclareMiningJob validation failed with IPC error: {e:?}");
+                // deliberately ignore potential send errors
+                // we don't care if the receiver dropped the channel
+                let _ = response_tx.send(JdResponse::Error {
+                    error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+                    prev_hash: None,
+                });
+                warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                self.cancellation_token.cancel();
+                return;
+            }
+        };
+
+        // deliberately ignore potential send errors
+        // we don't care if the receiver dropped the channel
+        let _ = response_tx.send(response);
+    }
+
+    /// Runs the `TxCollection` validation flow and maps the outcome to a [`JdResponse`].
+    ///
+    /// Returns `Err` only for IPC-level failures; validation failures are expressed as
+    /// [`JdResponse::Error`] or [`JdResponse::MissingTransactions`].
+    async fn validate_declare_mining_job(
+        &self,
+        coinbase_tx: &Transaction,
+        wtxid_list: &[Wtxid],
+        missing_txs: &[Transaction],
+    ) -> Result<JdResponse, BitcoinCoreSv2JDPError> {
+        let (tip_hash, tip_height) = self.get_tip().await?;
+
+        let collection = self.collect_txs(wtxid_list).await?;
+
+        // Complete the collection with transactions from ProvideMissingTransactions.Success
+        if !missing_txs.is_empty() {
+            self.add_missing_txs(&collection, missing_txs).await?;
+        }
+
+        // Ask Bitcoin Core which declared transactions it still doesn't know about
+        let missing_positions = self.unknown_tx_pos(&collection).await?;
+        if !missing_positions.is_empty() {
+            let missing_wtxids = Self::wtxids_at_positions(wtxid_list, &missing_positions);
+            self.destroy_tx_collection(&collection).await;
+            return Ok(JdResponse::MissingTransactions {
+                missing_wtxids,
+                prev_hash: tip_hash,
+            });
+        }
+
+        // A BIP34 height mismatch would also be caught by makeTemplate (bad-cb-height), but
+        // checking it here lets us classify the error as a stale chain tip instead of a
+        // generically invalid job.
         let declared_bip34_height = coinbase_tx
             .input
             .first()
@@ -63,254 +132,61 @@ impl BitcoinCoreSv2JDP {
             // Fall back to coinbase lock_time to avoid panics and keep a stable
             // stale-tip comparison signal.
             .unwrap_or_else(|| coinbase_tx.lock_time.to_consensus_u32());
-
-        let (initial_validation_context, initial_bip34_height, txdata) = {
-            let mut mempool_mirror = self.mempool_mirror.borrow_mut();
-
-            // Add the missing transactions to the mempool mirror
-            mempool_mirror.add_transactions(missing_txs);
-
-            let prev_hash = mempool_mirror
-                .get_current_prev_hash()
-                .expect("current_prev_hash must be set");
-            let nbits = mempool_mirror
-                .get_current_nbits()
-                .expect("current_nbits must be set");
-            let min_ntime = mempool_mirror
-                .get_current_min_ntime()
-                .expect("current_min_ntime must be set");
-
-            let initial_validation_context = ValidationContext {
-                prev_hash,
-                nbits,
-                min_ntime,
-            };
-
-            let initial_bip34_height = mempool_mirror
-                .get_current_bip34_height()
-                .expect("current_bip34_height must be set");
-
-            // Now verify that all wtxids from the declared job are available
-            let missing_wtxids = mempool_mirror.verify(&wtxid_list);
-            if !missing_wtxids.is_empty() {
-                // deliberately ignore potential errors
-                // we don't care if the receiver dropped the channel
-                let _ = response_tx.send(JdResponse::MissingTransactions {
-                    missing_wtxids,
-                    prev_hash: initial_validation_context.prev_hash,
-                });
-                return;
-            }
-
-            let txdata = mempool_mirror.get_txdata(&wtxid_list);
-
-            info!(
-                "Using prevhash: {:?}, nbits: {:?}, min_ntime: {}, bip34_height: {} from mempool mirror",
-                initial_validation_context.prev_hash,
-                initial_validation_context.nbits,
-                initial_validation_context.min_ntime,
-                initial_bip34_height
-            );
-
-            (initial_validation_context, initial_bip34_height, txdata)
-        }; // mempool_mirror dropped here, we don't want to hold it across await points
-
-        let txdata_for_response = txdata.clone();
-
-        let valid_job = {
-            let mut all_transactions = Vec::with_capacity(1 + txdata.len());
-            all_transactions.push(coinbase_tx.clone());
-            all_transactions.extend(txdata);
-
-            let num_transactions = all_transactions.len();
-
-            // Use the min_ntime from the template as the block timestamp
-            // This ensures we meet Bitcoin Core's timestamp validation rules
-            let block_time = initial_validation_context.min_ntime;
-
-            let header = Header {
-                version,
-                prev_blockhash: initial_validation_context.prev_hash,
-                merkle_root: TxMerkleNode::all_zeros(), // doesn't matter
-                time: block_time,
-                bits: initial_validation_context.nbits,
-                nonce: 0, // doesn't matter
-            };
-
-            let block = Block {
-                header,
-                txdata: all_transactions,
-            };
-
-            let block_bytes: Vec<u8> = serialize(&block);
-
+        let next_height = (tip_height + 1) as u32;
+        if declared_bip34_height != next_height {
             debug!(
-                "Assembled block for checkBlock: {} bytes, {} transactions",
-                block_bytes.len(),
-                num_transactions
+                ?tip_hash,
+                tip_height,
+                declared_bip34_height,
+                "Declared BIP34 height does not match the next block height; classifying error as stale-chain-tip"
             );
-
-            let mut check_block_request = self.mining_ipc_client.check_block_request();
-
-            match check_block_request.get().get_context() {
-                Ok(mut context) => context.set_thread(self.thread_ipc_client.clone()),
-                Err(e) => {
-                    error!("Failed to set check block request thread context: {e}");
-                    // send error response to the client
-                    // deliberately ignore potential send errors
-                    let _ = response_tx.send(JdResponse::Error {
-                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        prev_hash: Some(initial_validation_context.prev_hash),
-                    });
-                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                    self.cancellation_token.cancel();
-                    return;
-                }
-            }
-
-            check_block_request.get().set_block(&block_bytes);
-
-            let mut options = match check_block_request.get().get_options() {
-                Ok(options) => options,
-                Err(e) => {
-                    error!("Failed to get check block options: {e}");
-                    // send error response to the client
-                    // deliberately ignore potential send errors
-                    let _ = response_tx.send(JdResponse::Error {
-                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        prev_hash: Some(initial_validation_context.prev_hash),
-                    });
-                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                    self.cancellation_token.cancel();
-                    return;
-                }
-            };
-            options.set_check_merkle_root(false);
-            options.set_check_pow(false);
-
-            let check_block_response = match check_block_request.send().promise.await {
-                Ok(response) => response,
-                Err(e) => {
-                    error!("Failed to send check block request: {e}");
-                    // send error response to the client
-                    // deliberately ignore potential send errors
-                    let _ = response_tx.send(JdResponse::Error {
-                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        prev_hash: Some(initial_validation_context.prev_hash),
-                    });
-                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                    self.cancellation_token.cancel();
-                    return;
-                }
-            };
-            let check_block_result = match check_block_response.get() {
-                Ok(result) => result,
-                Err(e) => {
-                    error!("Failed to get check block result: {e}");
-                    // send error response to the client
-                    // deliberately ignore potential send errors
-                    let _ = response_tx.send(JdResponse::Error {
-                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        prev_hash: Some(initial_validation_context.prev_hash),
-                    });
-                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                    self.cancellation_token.cancel();
-                    return;
-                }
-            };
-
-            let result = check_block_result.get_result();
-            let check_block_reason = check_block_result.get_reason();
-            let check_block_debug = check_block_result.get_debug();
-
-            debug!("checkBlock returned: {}", result);
-            if !result {
-                error!(
-                    reason = ?check_block_reason,
-                    debug = ?check_block_debug,
-                    "Bitcoin Core rejected the block via checkBlock"
-                );
-                debug!(
-                    "Block details - version: {:?}, prev_blockhash: {:?}, bits: {:?}, num_txs: {}",
-                    version,
-                    initial_validation_context.prev_hash,
-                    initial_validation_context.nbits,
-                    num_transactions
-                );
-                debug!(
-                    "Coinbase tx inputs: {}, outputs: {}",
-                    coinbase_tx.input.len(),
-                    coinbase_tx.output.len()
-                );
-                debug!(
-                    "Block header time: {}, merkle_root: {:?}",
-                    header.time, header.merkle_root
-                );
-            }
-            result
-        };
-
-        if !valid_job {
-            // On checkBlock failure, force-refresh template + mirror before classifying the error.
-            // The template monitor updates mempool_mirror asynchronously, so we need to avoid races
-            // where validation can run on context A while chain tip has already moved to context B.
-            // Refreshing here narrows this TOCTOU window and lets us correctly emit
-            // `stale-chain-tip` instead of generic `invalid-job` when context drift occurred.
-            if let Err(e) = self.force_update_mempool_mirror().await {
-                debug!(
-                    error = ?e,
-                    "Failed to force-refresh template/mempool mirror after checkBlock failure; continuing with current validation context"
-                );
-            }
+            self.destroy_tx_collection(&collection).await;
+            return Ok(JdResponse::Error {
+                error_code: ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                prev_hash: Some(tip_hash),
+            });
         }
 
-        let (latest_validation_context, latest_bip34_height) = {
-            let mempool_mirror = self.mempool_mirror.borrow();
-            let latest_validation_context = ValidationContext {
-                prev_hash: mempool_mirror
-                    .get_current_prev_hash()
-                    .expect("current_prev_hash must be set"),
-                nbits: mempool_mirror
-                    .get_current_nbits()
-                    .expect("current_nbits must be set"),
-                min_ntime: mempool_mirror
-                    .get_current_min_ntime()
-                    .expect("current_min_ntime must be set"),
-            };
-            let latest_bip34_height = mempool_mirror
-                .get_current_bip34_height()
-                .expect("current_bip34_height must be set");
-            (latest_validation_context, latest_bip34_height)
-        };
+        // Reconstruct and validate the block, including the declared coinbase, inside
+        // Bitcoin Core
+        let (reason, debug_msg, template) = self
+            .make_template(&collection, tip_hash, coinbase_tx)
+            .await?;
 
-        let response = if valid_job {
-            JdResponse::Success {
-                prev_hash: initial_validation_context.prev_hash,
-                nbits: initial_validation_context.nbits,
-                min_ntime: initial_validation_context.min_ntime,
-                txdata: txdata_for_response,
+        let Some(template) = template else {
+            // Transactions can disappear from the mempool between unknownTxPos and
+            // makeTemplate (e.g. eviction, replacement, new block). Give the client a chance
+            // to provide them instead of failing the declaration outright.
+            if reason == MAKE_TEMPLATE_REASON_MISSING_TXS {
+                let missing_positions = self.unknown_tx_pos(&collection).await?;
+                if !missing_positions.is_empty() {
+                    let missing_wtxids = Self::wtxids_at_positions(wtxid_list, &missing_positions);
+                    self.destroy_tx_collection(&collection).await;
+                    return Ok(JdResponse::MissingTransactions {
+                        missing_wtxids,
+                        prev_hash: tip_hash,
+                    });
+                }
             }
-        } else {
-            let stale_at_arrival_by_bip34 = declared_bip34_height != latest_bip34_height;
-            let context_drifted = initial_validation_context.prev_hash
-                != latest_validation_context.prev_hash
-                || initial_validation_context.nbits != latest_validation_context.nbits
-                || initial_validation_context.min_ntime != latest_validation_context.min_ntime
-                || initial_bip34_height != latest_bip34_height
-                || stale_at_arrival_by_bip34;
 
-            let error_code = if context_drifted {
+            self.destroy_tx_collection(&collection).await;
+
+            error!(
+                reason,
+                debug = debug_msg,
+                "Bitcoin Core rejected the declared job via TxCollection::makeTemplate"
+            );
+
+            // The declared BIP34 height matched the tip at arrival, so a makeTemplate
+            // failure is either a stale-tip race (tip moved while we were validating) or a
+            // genuinely invalid job.
+            let (latest_tip_hash, latest_tip_height) = self.get_tip().await?;
+            let error_code = if latest_tip_hash != tip_hash {
                 debug!(
-                    initial_prev_hash = ?initial_validation_context.prev_hash,
-                    initial_nbits = ?initial_validation_context.nbits,
-                    initial_min_ntime = initial_validation_context.min_ntime,
-                    initial_bip34_height,
-                    declared_bip34_height,
-                    latest_prev_hash = ?latest_validation_context.prev_hash,
-                    latest_nbits = ?latest_validation_context.nbits,
-                    latest_min_ntime = latest_validation_context.min_ntime,
-                    latest_bip34_height,
-                    stale_at_arrival_by_bip34,
+                    ?tip_hash,
+                    tip_height,
+                    ?latest_tip_hash,
+                    latest_tip_height,
                     "Detected stale chain tip during DeclareMiningJob validation; classifying error as stale-chain-tip"
                 );
                 ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
@@ -318,15 +194,210 @@ impl BitcoinCoreSv2JDP {
                 ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB
             };
 
-            JdResponse::Error {
+            return Ok(JdResponse::Error {
                 error_code,
-                prev_hash: Some(latest_validation_context.prev_hash),
-            }
+                prev_hash: Some(latest_tip_hash),
+            });
         };
 
-        // deliberately ignore potential send errors
-        // we don't care if the receiver dropped the channel
-        let _ = response_tx.send(response);
+        // The validated template provides the parameters (header) and the full transaction
+        // list (block) that jd-server needs for SetCustomMiningJob validation and solved
+        // block reconstruction.
+        let header = self.get_template_header(&template).await?;
+        let block = self.get_template_block(&template).await?;
+
+        self.destroy_template(&template).await;
+        self.destroy_tx_collection(&collection).await;
+
+        // skip the node-generated dummy coinbase
+        let txdata: Vec<Transaction> = block.txdata.into_iter().skip(1).collect();
+
+        debug!(
+            prev_hash = ?header.prev_blockhash,
+            nbits = ?header.bits,
+            min_ntime = header.time,
+            tx_count = txdata.len(),
+            "TxCollection::makeTemplate validated the declared job"
+        );
+
+        Ok(JdResponse::Success {
+            prev_hash: header.prev_blockhash,
+            nbits: header.bits,
+            min_ntime: header.time,
+            txdata,
+        })
+    }
+
+    /// Maps `unknownTxPos` positions back to the declared wtxids.
+    fn wtxids_at_positions(wtxid_list: &[Wtxid], positions: &[u32]) -> Vec<Wtxid> {
+        positions
+            .iter()
+            .filter_map(|&pos| wtxid_list.get(pos as usize).copied())
+            .collect()
+    }
+
+    /// Calls `Mining::collectTxs` with the declared wtxids.
+    async fn collect_txs(
+        &self,
+        wtxid_list: &[Wtxid],
+    ) -> Result<TxCollectionIpcClient, BitcoinCoreSv2JDPError> {
+        let mut collect_txs_request = self.mining_ipc_client.collect_txs_request();
+        collect_txs_request
+            .get()
+            .get_context()?
+            .set_thread(self.thread_ipc_client.clone());
+        {
+            let mut wtxids = collect_txs_request
+                .get()
+                .init_wtxids(wtxid_list.len() as u32);
+            for (pos, wtxid) in wtxid_list.iter().enumerate() {
+                wtxids.set(pos as u32, wtxid.as_byte_array());
+            }
+        }
+        let collect_txs_response = collect_txs_request.send().promise.await?;
+        Ok(collect_txs_response.get()?.get_result()?)
+    }
+
+    /// Calls `TxCollection::addMissingTxs` with client-provided transactions.
+    ///
+    /// The caller must only pass transactions whose wtxid is part of the collection
+    /// (see the [`JdRequest::DeclareMiningJob`] invariants); Bitcoin Core rejects the
+    /// whole call otherwise.
+    async fn add_missing_txs(
+        &self,
+        collection: &TxCollectionIpcClient,
+        missing_txs: &[Transaction],
+    ) -> Result<(), BitcoinCoreSv2JDPError> {
+        let mut add_missing_txs_request = collection.add_missing_txs_request();
+        add_missing_txs_request
+            .get()
+            .get_context()?
+            .set_thread(self.thread_ipc_client.clone());
+        {
+            let mut txs = add_missing_txs_request
+                .get()
+                .init_txs(missing_txs.len() as u32);
+            for (pos, tx) in missing_txs.iter().enumerate() {
+                txs.set(pos as u32, &serialize(tx));
+            }
+        }
+        add_missing_txs_request.send().promise.await?;
+        Ok(())
+    }
+
+    /// Calls `TxCollection::unknownTxPos`, returning the positions of transactions Bitcoin
+    /// Core does not know about.
+    async fn unknown_tx_pos(
+        &self,
+        collection: &TxCollectionIpcClient,
+    ) -> Result<Vec<u32>, BitcoinCoreSv2JDPError> {
+        let mut unknown_tx_pos_request = collection.unknown_tx_pos_request();
+        unknown_tx_pos_request
+            .get()
+            .get_context()?
+            .set_thread(self.thread_ipc_client.clone());
+        let unknown_tx_pos_response = unknown_tx_pos_request.send().promise.await?;
+        let positions = unknown_tx_pos_response.get()?.get_result()?;
+        Ok((0..positions.len()).map(|pos| positions.get(pos)).collect())
+    }
+
+    /// Calls `TxCollection::makeTemplate` with the declared coinbase, returning the BIP-22
+    /// style `reason`/`debug` strings and, on success, the validated
+    /// [`BlockTemplateIpcClient`].
+    async fn make_template(
+        &self,
+        collection: &TxCollectionIpcClient,
+        prev_hash: BlockHash,
+        coinbase_tx: &Transaction,
+    ) -> Result<(String, String, Option<BlockTemplateIpcClient>), BitcoinCoreSv2JDPError> {
+        let mut make_template_request = collection.make_template_request();
+        make_template_request
+            .get()
+            .get_context()?
+            .set_thread(self.thread_ipc_client.clone());
+        make_template_request
+            .get()
+            .set_prevhash(prev_hash.as_byte_array());
+        make_template_request
+            .get()
+            .set_coinbase(&serialize(coinbase_tx));
+        let make_template_response = make_template_request.send().promise.await?;
+        let make_template_result = make_template_response.get()?;
+        let reason = make_template_result
+            .get_reason()?
+            .to_string()
+            .map_err(bitcoin_capnp_types::capnp::Error::from)?;
+        let debug_msg = make_template_result
+            .get_debug()?
+            .to_string()
+            .map_err(bitcoin_capnp_types::capnp::Error::from)?;
+        let template = if make_template_result.has_result() {
+            Some(make_template_result.get_result()?)
+        } else {
+            None
+        };
+        Ok((reason, debug_msg, template))
+    }
+
+    /// Fetches the header of a validated template via `BlockTemplate::getBlockHeader`.
+    async fn get_template_header(
+        &self,
+        template: &BlockTemplateIpcClient,
+    ) -> Result<Header, BitcoinCoreSv2JDPError> {
+        let mut get_block_header_request = template.get_block_header_request();
+        get_block_header_request
+            .get()
+            .get_context()?
+            .set_thread(self.thread_ipc_client.clone());
+        let get_block_header_response = get_block_header_request.send().promise.await?;
+        let header_bytes = get_block_header_response.get()?.get_result()?;
+        deserialize(header_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)
+    }
+
+    /// Fetches the full block of a validated template via `BlockTemplate::getBlock`.
+    async fn get_template_block(
+        &self,
+        template: &BlockTemplateIpcClient,
+    ) -> Result<Block, BitcoinCoreSv2JDPError> {
+        let mut get_block_request = template.get_block_request();
+        get_block_request
+            .get()
+            .get_context()?
+            .set_thread(self.thread_ipc_client.clone());
+        let get_block_response = get_block_request.send().promise.await?;
+        let block_bytes = get_block_response.get()?.get_result()?;
+        debug!("Deserializing block ({} bytes)", block_bytes.len());
+        deserialize(block_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)
+    }
+
+    /// Best-effort `TxCollection::destroy` so Bitcoin Core can free the collection early.
+    async fn destroy_tx_collection(&self, collection: &TxCollectionIpcClient) {
+        let mut destroy_request = collection.destroy_request();
+        match destroy_request.get().get_context() {
+            Ok(mut context) => context.set_thread(self.thread_ipc_client.clone()),
+            Err(e) => {
+                debug!("Failed to set TxCollection destroy request thread context: {e}");
+                return;
+            }
+        }
+        if let Err(e) = destroy_request.send().promise.await {
+            debug!("Failed to destroy TxCollection: {e}");
+        }
+    }
+
+    /// Best-effort `BlockTemplate::destroy` so Bitcoin Core can free the template early.
+    async fn destroy_template(&self, template: &BlockTemplateIpcClient) {
+        let mut destroy_request = template.destroy_request();
+        match destroy_request.get().get_context() {
+            Ok(mut context) => context.set_thread(self.thread_ipc_client.clone()),
+            Err(e) => {
+                debug!("Failed to set BlockTemplate destroy request thread context: {e}");
+                return;
+            }
+        }
+        if let Err(e) = destroy_request.send().promise.await {
+            debug!("Failed to destroy BlockTemplate: {e}");
+        }
     }
 
     /// Submits a solved block to Bitcoin Core via `submitBlock`.
@@ -424,4 +495,28 @@ impl BitcoinCoreSv2JDP {
             return;
         }
     }
+}
+
+/// Decodes BIP34 height from the first push in coinbase scriptSig.
+/// Returns None if scriptSig does not start with a canonical small push.
+pub(crate) fn decode_bip34_height_from_coinbase_script_sig(script_sig: &[u8]) -> Option<u32> {
+    let first = *script_sig.first()?;
+
+    // Support small-integer opcodes (OP_0, OP_1..OP_16) used by some templates.
+    if first == 0x00 {
+        return Some(0);
+    }
+    if (0x51..=0x60).contains(&first) {
+        return Some((first - 0x50) as u32);
+    }
+
+    // Canonical small push form: first byte is push length (1..=4).
+    let push_len = first as usize;
+    if push_len == 0 || push_len > 4 || script_sig.len() < 1 + push_len {
+        return None;
+    }
+
+    let mut height_bytes = [0u8; 4];
+    height_bytes[..push_len].copy_from_slice(&script_sig[1..1 + push_len]);
+    Some(u32::from_le_bytes(height_bytes))
 }

@@ -16,6 +16,8 @@ pub enum BitcoinCoreSv2JDPError {
     CannotConnectToUnixSocket(PathBuf, String),
     /// Failed to deserialize a block from the IPC response.
     FailedToDeserializeBlock(consensus::encode::Error),
+    /// Bitcoin Core reported no chain tip (or a malformed one) via `getTip`.
+    NoChainTip,
     /// Readiness signal receiver was dropped before bootstrap completed.
     ReadinessSignalFailed,
 }
