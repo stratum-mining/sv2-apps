@@ -2,7 +2,7 @@ use corepc_node::{types::GetBlockchainInfo, Conf, ConnectParams, Node};
 use std::{
     env,
     fs::create_dir_all,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 use stratum_apps::{
@@ -71,9 +71,16 @@ fn parse_ipc_version(version: &str) -> Option<BitcoinCoreVersion> {
 }
 
 pub fn selected_bitcoin_core_version() -> BitcoinCoreVersion {
-    if let Ok(version) = env::var("BITCOIN_CORE_VERSION") {
+    if let Ok(version) = env::var("BITCOIN_CORE_IPC_VERSION") {
         return parse_ipc_version(&version)
-            .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_VERSION release: {version}"));
+            .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_IPC_VERSION: {version}"));
+    }
+
+    if let Ok(version) = env::var("BITCOIN_CORE_VERSION") {
+        if !version.contains('@') {
+            return parse_ipc_version(&version)
+                .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_VERSION release: {version}"));
+        }
     }
 
     BITCOIN_CORE_LATEST
@@ -92,9 +99,30 @@ fn release_version(version: BitcoinCoreVersion) -> &'static str {
 
 fn selected_release_version(ipc_version: BitcoinCoreVersion) -> String {
     match env::var("BITCOIN_CORE_VERSION") {
-        Ok(version) => version.strip_prefix('v').unwrap_or(&version).to_owned(),
+        Ok(version) if !version.contains('@') => {
+            version.strip_prefix('v').unwrap_or(&version).to_owned()
+        }
         _ => release_version(ipc_version).to_owned(),
     }
+}
+
+fn source_bitcoin_core_binary() -> Option<PathBuf> {
+    let binary = env::var("BITCOIN_CORE_BINARY").ok()?;
+    if !env::var("BITCOIN_CORE_VERSION")
+        .map(|version| version.contains('@'))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(PathBuf::from(binary))
+}
+
+fn ensure_executable_exists(path: &Path, env_var: &str) {
+    assert!(
+        path.exists(),
+        "Cannot find {} specified by {env_var}",
+        path.display()
+    );
 }
 
 /// Represents the consensus difficulty level of the network.
@@ -204,16 +232,18 @@ impl BitcoinCore {
             }
         }
 
-        // Download and setup Bitcoin Core with IPC support
+        // Download and setup Bitcoin Core with IPC support, or use a source-built binary.
         let bitcoin_core_version = selected_release_version(node_version);
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
         let bitcoin_filename = get_bitcoin_core_filename(os, arch, &bitcoin_core_version);
         let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
-        let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
+        let bitcoin_node_bin = source_bitcoin_core_binary()
+            .inspect(|path| ensure_executable_exists(path, "BITCOIN_CORE_BINARY"))
+            .unwrap_or_else(|| bitcoin_home.join("libexec").join("bitcoin-node"));
         let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
 
-        if !bitcoin_node_bin.exists() {
+        if source_bitcoin_core_binary().is_none() && !bitcoin_node_bin.exists() {
             let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
                 Ok(path) => tarball::read_from_file(&path),
                 Err(_) => {
