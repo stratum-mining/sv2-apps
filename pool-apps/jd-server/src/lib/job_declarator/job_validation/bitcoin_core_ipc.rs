@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -36,6 +36,7 @@ use stratum_apps::{
             ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
             ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
         },
@@ -531,10 +532,25 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             .map(|u256| Wtxid::from_byte_array(u256.to_array()))
             .collect();
 
-        // Parse missing transactions from ProvideMissingTransactionsSuccess
-        let missing_txs: Vec<Transaction> =
-            if let Some(ref pmts) = provide_missing_transactions_success {
-                pmts.transaction_list
+        // A declared job must not list the same transaction twice.
+        let declared_wtxids: HashSet<Wtxid> = wtxid_list.iter().copied().collect();
+        if declared_wtxids.len() != wtxid_list.len() {
+            tracing::debug!(
+                downstream_id,
+                request_id = declare_mining_job.request_id,
+                "DeclareMiningJob wtxid list contains duplicates"
+            );
+            return DeclareMiningJobResult::Error(ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB);
+        }
+
+        // Parse missing transactions from ProvideMissingTransactionsSuccess, ignoring any
+        // transaction that is not part of the declared job. Anything the validator still
+        // considers missing afterwards is reported through another
+        // ProvideMissingTransactions round.
+        let missing_txs: Vec<Transaction> = if let Some(ref pmts) =
+            provide_missing_transactions_success
+        {
+            pmts.transaction_list
                     .iter_bytes()
                     .filter_map(|tx_bytes| {
                         match bitcoin::consensus::Decodable::consensus_decode(&mut &tx_bytes[..]) {
@@ -545,10 +561,21 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                             }
                         }
                     })
+                    .filter(|tx: &Transaction| {
+                        let declared = declared_wtxids.contains(&tx.compute_wtxid());
+                        if !declared {
+                            tracing::warn!(
+                                downstream_id,
+                                request_id = declare_mining_job.request_id,
+                                "Ignoring provided missing transaction that is not part of the declared job"
+                            );
+                        }
+                        declared
+                    })
                     .collect()
-            } else {
-                Vec::new()
-            };
+        } else {
+            Vec::new()
+        };
 
         let previous_pending_validation_context =
             provide_missing_transactions_success.as_ref().and_then(|_| {
