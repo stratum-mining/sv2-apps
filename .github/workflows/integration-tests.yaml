@@ -15,14 +15,14 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
+          - macos-15
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.88
@@ -32,7 +32,7 @@ jobs:
         run: sudo apt-get install -y capnproto libcapnp-dev
 
       - name: Install capnp dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-15'
         run: brew install capnp
 
       # Install cargo-binstall so tool installs below use prebuilt binaries.
