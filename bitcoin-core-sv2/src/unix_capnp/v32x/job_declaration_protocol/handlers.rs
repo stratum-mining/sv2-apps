@@ -1,7 +1,7 @@
 //! Handlers for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
 
 use crate::{
-    common::job_declaration_protocol::io::JdResponse,
+    common::job_declaration_protocol::io::{DownstreamId, JdResponse, RequestId},
     unix_capnp::v32x::job_declaration_protocol::{
         BitcoinCoreSv2JDP, error::BitcoinCoreSv2JDPError,
     },
@@ -13,7 +13,7 @@ use bitcoin_capnp_types::mining_capnp::{
 use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use stratum_core::{
     bitcoin::{
-        Block, BlockHash, Transaction, Wtxid,
+        BlockHash, Transaction, TxMerkleNode, Wtxid,
         block::{Header, Version},
         consensus::{deserialize, serialize},
         hashes::Hash,
@@ -26,8 +26,8 @@ use stratum_core::{
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-const MAX_SUBMIT_BLOCK_ATTEMPTS: usize = 3;
-const SUBMIT_BLOCK_RETRY_BACKOFF_MS: u64 = 15;
+const MAX_SUBMIT_SOLUTION_ATTEMPTS: usize = 3;
+const SUBMIT_SOLUTION_RETRY_BACKOFF_MS: u64 = 15;
 
 /// `reason` returned by `TxCollection::makeTemplate` when the collection is still incomplete.
 const MAKE_TEMPLATE_REASON_MISSING_TXS: &str = "missing-txs";
@@ -44,8 +44,14 @@ impl BitcoinCoreSv2JDP {
     /// The declared coinbase (with a zeroed extranonce, which no contextual check depends
     /// on) is passed to `makeTemplate`, so it is fully validated at declaration time (BIP34
     /// height, output value, sigops, weight, witness commitment).
+    ///
+    /// On success the validated template is retained under `(downstream_id, request_id)`
+    /// so a later [`JdRequest::PushSolution`] can submit a solution against it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn handle_declare_mining_job(
         &self,
+        downstream_id: DownstreamId,
+        request_id: RequestId,
         version: Version,
         coinbase_tx: Transaction,
         wtxid_list: Vec<Wtxid>,
@@ -65,7 +71,13 @@ impl BitcoinCoreSv2JDP {
         );
 
         let response = match self
-            .validate_declare_mining_job(&coinbase_tx, &wtxid_list, &missing_txs)
+            .validate_declare_mining_job(
+                downstream_id,
+                request_id,
+                &coinbase_tx,
+                &wtxid_list,
+                &missing_txs,
+            )
             .await
         {
             Ok(response) => response,
@@ -94,6 +106,8 @@ impl BitcoinCoreSv2JDP {
     /// [`JdResponse::Error`] or [`JdResponse::MissingTransactions`].
     async fn validate_declare_mining_job(
         &self,
+        downstream_id: DownstreamId,
+        request_id: RequestId,
         coinbase_tx: &Transaction,
         wtxid_list: &[Wtxid],
         missing_txs: &[Transaction],
@@ -200,32 +214,79 @@ impl BitcoinCoreSv2JDP {
             });
         };
 
-        // The validated template provides the parameters (header) and the full transaction
-        // list (block) that jd-server needs for SetCustomMiningJob validation and solved
-        // block reconstruction.
+        // The validated template provides the parameters (header) and the coinbase merkle
+        // branch that jd-server needs for SetCustomMiningJob validation. The block itself
+        // stays inside Bitcoin Core: the template is retained so a later PushSolution can
+        // be submitted against it via submitSolution.
         let header = self.get_template_header(&template).await?;
-        let block = self.get_template_block(&template).await?;
+        let merkle_path = self.get_coinbase_merkle_path(&template).await?;
 
-        self.destroy_template(&template).await;
         self.destroy_tx_collection(&collection).await;
-
-        // skip the node-generated dummy coinbase
-        let txdata: Vec<Transaction> = block.txdata.into_iter().skip(1).collect();
 
         debug!(
             prev_hash = ?header.prev_blockhash,
             nbits = ?header.bits,
             min_ntime = header.time,
-            tx_count = txdata.len(),
-            "TxCollection::makeTemplate validated the declared job"
+            merkle_path_len = merkle_path.len(),
+            "TxCollection::makeTemplate validated the declared job; retaining template"
         );
+
+        let replaced_template = self
+            .declared_templates
+            .borrow_mut()
+            .insert((downstream_id, request_id), template);
+        if let Some(replaced_template) = replaced_template {
+            // A re-declared request id supersedes the previous declaration.
+            self.destroy_template(&replaced_template).await;
+        }
 
         Ok(JdResponse::Success {
             prev_hash: header.prev_blockhash,
             nbits: header.bits,
             min_ntime: header.time,
-            txdata,
+            merkle_path,
         })
+    }
+
+    /// Discards the retained template of a declared job, if any.
+    pub(crate) async fn release_declared_job(
+        &self,
+        downstream_id: DownstreamId,
+        request_id: RequestId,
+    ) {
+        let template = self
+            .declared_templates
+            .borrow_mut()
+            .remove(&(downstream_id, request_id));
+        if let Some(template) = template {
+            debug!(downstream_id, request_id, "Releasing retained template");
+            self.destroy_template(&template).await;
+        }
+    }
+
+    /// Discards all retained templates of a disconnected downstream.
+    pub(crate) async fn cleanup_downstream(&self, downstream_id: DownstreamId) {
+        let templates: Vec<BlockTemplateIpcClient> = {
+            let mut declared_templates = self.declared_templates.borrow_mut();
+            let keys: Vec<(DownstreamId, RequestId)> = declared_templates
+                .keys()
+                .filter(|(id, _)| *id == downstream_id)
+                .copied()
+                .collect();
+            keys.iter()
+                .filter_map(|key| declared_templates.remove(key))
+                .collect()
+        };
+        if !templates.is_empty() {
+            debug!(
+                downstream_id,
+                count = templates.len(),
+                "Releasing retained templates for disconnected downstream"
+            );
+        }
+        for template in &templates {
+            self.destroy_template(template).await;
+        }
     }
 
     /// Maps `unknownTxPos` positions back to the declared wtxids.
@@ -354,20 +415,34 @@ impl BitcoinCoreSv2JDP {
         deserialize(header_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)
     }
 
-    /// Fetches the full block of a validated template via `BlockTemplate::getBlock`.
-    async fn get_template_block(
+    /// Fetches the coinbase merkle branch of a validated template via
+    /// `BlockTemplate::getCoinbaseMerklePath`.
+    ///
+    /// The branch does not depend on the template's (dummy) coinbase, so it also applies to
+    /// the declared coinbase.
+    async fn get_coinbase_merkle_path(
         &self,
         template: &BlockTemplateIpcClient,
-    ) -> Result<Block, BitcoinCoreSv2JDPError> {
-        let mut get_block_request = template.get_block_request();
-        get_block_request
+    ) -> Result<Vec<TxMerkleNode>, BitcoinCoreSv2JDPError> {
+        let mut get_coinbase_merkle_path_request = template.get_coinbase_merkle_path_request();
+        get_coinbase_merkle_path_request
             .get()
             .get_context()?
             .set_thread(self.thread_ipc_client.clone());
-        let get_block_response = get_block_request.send().promise.await?;
-        let block_bytes = get_block_response.get()?.get_result()?;
-        debug!("Deserializing block ({} bytes)", block_bytes.len());
-        deserialize(block_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)
+        let get_coinbase_merkle_path_response =
+            get_coinbase_merkle_path_request.send().promise.await?;
+        let get_coinbase_merkle_path_result = get_coinbase_merkle_path_response.get()?;
+        let path = get_coinbase_merkle_path_result.get_result()?;
+        let mut merkle_path = Vec::with_capacity(path.len() as usize);
+        for pos in 0..path.len() {
+            let node_bytes: [u8; 32] = path.get(pos)?.try_into().map_err(|_| {
+                bitcoin_capnp_types::capnp::Error::failed(
+                    "coinbase merkle path node is not 32 bytes".to_string(),
+                )
+            })?;
+            merkle_path.push(TxMerkleNode::from_byte_array(node_bytes));
+        }
+        Ok(merkle_path)
     }
 
     /// Best-effort `TxCollection::destroy` so Bitcoin Core can free the collection early.
@@ -400,100 +475,128 @@ impl BitcoinCoreSv2JDP {
         }
     }
 
-    /// Submits a solved block to Bitcoin Core via `submitBlock`.
-    pub(crate) async fn handle_push_solution(&self, block: Block) {
-        let block_bytes: Vec<u8> = serialize(&block);
+    /// Submits a solution for a previously declared job via the retained template's
+    /// `submitSolution` method. Bitcoin Core reconstructs the solved block from the
+    /// template's transactions plus the given header fields and coinbase, so the block
+    /// never crosses the IPC boundary.
+    pub(crate) async fn handle_push_solution(
+        &self,
+        downstream_id: DownstreamId,
+        request_id: RequestId,
+        version: u32,
+        ntime: u32,
+        nonce: u32,
+        coinbase_tx: Transaction,
+    ) {
+        let template = self
+            .declared_templates
+            .borrow_mut()
+            .remove(&(downstream_id, request_id));
+        let Some(template) = template else {
+            error!(
+                downstream_id,
+                request_id, "No retained template for PushSolution; dropping solution"
+            );
+            return;
+        };
+
+        let coinbase_bytes: Vec<u8> = serialize(&coinbase_tx);
         debug!(
-            block_bytes_len = block_bytes.len(),
-            tx_count = block.txdata.len(),
-            "Submitting solved block via submitBlock"
+            downstream_id,
+            request_id,
+            version,
+            ntime,
+            nonce,
+            coinbase_bytes_len = coinbase_bytes.len(),
+            "Submitting solution via BlockTemplate::submitSolution"
         );
 
-        // a dedicated thread is used to submit blocks to Bitcoin Core
+        // a dedicated thread is used to submit solutions to Bitcoin Core
         // therefore retries should be extremely rare
-        for attempt in 1..=MAX_SUBMIT_BLOCK_ATTEMPTS {
-            let mut submit_block_request = self.mining_ipc_client.submit_block_request();
+        for attempt in 1..=MAX_SUBMIT_SOLUTION_ATTEMPTS {
+            let mut submit_solution_request = template.submit_solution_request();
 
-            match submit_block_request.get().get_context() {
+            match submit_solution_request.get().get_context() {
                 Ok(mut context) => context.set_thread(self.submit_block_thread_ipc_client.clone()),
                 Err(e) => {
-                    error!("Failed to set submitBlock request thread context: {e}");
+                    error!("Failed to set submitSolution request thread context: {e}");
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
                     return;
                 }
             }
 
-            submit_block_request.get().set_block(&block_bytes);
+            submit_solution_request.get().set_version(version);
+            submit_solution_request.get().set_timestamp(ntime);
+            submit_solution_request.get().set_nonce(nonce);
+            submit_solution_request.get().set_coinbase(&coinbase_bytes);
 
-            let submit_block_response = match submit_block_request.send().promise.await {
+            let submit_solution_response = match submit_solution_request.send().promise.await {
                 Ok(response) => response,
                 Err(e) => {
                     let err: BitcoinCoreSv2JDPError = e.into();
-                    if err.is_thread_busy() && attempt < MAX_SUBMIT_BLOCK_ATTEMPTS {
+                    if err.is_thread_busy() && attempt < MAX_SUBMIT_SOLUTION_ATTEMPTS {
                         warn!(
                             attempt,
-                            max_attempts = MAX_SUBMIT_BLOCK_ATTEMPTS,
-                            "Transient IPC contention during submitBlock (thread busy); retrying"
+                            max_attempts = MAX_SUBMIT_SOLUTION_ATTEMPTS,
+                            "Transient IPC contention during submitSolution (thread busy); retrying"
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(
-                            SUBMIT_BLOCK_RETRY_BACKOFF_MS,
+                            SUBMIT_SOLUTION_RETRY_BACKOFF_MS,
                         ))
                         .await;
                         continue;
                     }
 
-                    error!("Failed to send submitBlock request: {err:?}");
+                    error!("Failed to send submitSolution request: {err:?}");
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
                     return;
                 }
             };
 
-            let submit_block_result = match submit_block_response.get() {
+            let submit_solution_result = match submit_solution_response.get() {
                 Ok(result) => result,
                 Err(e) => {
                     let err: BitcoinCoreSv2JDPError = e.into();
-                    if err.is_thread_busy() && attempt < MAX_SUBMIT_BLOCK_ATTEMPTS {
+                    if err.is_thread_busy() && attempt < MAX_SUBMIT_SOLUTION_ATTEMPTS {
                         warn!(
                             attempt,
-                            max_attempts = MAX_SUBMIT_BLOCK_ATTEMPTS,
-                            "Transient IPC contention while reading submitBlock response (thread busy); retrying"
+                            max_attempts = MAX_SUBMIT_SOLUTION_ATTEMPTS,
+                            "Transient IPC contention while reading submitSolution response (thread busy); retrying"
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(
-                            SUBMIT_BLOCK_RETRY_BACKOFF_MS,
+                            SUBMIT_SOLUTION_RETRY_BACKOFF_MS,
                         ))
                         .await;
                         continue;
                     }
 
-                    error!("Failed to get submitBlock result: {err:?}");
+                    error!("Failed to get submitSolution result: {err:?}");
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
                     return;
                 }
             };
 
-            let accepted = submit_block_result.get_result();
-            let reason = submit_block_result.get_reason();
-            let debug_msg = submit_block_result.get_debug();
+            let accepted = submit_solution_result.get_result();
 
             if accepted {
                 info!(
-                    reason = ?reason,
-                    debug = ?debug_msg,
-                    "Bitcoin Core accepted block via submitBlock"
+                    downstream_id,
+                    request_id, "Bitcoin Core accepted solution via submitSolution"
                 );
             } else {
                 warn!(
-                    reason = ?reason,
-                    debug = ?debug_msg,
-                    "Bitcoin Core rejected block via submitBlock"
+                    downstream_id,
+                    request_id, "Bitcoin Core rejected solution via submitSolution"
                 );
             }
 
-            return;
+            break;
         }
+
+        self.destroy_template(&template).await;
     }
 }
 

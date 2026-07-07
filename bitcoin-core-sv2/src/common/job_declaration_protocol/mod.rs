@@ -19,6 +19,7 @@ use crate::{
 use async_channel::Receiver;
 use io::JdRequest;
 use std::path::Path;
+use stratum_core::bitcoin::{TxMerkleNode, Txid, consensus::Encodable, hashes::Hash};
 pub use tokio_util::sync::CancellationToken;
 
 /// Version-agnostic JDP runtime handle.
@@ -89,4 +90,48 @@ where
             BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
         }),
     }
+}
+
+/// Computes the coinbase merkle branch in the txid merkle tree for a block whose
+/// non-coinbase transactions have the given txids (in block order).
+///
+/// Returns the sibling hashes at each level from leaf to root, needed to reconstruct the
+/// block header's merkle root from the coinbase position (index 0). The branch does not
+/// depend on the coinbase transaction itself, so a placeholder leaf is used.
+///
+/// Used to compare with a `SetCustomMiningJob.merkle_path`.
+pub fn coinbase_merkle_branch(txids: &[Txid]) -> Vec<TxMerkleNode> {
+    let mut hashes: Vec<TxMerkleNode> = Vec::with_capacity(1 + txids.len());
+    // placeholder for the coinbase txid; position-0 branches never include their own leaf
+    hashes.push(TxMerkleNode::all_zeros());
+    for txid in txids {
+        hashes.push((*txid).into());
+    }
+
+    if hashes.len() == 1 {
+        return Vec::new();
+    }
+
+    let mut branch = Vec::new();
+
+    while hashes.len() > 1 {
+        branch.push(hashes[1]);
+
+        let half = hashes.len().div_ceil(2);
+        let mut next_level = Vec::with_capacity(half);
+        for idx in 0..half {
+            let left = hashes[2 * idx];
+            let right = hashes[std::cmp::min(2 * idx + 1, hashes.len() - 1)];
+            let mut engine = TxMerkleNode::engine();
+            left.consensus_encode(&mut engine)
+                .expect("in-memory writers don't error");
+            right
+                .consensus_encode(&mut engine)
+                .expect("in-memory writers don't error");
+            next_level.push(TxMerkleNode::from_engine(engine));
+        }
+        hashes = next_level;
+    }
+
+    branch
 }

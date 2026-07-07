@@ -1,7 +1,10 @@
 //! Handlers for Bitcoin Core v31.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
 
 use crate::{
-    common::job_declaration_protocol::io::{JdResponse, ValidationContext},
+    common::job_declaration_protocol::{
+        coinbase_merkle_branch,
+        io::{JdResponse, ValidationContext},
+    },
     unix_capnp::v31x::job_declaration_protocol::{
         BitcoinCoreSv2JDP, mempool::decode_bip34_height_from_coinbase_script_sig,
     },
@@ -284,7 +287,12 @@ impl BitcoinCoreSv2JDP {
                 prev_hash: initial_validation_context.prev_hash,
                 nbits: initial_validation_context.nbits,
                 min_ntime: initial_validation_context.min_ntime,
-                txdata: txdata_for_response,
+                merkle_path: coinbase_merkle_branch(
+                    &txdata_for_response
+                        .iter()
+                        .map(|tx| tx.compute_txid())
+                        .collect::<Vec<_>>(),
+                ),
             }
         } else {
             let stale_at_arrival_by_bip34 = declared_bip34_height != latest_bip34_height;
@@ -328,7 +336,7 @@ impl BitcoinCoreSv2JDP {
     /// Submits a solved block to Bitcoin Core.
     ///
     /// Not yet implemented for v31.x IPC, which does not expose `submitBlock`.
-    pub(crate) async fn handle_push_solution(&self, _block: Block) {
+    pub(crate) async fn handle_push_solution(&self) {
         // todo
     }
 }

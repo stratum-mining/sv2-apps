@@ -357,6 +357,7 @@ impl BitcoinCoreSv2JDP {
                 wtxid_list,
                 missing_txs,
                 response_tx,
+                ..
             } => {
                 self.handle_declare_mining_job(
                     version,
@@ -369,9 +370,12 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { block } => {
-                self.handle_push_solution(block).await;
+            JdRequest::PushSolution { .. } => {
+                self.handle_push_solution().await;
             }
+
+            // This backend retains no per-job state, so there is nothing to release.
+            JdRequest::ReleaseDeclaredJob { .. } | JdRequest::CleanupDownstream { .. } => {}
         }
     }
 

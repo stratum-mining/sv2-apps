@@ -149,10 +149,10 @@ async fn assert_jdp_success_scenario(
     .await;
 
     match response {
-        JdResponse::Success { txdata, .. } => {
+        JdResponse::Success { merkle_path, .. } => {
             assert!(
-                txdata.is_empty(),
-                "txdata should be empty when no non-coinbase txs were declared"
+                merkle_path.is_empty(),
+                "merkle path should be empty when no non-coinbase txs were declared"
             );
         }
         response => panic!("expected Success, got: {response:?}"),
@@ -193,6 +193,9 @@ async fn send_declare_mining_job_and_recv_response(
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     incoming_sender
         .send(JdRequest::DeclareMiningJob {
+            // This test drives a single logical downstream; ids only need to be consistent.
+            downstream_id: 0,
+            request_id: 0,
             // Use a fixed, valid block version across scenarios so assertions focus on IO paths.
             version: BlockVersion::from_consensus(0x2000_0000),
             coinbase_tx,

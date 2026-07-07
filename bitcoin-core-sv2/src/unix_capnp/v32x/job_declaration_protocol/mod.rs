@@ -2,18 +2,20 @@
 //! UNIX socket.
 
 use crate::{
-    common::job_declaration_protocol::io::JdRequest,
+    common::job_declaration_protocol::io::{DownstreamId, JdRequest, RequestId},
     unix_capnp::v32x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
 };
 use async_channel::Receiver;
 use bitcoin_capnp_types::{
     capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty},
     init_capnp::init::Client as InitIpcClient,
-    mining_capnp::mining::Client as MiningIpcClient,
+    mining_capnp::{
+        block_template::Client as BlockTemplateIpcClient, mining::Client as MiningIpcClient,
+    },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
 use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
-use std::path::Path;
+use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
 use stratum_core::bitcoin::{BlockHash, hashes::Hash};
 use tokio::net::UnixStream;
 use tokio_util::compat::*;
@@ -43,15 +45,24 @@ const IBD_POLL_INTERVAL_SECS: u64 = 1;
 /// - `makeTemplate` reconstructs and validates the block, returning a `BlockTemplate`
 ///
 /// If transactions are missing, a [`MissingTransactions`] response is sent. If validation
-/// succeeds, a [`Success`] response with the template parameters is sent.
+/// succeeds, a [`Success`] response with the template parameters is sent and the validated
+/// `BlockTemplate` is retained, keyed by `(downstream_id, request_id)`.
 ///
-/// Incoming [`PushSolution`] requests are used to submit mining solutions to Bitcoin Core.
+/// Incoming [`PushSolution`] requests submit mining solutions to Bitcoin Core via the
+/// retained template's `submitSolution` method; the block itself never leaves the node.
+/// [`ReleaseDeclaredJob`] and [`CleanupDownstream`] requests discard retained templates
+/// that will no longer be used.
 #[derive(Clone)]
 pub struct BitcoinCoreSv2JDP {
     thread_ipc_client: ThreadIpcClient,
     submit_block_thread_ipc_client: ThreadIpcClient,
     mining_ipc_client: MiningIpcClient,
     cancellation_token: CancellationToken,
+    /// Validated templates of declared jobs, retained for `PushSolution`.
+    ///
+    /// Dropping a client releases the corresponding `BlockTemplate` inside Bitcoin Core,
+    /// but an explicit `destroy` is preferred for prompt cleanup.
+    declared_templates: Rc<RefCell<HashMap<(DownstreamId, RequestId), BlockTemplateIpcClient>>>,
     incoming_requests: Receiver<JdRequest>,
 }
 
@@ -151,6 +162,7 @@ impl BitcoinCoreSv2JDP {
             submit_block_thread_ipc_client,
             mining_ipc_client,
             cancellation_token: cancellation_token.clone(),
+            declared_templates: Rc::new(RefCell::new(HashMap::new())),
             incoming_requests,
         };
 
@@ -253,6 +265,8 @@ impl BitcoinCoreSv2JDP {
         match request {
             // Handle DeclareMiningJob requests
             JdRequest::DeclareMiningJob {
+                downstream_id,
+                request_id,
                 version,
                 coinbase_tx,
                 wtxid_list,
@@ -260,6 +274,8 @@ impl BitcoinCoreSv2JDP {
                 response_tx,
             } => {
                 self.handle_declare_mining_job(
+                    downstream_id,
+                    request_id,
                     version,
                     coinbase_tx,
                     wtxid_list,
@@ -270,8 +286,34 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { block } => {
-                self.handle_push_solution(block).await;
+            JdRequest::PushSolution {
+                downstream_id,
+                request_id,
+                version,
+                ntime,
+                nonce,
+                coinbase_tx,
+            } => {
+                self.handle_push_solution(
+                    downstream_id,
+                    request_id,
+                    version,
+                    ntime,
+                    nonce,
+                    coinbase_tx,
+                )
+                .await;
+            }
+
+            // Discard retained templates that will no longer be used
+            JdRequest::ReleaseDeclaredJob {
+                downstream_id,
+                request_id,
+            } => {
+                self.release_declared_job(downstream_id, request_id).await;
+            }
+            JdRequest::CleanupDownstream { downstream_id } => {
+                self.cleanup_downstream(downstream_id).await;
             }
         }
     }

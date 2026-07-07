@@ -25,11 +25,8 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            self,
-            block::{Header, Version},
-            consensus::{Decodable, Encodable},
-            hashes::Hash,
-            Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
+            self, block::Version, consensus::Decodable, hashes::Hash, BlockHash, CompactTarget,
+            Transaction, TxMerkleNode, Wtxid,
         },
         job_declaration_sv2::{
             DeclareMiningJob, ProvideMissingTransactionsSuccess, PushSolution,
@@ -80,13 +77,13 @@ struct DeclaredCustomJob {
     validated: Option<ValidatedJobData>,
 }
 
-/// Template parameters and transaction data of a fully validated declared job.
+/// Template parameters of a fully validated declared job.
 #[derive(Clone)]
 struct ValidatedJobData {
     nbits: CompactTarget,
-    /// Full non-coinbase transaction list in declaration order, used for merkle-path
-    /// validation and solved block reconstruction.
-    txdata: Vec<Transaction>,
+    /// Coinbase merkle branch reported by the validator, used to validate a
+    /// `SetCustomMiningJob.merkle_path`.
+    merkle_path: Vec<TxMerkleNode>,
 }
 
 /// Latest `DeclaredCustomJob` accepted via `SetCustomMiningJob` for a downstream.
@@ -178,61 +175,6 @@ impl DeclaredCustomJob {
                 tracing::error!("Failed to deserialize declared coinbase transaction: {}", e);
             },
         )
-    }
-
-    /// Computes the coinbase merkle branch in the txid merkle tree.
-    ///
-    /// Returns the sibling hashes at each level from leaf to root, needed to
-    /// reconstruct the block header's merkle root from the coinbase position (index 0).
-    ///
-    /// Requires the job to have been validated via `JdResponse::Success`.
-    /// The coinbase txid is derived from the declared coinbase prefix/suffix.
-    ///
-    /// Used to compare with a `SetCustomMiningJob.merkle_path`.
-    ///
-    /// Internally, errors may come from missing txdata
-    /// so error_code = "declared-job-not-yet-validated"
-    /// therefore () error type is sufficient.
-    fn get_merkle_path(&self) -> Result<Vec<TxMerkleNode>, ()> {
-        let txdata = &self.validated.as_ref().ok_or(())?.txdata;
-
-        let coinbase_tx = self
-            .get_coinbase_tx(None)
-            .expect("coinbase tx already validated");
-        let coinbase_txid: TxMerkleNode = coinbase_tx.compute_txid().into();
-
-        let mut hashes: Vec<TxMerkleNode> = Vec::with_capacity(1 + txdata.len());
-        hashes.push(coinbase_txid);
-        for tx in txdata {
-            hashes.push(tx.compute_txid().into());
-        }
-
-        if hashes.len() == 1 {
-            return Ok(Vec::new());
-        }
-
-        let mut branch = Vec::new();
-
-        while hashes.len() > 1 {
-            branch.push(hashes[1]);
-
-            let half = hashes.len().div_ceil(2);
-            let mut next_level = Vec::with_capacity(half);
-            for idx in 0..half {
-                let left = hashes[2 * idx];
-                let right = hashes[std::cmp::min(2 * idx + 1, hashes.len() - 1)];
-                let mut engine = TxMerkleNode::engine();
-                left.consensus_encode(&mut engine)
-                    .expect("in-memory writers don't error");
-                right
-                    .consensus_encode(&mut engine)
-                    .expect("in-memory writers don't error");
-                next_level.push(TxMerkleNode::from_engine(engine));
-            }
-            hashes = next_level;
-        }
-
-        Ok(branch)
     }
 }
 
@@ -385,6 +327,7 @@ impl BitcoinCoreIPCEngine {
         // consumed by SetCustomMiningJob.
         let janitor_downstream_states = downstream_states.clone();
         let janitor_cancellation = cancellation_token.clone();
+        let janitor_request_sender = request_sender.clone();
         tokio::spawn(async move {
             let janitor_interval = Duration::from_secs(JANITOR_INTERVAL_SECS);
             let token_timeout = Duration::from_secs(ALLOCATED_TOKEN_TIMEOUT_SECS);
@@ -411,6 +354,13 @@ impl BitcoinCoreIPCEngine {
                             for token in expired_tokens {
                                 if let Some(entry) = state.allocated_token_entries.remove(&token) {
                                     state.declared_custom_jobs.remove(&entry.request_id);
+                                    // let the validator release any state retained for the job
+                                    let _ = janitor_request_sender.try_send(
+                                        JdRequest::ReleaseDeclaredJob {
+                                            downstream_id,
+                                            request_id: entry.request_id,
+                                        },
+                                    );
                                     tracing::debug!(
                                         downstream_id,
                                         token,
@@ -432,6 +382,144 @@ impl BitcoinCoreIPCEngine {
             jdp_thread_handle: Arc::new(Mutex::new(Some(jdp_thread_handle))),
         })
     }
+
+    /// Tells the validator to release any state retained for a declared job that will
+    /// never receive a solution (fire-and-forget).
+    fn release_declared_job(&self, downstream_id: DownstreamId, request_id: RequestId) {
+        let _ = self.request_sender.try_send(JdRequest::ReleaseDeclaredJob {
+            downstream_id,
+            request_id,
+        });
+    }
+
+    /// Cross-checks a `SetCustomMiningJob` against the stored declaration, returning the
+    /// `SetCustomMiningJobError` error code on mismatch.
+    fn validate_set_custom_mining_job(
+        declared_custom_job: &DeclaredCustomJob,
+        set_custom_mining_job: &SetCustomMiningJob<'_>,
+    ) -> Result<(), &'static str> {
+        // Job may be pending retry after missing txs and not fully validated yet.
+        let Some(validated) = declared_custom_job.validated.as_ref() else {
+            tracing::error!("Job not yet validated");
+            return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED);
+        };
+
+        // Get declared values from stored job
+        let declared_prev_hash = declared_custom_job.prev_hash;
+        let declared_nbits = validated.nbits.to_consensus();
+        let declared_version: u32 = declared_custom_job.get_version();
+
+        // Extract values from SetCustomMiningJob message
+        let custom_job_prev_hash = {
+            let bytes = set_custom_mining_job.prev_hash.to_array();
+            BlockHash::from_byte_array(bytes)
+        };
+        let custom_job_nbits: u32 = set_custom_mining_job.nbits;
+        let custom_job_version: u32 = set_custom_mining_job.version;
+
+        // Validate prev_hash
+        if custom_job_prev_hash != declared_prev_hash {
+            tracing::debug!(
+                "prev_hash mismatch: custom={:?}, declared={:?}",
+                custom_job_prev_hash,
+                declared_prev_hash
+            );
+            return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP);
+        }
+
+        // Validate nbits
+        if custom_job_nbits != declared_nbits {
+            tracing::debug!(
+                "nbits mismatch: custom={}, declared={}",
+                custom_job_nbits,
+                declared_nbits
+            );
+            return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_NBITS);
+        }
+
+        // Validate version
+        if custom_job_version != declared_version {
+            tracing::debug!(
+                "version mismatch: custom={}, declared={}",
+                custom_job_version,
+                declared_version
+            );
+            return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_VERSION);
+        }
+
+        // validate coinbase tx
+        {
+            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx(None) {
+                Ok(tx) => tx,
+                Err(_) => return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX),
+            };
+
+            if declared_coinbase_tx.version.0 != set_custom_mining_job.coinbase_tx_version as i32 {
+                tracing::debug!(
+                    "coinbase version mismatch: custom={}, declared={}",
+                    set_custom_mining_job.coinbase_tx_version,
+                    declared_coinbase_tx.version.0
+                );
+                return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_VERSION);
+            }
+
+            let script_sig = declared_coinbase_tx.input[0].script_sig.as_bytes();
+            let coinbase_prefix = set_custom_mining_job.coinbase_prefix.as_bytes();
+            if !script_sig.starts_with(coinbase_prefix) {
+                tracing::debug!("coinbase prefix mismatch");
+                return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX);
+            }
+
+            if declared_coinbase_tx.input[0].sequence.0
+                != set_custom_mining_job.coinbase_tx_input_n_sequence
+            {
+                tracing::debug!(
+                    "coinbase input sequence mismatch: custom={}, declared={}",
+                    set_custom_mining_job.coinbase_tx_input_n_sequence,
+                    declared_coinbase_tx.input[0].sequence.0
+                );
+                return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_INPUT_N_SEQUENCE);
+            }
+
+            let declared_outputs_bytes =
+                bitcoin::consensus::serialize(&declared_coinbase_tx.output);
+            if declared_outputs_bytes != set_custom_mining_job.coinbase_tx_outputs.as_bytes() {
+                tracing::debug!("coinbase outputs mismatch");
+                return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_OUTPUTS);
+            }
+
+            if declared_coinbase_tx.lock_time.to_consensus_u32()
+                != set_custom_mining_job.coinbase_tx_locktime
+            {
+                tracing::debug!(
+                    "coinbase locktime mismatch: custom={}, declared={}",
+                    set_custom_mining_job.coinbase_tx_locktime,
+                    declared_coinbase_tx.lock_time.to_consensus_u32()
+                );
+                return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_LOCKTIME);
+            }
+        }
+
+        // validate merkle path
+        {
+            let custom_merkle_path: Vec<TxMerkleNode> = set_custom_mining_job
+                .merkle_path
+                .iter()
+                .map(|u256| TxMerkleNode::from_byte_array(u256.to_array()))
+                .collect();
+
+            if validated.merkle_path != custom_merkle_path {
+                tracing::debug!(
+                    "merkle path mismatch: custom={:?}, declared={:?}",
+                    custom_merkle_path,
+                    validated.merkle_path
+                );
+                return Err(ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MERKLE_PATH);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -450,6 +538,10 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
     fn cleanup_downstream(&self, downstream_id: DownstreamId) {
         self.downstream_states.remove(&downstream_id);
+        // let the validator release any state retained for the downstream's jobs
+        let _ = self
+            .request_sender
+            .try_send(JdRequest::CleanupDownstream { downstream_id });
     }
 
     /// Validates a `DeclareMiningJob` by forwarding it to Bitcoin Core over IPC.
@@ -579,6 +671,8 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
         // Send request to BitcoinCoreSv2JDP (clone wtxid_list since we need it for error handling)
         let request = JdRequest::DeclareMiningJob {
+            downstream_id,
+            request_id: declare_mining_job.request_id,
             version: Version::from_consensus(declare_mining_job.version as i32),
             coinbase_tx: declared_coinbase_tx,
             wtxid_list: wtxid_list.clone(),
@@ -608,12 +702,12 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 prev_hash,
                 nbits,
                 min_ntime: _,
-                txdata,
+                merkle_path,
             } => {
                 let declared_custom_job = DeclaredCustomJob {
                     declare_mining_job: declare_mining_job_static,
                     prev_hash,
-                    validated: Some(ValidatedJobData { nbits, txdata }),
+                    validated: Some(ValidatedJobData { nbits, merkle_path }),
                 };
                 self.downstream_states
                     .with_mut_or_default(downstream_id, |state| {
@@ -640,6 +734,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                         .remove(&declare_mining_job.request_id);
                     state.allocated_token_entries.remove(&allocated_token);
                 });
+                self.release_declared_job(downstream_id, declare_mining_job.request_id);
 
                 let tip_drifted = match (previous_pending_prev_hash, prev_hash) {
                     (Some(previous_prev_hash), Some(current_prev_hash)) => {
@@ -671,6 +766,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                             .remove(&declare_mining_job.request_id);
                         state.allocated_token_entries.remove(&allocated_token);
                     });
+                    self.release_declared_job(downstream_id, declare_mining_job.request_id);
 
                     DeclareMiningJobResult::Error(ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP)
                 } else {
@@ -769,46 +865,28 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             return;
         };
 
-        let declared_prev_hash = active_job.prev_hash;
+        let request_id = active_job.declare_mining_job.request_id;
 
-        let mut txdata = match active_job.validated {
-            Some(ref validated) => validated.txdata.clone(),
-            None => {
-                tracing::error!("Active custom job is missing transaction data");
-                return;
-            }
-        };
-
+        // Reconstruct the declared coinbase with the solution's extranonce; the validator
+        // reconstructs and submits the full block from its retained template.
         let coinbase_tx = match active_job.get_coinbase_tx(Some(push_solution.extranonce.as_ref()))
         {
             Ok(coinbase_tx) => coinbase_tx,
             Err(_) => {
                 tracing::error!("Failed to reconstruct solved coinbase transaction");
+                self.release_declared_job(downstream_id, request_id);
                 return;
             }
         };
 
-        txdata.insert(0, coinbase_tx);
-
-        let mut block = Block {
-            header: Header {
-                version: Version::from_consensus(push_solution.version as i32),
-                prev_blockhash: declared_prev_hash,
-                merkle_root: TxMerkleNode::all_zeros(),
-                time: push_solution.ntime,
-                bits: CompactTarget::from_consensus(push_solution.nbits),
-                nonce: push_solution.nonce,
-            },
-            txdata,
+        let request = JdRequest::PushSolution {
+            downstream_id,
+            request_id,
+            version: push_solution.version,
+            ntime: push_solution.ntime,
+            nonce: push_solution.nonce,
+            coinbase_tx,
         };
-
-        let Some(merkle_root) = block.compute_merkle_root() else {
-            tracing::error!("Failed to compute merkle root for PushSolution block");
-            return;
-        };
-        block.header.merkle_root = merkle_root;
-
-        let request = JdRequest::PushSolution { block };
 
         if let Err(e) = self.request_sender.send(request).await {
             tracing::error!(downstream_id, "Failed to send PushSolution request: {}", e);
@@ -879,178 +957,34 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             }
         };
 
-        // Job may be pending retry after missing txs and not fully validated yet.
-        let Some(validated) = declared_custom_job.validated.as_ref() else {
-            tracing::error!("Job not yet validated");
-            return SetCustomMiningJobResult::Error(
-                ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED,
+        // The job is consumed at this point, so a validation failure must also release any
+        // validator state retained for it (e.g. the v32.x backend's BlockTemplate).
+        if let Err(error_code) =
+            Self::validate_set_custom_mining_job(&declared_custom_job, &set_custom_mining_job)
+        {
+            self.release_declared_job(downstream_id, request_id);
+            return SetCustomMiningJobResult::Error(error_code);
+        }
+
+        let replaced_request_id =
+            self.downstream_states
+                .with_mut_or_default(downstream_id, |state| {
+                    state
+                        .active_custom_job
+                        .replace(declared_custom_job)
+                        .map(|replaced_job| replaced_job.declare_mining_job.request_id)
+                });
+        if let Some(replaced_request_id) = replaced_request_id {
+            tracing::debug!(
+                "Replaced previous active custom job for downstream {} with newer SetCustomMiningJob",
+                downstream_id,
             );
-        };
-
-        // Get declared values from stored job
-        let declared_prev_hash = declared_custom_job.prev_hash;
-        let declared_nbits = validated.nbits.to_consensus();
-        let declared_version: u32 = declared_custom_job.get_version();
-
-        // Extract values from SetCustomMiningJob message
-        let custom_job_prev_hash = {
-            let bytes = set_custom_mining_job.prev_hash.to_array();
-            BlockHash::from_byte_array(bytes)
-        };
-        let custom_job_nbits: u32 = set_custom_mining_job.nbits;
-        let custom_job_version: u32 = set_custom_mining_job.version;
-
-        // Validate prev_hash
-        {
-            if custom_job_prev_hash != declared_prev_hash {
-                tracing::debug!(
-                    "prev_hash mismatch: custom={:?}, declared={:?}",
-                    custom_job_prev_hash,
-                    declared_prev_hash
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
-                );
+            // The replaced job can no longer receive a solution; release its retained state
+            // (unless the same request id was just re-activated).
+            if replaced_request_id != request_id {
+                self.release_declared_job(downstream_id, replaced_request_id);
             }
         }
-
-        // Validate nbits
-        {
-            if custom_job_nbits != declared_nbits {
-                tracing::debug!(
-                    "nbits mismatch: custom={}, declared={}",
-                    custom_job_nbits,
-                    declared_nbits
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_NBITS,
-                );
-            }
-        }
-
-        // Validate version
-        {
-            if custom_job_version != declared_version {
-                tracing::debug!(
-                    "version mismatch: custom={}, declared={}",
-                    custom_job_version,
-                    declared_version
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_VERSION,
-                );
-            }
-        }
-
-        // validate coinbase tx
-        {
-            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx(None) {
-                Ok(tx) => tx,
-                Err(_) => {
-                    return SetCustomMiningJobResult::Error(
-                        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX,
-                    )
-                }
-            };
-
-            if declared_coinbase_tx.version.0 != set_custom_mining_job.coinbase_tx_version as i32 {
-                tracing::debug!(
-                    "coinbase version mismatch: custom={}, declared={}",
-                    set_custom_mining_job.coinbase_tx_version,
-                    declared_coinbase_tx.version.0
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_VERSION,
-                );
-            }
-
-            let script_sig = declared_coinbase_tx.input[0].script_sig.as_bytes();
-            let coinbase_prefix = set_custom_mining_job.coinbase_prefix.as_bytes();
-            if !script_sig.starts_with(coinbase_prefix) {
-                tracing::debug!("coinbase prefix mismatch");
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX,
-                );
-            }
-
-            if declared_coinbase_tx.input[0].sequence.0
-                != set_custom_mining_job.coinbase_tx_input_n_sequence
-            {
-                tracing::debug!(
-                    "coinbase input sequence mismatch: custom={}, declared={}",
-                    set_custom_mining_job.coinbase_tx_input_n_sequence,
-                    declared_coinbase_tx.input[0].sequence.0
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_INPUT_N_SEQUENCE,
-                );
-            }
-
-            let declared_outputs_bytes =
-                bitcoin::consensus::serialize(&declared_coinbase_tx.output);
-            if declared_outputs_bytes != set_custom_mining_job.coinbase_tx_outputs.as_bytes() {
-                tracing::debug!("coinbase outputs mismatch");
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_OUTPUTS,
-                );
-            }
-
-            if declared_coinbase_tx.lock_time.to_consensus_u32()
-                != set_custom_mining_job.coinbase_tx_locktime
-            {
-                tracing::debug!(
-                    "coinbase locktime mismatch: custom={}, declared={}",
-                    set_custom_mining_job.coinbase_tx_locktime,
-                    declared_coinbase_tx.lock_time.to_consensus_u32()
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_LOCKTIME,
-                );
-            }
-        }
-
-        // validate merkle path
-        {
-            let declared_merkle_path = match declared_custom_job.get_merkle_path() {
-                Ok(path) => path,
-                Err(_) => {
-                    return SetCustomMiningJobResult::Error(
-                        ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED,
-                    )
-                }
-            };
-
-            let custom_merkle_path: Vec<TxMerkleNode> = set_custom_mining_job
-                .merkle_path
-                .iter()
-                .map(|u256| TxMerkleNode::from_byte_array(u256.to_array()))
-                .collect();
-
-            if declared_merkle_path != custom_merkle_path {
-                tracing::debug!(
-                    "merkle path mismatch: custom={:?}, declared={:?}",
-                    custom_merkle_path,
-                    declared_merkle_path
-                );
-                return SetCustomMiningJobResult::Error(
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MERKLE_PATH,
-                );
-            }
-        }
-
-        self.downstream_states
-            .with_mut_or_default(downstream_id, |state| {
-                if state
-                    .active_custom_job
-                    .replace(declared_custom_job)
-                    .is_some()
-                {
-                    tracing::debug!(
-                        "Replaced previous active custom job for downstream {} with newer SetCustomMiningJob",
-                        downstream_id,
-                    );
-                }
-            });
 
         SetCustomMiningJobResult::Success
     }
