@@ -59,6 +59,62 @@ jobs:
           path: integration-test-binaries-${{ runner.os }}.tar.zst
           if-no-files-found: error
 
+  bitcoin-core:
+    name: Build Bitcoin Core (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - bitcoin/bitcoin@master
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Classify Bitcoin Core version
+        id: bitcoin-core
+        uses: ./.github/actions/classify-bitcoin-core
+        with:
+          version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Install Bitcoin Core build dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y build-essential cmake pkgconf python3 libevent-dev libboost-dev libsqlite3-dev capnproto libcapnp-dev ccache
+
+      - name: Install Bitcoin Core build dependencies (macOS)
+        if: matrix.os == 'macos-15'
+        run: brew install cmake boost pkgconf libevent sqlite capnp ccache
+
+      - name: ccache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-bitcoin-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-bitcoin-${{ runner.os }}-
+
+      - name: Checkout Bitcoin Core source
+        run: |
+          git clone --filter=blob:none --no-checkout "https://github.com/${{ steps.bitcoin-core.outputs.repo }}.git" bitcoin
+          git -C bitcoin fetch --depth 1 origin "${{ steps.bitcoin-core.outputs.ref }}"
+          git -C bitcoin checkout --detach FETCH_HEAD
+
+      - name: Build Bitcoin Core
+        run: |
+          cd bitcoin
+          export CCACHE_DIR="$HOME/.cache/ccache"
+          cmake -B build -DENABLE_WALLET=ON -DBUILD_TESTS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Upload Bitcoin Core binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: bitcoin-core-${{ runner.os }}-${{ steps.bitcoin-core.outputs.cache-key }}
+          path: bitcoin/build/bin/bitcoin-node
+          if-no-files-found: error
+
   ci:
     name: Integration tests (${{ matrix.os }})
     needs: build
