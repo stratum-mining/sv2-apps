@@ -1,11 +1,12 @@
 //! Module for interacting with Bitcoin Core v31.x via Sv2 Job Declaration Protocol via capnp over
 //! UNIX socket.
 
+use super::bitcoin_capnp_types;
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
         v31x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
-        v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
+        v32x_v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
     },
 };
 use async_channel::Receiver;
@@ -18,7 +19,6 @@ use bitcoin_capnp_types::{
     },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v31 as bitcoin_capnp_types;
 use std::{cell::RefCell, path::Path, rc::Rc};
 use stratum_core::bitcoin::{Block, BlockHash, consensus::deserialize, hashes::Hash};
 use tokio::net::UnixStream;
@@ -26,35 +26,38 @@ use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+#[allow(clippy::duplicate_mod)]
+#[path = "../../v32x_v31x/job_declaration_protocol/error.rs"]
 pub mod error;
 mod handlers;
+#[allow(clippy::duplicate_mod)]
+#[path = "../../v32x_v31x/job_declaration_protocol/monitors.rs"]
 mod monitors;
+#[allow(clippy::duplicate_mod)]
+#[path = "../../v32x_v31x/job_declaration_protocol/handlers.rs"]
+mod shared_handlers;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Job Declaration Protocol.
 ///
 /// It is instantiated with:
 /// - A `&`[`std::path::Path`] to the Bitcoin Core UNIX socket
 /// - A [`async_channel::Receiver`] for incoming [`JdRequest`] messages (handles
-///   [`JdRequest::DeclareMiningJob`] and [`JdRequest::PushSolution`] requests)
+///   [`DeclareMiningJob`] and [`PushSolution`] requests)
 /// - A [`tokio_util::sync::CancellationToken`] to stop the internally spawned tasks
 ///
 /// The instance bootstraps its internal mempool state by fetching the current block template
 /// from Bitcoin Core before accepting requests. It then spawns a background monitor task that
 /// tracks mempool changes via `waitNext` requests.
 ///
-/// Incoming [`JdRequest::DeclareMiningJob`] requests are validated by:
+/// Incoming [`DeclareMiningJob`] requests are validated by:
 /// - Verifying all transactions exist in the mempool
 /// - Assembling a test block with the declared coinbase and transactions
 /// - Using Bitcoin Core's `checkBlock` to validate block structure
 ///
-/// If transactions are missing, a
-/// [`crate::common::job_declaration_protocol::io::JdResponse::MissingTransactions`] response is
-/// sent. If validation succeeds, a
-/// [`crate::common::job_declaration_protocol::io::JdResponse::Success`] response with current
-/// template parameters is sent.
+/// If transactions are missing, a [`MissingTransactions`] response is sent. If validation
+/// succeeds, a [`Success`] response with current template parameters is sent.
 ///
-/// Incoming [`JdRequest::PushSolution`] requests are used to submit mining solutions to Bitcoin
-/// Core.
+/// Incoming [`PushSolution`] requests are used to submit mining solutions to Bitcoin Core.
 #[derive(Clone)]
 pub struct BitcoinCoreSv2JDP {
     thread_map: ThreadMapIpcClient,
@@ -443,8 +446,8 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { push_solution } => {
-                self.handle_push_solution(push_solution).await;
+            JdRequest::PushSolution { block } => {
+                self.handle_push_solution(block).await;
             }
         }
     }

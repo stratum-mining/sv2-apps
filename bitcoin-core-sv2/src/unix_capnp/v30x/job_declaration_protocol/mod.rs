@@ -5,7 +5,7 @@ use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
         v30x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
-        v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
+        v32x_v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
     },
 };
 use async_channel::Receiver;
@@ -35,26 +35,22 @@ mod monitors;
 /// It is instantiated with:
 /// - A `&`[`std::path::Path`] to the Bitcoin Core UNIX socket
 /// - A [`async_channel::Receiver`] for incoming [`JdRequest`] messages (handles
-///   [`JdRequest::DeclareMiningJob`] and [`JdRequest::PushSolution`] requests)
+///   [`DeclareMiningJob`] and [`PushSolution`] requests)
 /// - A [`tokio_util::sync::CancellationToken`] to stop the internally spawned tasks
 ///
 /// The instance bootstraps its internal mempool state by fetching the current block template
 /// from Bitcoin Core before accepting requests. It then spawns a background monitor task that
 /// tracks mempool changes via `waitNext` requests.
 ///
-/// Incoming [`JdRequest::DeclareMiningJob`] requests are validated by:
+/// Incoming [`DeclareMiningJob`] requests are validated by:
 /// - Verifying all transactions exist in the mempool
 /// - Assembling a test block with the declared coinbase and transactions
 /// - Using Bitcoin Core's `checkBlock` to validate block structure
 ///
-/// If transactions are missing, a
-/// [`crate::common::job_declaration_protocol::io::JdResponse::MissingTransactions`] response is
-/// sent. If validation succeeds, a
-/// [`crate::common::job_declaration_protocol::io::JdResponse::Success`] response with current
-/// template parameters is sent.
+/// If transactions are missing, a [`MissingTransactions`] response is sent. If validation
+/// succeeds, a [`Success`] response with current template parameters is sent.
 ///
-/// Incoming [`JdRequest::PushSolution`] requests are used to submit mining solutions to Bitcoin
-/// Core.
+/// Incoming [`PushSolution`] requests are used to submit mining solutions to Bitcoin Core.
 #[derive(Clone)]
 pub struct BitcoinCoreSv2JDP {
     thread_ipc_client: ThreadIpcClient,
@@ -391,8 +387,8 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { push_solution } => {
-                self.handle_push_solution(push_solution).await;
+            JdRequest::PushSolution { block } => {
+                self.handle_push_solution(block).await;
             }
         }
     }

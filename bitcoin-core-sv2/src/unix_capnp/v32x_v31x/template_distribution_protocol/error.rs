@@ -1,12 +1,11 @@
-//! Error types for Bitcoin Core v31.x Sv2 Template Distribution Protocol via capnp over UNIX
-//! socket.
+//! Error types shared by Bitcoin Core v31.x and v32.x Sv2 Template Distribution Protocol runtimes.
 
 use std::path::Path;
 use stratum_core::bitcoin::{
     block::ValidationError, consensus, consensus::encode::Error as ConsensusEncodeError,
 };
 
-use bitcoin_capnp_types_v31::capnp;
+use super::bitcoin_capnp_types::capnp;
 
 /// Error type for [`super::BitcoinCoreSv2TDP`]
 #[derive(Debug)]

@@ -1,15 +1,14 @@
-//! Background monitors for Bitcoin Core v31.x Sv2 Job Declaration Protocol via capnp over UNIX
-//! socket.
+//! Background monitors shared by Bitcoin Core v31.x and v32.x Sv2 Job Declaration Protocol
+//! runtimes.
 
-use crate::unix_capnp::v31x::job_declaration_protocol::BitcoinCoreSv2JDP;
-use bitcoin_capnp_types_v31::capnp;
+use super::{BitcoinCoreSv2JDP, bitcoin_capnp_types::capnp};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 
 impl BitcoinCoreSv2JDP {
     /// Spawns a `spawn_local` task that issues `waitNext` requests to Bitcoin Core and
-    /// refreshes the `MempoolMirror` whenever the template
-    /// changes. Returns the [`JoinHandle`] so the caller can await clean shutdown.
+    /// refreshes the local mempool mirror whenever the template changes. Returns the
+    /// [`JoinHandle`] so the caller can await clean shutdown.
     pub fn monitor_and_update_mempool_mirror(&self) -> JoinHandle<()> {
         let self_clone = self.clone();
 

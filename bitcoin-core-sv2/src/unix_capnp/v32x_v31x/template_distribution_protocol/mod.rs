@@ -1,7 +1,8 @@
-//! Module for interacting with Bitcoin Core v30.x via Sv2 Template Distribution Protocol via
-//! capnp over UNIX socket.
+//! Module for interacting with Bitcoin Core v31.x and v32.x via Sv2 Template Distribution Protocol
+//! via capnp over UNIX socket.
 
-use crate::unix_capnp::v30x::template_distribution_protocol::template_data::TemplateData;
+use self::template_data::TemplateData;
+use super::bitcoin_capnp_types;
 use async_channel::{Receiver, Sender};
 use bitcoin_capnp_types::{
     capnp,
@@ -12,11 +13,11 @@ use bitcoin_capnp_types::{
             Client as BlockTemplateIpcClient, wait_next_params::Owned as WaitNextParams,
             wait_next_results::Owned as WaitNextResults,
         },
+        coinbase_tx,
         mining::Client as MiningIpcClient,
     },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v30 as bitcoin_capnp_types;
 use capnp::capability::Request;
 use error::BitcoinCoreSv2TDPError;
 use std::{
@@ -29,7 +30,13 @@ use std::{
 };
 use stratum_core::{
     binary_sv2::U256,
-    bitcoin::{Transaction, block::Header, consensus::deserialize},
+    bitcoin::{
+        OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+        absolute::LockTime,
+        block::Header,
+        consensus::{Decodable, deserialize},
+        transaction::Version as TransactionVersion,
+    },
     parsers_sv2::TemplateDistribution,
     template_distribution_sv2::CoinbaseOutputConstraints,
 };
@@ -40,11 +47,14 @@ use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+#[allow(clippy::duplicate_mod)]
 pub mod error;
+#[allow(clippy::duplicate_mod)]
 mod handlers;
 #[allow(clippy::duplicate_mod)]
 #[path = "../../v32x_v31x_v30x/template_distribution_protocol/monitors.rs"]
 mod monitors;
+#[allow(clippy::duplicate_mod)]
 mod template_data;
 
 const WEIGHT_FACTOR: u32 = 4;
@@ -230,6 +240,12 @@ impl BitcoinCoreSv2TDP {
                                     );
                                     break;
                                 }
+                                Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted) => {
+                                    debug!(
+                                        "Initial createNewBlock request interrupted during shutdown"
+                                    );
+                                    return;
+                                }
                                 Err(e) => {
                                     error!(
                                         "Failed to bootstrap initial template IPC client: {:?}",
@@ -326,21 +342,14 @@ impl BitcoinCoreSv2TDP {
             .get_context()?
             .set_thread(thread_ipc_client.clone());
 
-        let coinbase_tx_bytes = coinbase_tx_request
-            .send()
-            .promise
-            .await?
-            .get()?
-            .get_result()?
-            .to_vec();
-
-        // Deserialize the coinbase tx from Bitcoin Core's serialization format
+        let coinbase_tx_response = coinbase_tx_request.send().promise.await?;
+        let coinbase_tx_result = coinbase_tx_response.get()?;
+        let coinbase_tx_reader = coinbase_tx_result.get_result()?;
+        let (coinbase_tx, block_reward_remaining) = coinbase_tx_from_ipc(coinbase_tx_reader)?;
         debug!(
-            "Deserializing coinbase tx ({} bytes)",
-            coinbase_tx_bytes.len()
+            "Coinbase tx built from getCoinbaseTx result: {:?}",
+            coinbase_tx
         );
-        let coinbase_tx: Transaction = deserialize(&coinbase_tx_bytes)?;
-        debug!("Coinbase tx deserialized: {:?}", coinbase_tx);
 
         let mut merkle_path_request = template_ipc_client.get_coinbase_merkle_path_request();
         merkle_path_request
@@ -363,6 +372,7 @@ impl BitcoinCoreSv2TDP {
             template_id,
             header,
             coinbase_tx,
+            block_reward_remaining,
             merkle_path,
             template_ipc_client,
         );
@@ -515,6 +525,16 @@ impl BitcoinCoreSv2TDP {
         );
 
         let mut template_ipc_client_request = self.mining_ipc_client.create_new_block_request();
+
+        template_ipc_client_request
+            .get()
+            .get_context()
+            .map_err(|e| {
+                error!("Failed to get template IPC client request context: {e}");
+                e
+            })?
+            .set_thread(self.thread_ipc_client.clone());
+
         let mut template_ipc_client_request_options = template_ipc_client_request
             .get()
             .get_options()
@@ -534,14 +554,20 @@ impl BitcoinCoreSv2TDP {
         template_ipc_client_request_options.set_use_mempool(true);
 
         debug!("Sending createNewBlock request to Bitcoin Core");
-        let template_ipc_client_response = template_ipc_client_request
-            .send()
-            .promise
-            .await
-            .map_err(|e| {
-                error!("Failed to send template IPC client request: {}", e);
-                e
-            })?;
+        let create_new_block_promise = template_ipc_client_request.send().promise;
+        let template_ipc_client_response = tokio::select! {
+            template_ipc_client_response = create_new_block_promise => {
+                template_ipc_client_response.map_err(|e| {
+                    error!("Failed to send template IPC client request: {}", e);
+                    e
+                })?
+            }
+            _ = self.global_cancellation_token.cancelled() => {
+                debug!("Interrupting createNewBlock request");
+                self.interrupt_create_new_block_request().await?;
+                return Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted);
+            }
+        };
 
         let template_ipc_client_result = template_ipc_client_response.get().map_err(|e| {
             error!("Failed to get template IPC client result: {}", e);
@@ -577,6 +603,16 @@ impl BitcoinCoreSv2TDP {
         if let Err(e) = interrupt_wait_request.send().promise.await {
             error!("Failed to send interrupt wait request: {}", e);
             return Err(BitcoinCoreSv2TDPError::FailedToSendInterruptWaitRequest);
+        }
+
+        Ok(())
+    }
+
+    async fn interrupt_create_new_block_request(&self) -> Result<(), BitcoinCoreSv2TDPError> {
+        let interrupt_request = self.mining_ipc_client.interrupt_request();
+        if let Err(e) = interrupt_request.send().promise.await {
+            error!("Failed to send interrupt createNewBlock request: {}", e);
+            return Err(BitcoinCoreSv2TDPError::FailedToSendInterruptCreateNewBlockRequest);
         }
 
         Ok(())
@@ -695,5 +731,94 @@ impl BitcoinCoreSv2TDP {
                 }
             }
         });
+    }
+}
+
+fn coinbase_tx_from_ipc(
+    coinbase_tx: coinbase_tx::Reader<'_>,
+) -> Result<(Transaction, u64), BitcoinCoreSv2TDPError> {
+    let block_reward_remaining: i64 = coinbase_tx.get_block_reward_remaining();
+    let block_reward_remaining: u64 = block_reward_remaining
+        .try_into()
+        .map_err(|_| BitcoinCoreSv2TDPError::InvalidBlockRewardRemaining(block_reward_remaining))?;
+
+    let witness = {
+        let witness_bytes = coinbase_tx.get_witness()?;
+        let mut witness = Witness::new();
+        if !witness_bytes.is_empty() {
+            witness.push(witness_bytes);
+        }
+        witness
+    };
+
+    let mut required_outputs = Vec::new();
+    for output_bytes in coinbase_tx.get_required_outputs()?.iter() {
+        let output_bytes = output_bytes?;
+        required_outputs.push(TxOut::consensus_decode(&mut &output_bytes[..])?);
+    }
+
+    let transaction = Transaction {
+        version: TransactionVersion::non_standard(coinbase_tx.get_version() as i32),
+        lock_time: LockTime::from_consensus(coinbase_tx.get_lock_time()),
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(coinbase_tx.get_script_sig_prefix()?.to_vec()),
+            sequence: Sequence::from_consensus(coinbase_tx.get_sequence()),
+            witness,
+        }],
+        output: required_outputs,
+    };
+
+    Ok((transaction, block_reward_remaining))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_core::bitcoin::{Amount, consensus::serialize};
+
+    #[test]
+    fn coinbase_tx_from_ipc_builds_transaction_from_struct_fields() {
+        let required_output = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x6a, 0x24]),
+        };
+        let required_output_bytes = serialize(&required_output);
+
+        let mut message = capnp::message::Builder::new_default();
+        let mut coinbase_tx_builder: coinbase_tx::Builder<'_> = message.init_root();
+        coinbase_tx_builder.set_version(2);
+        coinbase_tx_builder.set_sequence(0xffff_fffe);
+        coinbase_tx_builder.set_script_sig_prefix(&[0x03, 0xaa, 0xbb, 0xcc]);
+        coinbase_tx_builder.set_witness(&[0x42; 32]);
+        coinbase_tx_builder.set_block_reward_remaining(5_000_000_000);
+        coinbase_tx_builder.set_lock_time(840_000);
+        {
+            let mut required_outputs = coinbase_tx_builder.reborrow().init_required_outputs(1);
+            required_outputs.set(0, &required_output_bytes);
+        }
+
+        let coinbase_tx_reader = coinbase_tx_builder.into_reader();
+        let (coinbase_tx, value_remaining) =
+            coinbase_tx_from_ipc(coinbase_tx_reader).expect("coinbase tx should convert");
+
+        println!("coinbase_tx: {:?}", coinbase_tx);
+
+        assert_eq!(value_remaining, 5_000_000_000);
+        assert_eq!(coinbase_tx.version, TransactionVersion::TWO);
+        assert_eq!(coinbase_tx.lock_time.to_consensus_u32(), 840_000);
+        assert_eq!(coinbase_tx.input.len(), 1);
+        assert_eq!(coinbase_tx.input[0].previous_output, OutPoint::null());
+        assert_eq!(
+            coinbase_tx.input[0].sequence,
+            Sequence::from_consensus(0xffff_fffe)
+        );
+        assert_eq!(
+            coinbase_tx.input[0].script_sig.as_bytes(),
+            &[0x03, 0xaa, 0xbb, 0xcc]
+        );
+        assert_eq!(coinbase_tx.input[0].witness.len(), 1);
+        assert_eq!(&coinbase_tx.input[0].witness[0], &[0x42; 32]);
+        assert_eq!(coinbase_tx.output, vec![required_output]);
     }
 }
