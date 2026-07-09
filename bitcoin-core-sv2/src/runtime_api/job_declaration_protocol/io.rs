@@ -1,9 +1,6 @@
 //! Request / response types exchanged between `jd-server` and the Bitcoin Core IPC thread.
 
-use stratum_core::{
-    bitcoin::{BlockHash, CompactTarget, Transaction, Wtxid, block::Version},
-    job_declaration_sv2::PushSolution,
-};
+use stratum_core::bitcoin::{Block, BlockHash, CompactTarget, Transaction, Wtxid, block::Version};
 use tokio::sync::oneshot;
 
 /// Snapshot of the template parameters used by the validator at decision time.
@@ -33,10 +30,8 @@ pub enum JdRequest {
         missing_txs: Vec<Transaction>,
         response_tx: oneshot::Sender<JdResponse>,
     },
-    /// Submit a mining solution to Bitcoin Core (fire-and-forget).
-    PushSolution {
-        push_solution: PushSolution<'static>,
-    },
+    /// Submit a fully assembled block to Bitcoin Core (fire-and-forget).
+    PushSolution { block: Block },
 }
 
 /// The result of trying to handle a DeclareMiningJob request.
