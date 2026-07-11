@@ -6,7 +6,7 @@ use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
         v32x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
-        v32x_v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
+        v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
     },
 };
 use async_channel::Receiver;
