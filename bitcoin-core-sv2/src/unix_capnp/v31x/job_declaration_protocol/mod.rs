@@ -1,12 +1,15 @@
 //! Module for interacting with Bitcoin Core v31.x via Sv2 Job Declaration Protocol via capnp over
 //! UNIX socket.
+//!
+//! Multi-version layout: this runtime owns v31.x handlers/monitors and reuses
+//! `MempoolMirror` from `unix_capnp::v31x_v30x`.
 
 use super::bitcoin_capnp_types;
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
-        v31x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
         v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
+        v31x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
     },
 };
 use async_channel::Receiver;
@@ -26,16 +29,9 @@ use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v32x_v31x/job_declaration_protocol/error.rs"]
-pub mod error;
+mod error;
 mod handlers;
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v32x_v31x/job_declaration_protocol/monitors.rs"]
 mod monitors;
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v32x_v31x/job_declaration_protocol/handlers.rs"]
-mod shared_handlers;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Job Declaration Protocol.
 ///
@@ -50,7 +46,7 @@ mod shared_handlers;
 /// tracks mempool changes via `waitNext` requests.
 ///
 /// Incoming [`DeclareMiningJob`] requests are validated by:
-/// - Verifying all transactions exist in the mempool
+/// - Verifying all transactions exist in the local mempool mirror
 /// - Assembling a test block with the declared coinbase and transactions
 /// - Using Bitcoin Core's `checkBlock` to validate block structure
 ///

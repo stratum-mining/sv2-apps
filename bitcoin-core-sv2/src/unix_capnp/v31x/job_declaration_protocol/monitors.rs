@@ -1,5 +1,4 @@
-//! Background monitors shared by Bitcoin Core v31.x and v32.x Sv2 Job Declaration Protocol
-//! runtimes.
+//! v31.x-specific background mempool monitor.
 
 use super::{BitcoinCoreSv2JDP, bitcoin_capnp_types::capnp};
 use tokio::task::JoinHandle;
