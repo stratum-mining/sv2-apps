@@ -6,36 +6,36 @@ use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
         v32x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
-        v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
+        v32x::job_declaration_protocol::chain_tip_state::ChainTipState,
     },
 };
 use async_channel::Receiver;
 use bitcoin_capnp_types::{
-    capnp,
     capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty},
     init_capnp::init::Client as InitIpcClient,
     mining_capnp::{
-        block_template::Client as BlockTemplateIpcClient, mining::Client as MiningIpcClient,
+        mining::Client as MiningIpcClient,
     },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
+    rpc_capnp::rpc::Client as RpcIpcClient,
 };
+use serde_json::Value;
 use std::{cell::RefCell, path::Path, rc::Rc};
-use stratum_core::bitcoin::{Block, BlockHash, consensus::deserialize, hashes::Hash};
+use stratum_core::bitcoin::{
+    BlockHash, CompactTarget,
+    block::Header,
+    consensus::encode::deserialize_hex,
+    hashes::Hash,
+};
 use tokio::net::UnixStream;
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v32x_v31x/job_declaration_protocol/error.rs"]
-pub mod error;
+mod error;
 mod handlers;
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v32x_v31x/job_declaration_protocol/monitors.rs"]
 mod monitors;
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v32x_v31x/job_declaration_protocol/handlers.rs"]
-mod shared_handlers;
+mod chain_tip_state;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Job Declaration Protocol.
 ///
@@ -45,14 +45,23 @@ mod shared_handlers;
 ///   [`DeclareMiningJob`] and [`PushSolution`] requests)
 /// - A [`tokio_util::sync::CancellationToken`] to stop the internally spawned tasks
 ///
-/// The instance bootstraps its internal mempool state by fetching the current block template
-/// from Bitcoin Core before accepting requests. It then spawns a background monitor task that
-/// tracks mempool changes via `waitNext` requests.
+/// The instance bootstraps its internal chain-tip state by fetching the current tip and header
+/// from Bitcoin Core before accepting requests. It also calls `getmininginfo` to source the
+/// **next-block** `nBits` (see [`ChainTipState::next_nbits`] for why this matters at
+/// difficulty-adjustment boundaries). It then spawns a background monitor task that
+/// tracks tip changes via `waitTipChanged`, refreshes header fields via `getblockheader` RPC,
+/// and re-fetches next-block `nBits` via `getmininginfo`.
 ///
 /// Incoming [`DeclareMiningJob`] requests are validated by:
-/// - Verifying all transactions exist in the mempool
+/// - Fetching declared transactions from Bitcoin Core via
+///   `getTransactionsByWitnessID`
+/// - Combining non-empty responses with `ProvideMissingTransactionsSuccess` payloads
 /// - Assembling a test block with the declared coinbase and transactions
 /// - Using Bitcoin Core's `checkBlock` to validate block structure
+///
+/// Unlike v30.x / v31.x, v32.x does **not** maintain a local mempool mirror
+/// for transaction lookup — every `DeclareMiningJob` queries Bitcoin Core
+/// directly.
 ///
 /// If transactions are missing, a [`MissingTransactions`] response is sent. If validation
 /// succeeds, a [`Success`] response with current template parameters is sent.
@@ -64,16 +73,16 @@ pub struct BitcoinCoreSv2JDP {
     thread_ipc_client: ThreadIpcClient,
     submit_block_thread_ipc_client: ThreadIpcClient,
     mining_ipc_client: MiningIpcClient,
-    current_template_ipc_client: Rc<RefCell<BlockTemplateIpcClient>>,
+    rpc_ipc_client: RpcIpcClient,
     cancellation_token: CancellationToken,
-    mempool_mirror: Rc<RefCell<MempoolMirror>>,
+    chain_tip_state: Rc<RefCell<ChainTipState>>,
     incoming_requests: Receiver<JdRequest>,
 }
 
 impl BitcoinCoreSv2JDP {
     /// Creates a new [`BitcoinCoreSv2JDP`] instance.
     ///
-    /// Bootstraps the mempool mirror and signals readiness before returning.
+    /// Bootstraps the chain-tip state and signals readiness before returning.
     pub async fn new<P>(
         bitcoin_core_unix_socket_path: P,
         incoming_requests: Receiver<JdRequest>,
@@ -161,50 +170,13 @@ impl BitcoinCoreSv2JDP {
         let mining_client_response = mining_client_request.send().promise.await?;
         let mining_ipc_client: MiningIpcClient = mining_client_response.get()?.get_result()?;
 
-        let mut template_ipc_client_request = mining_ipc_client.create_new_block_request();
-        template_ipc_client_request
+        let mut rpc_client_request = bootstrap_client.make_rpc_request();
+        rpc_client_request
             .get()
             .get_context()?
             .set_thread(thread_ipc_client.clone());
-        let mut template_ipc_client_request_options = template_ipc_client_request
-            .get()
-            .get_options()
-            .map_err(|e| {
-                error!("Failed to get template IPC client request options: {e}");
-                e
-            })?;
-        template_ipc_client_request_options.set_use_mempool(true);
-
-        debug!("Sending createNewBlock request to Bitcoin Core");
-        let create_new_block_promise = template_ipc_client_request.send().promise;
-        // During IBD this startup call can block for a long time, so shutdown must interrupt the
-        // in-flight request instead of only abandoning the outer wait loop.
-        let template_ipc_client_response = tokio::select! {
-            template_ipc_client_response = create_new_block_promise => {
-                template_ipc_client_response.map_err(|e| {
-                    error!("Failed to send template IPC client request: {}", e);
-                    e
-                })?
-            }
-            _ = cancellation_token.cancelled() => {
-                debug!("Interrupting initial createNewBlock request");
-                Self::interrupt_create_new_block_request(&mining_ipc_client).await?;
-                return Err(capnp::Error::failed(
-                    "createNewBlock request interrupted during shutdown".to_string(),
-                )
-                .into());
-            }
-        };
-
-        let template_ipc_client_result = template_ipc_client_response.get().map_err(|e| {
-            error!("Failed to get template IPC client result: {}", e);
-            e
-        })?;
-
-        let template_ipc_client = template_ipc_client_result.get_result().map_err(|e| {
-            error!("Failed to get template IPC client result: {}", e);
-            e
-        })?;
+        let rpc_client_response = rpc_client_request.send().promise.await?;
+        let rpc_ipc_client: RpcIpcClient = rpc_client_response.get()?.get_result()?;
 
         info!("IPC JDP client successfully created.");
 
@@ -213,20 +185,19 @@ impl BitcoinCoreSv2JDP {
             thread_ipc_client,
             submit_block_thread_ipc_client,
             mining_ipc_client,
-            current_template_ipc_client: Rc::new(RefCell::new(template_ipc_client)),
+            rpc_ipc_client,
             cancellation_token,
-            mempool_mirror: Rc::new(RefCell::new(MempoolMirror::new())),
+            chain_tip_state: Rc::new(RefCell::new(ChainTipState::new())),
             incoming_requests,
         };
 
-        // Bootstrap initial mempool state before signaling readiness
-        debug!("Bootstrapping initial mempool state");
-        if let Err(e) = self_.update_mempool_mirror().await {
-            error!("Failed to bootstrap mempool mirror: {:?}", e);
-            // Don't send readiness signal on failure (ready_tx dropped)
+        // Bootstrap initial chain-tip state before signaling readiness
+        debug!("Bootstrapping initial chain-tip state");
+        if let Err(e) = self_.update_chain_tip_state(None).await {
+            error!("Failed to bootstrap chain-tip state: {:?}", e);
             return Err(e);
         }
-        debug!("Initial mempool state bootstrapped successfully");
+        debug!("Initial chain-tip state bootstrapped successfully");
 
         // Signal that we're ready to accept requests
         ready_tx.send(()).map_err(|_| {
@@ -263,25 +234,12 @@ impl BitcoinCoreSv2JDP {
         Ok(thread_ipc_client)
     }
 
-    /// Interrupts an in-flight `createNewBlock` request during startup shutdown.
-    async fn interrupt_create_new_block_request(
-        mining_ipc_client: &MiningIpcClient,
-    ) -> Result<(), BitcoinCoreSv2JDPError> {
-        let interrupt_request = mining_ipc_client.interrupt_request();
-        if let Err(e) = interrupt_request.send().promise.await {
-            error!("Failed to send interrupt createNewBlock request: {}", e);
-            return Err(BitcoinCoreSv2JDPError::CapnpError(e));
-        }
-
-        Ok(())
-    }
-
     /// Main event loop - runs in a LocalSet on dedicated thread.
     ///
     /// Spawns the monitor task and processes incoming job declaration requests until shutdown.
     pub async fn run(&self) {
-        // spawn mempool mirror monitor task
-        let monitor_handle = self.monitor_and_update_mempool_mirror();
+        // spawn chain-tip state monitor task
+        let monitor_handle = self.monitor_and_update_chain_tip_state();
 
         // Main request processing loop
         loop {
@@ -311,67 +269,34 @@ impl BitcoinCoreSv2JDP {
             }
         }
 
-        // Wait for the monitor_mempool_mirror task to finish gracefully
-        debug!("Waiting for monitor_mempool_mirror() task to finish");
+        // Wait for the monitor task to finish gracefully
+        debug!("Waiting for monitor_chain_tip_state() task to finish");
         match monitor_handle.await {
             Ok(()) => {
-                debug!("monitor_mempool_mirror() task finished successfully");
+                debug!("monitor_chain_tip_state() task finished successfully");
             }
             Err(e) => {
                 error!(
-                    "error waiting for monitor_mempool_mirror task to finish: {:?}",
+                    "error waiting for monitor_chain_tip_state task to finish: {:?}",
                     e
                 );
             }
         }
     }
 
-    /// Updates the mempool mirror with the current block template from Bitcoin Core.
-    async fn update_mempool_mirror(&self) -> Result<(), BitcoinCoreSv2JDPError> {
-        let mut get_block_request = self
-            .current_template_ipc_client
-            .borrow()
-            .get_block_request();
-        get_block_request
-            .get()
-            .get_context()?
-            .set_thread(self.thread_ipc_client.clone());
-
-        let block_bytes = get_block_request
-            .send()
-            .promise
-            .await?
-            .get()?
-            .get_result()?
-            .to_vec();
-        debug!("Deserializing block ({} bytes)", block_bytes.len());
-        let block: Block =
-            deserialize(&block_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)?;
-
-        self.mempool_mirror.borrow_mut().update(&block);
-
-        Ok(())
-    }
-
-    /// Checks whether the chain tip has changed via `getTip` and, if so, updates the mempool
-    /// mirror's prev_hash.
+    /// Updates the chain-tip state.
     ///
-    /// This is called after `checkBlock` failures to reduce stale-tip classification races.
-    /// We avoid `createNewBlock` (which is expensive) because only the prev_hash is needed for
-    /// stale detection.
-    ///
-    /// On transient `"thread busy"` IPC contention, this method retries a few times with
-    /// a short backoff before returning the error.
-    pub(crate) async fn force_update_mempool_mirror_prev_hash(
+    /// If `tip_hash_override` is provided (e.g. from `waitTipChanged`), it is used directly.
+    /// Otherwise, the current tip hash is fetched via `getTip` first.
+    async fn update_chain_tip_state(
         &self,
+        tip_hash_override: Option<BlockHash>,
     ) -> Result<(), BitcoinCoreSv2JDPError> {
-        const MAX_ATTEMPTS: usize = 3;
-        const RETRY_BACKOFF_MS: u64 = 25;
-
-        let mut last_error: Option<BitcoinCoreSv2JDPError> = None;
-
-        for attempt in 1..=MAX_ATTEMPTS {
-            let result: Result<(), BitcoinCoreSv2JDPError> = async {
+        let tip_hash = if let Some(tip_hash) = tip_hash_override {
+            tip_hash
+        } else {
+            // Query the current tip hash from Bitcoin Core.
+            {
                 let mut get_tip_request = self.mining_ipc_client.get_tip_request();
 
                 get_tip_request
@@ -388,12 +313,16 @@ impl BitcoinCoreSv2JDP {
                     e
                 })?;
 
-                let tip_hash_bytes = get_tip_response
-                    .get()
-                    .map_err(|e| {
-                        error!("Failed to read getTip response: {e}");
-                        e
-                    })?
+                let get_tip_result = get_tip_response.get().map_err(|e| {
+                    error!("Failed to read getTip response: {e}");
+                    e
+                })?;
+
+                if !get_tip_result.get_has_result() {
+                    return Err(BitcoinCoreSv2JDPError::GetTipReturnedNoResult);
+                }
+
+                let tip_hash_bytes = get_tip_result
                     .get_result()
                     .map_err(|e| {
                         error!("Failed to get tip result from getTip: {e}");
@@ -405,37 +334,147 @@ impl BitcoinCoreSv2JDP {
                         e
                     })?;
 
-                let tip_hash = BlockHash::from_slice(tip_hash_bytes).map_err(|e| {
+                BlockHash::from_slice(tip_hash_bytes).map_err(|e| {
                     error!("Failed to parse tip hash from getTip: {e}");
-                    BitcoinCoreSv2JDPError::CapnpError(capnp::Error::failed(format!(
-                        "Failed to parse tip hash: {e}"
-                    )))
+                    BitcoinCoreSv2JDPError::FailedToParseTipHashFromGetTip(e.to_string())
+                })?
+            }
+        };
+
+        // Query `getblockheader` via RPC and deserialize the returned header hex.
+        let header: Header = {
+            let mut execute_rpc_request = self.rpc_ipc_client.execute_rpc_request();
+            execute_rpc_request
+                .get()
+                .get_context()
+                .map_err(|e| {
+                    error!("Failed to get executeRpc request context: {e}");
+                    e
+                })?
+                .set_thread(self.thread_ipc_client.clone());
+
+            let request = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":\"v32-jdp-chain-tip\",\"method\":\"getblockheader\",\"params\":[\"{}\",false]}}",
+                tip_hash
+            );
+            execute_rpc_request.get().set_request(request.as_str());
+
+            let execute_rpc_response = execute_rpc_request.send().promise.await.map_err(|e| {
+                error!("Failed to send executeRpc request: {e}");
+                e
+            })?;
+
+            let rpc_response_text = execute_rpc_response
+                .get()
+                .map_err(|e| {
+                    error!("Failed to read executeRpc response: {e}");
+                    e
+                })?
+                .get_result()
+                .map_err(|e| {
+                    error!("Failed to get executeRpc result: {e}");
+                    e
+                })?
+                .to_string()
+                .map_err(|e| {
+                    error!("Failed to decode executeRpc result as text: {e}");
+                    BitcoinCoreSv2JDPError::FailedToDecodeExecuteRpcResultText(e.to_string())
                 })?;
 
-                {
-                    let mut mempool_mirror = self.mempool_mirror.borrow_mut();
-                    if mempool_mirror.get_current_prev_hash() != Some(tip_hash) {
-                        debug!(
-                            old_prev_hash = ?mempool_mirror.get_current_prev_hash(),
-                            new_prev_hash = ?tip_hash,
-                            "Chain tip changed; updating mempool mirror prev_hash"
-                        );
-                        mempool_mirror.set_current_prev_hash(tip_hash);
-                    }
-                }
+            let rpc_response_json: Value = serde_json::from_str(&rpc_response_text)
+                .map_err(BitcoinCoreSv2JDPError::FailedToParseExecuteRpcJsonResponse)?;
 
-                Ok(())
+            if !rpc_response_json["error"].is_null() {
+                return Err(BitcoinCoreSv2JDPError::GetBlockHeaderRpcReturnedError(
+                    rpc_response_json["error"].to_string(),
+                ));
             }
-            .await;
 
-            match result {
+            let header_hex = rpc_response_json["result"].as_str().ok_or_else(|| {
+                BitcoinCoreSv2JDPError::GetBlockHeaderRpcResultIsNotHexString
+            })?;
+            debug!(
+                header_hex_len = header_hex.len(),
+                tip_hash = %tip_hash,
+                "Deserializing block header from getblockheader RPC"
+            );
+
+            deserialize_hex(header_hex)
+                .map_err(BitcoinCoreSv2JDPError::FailedToDeserializeHeaderHex)?
+        };
+
+        // Fetch `getmininginfo.next.bits` for the **next-block** `nBits`.
+        // At difficulty-adjustment boundaries the tip header's `nBits` differs from
+        // the next block's required `nBits`.  `checkBlock` enforces next-block `nBits`
+        // even when `check_pow` is disabled, so we must source the value from
+        // `getmininginfo` rather than from the tip header.
+        let next_nbits = {
+            let mut execute_rpc_request = self.rpc_ipc_client.execute_rpc_request();
+            execute_rpc_request
+                .get()
+                .get_context()
+                .map_err(|e| {
+                    error!("Failed to get executeRpc request context: {e}");
+                    e
+                })?
+                .set_thread(self.thread_ipc_client.clone());
+
+            let request = r#"{"jsonrpc":"2.0","id":"v32-jdp-nbits","method":"getmininginfo","params":[]}"#;
+            execute_rpc_request.get().set_request(request);
+
+            let execute_rpc_response = execute_rpc_request.send().promise.await.map_err(|e| {
+                error!("Failed to send executeRpc request: {e}");
+                e
+            })?;
+
+            let rpc_response_text = execute_rpc_response
+                .get()
+                .map_err(|e| {
+                    error!("Failed to read executeRpc response: {e}");
+                    e
+                })?
+                .get_result()
+                .map_err(|e| {
+                    error!("Failed to get executeRpc result: {e}");
+                    e
+                })?
+                .to_string()
+                .map_err(|e| {
+                    error!("Failed to decode executeRpc result as text: {e}");
+                    BitcoinCoreSv2JDPError::FailedToDecodeExecuteRpcResultText(e.to_string())
+                })?;
+
+            parse_next_nbits_from_getmininginfo(&rpc_response_text)?
+        };
+
+        let mut chain_tip_state = self.chain_tip_state.borrow_mut();
+        chain_tip_state.set(tip_hash, next_nbits, header.time);
+
+        Ok(())
+    }
+
+    /// Forces a synchronous chain-tip refresh from Bitcoin Core.
+    ///
+    /// This is used after `checkBlock` failures to reduce stale-tip classification races.
+    /// On transient `"thread busy"` IPC contention, this method retries a few times with
+    /// a short backoff before returning the error.
+    pub(crate) async fn force_update_chain_tip_state(
+        &self,
+    ) -> Result<(), BitcoinCoreSv2JDPError> {
+        const MAX_ATTEMPTS: usize = 3;
+        const RETRY_BACKOFF_MS: u64 = 25;
+
+        let mut last_error: Option<BitcoinCoreSv2JDPError> = None;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.update_chain_tip_state(None).await {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_thread_busy() && attempt < MAX_ATTEMPTS => {
                     warn!(
                         error = ?e,
                         attempt,
                         max_attempts = MAX_ATTEMPTS,
-                        "Transient IPC contention during force_update_mempool_mirror_prev_hash (thread busy); retrying"
+                        "Transient IPC contention during force_update_chain_tip_state (thread busy); retrying"
                     );
                     last_error = Some(e);
                     tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS)).await;
@@ -444,14 +483,8 @@ impl BitcoinCoreSv2JDP {
             }
         }
 
-        // Normally one of the retry attempts returns early (Ok or Err).
-        // If execution reaches here, no terminal error was captured, so synthesize one.
-        Err(last_error.unwrap_or_else(|| {
-            BitcoinCoreSv2JDPError::CapnpError(capnp::Error::failed(
-                "force_update_mempool_mirror_prev_hash exhausted retries without a terminal error"
-                    .to_string(),
-            ))
-        }))
+        Err(last_error
+            .unwrap_or(BitcoinCoreSv2JDPError::ForceUpdateChainTipStateExhaustedRetries))
     }
 
     /// Processes a single job declaration request and dispatches to the appropriate handler.
@@ -482,16 +515,89 @@ impl BitcoinCoreSv2JDP {
         }
     }
 
-    /// Interrupts the current `waitNext` request to Bitcoin Core for graceful shutdown.
-    async fn interrupt_wait_request(&self) -> Result<(), BitcoinCoreSv2JDPError> {
-        let template_ipc_client = self.current_template_ipc_client.borrow().clone();
-
-        let interrupt_wait_request = template_ipc_client.interrupt_wait_request();
-        if let Err(e) = interrupt_wait_request.send().promise.await {
-            error!("Failed to send interrupt wait request: {}", e);
+    /// Interrupts an in-flight `waitTipChanged` request to Bitcoin Core.
+    async fn interrupt_wait_tip_changed_request(&self) -> Result<(), BitcoinCoreSv2JDPError> {
+        let interrupt_request = self.mining_ipc_client.interrupt_request();
+        if let Err(e) = interrupt_request.send().promise.await {
+            error!("Failed to send interrupt waitTipChanged request: {}", e);
             return Err(BitcoinCoreSv2JDPError::CapnpError(e));
         }
 
         Ok(())
+    }
+}
+
+/// Parse `next.bits` from a `getmininginfo` JSON-RPC response.
+///
+/// Returns the parsed [`CompactTarget`] on success, or a
+/// [`BitcoinCoreSv2JDPError`] variant if the response is malformed.
+fn parse_next_nbits_from_getmininginfo(
+    rpc_response_text: &str,
+) -> Result<CompactTarget, BitcoinCoreSv2JDPError> {
+    let rpc_response_json: Value = serde_json::from_str(rpc_response_text)
+        .map_err(BitcoinCoreSv2JDPError::FailedToParseExecuteRpcJsonResponse)?;
+
+    if !rpc_response_json["error"].is_null() {
+        return Err(BitcoinCoreSv2JDPError::GetMiningInfoRpcReturnedError(
+            rpc_response_json["error"].to_string(),
+        ));
+    }
+
+    let next_bits_hex = rpc_response_json["result"]["next"]["bits"]
+        .as_str()
+        .ok_or(BitcoinCoreSv2JDPError::GetMiningInfoMissingNextBits)?;
+
+    let next_bits_u32 = u32::from_str_radix(next_bits_hex, 16).map_err(|e| {
+        BitcoinCoreSv2JDPError::FailedToParseGetMiningInfoNextBits(e.to_string())
+    })?;
+
+    Ok(CompactTarget::from_consensus(next_bits_u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::error::BitcoinCoreSv2JDPError;
+
+    #[test]
+    fn parse_getmininginfo_next_bits_valid() {
+        let json = r#"{"result":{"blocks":864000,"currentblockweight":3999999,"currentblocktx":1234,"next":{"height":864001,"bits":"1702e4d1","difficulty":12345.6789,"target":"0000000000000002e4d10000000000000000000000000000000000000000000000"},"errors":"","warnings":""},"error":null,"id":"v32-jdp-nbits"}"#;
+        let result = parse_next_nbits_from_getmininginfo(json);
+        assert!(result.is_ok(), "expected ok, got {:?}", result);
+        let nbits = result.unwrap();
+        assert_eq!(nbits.to_consensus(), 0x1702e4d1);
+    }
+
+    #[test]
+    fn parse_getmininginfo_rpc_error() {
+        let json = r#"{"result":null,"error":{"code":-1,"message":"test error"},"id":"v32-jdp-nbits"}"#;
+        let result = parse_next_nbits_from_getmininginfo(json);
+        match result {
+            Err(BitcoinCoreSv2JDPError::GetMiningInfoRpcReturnedError(_)) => {}
+            other => panic!("expected GetMiningInfoRpcReturnedError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_getmininginfo_missing_next_bits() {
+        let json = r#"{"result":{"next":{}},"error":null,"id":"v32-jdp-nbits"}"#;
+        let result = parse_next_nbits_from_getmininginfo(json);
+        match result {
+            Err(BitcoinCoreSv2JDPError::GetMiningInfoMissingNextBits) => {}
+            other => panic!("expected GetMiningInfoMissingNextBits, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_getmininginfo_next_bits_invalid_hex() {
+        let json = r#"{"result":{"next":{"bits":"xyz"}},"error":null,"id":"v32-jdp-nbits"}"#;
+        let result = parse_next_nbits_from_getmininginfo(json);
+        match result {
+            Err(BitcoinCoreSv2JDPError::FailedToParseGetMiningInfoNextBits(_)) => {}
+            other => panic!(
+                "expected FailedToParseGetMiningInfoNextBits, got {:?}",
+                other
+            ),
+        }
     }
 }
