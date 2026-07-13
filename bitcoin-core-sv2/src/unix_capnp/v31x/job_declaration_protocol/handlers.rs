@@ -1,21 +1,24 @@
 //! Handlers for Bitcoin Core v31.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
 
 use crate::{
-    common::job_declaration_protocol::io::{JdResponse, ValidationContext},
+    common::job_declaration_protocol::{
+        coinbase_merkle_branch,
+        io::{JdResponse, ValidationContext},
+    },
     unix_capnp::v31x::job_declaration_protocol::{
         BitcoinCoreSv2JDP, mempool::decode_bip34_height_from_coinbase_script_sig,
     },
 };
 use stratum_core::{
     bitcoin::{
-        Block, Transaction, TxMerkleNode, Txid, Wtxid,
+        Block, Transaction, TxMerkleNode, Wtxid,
         block::{Header, Version},
         consensus::serialize,
         hashes::Hash,
     },
     job_declaration_sv2::{
         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
-        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, PushSolution,
+        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
     },
 };
 use tokio::sync::oneshot;
@@ -93,7 +96,7 @@ impl BitcoinCoreSv2JDP {
                 // we don't care if the receiver dropped the channel
                 let _ = response_tx.send(JdResponse::MissingTransactions {
                     missing_wtxids,
-                    validation_context: initial_validation_context,
+                    prev_hash: initial_validation_context.prev_hash,
                 });
                 return;
             }
@@ -111,7 +114,7 @@ impl BitcoinCoreSv2JDP {
             (initial_validation_context, initial_bip34_height, txdata)
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
-        let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
+        let txdata_for_response = txdata.clone();
 
         let valid_job = {
             let mut all_transactions = Vec::with_capacity(1 + txdata.len());
@@ -156,7 +159,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -174,7 +177,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -192,7 +195,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -207,7 +210,7 @@ impl BitcoinCoreSv2JDP {
                     // deliberately ignore potential send errors
                     let _ = response_tx.send(JdResponse::Error {
                         error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
-                        validation_context: initial_validation_context,
+                        prev_hash: Some(initial_validation_context.prev_hash),
                     });
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self.cancellation_token.cancel();
@@ -284,7 +287,12 @@ impl BitcoinCoreSv2JDP {
                 prev_hash: initial_validation_context.prev_hash,
                 nbits: initial_validation_context.nbits,
                 min_ntime: initial_validation_context.min_ntime,
-                txid_list,
+                merkle_path: coinbase_merkle_branch(
+                    &txdata_for_response
+                        .iter()
+                        .map(|tx| tx.compute_txid())
+                        .collect::<Vec<_>>(),
+                ),
             }
         } else {
             let stale_at_arrival_by_bip34 = declared_bip34_height != latest_bip34_height;
@@ -316,7 +324,7 @@ impl BitcoinCoreSv2JDP {
 
             JdResponse::Error {
                 error_code,
-                validation_context: latest_validation_context,
+                prev_hash: Some(latest_validation_context.prev_hash),
             }
         };
 
@@ -325,10 +333,10 @@ impl BitcoinCoreSv2JDP {
         let _ = response_tx.send(response);
     }
 
-    /// Submits a mining solution to Bitcoin Core.
+    /// Submits a solved block to Bitcoin Core.
     ///
-    /// Not yet implemented — deliberately left as a stub for future work.
-    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolution<'_>) {
+    /// Not yet implemented for v31.x IPC, which does not expose `submitBlock`.
+    pub(crate) async fn handle_push_solution(&self) {
         // todo
     }
 }

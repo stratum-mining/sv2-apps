@@ -34,7 +34,7 @@ monitoring_cache_refresh_secs = 15
 # Supported networks: mainnet, testnet4, signet, regtest
 # Default data_dir: ~/.bitcoin (Linux) or ~/Library/Application Support/Bitcoin (macOS)
 [template_provider_type.BitcoinCoreIpc]
-version = 31
+version = 32
 network = "testnet4"
 # data_dir = "/custom/bitcoin/data"  # Optional: override default data directory
 fee_threshold = 100

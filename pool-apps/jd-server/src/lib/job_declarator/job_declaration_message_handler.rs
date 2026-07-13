@@ -168,7 +168,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         // validate job
         let response = match self
             .job_validator
-            .handle_declare_mining_job(msg.clone(), None)
+            .handle_declare_mining_job(client_id, msg.clone(), None)
             .await
         {
             // if job is valid, activate token and return DeclareMiningJobSuccess
@@ -299,7 +299,11 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
 
         let response = match self
             .job_validator
-            .handle_declare_mining_job(pending_declare_mining_job.clone(), Some(msg.clone()))
+            .handle_declare_mining_job(
+                client_id,
+                pending_declare_mining_job.clone(),
+                Some(msg.clone()),
+            )
             .await
         {
             // if job is valid, activate token and return DeclareMiningJobSuccess
@@ -368,13 +372,19 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
 
     async fn handle_push_solution(
         &mut self,
-        _client_id: Option<usize>,
+        client_id: Option<usize>,
         msg: PushSolution<'_>,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
-        self.job_validator.handle_push_solution(msg).await;
+        // Shutdown: client_id is always Some; None indicates a bug.
+        let client_id =
+            client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
+
+        self.job_validator
+            .handle_push_solution(client_id, msg)
+            .await;
 
         Ok(())
     }

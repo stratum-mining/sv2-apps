@@ -361,6 +361,7 @@ impl JobDeclarator {
             .remove(&downstream_id)
             .is_some();
 
+        self.job_validator.cleanup_downstream(downstream_id);
         self.token_manager.remove_downstream(downstream_id);
 
         debug!(
@@ -438,38 +439,40 @@ impl JobDeclarator {
         };
 
         // this allows JobValidationEngine to lookup the corresponding DeclareMiningJob
-        let allocated_token = match self.token_manager.allocated_from_active(active_token) {
-            Some(token) => {
-                debug!(
-                    request_id,
-                    channel_id,
-                    active_token,
-                    allocated_token = token,
-                    "SetCustomMiningJob: active token mapped to allocated token"
-                );
-                token
-            }
-            None => {
-                debug!(
-                    request_id,
-                    channel_id,
-                    active_token,
-                    "SetCustomMiningJob: active token not found in TokenManager"
-                );
-                return Ok(SetCustomMiningJobResponse::error(
-                    request_id,
-                    channel_id,
-                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-                ));
-            }
-        };
+        let (allocated_token, downstream_id) =
+            match self.token_manager.allocated_from_active(active_token) {
+                Some((token, downstream_id)) => {
+                    debug!(
+                        request_id,
+                        channel_id,
+                        active_token,
+                        allocated_token = token,
+                        downstream_id,
+                        "SetCustomMiningJob: active token mapped to allocated token"
+                    );
+                    (token, downstream_id)
+                }
+                None => {
+                    debug!(
+                        request_id,
+                        channel_id,
+                        active_token,
+                        "SetCustomMiningJob: active token not found in TokenManager"
+                    );
+                    return Ok(SetCustomMiningJobResponse::error(
+                        request_id,
+                        channel_id,
+                        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+                    ));
+                }
+            };
 
         // Clean up TokenManager
         self.token_manager.deactivate(active_token);
 
         match self
             .job_validator
-            .handle_set_custom_mining_job(set_custom_mining_job, allocated_token)
+            .handle_set_custom_mining_job(downstream_id, set_custom_mining_job, allocated_token)
             .await
         {
             SetCustomMiningJobResult::Success => {

@@ -134,13 +134,17 @@ impl TokenManager {
         );
     }
 
-    /// Returns the allocated token that corresponds to an active token.
+    /// Returns the allocated token and owning downstream that correspond to an active token.
     /// Returns `None` if the active token is not found.
-    pub fn allocated_from_active(&self, active_token: JdToken) -> Option<JdToken> {
-        let mapped = self.active_tokens.get(&active_token).map(|entry| entry.0);
+    pub fn allocated_from_active(&self, active_token: JdToken) -> Option<(JdToken, DownstreamId)> {
+        let mapped = self
+            .active_tokens
+            .get(&active_token)
+            .map(|entry| (entry.0, entry.2));
         debug!(
             active_token,
-            mapped_allocated_token = mapped,
+            mapped_allocated_token = mapped.map(|(allocated, _)| allocated),
+            mapped_downstream_id = mapped.map(|(_, downstream_id)| downstream_id),
             found = mapped.is_some(),
             active_tokens_len = self.active_tokens.len(),
             allocated_tokens_len = self.allocated_tokens.len(),
@@ -156,15 +160,15 @@ impl TokenManager {
     }
 
     /// Removes allocated tokens belonging to a given downstream.
-    ///
-    /// Active tokens are intentionally retained here and can still be consumed by
-    /// `SetCustomMiningJob` or evicted later by the janitor timeout.
+    /// Also removes active tokens that were activated by the same downstream.
     pub fn remove_downstream(&self, downstream_id: DownstreamId) {
         let allocated_tokens_before = self.allocated_tokens.len();
         let active_tokens_before = self.active_tokens.len();
 
         self.allocated_tokens
             .retain(|_, (_, owner)| *owner != downstream_id);
+        self.active_tokens
+            .retain(|_, (_, _, owner)| *owner != downstream_id);
 
         let allocated_tokens_after = self.allocated_tokens.len();
         let active_tokens_after = self.active_tokens.len();
@@ -174,11 +178,12 @@ impl TokenManager {
             downstream_id,
             removed_allocated_tokens =
                 allocated_tokens_before.saturating_sub(allocated_tokens_after),
+            removed_active_tokens = active_tokens_before.saturating_sub(active_tokens_after),
             allocated_tokens_before,
             allocated_tokens_after,
             active_tokens_before,
             active_tokens_after,
-            "TokenManager: removed downstream-allocated tokens and retained active tokens"
+            "TokenManager: removed downstream tokens"
         );
     }
 

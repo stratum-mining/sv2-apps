@@ -35,6 +35,38 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: brew install capnp
 
+      # TEMPORARY: build Bitcoin Core from the bitcoin/bitcoin#35671 PR branch
+      # (TxCollection) until an official v32 release with TxCollection support is
+      # available. Remove these steps (and BITCOIN_CORE_V32_BINARY below) once v32
+      # follows the standard release-binary download flow.
+      - name: Install Bitcoin Core build dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y build-essential cmake pkgconf python3 libevent-dev libboost-dev ccache
+
+      - name: Install Bitcoin Core build dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install cmake boost pkgconf ccache
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.os == 'macos-latest' && '~/Library/Caches/ccache' || '~/.cache/ccache' }}
+          key: ccache-bitcoin-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-bitcoin-${{ runner.os }}-
+
+      - name: Checkout Bitcoin Core (bitcoin/bitcoin#35671)
+        run: |
+          git clone --depth 1 https://github.com/bitcoin/bitcoin.git
+          cd bitcoin
+          git fetch --depth 1 origin pull/35671/head:pr-35671
+          git checkout pr-35671
+
+      - name: Build Bitcoin Core
+        run: |
+          cd bitcoin
+          cmake -B build -DENABLE_WALLET=ON -DBUILD_TESTS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build -j $(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
       # Install cargo-binstall so tool installs below use prebuilt binaries.
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@v1.20.0
@@ -49,5 +81,7 @@ jobs:
         run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-nextest@0.9.100
 
       - name: Integration Tests
+        env:
+          BITCOIN_CORE_V32_BINARY: ${{ github.workspace }}/bitcoin/build/bin/bitcoin-node
         run: |
          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture

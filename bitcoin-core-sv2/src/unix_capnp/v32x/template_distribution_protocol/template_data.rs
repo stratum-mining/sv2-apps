@@ -1,17 +1,16 @@
-//! Template-data helpers for Bitcoin Core v30.x Sv2 Template Distribution Protocol via capnp over
+//! Template-data helpers for Bitcoin Core v32.x Sv2 Template Distribution Protocol via capnp over
 //! UNIX socket.
 
-use crate::unix_capnp::v30x::template_distribution_protocol::error::TemplateDataError;
+use crate::unix_capnp::v32x::template_distribution_protocol::error::TemplateDataError;
 
 use bitcoin_capnp_types::{
     mining_capnp::block_template::Client as BlockTemplateIpcClient,
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v30 as bitcoin_capnp_types;
+use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use std::{fs::File, io::Write, path::Path};
 use stratum_core::bitcoin::{
     Target, Transaction, TxOut,
-    amount::{Amount, CheckedSum},
     block::{Block, Header, Version},
     consensus::{deserialize, serialize},
     hashes::{Hash, HashEngine, sha256d},
@@ -30,6 +29,7 @@ pub struct TemplateData {
     template_id: u64,
     header: Header,
     coinbase_tx: Transaction,
+    block_reward_remaining: u64,
     merkle_path: Vec<Vec<u8>>,
     template_ipc_client: BlockTemplateIpcClient,
 }
@@ -40,6 +40,7 @@ impl TemplateData {
         template_id: u64,
         header: Header,
         coinbase_tx: Transaction,
+        block_reward_remaining: u64,
         merkle_path: Vec<Vec<u8>>,
         template_ipc_client: BlockTemplateIpcClient,
     ) -> Self {
@@ -47,6 +48,7 @@ impl TemplateData {
             template_id,
             header,
             coinbase_tx,
+            block_reward_remaining,
             merkle_path,
             template_ipc_client,
         }
@@ -85,9 +87,9 @@ impl TemplateData {
             coinbase_tx_version: self.get_coinbase_tx_version()?,
             coinbase_prefix: self.get_coinbase_script_sig()?,
             coinbase_tx_input_sequence: self.get_coinbase_input_sequence(),
-            coinbase_tx_value_remaining: self.get_coinbase_tx_value_remaining()?,
-            coinbase_tx_outputs_count: self.get_empty_coinbase_outputs().len() as u32,
-            coinbase_tx_outputs: self.get_serialized_empty_coinbase_outputs()?,
+            coinbase_tx_value_remaining: self.block_reward_remaining,
+            coinbase_tx_outputs_count: self.get_required_coinbase_outputs().len() as u32,
+            coinbase_tx_outputs: self.get_serialized_required_coinbase_outputs()?,
             coinbase_tx_locktime: self.get_coinbase_tx_lock_time(),
             merkle_path: self.get_merkle_path()?,
         };
@@ -330,36 +332,19 @@ impl TemplateData {
         self.coinbase_tx.input[0].sequence.to_consensus_u32()
     }
 
-    fn get_empty_coinbase_outputs(&self) -> Vec<TxOut> {
-        self.coinbase_tx
-            .output
-            .iter()
-            .filter(|output| output.value == Amount::from_sat(0))
-            .cloned()
-            .collect()
+    fn get_required_coinbase_outputs(&self) -> &[TxOut] {
+        &self.coinbase_tx.output
     }
 
-    fn get_serialized_empty_coinbase_outputs(&self) -> Result<B064K<'_>, TemplateDataError> {
-        let empty_coinbase_outputs = self.get_empty_coinbase_outputs();
-        let mut serialized_empty_coinbase_outputs = Vec::new();
-        for output in empty_coinbase_outputs {
-            serialized_empty_coinbase_outputs.extend_from_slice(&serialize(&output));
+    fn get_serialized_required_coinbase_outputs(&self) -> Result<B064K<'_>, TemplateDataError> {
+        let mut serialized_required_coinbase_outputs = Vec::new();
+        for output in self.get_required_coinbase_outputs() {
+            serialized_required_coinbase_outputs.extend_from_slice(&serialize(output));
         }
-        let serialized_empty_coinbase_outputs: B064K = serialized_empty_coinbase_outputs
+        let serialized_required_coinbase_outputs: B064K = serialized_required_coinbase_outputs
             .try_into()
-            .map_err(|_| TemplateDataError::FailedToSerializeEmptyCoinbaseOutputs)?;
-        Ok(serialized_empty_coinbase_outputs)
-    }
-
-    fn get_coinbase_tx_value_remaining(&self) -> Result<u64, TemplateDataError> {
-        Ok(self
-            .coinbase_tx
-            .output
-            .iter()
-            .map(|output| output.value)
-            .checked_sum()
-            .ok_or(TemplateDataError::FailedToSumCoinbaseOutputs)?
-            .to_sat())
+            .map_err(|_| TemplateDataError::FailedToSerializeCoinbaseOutputs)?;
+        Ok(serialized_required_coinbase_outputs)
     }
 
     fn get_coinbase_tx_lock_time(&self) -> u32 {

@@ -16,6 +16,11 @@ use crate::utils::{fs_utils, http, tarball};
 const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
+const BITCOIN_CORE_V32X: &str = "32.0";
+// TEMPORARY: keep BITCOIN_CORE_V32_BINARY_ENV only while v32 tests depend on a Bitcoin Core
+// build of https://github.com/bitcoin/bitcoin/pull/35671 (TxCollection). Remove once v32 is
+// released and follows the standard binary resolution flow used by other versions.
+const BITCOIN_CORE_V32_BINARY_ENV: &str = "BITCOIN_CORE_V32_BINARY";
 /// Allow static signet fixtures to leave IBD without freezing Bitcoin Core's
 /// clock, so mined blocks still use wall-clock timestamps.
 ///
@@ -58,13 +63,43 @@ fn get_bitcoin_core_filename(os: &str, arch: &str, bitcoin_core_version: &str) -
     }
 }
 
-pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V31X;
+pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V32X;
 
 fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
+        BitcoinCoreVersion::V32X => BITCOIN_CORE_V32X,
     }
+}
+
+fn resolve_v32_node_binary() -> PathBuf {
+    let configured_path = env::var(BITCOIN_CORE_V32_BINARY_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            panic!(
+                "Bitcoin Core v32 is not released yet. Build \
+                 https://github.com/bitcoin/bitcoin/pull/35671 from source and point \
+                 {BITCOIN_CORE_V32_BINARY_ENV} at the resulting bitcoin-node binary \
+                 (e.g. <bitcoin>/build/bin/bitcoin-node)."
+            )
+        });
+
+    if configured_path.file_name().and_then(|name| name.to_str()) == Some("bitcoin") {
+        if let Some(parent) = configured_path.parent() {
+            let bitcoin_node = parent.join("bitcoin-node");
+            if bitcoin_node.exists() {
+                return bitcoin_node;
+            }
+
+            let bitcoind = parent.join("bitcoind");
+            if bitcoind.exists() {
+                return bitcoind;
+            }
+        }
+    }
+
+    configured_path
 }
 
 /// Represents the consensus difficulty level of the network.
@@ -174,58 +209,74 @@ impl BitcoinCore {
             }
         }
 
-        // Download and setup Bitcoin Core with IPC support
-        let bitcoin_core_version = release_version(node_version);
+        // Download and setup Bitcoin Core with IPC support.
+        // During the v32 draft phase, we use a locally built bitcoin/bitcoin#35671 binary
+        // (via BITCOIN_CORE_V32_BINARY) until official Bitcoin Core v32 release artifacts
+        // are available.
         let os = env::consts::OS;
-        let arch = env::consts::ARCH;
-        let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
-        let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
-        let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
-        let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
-
-        if !bitcoin_node_bin.exists() {
-            let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
-                Ok(path) => tarball::read_from_file(&path),
-                Err(_) => {
-                    warn!(
-                        "Downloading Bitcoin Core {} for the testing session. This could take a while...",
-                        bitcoin_core_version
-                    );
-                    let download_endpoint = env::var("BITCOIN_CORE_DOWNLOAD_ENDPOINT")
-                        .unwrap_or_else(|_| {
-                            format!(
-                                "https://bitcoincore.org/bin/bitcoin-core-{bitcoin_core_version}"
-                            )
-                        });
-                    let url = format!("{download_endpoint}/{bitcoin_filename}");
-                    http::make_get_request(&url, 5)
-                }
-            };
-
-            if let Some(parent) = bitcoin_home.parent() {
-                create_dir_all(parent).unwrap();
-            }
-
-            tarball::unpack(&tarball_bytes, &bin_dir);
-
+        let bitcoin_node_bin = if node_version == BitcoinCoreVersion::V32X {
+            let binary = resolve_v32_node_binary();
             assert!(
-                bitcoin_node_bin.exists(),
-                "Bitcoin Core node binary not found after unpack in {}",
-                bitcoin_home.display()
+                binary.exists(),
+                "Bitcoin Core v32 binary not found at {} (from {}).",
+                binary.display(),
+                BITCOIN_CORE_V32_BINARY_ENV,
             );
+            binary
+        } else {
+            let bitcoin_core_version = release_version(node_version);
+            let arch = env::consts::ARCH;
+            let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
+            let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
+            let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
+            let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
 
-            // Sign the binaries on macOS
-            if os == "macos" {
-                for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
-                    std::process::Command::new("codesign")
-                        .arg("--sign")
-                        .arg("-")
-                        .arg(bin)
-                        .output()
-                        .expect("Failed to sign Bitcoin Core binary");
+            if !bitcoin_node_bin.exists() {
+                let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
+                    Ok(path) => tarball::read_from_file(&path),
+                    Err(_) => {
+                        warn!(
+                            "Downloading Bitcoin Core {} for the testing session. This could take a while...",
+                            bitcoin_core_version
+                        );
+                        let download_endpoint = env::var("BITCOIN_CORE_DOWNLOAD_ENDPOINT")
+                            .unwrap_or_else(|_| {
+                                format!(
+                                    "https://bitcoincore.org/bin/bitcoin-core-{bitcoin_core_version}"
+                                )
+                            });
+                        let url = format!("{download_endpoint}/{bitcoin_filename}");
+                        http::make_get_request(&url, 5)
+                    }
+                };
+
+                if let Some(parent) = bitcoin_home.parent() {
+                    create_dir_all(parent).unwrap();
+                }
+
+                tarball::unpack(&tarball_bytes, &bin_dir);
+
+                assert!(
+                    bitcoin_node_bin.exists(),
+                    "Bitcoin Core node binary not found after unpack in {}",
+                    bitcoin_home.display()
+                );
+
+                // Sign the binaries on macOS
+                if os == "macos" {
+                    for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
+                        std::process::Command::new("codesign")
+                            .arg("--sign")
+                            .arg("-")
+                            .arg(bin)
+                            .output()
+                            .expect("Failed to sign Bitcoin Core binary");
+                    }
                 }
             }
-        }
+
+            bitcoin_node_bin
+        };
 
         // Add IPC and basic args
         conf.args.extend(vec![
@@ -324,11 +375,141 @@ impl BitcoinCore {
         Ok(())
     }
 
+    /// Fund the node's wallet with spendable *legacy* (pre-segwit) outputs by mining 101
+    /// blocks to a legacy address, which is returned for later use.
+    ///
+    /// Useful for building witness-free transactions, which can be included in a block
+    /// whose coinbase carries no witness commitment.
+    pub fn fund_wallet_legacy(&self) -> Result<String, corepc_node::Error> {
+        let client = &self.bitcoind.client;
+        let address: String = client.call("getnewaddress", &["".into(), "legacy".into()])?;
+        // Mine in batches: a single 101-block generatetoaddress can exceed the RPC
+        // client's 15s timeout when several test nodes mine concurrently.
+        let mut remaining = 101u32;
+        while remaining > 0 {
+            let batch = remaining.min(20);
+            let _: serde_json::Value =
+                client.call("generatetoaddress", &[batch.into(), address.clone().into()])?;
+            remaining -= batch;
+        }
+        Ok(address)
+    }
+
+    /// Create and sign a legacy (witness-free) self-transfer WITHOUT broadcasting it, and
+    /// return its consensus-serialized bytes.
+    ///
+    /// Explicitly spends a mature coinbase output of `funded_address` (from
+    /// [`BitcoinCore::fund_wallet_legacy`]) so no segwit input sneaks in through wallet
+    /// coin selection, keeping the transaction free of witness data.
+    pub fn create_unbroadcast_legacy_transaction(
+        &self,
+        funded_address: &str,
+    ) -> Result<Vec<u8>, corepc_node::Error> {
+        let client = &self.bitcoind.client;
+        let unspent: serde_json::Value = client.call(
+            "listunspent",
+            &[
+                100.into(),
+                9_999_999.into(),
+                serde_json::json!([funded_address]),
+            ],
+        )?;
+        let utxo = unspent
+            .as_array()
+            .and_then(|utxos| utxos.first())
+            .unwrap_or_else(|| {
+                panic!("expected a mature UTXO on the legacy funding address {funded_address}")
+            })
+            .clone();
+        let txid = utxo["txid"].as_str().expect("listunspent entry has txid");
+        let vout = utxo["vout"].as_u64().expect("listunspent entry has vout");
+        let amount = utxo["amount"]
+            .as_f64()
+            .expect("listunspent entry has amount");
+
+        let destination: String = client.call("getnewaddress", &["".into(), "legacy".into()])?;
+        let raw: String = client.call(
+            "createrawtransaction",
+            &[
+                serde_json::json!([{ "txid": txid, "vout": vout }]),
+                serde_json::json!({ destination: amount - 0.0001 }),
+            ],
+        )?;
+        let signed: serde_json::Value =
+            client.call("signrawtransactionwithwallet", &[raw.into()])?;
+        assert!(
+            signed["complete"].as_bool().unwrap_or(false),
+            "wallet should fully sign the self-transfer: {signed}"
+        );
+        let signed_hex = signed["hex"]
+            .as_str()
+            .expect("signrawtransactionwithwallet should return hex");
+        Ok(hex::decode(signed_hex).expect("signed transaction should be valid hex"))
+    }
+
     /// Return the hash of the most recent block.
     pub fn get_best_block_hash(&self) -> Result<String, corepc_node::Error> {
         let client = &self.bitcoind.client;
         let block_hash = client.get_best_block_hash()?.0;
         Ok(block_hash)
+    }
+
+    /// Copy all blocks from `source` to this node via RPC.
+    ///
+    /// The integration test nodes are not connected over P2P, so this is the way to give
+    /// two nodes the same chain while keeping their mempools independent. The node reorgs
+    /// to the source chain, so the source must have more work than any leftover local
+    /// chain (test datadirs persist across runs).
+    pub fn sync_chain_from(&self, source: &BitcoinCore) -> Result<(), corepc_node::Error> {
+        let source_client = &source.bitcoind.client;
+        let target_client = &self.bitcoind.client;
+        let source_height: u64 = source_client.call("getblockcount", &[])?;
+        for height in 1..=source_height {
+            let hash: String = source_client.call("getblockhash", &[height.into()])?;
+            let block_hex: String = source_client.call("getblock", &[hash.into(), 0.into()])?;
+            let result: serde_json::Value =
+                target_client.call("submitblock", &[block_hex.into()])?;
+            // Blocks the node already knows about are reported as duplicates, and blocks
+            // that do not (yet) beat a leftover local chain as inconclusive.
+            assert!(
+                result.is_null()
+                    || result
+                        .as_str()
+                        .is_some_and(|r| r.starts_with("duplicate") || r == "inconclusive"),
+                "submitblock rejected block at height {height}: {result}"
+            );
+        }
+        assert_eq!(
+            self.get_best_block_hash()?,
+            source.get_best_block_hash()?,
+            "chain sync should leave both nodes on the same tip"
+        );
+        Ok(())
+    }
+
+    /// Return the hash of the block at the given height.
+    pub fn get_block_hash(&self, height: u64) -> Result<String, corepc_node::Error> {
+        Ok(self
+            .bitcoind
+            .client
+            .call("getblockhash", &[height.into()])?)
+    }
+
+    /// Return the txids of the block with the given hash.
+    pub fn get_block_txids(&self, block_hash: &str) -> Result<Vec<String>, corepc_node::Error> {
+        let block: serde_json::Value = self
+            .bitcoind
+            .client
+            .call("getblock", &[block_hash.into(), 1.into()])?;
+        Ok(block["tx"]
+            .as_array()
+            .map(|txids| {
+                txids
+                    .iter()
+                    .filter_map(|txid| txid.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Return the IPC socket path for connecting to this node.

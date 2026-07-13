@@ -820,6 +820,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-capnp-types"
+version = "0.2.1"
+source = "git+https://github.com/Sjors/bitcoin-capnp-types.git?branch=2026%2F07%2Ftx-collection#26d1aad13ebc322dcecb73d084d972d1a24d5845"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+]
+
+[[package]]
 name = "bitcoin-internals"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -852,7 +862,8 @@ version = "0.4.0"
 dependencies = [
  "async-channel",
  "bitcoin-capnp-types 0.1.2",
- "bitcoin-capnp-types 0.2.1",
+ "bitcoin-capnp-types 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bitcoin-capnp-types 0.2.1 (git+https://github.com/Sjors/bitcoin-capnp-types.git?branch=2026%2F07%2Ftx-collection)",
  "stratum-core",
  "tokio",
  "tokio-util",
