@@ -7,5 +7,6 @@
 //! Due to `capnp-rpc` `!Send` internals, these runtimes must execute inside a
 //! [`tokio::task::LocalSet`].
 
+pub mod master;
 pub mod v30x;
 pub mod v31x;

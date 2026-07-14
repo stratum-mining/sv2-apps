@@ -6,7 +6,7 @@ use stratum_core::bitcoin::{
     block::ValidationError, consensus, consensus::encode::Error as ConsensusEncodeError,
 };
 
-use bitcoin_capnp_types_v31::capnp;
+use super::super::capnp_types::capnp;
 
 /// Error type for [`super::BitcoinCoreSv2TDP`]
 #[derive(Debug)]

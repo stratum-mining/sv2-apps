@@ -1,8 +1,8 @@
 //! Background monitors for Bitcoin Core v31.x Sv2 Job Declaration Protocol via capnp over UNIX
 //! socket.
 
-use crate::unix_capnp::v31x::job_declaration_protocol::BitcoinCoreSv2JDP;
-use bitcoin_capnp_types_v31::capnp;
+use super::super::capnp_types::capnp;
+use super::BitcoinCoreSv2JDP;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 

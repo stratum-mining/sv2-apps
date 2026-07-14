@@ -1,0 +1,41 @@
+name: Classify Bitcoin Core version
+description: Classify a Bitcoin Core matrix entry as a release tag or source ref.
+
+inputs:
+  version:
+    description: Bitcoin Core release tag or repo@ref source entry.
+    required: true
+
+outputs:
+  cache-key:
+    description: Artifact-safe cache key for the matrix entry.
+    value: ${{ steps.classify.outputs.cache-key }}
+  source:
+    description: Whether the matrix entry points to a source ref.
+    value: ${{ steps.classify.outputs.source }}
+  repo:
+    description: GitHub repository for source entries.
+    value: ${{ steps.classify.outputs.repo }}
+  ref:
+    description: Git ref for source entries.
+    value: ${{ steps.classify.outputs.ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Classify Bitcoin Core version
+      id: classify
+      shell: bash
+      run: |
+        bitcoin_core_version="${{ inputs.version }}"
+        cache_key="${bitcoin_core_version//[^A-Za-z0-9_.-]/-}"
+        {
+          echo "cache-key=$cache_key"
+          if [[ "$bitcoin_core_version" == *@* ]]; then
+            echo "source=true"
+            echo "repo=${bitcoin_core_version%@*}"
+            echo "ref=${bitcoin_core_version#*@}"
+          else
+            echo "source=false"
+          fi
+        } >> "$GITHUB_OUTPUT"

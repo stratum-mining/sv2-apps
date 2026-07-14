@@ -1,4 +1,17 @@
-use integration_tests_sv2::{template_provider::DifficultyLevel, *};
+use integration_tests_sv2::{
+    template_provider::{DifficultyLevel, TemplateProvider},
+    utils::get_available_address,
+    *,
+};
+
+#[tokio::test]
+async fn test_create_mempool_transaction() {
+    let address = get_available_address();
+    let port = address.port();
+    let tp = TemplateProvider::start(port, 1, DifficultyLevel::Low);
+    assert!(tp.fund_wallet().is_ok());
+    assert!(tp.create_mempool_transaction().is_ok());
+}
 
 #[tokio::test]
 async fn tp_low_diff() {

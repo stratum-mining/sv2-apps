@@ -13,7 +13,7 @@
 use async_channel::{Receiver, Sender};
 use integration_tests_sv2::{
     start_bitcoin_core, start_tracing,
-    template_provider::{BitcoinCore, DifficultyLevel},
+    template_provider::{should_run_bitcoin_core_version, BitcoinCore, DifficultyLevel},
 };
 use std::time::{Duration, Instant};
 use stratum_apps::{
@@ -33,12 +33,26 @@ use stratum_apps::{
 
 #[tokio::test]
 async fn tdp_io_integration_v30x() {
+    if !should_run_bitcoin_core_version(BitcoinCoreVersion::V30X) {
+        return;
+    }
     assert_tdp_io_integration(BitcoinCoreVersion::V30X).await;
 }
 
 #[tokio::test]
 async fn tdp_io_integration_v31x() {
+    if !should_run_bitcoin_core_version(BitcoinCoreVersion::V31X) {
+        return;
+    }
     assert_tdp_io_integration(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+async fn tdp_io_integration_master() {
+    if !should_run_bitcoin_core_version(BitcoinCoreVersion::Master) {
+        return;
+    }
+    assert_tdp_io_integration(BitcoinCoreVersion::Master).await;
 }
 
 async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {

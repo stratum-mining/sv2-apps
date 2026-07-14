@@ -1,0 +1,38 @@
+name: Setup Bitcoin integration test runtime
+description: Install IPC runtime dependencies and prepare a Bitcoin Core source binary when needed.
+
+inputs:
+  bitcoin-core-version:
+    description: Bitcoin Core release tag or repo@ref source entry.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install capnp dependencies
+      shell: bash
+      run: |
+        case "$RUNNER_OS" in
+          Linux)
+            sudo apt-get install -y capnproto libcapnp-dev
+            ;;
+          macOS)
+            brew install capnp
+            ;;
+          *)
+            echo "Unsupported runner OS: $RUNNER_OS" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Classify Bitcoin Core version
+      id: bitcoin-core
+      uses: ./.github/actions/classify-bitcoin-core
+      with:
+        version: ${{ inputs.bitcoin-core-version }}
+
+    - name: Setup Bitcoin Core binary
+      uses: ./.github/actions/setup-bitcoin-core-binary
+      with:
+        source: ${{ steps.bitcoin-core.outputs.source }}
+        cache-key: ${{ steps.bitcoin-core.outputs.cache-key }}

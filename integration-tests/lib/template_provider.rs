@@ -2,7 +2,7 @@ use corepc_node::{types::GetBlockchainInfo, Conf, ConnectParams, Node};
 use std::{
     env,
     fs::create_dir_all,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 use stratum_apps::{
@@ -13,7 +13,8 @@ use tracing::warn;
 
 use crate::utils::{fs_utils, http, tarball};
 
-const VERSION_SV2_TP: &str = "1.1.0";
+const VERSION_SV2_TP_V30X: &str = "1.0.6";
+const VERSION_SV2_TP_V31X: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
 /// Allow static signet fixtures to leave IBD without freezing Bitcoin Core's
@@ -28,17 +29,17 @@ const BITCOIN_CORE_V31X: &str = "31.0";
 /// stale-tip IBD threshold; it does not change Bitcoin Core's clock.
 const SIGNET_FIXTURE_MAX_TIP_AGE_SECS: u64 = 100 * 365 * 24 * 60 * 60;
 
-fn get_sv2_tp_filename(os: &str, arch: &str) -> String {
+fn get_sv2_tp_filename(os: &str, arch: &str, sv2_tp_version: &str) -> String {
     match (os, arch) {
         ("macos", "aarch64") => {
-            format!("sv2-tp-{VERSION_SV2_TP}-arm64-apple-darwin.tar.gz")
+            format!("sv2-tp-{sv2_tp_version}-arm64-apple-darwin.tar.gz")
         }
         ("macos", "x86_64") => {
-            format!("sv2-tp-{VERSION_SV2_TP}-x86_64-apple-darwin.tar.gz")
+            format!("sv2-tp-{sv2_tp_version}-x86_64-apple-darwin.tar.gz")
         }
-        ("linux", "x86_64") => format!("sv2-tp-{VERSION_SV2_TP}-x86_64-linux-gnu.tar.gz"),
-        ("linux", "aarch64") => format!("sv2-tp-{VERSION_SV2_TP}-aarch64-linux-gnu.tar.gz"),
-        _ => format!("sv2-tp-{VERSION_SV2_TP}-x86_64-apple-darwin.tar.gz"),
+        ("linux", "x86_64") => format!("sv2-tp-{sv2_tp_version}-x86_64-linux-gnu.tar.gz"),
+        ("linux", "aarch64") => format!("sv2-tp-{sv2_tp_version}-aarch64-linux-gnu.tar.gz"),
+        _ => format!("sv2-tp-{sv2_tp_version}-x86_64-apple-darwin.tar.gz"),
     }
 }
 
@@ -60,11 +61,92 @@ fn get_bitcoin_core_filename(os: &str, arch: &str, bitcoin_core_version: &str) -
 
 pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V31X;
 
+fn parse_ipc_version(version: &str) -> Option<BitcoinCoreVersion> {
+    if version.contains('@') || version == "master" {
+        return Some(BitcoinCoreVersion::Master);
+    }
+
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let major = version.split('.').next().unwrap_or(version);
+    match major {
+        "30" => Some(BitcoinCoreVersion::V30X),
+        "31" => Some(BitcoinCoreVersion::V31X),
+        _ => None,
+    }
+}
+
+pub fn selected_bitcoin_core_version() -> BitcoinCoreVersion {
+    if let Ok(version) = env::var("BITCOIN_CORE_IPC_VERSION") {
+        return parse_ipc_version(&version)
+            .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_IPC_VERSION: {version}"));
+    }
+
+    if let Ok(version) = env::var("BITCOIN_CORE_VERSION") {
+        return parse_ipc_version(&version)
+            .unwrap_or_else(|| panic!("Unsupported BITCOIN_CORE_VERSION release: {version}"));
+    }
+
+    BITCOIN_CORE_LATEST
+}
+
+pub fn should_run_bitcoin_core_version(version: BitcoinCoreVersion) -> bool {
+    if env::var("BITCOIN_CORE_VERSION").is_err() {
+        return version != BitcoinCoreVersion::Master;
+    }
+
+    selected_bitcoin_core_version() == version
+}
+
 fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
+        BitcoinCoreVersion::Master => BITCOIN_CORE_V31X,
     }
+}
+
+fn sv2_tp_version(version: BitcoinCoreVersion) -> &'static str {
+    match version {
+        BitcoinCoreVersion::V30X => VERSION_SV2_TP_V30X,
+        BitcoinCoreVersion::V31X => VERSION_SV2_TP_V31X,
+        BitcoinCoreVersion::Master => VERSION_SV2_TP_V31X,
+    }
+}
+
+fn sv2_tp_template_interval_arg(version: BitcoinCoreVersion, sv2_interval: u32) -> String {
+    match version {
+        BitcoinCoreVersion::V30X => format!("-sv2interval={sv2_interval}"),
+        BitcoinCoreVersion::V31X => format!("-templateinterval={sv2_interval}"),
+        BitcoinCoreVersion::Master => format!("-templateinterval={sv2_interval}"),
+    }
+}
+
+fn selected_release_version(ipc_version: BitcoinCoreVersion) -> String {
+    match env::var("BITCOIN_CORE_VERSION") {
+        Ok(version) if !version.contains('@') => {
+            version.strip_prefix('v').unwrap_or(&version).to_owned()
+        }
+        _ => release_version(ipc_version).to_owned(),
+    }
+}
+
+fn source_bitcoin_core_binary() -> Option<PathBuf> {
+    let binary = env::var("BITCOIN_CORE_BINARY").ok()?;
+    if !env::var("BITCOIN_CORE_VERSION")
+        .map(|version| version.contains('@'))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(PathBuf::from(binary))
+}
+
+fn ensure_executable_exists(path: &Path, env_var: &str) {
+    assert!(
+        path.exists(),
+        "Cannot find {} specified by {env_var}",
+        path.display()
+    );
 }
 
 /// Represents the consensus difficulty level of the network.
@@ -174,16 +256,18 @@ impl BitcoinCore {
             }
         }
 
-        // Download and setup Bitcoin Core with IPC support
-        let bitcoin_core_version = release_version(node_version);
+        // Download and setup Bitcoin Core with IPC support, or use a source-built binary.
+        let bitcoin_core_version = selected_release_version(node_version);
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
-        let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
+        let bitcoin_filename = get_bitcoin_core_filename(os, arch, &bitcoin_core_version);
         let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
-        let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
+        let bitcoin_node_bin = source_bitcoin_core_binary()
+            .inspect(|path| ensure_executable_exists(path, "BITCOIN_CORE_BINARY"))
+            .unwrap_or_else(|| bitcoin_home.join("libexec").join("bitcoin-node"));
         let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
 
-        if !bitcoin_node_bin.exists() {
+        if source_bitcoin_core_binary().is_none() && !bitcoin_node_bin.exists() {
             let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
                 Ok(path) => tarball::read_from_file(&path),
                 Err(_) => {
@@ -363,7 +447,8 @@ pub struct TemplateProvider {
 impl TemplateProvider {
     /// Start a new [`TemplateProvider`] instance with Bitcoin Core and standalone sv2-tp.
     pub fn start(port: u16, sv2_interval: u32, difficulty_level: DifficultyLevel) -> Self {
-        let bitcoin_core = BitcoinCore::start(port, difficulty_level, BITCOIN_CORE_LATEST);
+        let bitcoin_core_version = selected_bitcoin_core_version();
+        let bitcoin_core = BitcoinCore::start(port, difficulty_level, bitcoin_core_version);
 
         let current_dir: PathBuf = std::env::current_dir().expect("failed to read current dir");
         let bin_dir = current_dir.join("template-provider");
@@ -371,8 +456,9 @@ impl TemplateProvider {
         // Download and setup sv2-tp binary
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
-        let sv2_tp_filename = get_sv2_tp_filename(os, arch);
-        let sv2_tp_home = bin_dir.join(format!("sv2-tp-{VERSION_SV2_TP}"));
+        let sv2_tp_version = sv2_tp_version(bitcoin_core_version);
+        let sv2_tp_filename = get_sv2_tp_filename(os, arch, sv2_tp_version);
+        let sv2_tp_home = bin_dir.join(format!("sv2-tp-{sv2_tp_version}"));
         let sv2_tp_bin = sv2_tp_home.join("bin").join("sv2-tp");
 
         if !sv2_tp_bin.exists() {
@@ -384,7 +470,7 @@ impl TemplateProvider {
                         env::var("SV2TP_DOWNLOAD_ENDPOINT").unwrap_or_else(|_| {
                             "https://github.com/stratum-mining/sv2-tp/releases/download".to_owned()
                         });
-                    let url = format!("{download_endpoint}/v{VERSION_SV2_TP}/{sv2_tp_filename}");
+                    let url = format!("{download_endpoint}/v{sv2_tp_version}/{sv2_tp_filename}");
                     http::make_get_request(&url, 5)
                 }
             };
@@ -418,7 +504,10 @@ impl TemplateProvider {
             .arg(network)
             .arg(format!("-datadir={}", datadir.display()))
             .arg(format!("-sv2port={port}"))
-            .arg(format!("-templateinterval={sv2_interval}"))
+            .arg(sv2_tp_template_interval_arg(
+                bitcoin_core_version,
+                sv2_interval,
+            ))
             .arg("-sv2feedelta=0")
             .arg("-debug=sv2")
             .arg("-loglevel=sv2:trace")
@@ -504,20 +593,5 @@ impl Drop for TemplateProvider {
         let _ = self.sv2_tp_process.kill();
         let _ = self.sv2_tp_process.wait();
         // bitcoin-node is managed by corepc-node::Node and will be cleaned up automatically
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DifficultyLevel, TemplateProvider};
-    use crate::utils::get_available_address;
-
-    #[tokio::test]
-    async fn test_create_mempool_transaction() {
-        let address = get_available_address();
-        let port = address.port();
-        let tp = TemplateProvider::start(port, 1, DifficultyLevel::Low);
-        assert!(tp.fund_wallet().is_ok());
-        assert!(tp.create_mempool_transaction().is_ok());
     }
 }

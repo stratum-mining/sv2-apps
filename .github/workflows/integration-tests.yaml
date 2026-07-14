@@ -9,45 +9,276 @@ on:
 name: Integration Tests
 
 jobs:
-  ci:
+  build:
+    name: Build integration test binaries (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          - macos-15
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            integration-tests/target
+          key: integration-tests-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: integration-tests-cargo-${{ runner.os }}-
 
       - name: Install capnp dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y capnproto libcapnp-dev
 
       - name: Install capnp dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-15'
         run: brew install capnp
 
-      # Install cargo-binstall so tool installs below use prebuilt binaries.
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@v1.20.0
-        with:
-          version: "1.20.0"
-
-      # Install cargo-nextest via cargo-binstall (no source build).
-      # Keep quick-install disabled to only use upstream release artifacts.
       - name: Install cargo-nextest
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-nextest@0.9.100
+        uses: ./.github/actions/setup-nextest
+        with:
+          github-token: ${{ github.token }}
 
-      - name: Integration Tests
+      - name: Update Bitcoin Core master IPC bindings
+        run: cargo update --manifest-path=integration-tests/Cargo.toml 'git+https://github.com/2140-dev/bitcoin-capnp-types?branch=master#0.2.1'
+
+      - name: Build integration test binaries
         run: |
-         RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture
+          cargo nextest archive --manifest-path=integration-tests/Cargo.toml --archive-file integration-test-binaries-${{ runner.os }}.tar.zst
+
+      - name: Upload compiled test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-test-binaries-${{ runner.os }}
+          path: integration-test-binaries-${{ runner.os }}.tar.zst
+          if-no-files-found: error
+
+  bitcoin-core:
+    name: Build Bitcoin Core (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - bitcoin/bitcoin@master
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Classify Bitcoin Core version
+        id: bitcoin-core
+        uses: ./.github/actions/classify-bitcoin-core
+        with:
+          version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Install Bitcoin Core build dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y build-essential cmake pkgconf python3 libevent-dev libboost-dev libsqlite3-dev capnproto libcapnp-dev ccache
+
+      - name: Install Bitcoin Core build dependencies (macOS)
+        if: matrix.os == 'macos-15'
+        run: brew install cmake boost pkgconf libevent sqlite capnp ccache
+
+      - name: ccache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-bitcoin-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-bitcoin-${{ runner.os }}-
+
+      - name: Checkout Bitcoin Core source
+        run: |
+          git clone --filter=blob:none --no-checkout "https://github.com/${{ steps.bitcoin-core.outputs.repo }}.git" bitcoin
+          git -C bitcoin fetch --depth 1 origin "${{ steps.bitcoin-core.outputs.ref }}"
+          git -C bitcoin checkout --detach FETCH_HEAD
+
+      - name: Build Bitcoin Core
+        run: |
+          cd bitcoin
+          export CCACHE_DIR="$HOME/.cache/ccache"
+          cmake -B build -DENABLE_WALLET=ON -DBUILD_TESTS=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Upload Bitcoin Core binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: bitcoin-core-${{ runner.os }}-${{ steps.bitcoin-core.outputs.cache-key }}
+          path: bitcoin/build/bin/bitcoin-node
+          if-no-files-found: error
+
+  ci-no-bitcoin:
+    name: Integration tests without Bitcoin Core (${{ matrix.os }})
+    needs:
+      - build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-no-bitcoin
+          github-token: ${{ github.token }}
+
+  ci-bitcoin-core-ipc:
+    name: Integration tests BitcoinCoreIpc (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-bitcoin-core-ipc
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
+
+  ci-sv2-tp-jd:
+    name: sv2-tp jd (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-sv2-tp-jd
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
+
+  ci-sv2-tp-translator:
+    name: sv2-tp translator (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-sv2-tp-translator
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node
+
+  ci-sv2-tp-other:
+    name: sv2-tp other (${{ matrix.os }}, ${{ matrix.bitcoin_core_version }})
+    needs:
+      - build
+      - bitcoin-core
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+        bitcoin_core_version:
+          - v30.2
+          - v31.0
+          - bitcoin/bitcoin@master
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bitcoin integration runtime
+        uses: ./.github/actions/setup-bitcoin-integration-test
+        with:
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+
+      - name: Run archived integration tests
+        uses: ./.github/actions/run-archived-nextest
+        with:
+          profile: ci-sv2-tp-other
+          github-token: ${{ github.token }}
+          bitcoin-core-version: ${{ matrix.bitcoin_core_version }}
+          bitcoin-core-binary: ${{ github.workspace }}/bitcoin-core/bitcoin-node

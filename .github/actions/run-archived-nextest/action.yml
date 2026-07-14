@@ -1,0 +1,46 @@
+name: Run archived cargo-nextest profile
+description: Install cargo-nextest, download the compiled archive, and run one profile.
+
+inputs:
+  profile:
+    description: nextest profile to run.
+    required: true
+  github-token:
+    description: GitHub token used by cargo-binstall for release downloads.
+    required: true
+  bitcoin-core-version:
+    description: Bitcoin Core version selected by the matrix entry.
+    required: false
+    default: ""
+  bitcoin-core-binary:
+    description: Source-built Bitcoin Core binary path.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@1.88
+
+    - name: Install cargo-nextest
+      uses: ./.github/actions/setup-nextest
+      with:
+        github-token: ${{ inputs.github-token }}
+
+    - name: Download compiled test archive
+      uses: actions/download-artifact@v8
+      with:
+        name: integration-test-binaries-${{ runner.os }}
+
+    - name: Run archived integration tests
+      shell: bash
+      env:
+        BITCOIN_CORE_VERSION: ${{ inputs.bitcoin-core-version }}
+        BITCOIN_CORE_BINARY: ${{ inputs.bitcoin-core-binary }}
+      run: |
+        RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run \
+          --profile "${{ inputs.profile }}" \
+          --archive-file "integration-test-binaries-${{ runner.os }}.tar.zst" \
+          --workspace-remap "${{ github.workspace }}/integration-tests" \
+          --nocapture

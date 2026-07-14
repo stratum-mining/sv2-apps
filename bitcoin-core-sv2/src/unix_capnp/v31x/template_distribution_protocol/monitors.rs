@@ -1,9 +1,9 @@
 //! Background monitors for Bitcoin Core v31.x Sv2 Template Distribution Protocol via capnp over
 //! UNIX socket.
 
-use crate::unix_capnp::v31x::template_distribution_protocol::BitcoinCoreSv2TDP;
+use super::BitcoinCoreSv2TDP;
 
-use bitcoin_capnp_types_v31::capnp;
+use super::super::capnp_types::capnp;
 use stratum_core::parsers_sv2::TemplateDistribution;
 use tracing::{debug, error, info, warn};
 

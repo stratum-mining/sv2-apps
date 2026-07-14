@@ -10,13 +10,15 @@ use std::fmt;
 pub enum BitcoinCoreVersion {
     V30X,
     V31X,
+    Master,
 }
 
 impl BitcoinCoreVersion {
-    pub const fn as_major(self) -> u8 {
+    pub const fn as_label(self) -> &'static str {
         match self {
-            Self::V30X => 30,
-            Self::V31X => 31,
+            Self::V30X => "30",
+            Self::V31X => "31",
+            Self::Master => "master",
         }
     }
 }
@@ -78,9 +80,9 @@ impl fmt::Display for BitcoinCoreSv2Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "failed to initialize bitcoin_core_sv2 {} for v{}: {}",
+            "failed to initialize bitcoin_core_sv2 {} for {}: {}",
             self.protocol.as_str(),
-            self.version.as_major(),
+            self.version.as_label(),
             self.details
         )
     }

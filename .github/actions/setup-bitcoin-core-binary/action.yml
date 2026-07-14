@@ -1,0 +1,42 @@
+name: Setup Bitcoin Core binary
+description: Download and prepare a source-built Bitcoin Core binary for tests.
+
+inputs:
+  source:
+    description: Whether the current Bitcoin Core matrix entry is source-built.
+    required: true
+  cache-key:
+    description: Artifact-safe key for the Bitcoin Core source build.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Bitcoin Core runtime dependencies
+      if: inputs.source == 'true'
+      shell: bash
+      run: |
+        case "$RUNNER_OS" in
+          Linux)
+            sudo apt-get install -y libevent-dev libboost-dev libsqlite3-dev
+            ;;
+          macOS)
+            brew install boost libevent sqlite
+            ;;
+          *)
+            echo "Unsupported runner OS: $RUNNER_OS" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Download Bitcoin Core binary
+      if: inputs.source == 'true'
+      uses: actions/download-artifact@v8
+      with:
+        name: bitcoin-core-${{ runner.os }}-${{ inputs.cache-key }}
+        path: bitcoin-core
+
+    - name: Prepare Bitcoin Core binary
+      if: inputs.source == 'true'
+      shell: bash
+      run: chmod +x bitcoin-core/bitcoin-node
