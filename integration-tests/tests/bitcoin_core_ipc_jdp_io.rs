@@ -5,6 +5,8 @@
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
 //! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when tip drift is detected during a
 //!   missing-transactions retry flow.
+//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` for stale-at-arrival coinbase jobs
+//!   rejected by `checkBlock` with `bad-cb-height`.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -104,6 +106,7 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         .await;
     assert_jdp_success_scenario(&incoming_sender, coinbase_tx).await;
     assert_jdp_stale_chain_tip_scenario(&incoming_sender, &bitcoin_core, next_height).await;
+    assert_jdp_stale_chain_tip_at_arrival_scenario(&incoming_sender, &bitcoin_core).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -218,6 +221,56 @@ async fn assert_jdp_stale_chain_tip_scenario(
             );
         }
         response => panic!("expected Error(stale-chain-tip), got: {response:?}"),
+    }
+}
+
+async fn assert_jdp_stale_chain_tip_at_arrival_scenario(
+    incoming_sender: &Sender<JdRequest>,
+    bitcoin_core: &BitcoinCore,
+) {
+    // Build a coinbase that is valid for the current tip, then advance the tip so the same
+    // declaration becomes stale-at-arrival.
+    let current_height = bitcoin_core
+        .get_blockchain_info()
+        .expect("failed to get blockchain info")
+        .blocks;
+    let current_height = u32::try_from(current_height).expect("current height should fit in u32");
+    let coinbase_tx =
+        build_valid_coinbase_tx(current_height.checked_add(1).expect("height overflow"));
+
+    bitcoin_core.generate_blocks(1);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            vec![],
+            vec![],
+            "jdp/stale-chain-tip/at-arrival",
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => {
+                assert_eq!(
+                    error_code, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                    "expected stale-chain-tip for stale-at-arrival coinbase"
+                );
+                return;
+            }
+            JdResponse::Success { .. } => {
+                if tokio::time::Instant::now() >= deadline {
+                    panic!(
+                        "timed out waiting for stale-at-arrival classification after tip update"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            response => panic!(
+                "expected Error(stale-chain-tip) or transient Success while tip update propagates, got: {response:?}"
+            ),
+        }
     }
 }
 
