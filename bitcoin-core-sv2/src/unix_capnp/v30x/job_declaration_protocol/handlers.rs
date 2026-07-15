@@ -207,15 +207,15 @@ impl BitcoinCoreSv2JDP {
         };
 
         if !valid_job {
-            // On checkBlock failure, force-refresh template + mirror before classifying the error.
+            // On checkBlock failure, update local prev_hash before classifying the error.
             // The template monitor updates mempool_mirror asynchronously, so we need to avoid races
             // where validation can run on context A while chain tip has already moved to context B.
-            // Refreshing here narrows this TOCTOU window and lets us correctly emit
+            // Updating prev_hash here narrows this TOCTOU window and lets us correctly emit
             // `stale-chain-tip` instead of generic `invalid-job` when context drift occurred.
-            if let Err(e) = self.force_update_mempool_mirror().await {
+            if let Err(e) = self.force_update_mempool_mirror_prev_hash().await {
                 debug!(
                     error = ?e,
-                    "Failed to force-refresh template/mempool mirror after checkBlock failure; continuing with current validation context"
+                    "Failed to update prev_hash after checkBlock failure; continuing with current validation context"
                 );
             }
         }

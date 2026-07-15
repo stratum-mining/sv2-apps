@@ -72,6 +72,11 @@ impl MempoolMirror {
         self.current_prev_hash
     }
 
+    /// Sets the current template's prev_hash.
+    pub fn set_current_prev_hash(&mut self, prev_hash: BlockHash) {
+        self.current_prev_hash = Some(prev_hash);
+    }
+
     /// Returns the current template's difficulty target (nbits).
     pub fn get_current_nbits(&self) -> Option<CompactTarget> {
         self.current_nbits
