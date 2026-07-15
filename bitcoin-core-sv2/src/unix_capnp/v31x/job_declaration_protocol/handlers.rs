@@ -88,6 +88,8 @@ impl BitcoinCoreSv2JDP {
 
         let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
 
+        let mut check_block_reason_for_stale: Option<String> = None;
+
         let valid_job = {
             let mut all_transactions = Vec::with_capacity(1 + txdata.len());
             all_transactions.push(coinbase_tx.clone());
@@ -201,6 +203,8 @@ impl BitcoinCoreSv2JDP {
                     debug = ?check_block_debug,
                     "Bitcoin Core rejected the block via checkBlock"
                 );
+                check_block_reason_for_stale =
+                    check_block_reason.ok().and_then(|r| r.to_string().ok());
                 debug!(
                     "Block details - version: {:?}, prev_blockhash: {:?}, bits: {:?}, num_txs: {}",
                     version,
@@ -227,6 +231,10 @@ impl BitcoinCoreSv2JDP {
             // where validation can run on context A while chain tip has already moved to context B.
             // Updating prev_hash here narrows this TOCTOU window and lets us correctly emit
             // `stale-chain-tip` instead of generic `invalid-job` when context drift occurred.
+            //
+            // Additionally, a `bad-cb-height` rejection from checkBlock signals a job that was
+            // already stale at arrival (coinbase built from an old tip) and is mapped to
+            // stale-chain-tip even without prev_hash drift.
             if let Err(e) = self.force_update_mempool_mirror_prev_hash().await {
                 debug!(
                     error = ?e,
@@ -257,7 +265,12 @@ impl BitcoinCoreSv2JDP {
             let context_drifted =
                 initial_validation_context.prev_hash != latest_validation_context.prev_hash;
 
-            let error_code = if context_drifted {
+            let stale_at_arrival = matches!(
+                check_block_reason_for_stale.as_deref(),
+                Some("bad-cb-height")
+            );
+
+            let error_code = if context_drifted || stale_at_arrival {
                 debug!(
                     initial_prev_hash = ?initial_validation_context.prev_hash,
                     latest_prev_hash = ?latest_validation_context.prev_hash,
