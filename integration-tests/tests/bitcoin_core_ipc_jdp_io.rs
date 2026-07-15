@@ -3,8 +3,8 @@
 //! Flow covered per Bitcoin Core Sv2 runtime behavior and Sv2 JDP expectations:
 //! - `DeclareMiningJob` returns `MissingTransactions` when unknown wtxids are declared.
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
-//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
-//!   intentionally mismatched.
+//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when tip drift is detected during a
+//!   missing-transactions retry flow.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -12,7 +12,8 @@
 
 use async_channel::Sender;
 use integration_tests_sv2::{
-    start_bitcoin_core, start_tracing, template_provider::DifficultyLevel,
+    start_bitcoin_core, start_tracing,
+    template_provider::{BitcoinCore, DifficultyLevel},
 };
 use std::time::Duration;
 use stratum_apps::{
@@ -102,7 +103,7 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     assert_jdp_missing_transactions_scenario(&incoming_sender, coinbase_tx.clone(), missing_wtxid)
         .await;
     assert_jdp_success_scenario(&incoming_sender, coinbase_tx).await;
-    assert_jdp_stale_chain_tip_scenario(&incoming_sender, next_height).await;
+    assert_jdp_stale_chain_tip_scenario(&incoming_sender, &bitcoin_core, next_height).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -158,14 +159,54 @@ async fn assert_jdp_success_scenario(
 
 async fn assert_jdp_stale_chain_tip_scenario(
     incoming_sender: &Sender<JdRequest>,
+    bitcoin_core: &BitcoinCore,
     next_height: u32,
 ) {
+    // This coinbase is valid for the tip height observed before the missing-txs round-trip.
+    let coinbase_tx = build_valid_coinbase_tx(next_height);
+
+    let missing_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![0x01]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    let missing_wtxid = missing_tx.compute_wtxid();
+
+    // Round 1: declare unknown wtxid so JDP asks for missing transactions.
+    let first_response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx.clone(),
+        vec![missing_wtxid],
+        vec![],
+        "jdp/stale-chain-tip/round1",
+    )
+    .await;
+    match first_response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![missing_wtxid]);
+        }
+        response => panic!("expected MissingTransactions, got: {response:?}"),
+    }
+
+    // Move chain tip between the MissingTransactions response and retry.
+    bitcoin_core.generate_blocks(1);
+
+    // Round 2: provide the missing tx and expect stale-chain-tip due to tip drift.
     let response = send_declare_mining_job_and_recv_response(
         incoming_sender,
-        build_valid_coinbase_tx(next_height.saturating_add(10_000)),
-        vec![],
-        vec![],
-        "jdp/stale-chain-tip",
+        coinbase_tx,
+        vec![missing_wtxid],
+        vec![missing_tx],
+        "jdp/stale-chain-tip/round2",
     )
     .await;
 
@@ -173,7 +214,7 @@ async fn assert_jdp_stale_chain_tip_scenario(
         JdResponse::Error { error_code, .. } => {
             assert_eq!(
                 error_code, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-                "expected stale-chain-tip error for intentionally mismatched BIP34 height"
+                "expected stale-chain-tip after tip moved between missing-txs round-trip"
             );
         }
         response => panic!("expected Error(stale-chain-tip), got: {response:?}"),
