@@ -461,8 +461,6 @@ fn validation_context_drifted(
     current_ctx: ValidationContext,
 ) -> bool {
     previous_ctx.prev_hash != current_ctx.prev_hash
-        || previous_ctx.nbits != current_ctx.nbits
-        || previous_ctx.min_ntime != current_ctx.min_ntime
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -519,7 +517,6 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     prev_hash: BlockHash::all_zeros(), // irrelevant for coinbase tx validation
                     nbits: CompactTarget::from_consensus(0), /* irrelevant for coinbase tx
                                                         * validation */
-                    min_ntime: 0, // irrelevant for coinbase tx validation
                 },
                 txid_list: None,  // irrelevant for coinbase tx validation
                 validated: false, // irrelevant for coinbase tx validation
@@ -621,16 +618,11 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             JdResponse::Success {
                 prev_hash,
                 nbits,
-                min_ntime,
                 txid_list,
             } => {
                 let declared_custom_job = DeclaredCustomJob {
                     declare_mining_job: declare_mining_job_static,
-                    validation_context: ValidationContext {
-                        prev_hash,
-                        nbits,
-                        min_ntime,
-                    },
+                    validation_context: ValidationContext { prev_hash, nbits },
                     txid_list: Some(txid_list),
                     validated: true,
                 };

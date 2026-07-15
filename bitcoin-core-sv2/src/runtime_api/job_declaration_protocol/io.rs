@@ -8,7 +8,8 @@ use tokio::sync::oneshot;
 
 /// Snapshot of the template parameters used by the validator at decision time.
 ///
-/// This lets callers distinguish stale-tip races from other validation failures.
+/// Stale-chain-tip detection relies solely on [`prev_hash`](Self::prev_hash)
+/// drift; nbits is used for validation of SetCustomMiningJob.
 ///
 /// Please check <https://github.com/stratum-mining/sv2-apps/issues/364>
 /// for more details on the regression that motivated this field.
@@ -16,7 +17,6 @@ use tokio::sync::oneshot;
 pub struct ValidationContext {
     pub prev_hash: BlockHash,
     pub nbits: CompactTarget,
-    pub min_ntime: u32,
 }
 
 /// A request sent from `jd-server` to the [`BitcoinCoreSv2JDP`](super::BitcoinCoreSv2JDP) IPC
@@ -45,7 +45,6 @@ pub enum JdResponse {
     Success {
         prev_hash: BlockHash,
         nbits: CompactTarget,
-        min_ntime: u32,
         /// Txids for all transactions (excluding coinbase), in the same order as the declared
         /// wtxid_list. Enables the caller to build the txid merkle tree for validating
         /// SetCustomMiningJob.merkle_path.
