@@ -31,6 +31,9 @@ pub enum JdRequest {
         response_tx: oneshot::Sender<JdResponse>,
     },
     /// Submit a fully assembled block to Bitcoin Core (fire-and-forget).
+    ///
+    /// This request is currently stubbed as a warning-only no-op by the v30.x and v31.x
+    /// backends.
     PushSolution { block: Block },
 }
 

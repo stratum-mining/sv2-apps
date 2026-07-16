@@ -5,7 +5,7 @@
 //!
 //! The request channel covers the two base JDP flows:
 //! - `DeclareMiningJob`
-//! - `PushSolution`
+//! - `PushSolution` (currently stubbed as a warning-only no-op on v30.x and v31.x backends)
 //!
 //! Token lifecycle and higher-level protocol state remain the caller responsibility (for example,
 //! associating `AllocateMiningJobToken`/`DeclareMiningJob`/`SetCustomMiningJob` state).

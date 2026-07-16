@@ -281,6 +281,8 @@ impl BitcoinCoreSv2JDP {
     ///
     /// Not yet implemented for v30.x IPC, which does not expose `submitBlock`.
     pub(crate) async fn handle_push_solution(&self, _block: Block) {
-        // todo
+        warn!(
+            "Ignoring PushSolution for v30.x backend: Bitcoin Core v30.x IPC does not expose submitBlock"
+        );
     }
 }
