@@ -21,8 +21,8 @@ pub struct Sv1ClientInfo {
     /// Miner management IP used for matched telemetry, if discovery found one.
     #[schema(value_type = Option<String>)]
     pub management_ip: Option<IpAddr>,
-    pub authorized_worker_name: String,
-    pub user_identity: String,
+    pub sv1_username: String,
+    pub sv1_worker_name: String,
     pub target_hex: String,
     pub hashrate: Option<f32>,
     pub stable_hashrate: bool,
@@ -84,8 +84,8 @@ mod tests {
                 .expect("test IP address must be valid"),
             #[cfg(feature = "asic-rs-telemetry")]
             management_ip: None,
-            authorized_worker_name: format!("worker-{}", id),
-            user_identity: format!("miner-{}", id),
+            sv1_username: format!("account.worker-{}", id),
+            sv1_worker_name: format!("worker-{}", id),
             target_hex: "00ff".into(),
             hashrate,
             stable_hashrate: false,

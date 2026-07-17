@@ -4,7 +4,7 @@ use crate::{
         ChannelManager, AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES, AGGREGATED_TPROXY_MAX_CHANNELS,
         NON_AGGREGATED_TPROXY_MAX_CHANNELS,
     },
-    utils::{AggregatedState, AGGREGATED_CHANNEL_ID},
+    utils::{aggregated_upstream_user_identity, AggregatedState, AGGREGATED_CHANNEL_ID},
 };
 use stratum_apps::{
     stratum_core::{
@@ -181,9 +181,10 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                 let upstream_extranonce_prefix =
                     ExtranoncePrefix::from_wire(allocator.upstream_prefix().to_vec())
                         .expect("allocator upstream prefix is bounded by MAX_EXTRANONCE_LEN");
+                let upstream_user_identity = aggregated_upstream_user_identity(&user_identity);
                 let upstream_channel = ExtendedChannel::new(
                     m.channel_id,
-                    user_identity.clone(),
+                    upstream_user_identity,
                     upstream_extranonce_prefix,
                     target,
                     nominal_hashrate,
@@ -359,10 +360,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
 
         self.channel_manager_io
             .sv1_server_sender
-            .send((
-                Mining::OpenExtendedMiningChannelSuccess(success.clone()),
-                None,
-            ))
+            .send(Mining::OpenExtendedMiningChannelSuccess(success.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to send OpenExtendedMiningChannelSuccess: {:?}", e);
@@ -687,7 +685,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         for message in new_extended_mining_job_messages_sv1_server {
             self.channel_manager_io
                 .sv1_server_sender
-                .send((Mining::NewExtendedMiningJob(message), None))
+                .send(Mining::NewExtendedMiningJob(message))
                 .await
                 .map_err(|e| {
                     error!("Failed to send immediate NewExtendedMiningJob: {:?}", e);
@@ -858,7 +856,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         for message in set_new_prev_hash_messages_sv1_server {
             self.channel_manager_io
                 .sv1_server_sender
-                .send((Mining::SetNewPrevHash(message), None))
+                .send(Mining::SetNewPrevHash(message))
                 .await
                 .map_err(|e| {
                     error!("Failed to send SetNewPrevHash: {:?}", e);
@@ -870,7 +868,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         for message in new_extended_mining_job_messages_sv1_server {
             self.channel_manager_io
                 .sv1_server_sender
-                .send((Mining::NewExtendedMiningJob(message), None))
+                .send(Mining::NewExtendedMiningJob(message))
                 .await
                 .map_err(|e| {
                     error!("Failed to send NewExtendedMiningJob: {:?}", e);
@@ -1003,7 +1001,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         for message in set_target_messages_sv1_server {
             self.channel_manager_io
                 .sv1_server_sender
-                .send((Mining::SetTarget(message), None))
+                .send(Mining::SetTarget(message))
                 .await
                 .map_err(|e| {
                     error!("Failed to send SetTarget: {:?}", e);
