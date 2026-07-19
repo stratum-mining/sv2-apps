@@ -1,11 +1,11 @@
-//! Module for interacting with Bitcoin Core v31.x via Sv2 Job Declaration Protocol via capnp over
+//! Module for interacting with Bitcoin Core v32.x via Sv2 Job Declaration Protocol via capnp over
 //! UNIX socket.
 
 use super::bitcoin_capnp_types;
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
-        v31x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
+        v32x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
         v32x_v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
     },
 };
@@ -62,6 +62,7 @@ mod shared_handlers;
 pub struct BitcoinCoreSv2JDP {
     thread_map: ThreadMapIpcClient,
     thread_ipc_client: ThreadIpcClient,
+    submit_block_thread_ipc_client: ThreadIpcClient,
     mining_ipc_client: MiningIpcClient,
     current_template_ipc_client: Rc<RefCell<BlockTemplateIpcClient>>,
     cancellation_token: CancellationToken,
@@ -124,6 +125,34 @@ impl BitcoinCoreSv2JDP {
 
         info!("IPC execution thread client successfully created.");
 
+        let submit_block_thread_request = thread_map.make_thread_request();
+        let submit_block_thread_response = submit_block_thread_request
+            .send()
+            .promise
+            .await
+            .map_err(|e| {
+                let details =
+                    format!("Failed to send make_thread request for submitBlock thread: {e}");
+                error!("{}", details);
+                BitcoinCoreSv2JDPError::FailedToCreateThreadIpcClient(details)
+            })?;
+        let submit_block_thread_ipc_client: ThreadIpcClient = submit_block_thread_response
+            .get()
+            .map_err(|e| {
+                let details =
+                    format!("Failed to read make_thread response for submitBlock thread: {e}");
+                error!("{}", details);
+                BitcoinCoreSv2JDPError::FailedToCreateThreadIpcClient(details)
+            })?
+            .get_result()
+            .map_err(|e| {
+                let details = format!("Failed to get submitBlock thread IPC client: {e}");
+                error!("{}", details);
+                BitcoinCoreSv2JDPError::FailedToCreateThreadIpcClient(details)
+            })?;
+
+        info!("IPC submitBlock thread client successfully created.");
+
         let mut mining_client_request = bootstrap_client.make_mining_request();
         mining_client_request
             .get()
@@ -182,6 +211,7 @@ impl BitcoinCoreSv2JDP {
         let self_ = Self {
             thread_map,
             thread_ipc_client,
+            submit_block_thread_ipc_client,
             mining_ipc_client,
             current_template_ipc_client: Rc::new(RefCell::new(template_ipc_client)),
             cancellation_token,

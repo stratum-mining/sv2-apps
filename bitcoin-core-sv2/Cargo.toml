@@ -23,6 +23,10 @@ bitcoin_capnp_types_v30 = { package = "bitcoin-capnp-types", version = "0.1.2" }
 # Bitcoin Core v31.x IPC dependencies
 bitcoin_capnp_types_v31 = { package = "bitcoin-capnp-types", version = "0.2.1" }
 
+# todo: fetch from crates.io
+# Bitcoin Core v32.x IPC dependencies
+bitcoin_capnp_types_v32 = { package = "bitcoin-capnp-types", git = "https://github.com/2140-dev/bitcoin-capnp-types.git", rev = "6e4c99834df947df3a0f733d2a2dc6e12100e441" }
+
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before bitcoin-core-sv2 is published to crates.io
 # with the proper version of stratum-core being fetched from crates.io as well

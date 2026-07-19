@@ -1,8 +1,6 @@
-//! Handlers for Bitcoin Core v31.x Sv2 Template Distribution Protocol via capnp over UNIX socket.
+//! Handlers shared by Bitcoin Core v31.x and v32.x Sv2 Template Distribution Protocol runtimes.
 
-use crate::unix_capnp::v31x::template_distribution_protocol::{
-    BitcoinCoreSv2TDP, error::BitcoinCoreSv2TDPError,
-};
+use super::{BitcoinCoreSv2TDP, error::BitcoinCoreSv2TDPError};
 use stratum_core::{
     parsers_sv2::TemplateDistribution,
     template_distribution_sv2::{

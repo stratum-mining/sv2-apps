@@ -10,6 +10,7 @@ use std::fmt;
 pub enum BitcoinCoreVersion {
     V30X,
     V31X,
+    V32X,
 }
 
 impl BitcoinCoreVersion {
@@ -17,6 +18,7 @@ impl BitcoinCoreVersion {
         match self {
             Self::V30X => 30,
             Self::V31X => 31,
+            Self::V32X => 32,
         }
     }
 }
@@ -28,6 +30,7 @@ impl TryFrom<u8> for BitcoinCoreVersion {
         match value {
             30 => Ok(Self::V30X),
             31 => Ok(Self::V31X),
+            32 => Ok(Self::V32X),
             _ => Err(value),
         }
     }

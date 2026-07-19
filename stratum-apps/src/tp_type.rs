@@ -25,7 +25,7 @@ where
     let major = <u8 as serde::Deserialize>::deserialize(deserializer)?;
     BitcoinCoreVersion::try_from(major).map_err(|unsupported| {
         serde::de::Error::custom(format!(
-            "unsupported Bitcoin Core IPC version: {unsupported}. expected 30 or 31"
+            "unsupported Bitcoin Core IPC version: {unsupported}. expected 30, 31, or 32"
         ))
     })
 }
@@ -142,7 +142,7 @@ mod tests {
 
     #[cfg(feature = "bitcoin-core-sv2")]
     #[test]
-    fn bitcoin_core_version_accepts_30_and_31() {
+    fn bitcoin_core_version_accepts_30_31_and_32() {
         assert!(matches!(
             BitcoinCoreVersion::try_from(30),
             Ok(BitcoinCoreVersion::V30X)
@@ -151,12 +151,16 @@ mod tests {
             BitcoinCoreVersion::try_from(31),
             Ok(BitcoinCoreVersion::V31X)
         ));
+        assert!(matches!(
+            BitcoinCoreVersion::try_from(32),
+            Ok(BitcoinCoreVersion::V32X)
+        ));
     }
 
     #[cfg(feature = "bitcoin-core-sv2")]
     #[test]
     fn bitcoin_core_version_rejects_unsupported_values() {
         assert!(BitcoinCoreVersion::try_from(29).is_err());
-        assert!(BitcoinCoreVersion::try_from(32).is_err());
+        assert!(BitcoinCoreVersion::try_from(33).is_err());
     }
 }

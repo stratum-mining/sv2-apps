@@ -16,6 +16,12 @@ use crate::utils::{fs_utils, http, tarball};
 const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
+const BITCOIN_CORE_V32X: &str = "32.0";
+// TEMPORARY: keep BITCOIN_CORE_V32_BINARY_ENV / BITCOIN_CORE_V32_BINARY_DEFAULT only
+// while v32 tests depend on a local Bitcoin Core build path. Remove once v32 follows the
+// standard binary resolution flow used by other versions.
+const BITCOIN_CORE_V32_BINARY_ENV: &str = "BITCOIN_CORE_V32_BINARY";
+const BITCOIN_CORE_V32_BINARY_DEFAULT: &str = "/Users/plebhash/develop/bitcoin/build/bin/bitcoin";
 /// Allow static signet fixtures to leave IBD without freezing Bitcoin Core's
 /// clock, so mined blocks still use wall-clock timestamps.
 ///
@@ -58,13 +64,36 @@ fn get_bitcoin_core_filename(os: &str, arch: &str, bitcoin_core_version: &str) -
     }
 }
 
-pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V31X;
+pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V32X;
 
 fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
+        BitcoinCoreVersion::V32X => BITCOIN_CORE_V32X,
     }
+}
+
+fn resolve_v32_node_binary() -> PathBuf {
+    let configured_path = env::var(BITCOIN_CORE_V32_BINARY_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(BITCOIN_CORE_V32_BINARY_DEFAULT));
+
+    if configured_path.file_name().and_then(|name| name.to_str()) == Some("bitcoin") {
+        if let Some(parent) = configured_path.parent() {
+            let bitcoin_node = parent.join("bitcoin-node");
+            if bitcoin_node.exists() {
+                return bitcoin_node;
+            }
+
+            let bitcoind = parent.join("bitcoind");
+            if bitcoind.exists() {
+                return bitcoind;
+            }
+        }
+    }
+
+    configured_path
 }
 
 /// Represents the consensus difficulty level of the network.
@@ -174,58 +203,73 @@ impl BitcoinCore {
             }
         }
 
-        // Download and setup Bitcoin Core with IPC support
-        let bitcoin_core_version = release_version(node_version);
+        // Download and setup Bitcoin Core with IPC support.
+        // During the v32 draft phase, we use a local placeholder binary until
+        // official Bitcoin Core v32 release artifacts are available.
         let os = env::consts::OS;
-        let arch = env::consts::ARCH;
-        let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
-        let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
-        let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
-        let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
-
-        if !bitcoin_node_bin.exists() {
-            let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
-                Ok(path) => tarball::read_from_file(&path),
-                Err(_) => {
-                    warn!(
-                        "Downloading Bitcoin Core {} for the testing session. This could take a while...",
-                        bitcoin_core_version
-                    );
-                    let download_endpoint = env::var("BITCOIN_CORE_DOWNLOAD_ENDPOINT")
-                        .unwrap_or_else(|_| {
-                            format!(
-                                "https://bitcoincore.org/bin/bitcoin-core-{bitcoin_core_version}"
-                            )
-                        });
-                    let url = format!("{download_endpoint}/{bitcoin_filename}");
-                    http::make_get_request(&url, 5)
-                }
-            };
-
-            if let Some(parent) = bitcoin_home.parent() {
-                create_dir_all(parent).unwrap();
-            }
-
-            tarball::unpack(&tarball_bytes, &bin_dir);
-
+        let bitcoin_node_bin = if node_version == BitcoinCoreVersion::V32X {
+            let binary = resolve_v32_node_binary();
             assert!(
-                bitcoin_node_bin.exists(),
-                "Bitcoin Core node binary not found after unpack in {}",
-                bitcoin_home.display()
+                binary.exists(),
+                "Bitcoin Core v32 placeholder binary not found at {}. Set {} to override.",
+                binary.display(),
+                BITCOIN_CORE_V32_BINARY_ENV,
             );
+            binary
+        } else {
+            let bitcoin_core_version = release_version(node_version);
+            let arch = env::consts::ARCH;
+            let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
+            let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
+            let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
+            let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
 
-            // Sign the binaries on macOS
-            if os == "macos" {
-                for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
-                    std::process::Command::new("codesign")
-                        .arg("--sign")
-                        .arg("-")
-                        .arg(bin)
-                        .output()
-                        .expect("Failed to sign Bitcoin Core binary");
+            if !bitcoin_node_bin.exists() {
+                let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
+                    Ok(path) => tarball::read_from_file(&path),
+                    Err(_) => {
+                        warn!(
+                            "Downloading Bitcoin Core {} for the testing session. This could take a while...",
+                            bitcoin_core_version
+                        );
+                        let download_endpoint = env::var("BITCOIN_CORE_DOWNLOAD_ENDPOINT")
+                            .unwrap_or_else(|_| {
+                                format!(
+                                    "https://bitcoincore.org/bin/bitcoin-core-{bitcoin_core_version}"
+                                )
+                            });
+                        let url = format!("{download_endpoint}/{bitcoin_filename}");
+                        http::make_get_request(&url, 5)
+                    }
+                };
+
+                if let Some(parent) = bitcoin_home.parent() {
+                    create_dir_all(parent).unwrap();
+                }
+
+                tarball::unpack(&tarball_bytes, &bin_dir);
+
+                assert!(
+                    bitcoin_node_bin.exists(),
+                    "Bitcoin Core node binary not found after unpack in {}",
+                    bitcoin_home.display()
+                );
+
+                // Sign the binaries on macOS
+                if os == "macos" {
+                    for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
+                        std::process::Command::new("codesign")
+                            .arg("--sign")
+                            .arg("-")
+                            .arg(bin)
+                            .output()
+                            .expect("Failed to sign Bitcoin Core binary");
+                    }
                 }
             }
-        }
+
+            bitcoin_node_bin
+        };
 
         // Add IPC and basic args
         conf.args.extend(vec![

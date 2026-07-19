@@ -41,6 +41,11 @@ async fn tdp_io_integration_v31x() {
     assert_tdp_io_integration(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+async fn tdp_io_integration_v32x() {
+    assert_tdp_io_integration(BitcoinCoreVersion::V32X).await;
+}
+
 async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
     start_tracing();
 
