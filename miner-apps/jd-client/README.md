@@ -77,7 +77,7 @@ The configuration file contains the following information:
      - `address` - The Template Provider's network address
      - `public_key` - (Optional) The TP's authority public key for connection verification
    - `[template_provider_type.BitcoinCoreIpc]` - Connects directly to Bitcoin Core via IPC, with the following parameters:
-     - `version` - Required Bitcoin Core IPC schema major version (`30` or `31`, any other value fails startup)
+     - `version` - Required Bitcoin Core IPC schema major version (`30`, `31`, or `32`, any other value fails startup)
      - `network` - Bitcoin network (mainnet, testnet4, signet, regtest) for determining socket path
      - `data_dir` - (Optional) Custom Bitcoin data directory. Uses OS default if not set
      - `fee_threshold` - Minimum fee threshold to trigger new templates

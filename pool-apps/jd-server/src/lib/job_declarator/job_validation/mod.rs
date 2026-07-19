@@ -36,6 +36,9 @@ pub trait JobValidationEngine: Send + Sync {
     ) -> DeclareMiningJobResult;
 
     /// Submits a mining solution to the backend.
+    ///
+    /// Implementations should treat `prev_hash` and `nbits` as exact-match fields, and may allow
+    /// version rolling by validating only non-rollable bits of `PushSolution.version`.
     async fn handle_push_solution(
         &self,
         downstream_id: DownstreamId,

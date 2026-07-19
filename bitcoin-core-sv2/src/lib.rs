@@ -21,6 +21,7 @@
 //!   protocols.
 //! - [`unix_capnp::v30x`] contains the Bitcoin Core v30.x IPC implementation.
 //! - [`unix_capnp::v31x`] contains the Bitcoin Core v31.x IPC implementation.
+//! - [`unix_capnp::v32x`] contains the Bitcoin Core v32.x IPC implementation.
 //!
 //! ## Flavor direction
 //!

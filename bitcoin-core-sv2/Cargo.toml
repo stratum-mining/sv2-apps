@@ -16,12 +16,17 @@ tracing-subscriber = "0.3.19"
 tokio = { version = "1.44.1", features = ["full"] }
 tokio-util = { version = "0.7.10", features = ["codec", "compat"] }
 async-channel = "1.5.1"
+serde_json = "1.0"
 
 # Bitcoin Core v30.x IPC dependencies
 bitcoin_capnp_types_v30 = { package = "bitcoin-capnp-types", version = "0.1.2" }
 
 # Bitcoin Core v31.x IPC dependencies
 bitcoin_capnp_types_v31 = { package = "bitcoin-capnp-types", version = "0.2.1" }
+
+# todo: fetch from crates.io
+# Bitcoin Core v32.x IPC dependencies
+bitcoin_capnp_types_v32 = { package = "bitcoin-capnp-types", git = "https://github.com/2140-dev/bitcoin-capnp-types.git", rev = "6e4c99834df947df3a0f733d2a2dc6e12100e441" }
 
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before bitcoin-core-sv2 is published to crates.io

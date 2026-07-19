@@ -27,6 +27,13 @@ example:
 
 Downstream applications should integrate through `bitcoin_core_sv2::runtime_api`, choose the Bitcoin Core major version at runtime, and build runtimes via `template_distribution_protocol::new` / `job_declaration_protocol::new`.
 
+### JDP transaction lookup behavior by Bitcoin Core version
+
+`DeclareMiningJob` handling differs by selected runtime:
+
+- v30.x / v31.x: transaction availability is resolved from the local mempool mirror and missing wtxids trigger `MissingTransactions`.
+- v32.x: transaction lookup uses Bitcoin Core IPC `getTransactionsByWitnessID` directly. No local mempool mirror is maintained for transaction data.
+
 ## Requirements
 
 In order to build this, crate you need `capnproto` on your system.

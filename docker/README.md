@@ -74,8 +74,8 @@ In the same directory as `docker-compose.yml`, create a `docker_env` file:
 
 ```
 BITCOIN_SOCKET_PATH=/absolute/path/to/your/node.sock
-POOL_BITCOIN_CORE_IPC_VERSION=31
-JDC_BITCOIN_CORE_IPC_VERSION=31
+POOL_BITCOIN_CORE_IPC_VERSION=32
+JDC_BITCOIN_CORE_IPC_VERSION=32
 ```
 Make sure the path is correct, if there are spaces (like `Application Support`), keep the value unquoted.
 

@@ -1,4 +1,4 @@
-// Shared monitor implementation included by v30.x and v31.x TDP modules.
+// Shared monitor implementation included by v30.x, v31.x, and v32.x TDP modules.
 
 use super::{BitcoinCoreSv2TDP, bitcoin_capnp_types::capnp};
 use stratum_core::parsers_sv2::TemplateDistribution;

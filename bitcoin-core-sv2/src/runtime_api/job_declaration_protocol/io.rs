@@ -1,14 +1,12 @@
 //! Request / response types exchanged between `jd-server` and the Bitcoin Core IPC thread.
 
-use stratum_core::{
-    bitcoin::{BlockHash, CompactTarget, Transaction, Txid, Wtxid, block::Version},
-    job_declaration_sv2::PushSolution,
-};
+use stratum_core::bitcoin::{Block, BlockHash, CompactTarget, Transaction, Wtxid, block::Version};
 use tokio::sync::oneshot;
 
 /// Snapshot of the template parameters used by the validator at decision time.
 ///
-/// This lets callers distinguish stale-tip races from other validation failures.
+/// Stale-chain-tip detection relies solely on [`prev_hash`](Self::prev_hash)
+/// drift; nbits is used for validation of SetCustomMiningJob.
 ///
 /// Please check <https://github.com/stratum-mining/sv2-apps/issues/364>
 /// for more details on the regression that motivated this field.
@@ -16,7 +14,6 @@ use tokio::sync::oneshot;
 pub struct ValidationContext {
     pub prev_hash: BlockHash,
     pub nbits: CompactTarget,
-    pub min_ntime: u32,
 }
 
 /// A request sent from `jd-server` to the [`BitcoinCoreSv2JDP`](super::BitcoinCoreSv2JDP) IPC
@@ -33,10 +30,11 @@ pub enum JdRequest {
         missing_txs: Vec<Transaction>,
         response_tx: oneshot::Sender<JdResponse>,
     },
-    /// Submit a mining solution to Bitcoin Core (fire-and-forget).
-    PushSolution {
-        push_solution: PushSolution<'static>,
-    },
+    /// Submit a fully assembled block to Bitcoin Core (fire-and-forget).
+    ///
+    /// This request is currently stubbed as a warning-only no-op by the v30.x and v31.x
+    /// backends.
+    PushSolution { block: Block },
 }
 
 /// The result of trying to handle a DeclareMiningJob request.
@@ -45,11 +43,11 @@ pub enum JdResponse {
     Success {
         prev_hash: BlockHash,
         nbits: CompactTarget,
-        min_ntime: u32,
-        /// Txids for all transactions (excluding coinbase), in the same order as the declared
-        /// wtxid_list. Enables the caller to build the txid merkle tree for validating
-        /// SetCustomMiningJob.merkle_path.
-        txid_list: Vec<Txid>,
+        /// Full non-coinbase transaction list in declaration order.
+        ///
+        /// This is used by `jd-server` both to reconstruct solved blocks when handling
+        /// `PushSolution` and to derive txids for merkle-root/merkle-path validation.
+        txdata: Vec<Transaction>,
     },
     Error {
         error_code: &'static str,
