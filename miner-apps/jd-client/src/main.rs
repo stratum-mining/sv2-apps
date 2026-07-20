@@ -25,5 +25,7 @@ async fn inner_main() {
     });
 
     init_logging(jdc_config.log_file());
-    JobDeclaratorClient::new(jdc_config).start().await;
+    if JobDeclaratorClient::new(jdc_config).start().await.is_err() {
+        std::process::exit(1);
+    }
 }
