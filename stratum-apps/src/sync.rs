@@ -246,6 +246,14 @@ impl<K: Eq + Hash + Clone, V> SharedMap<K, V> {
         self.0.remove(key)
     }
 
+    /// Remove a key only when the predicate matches the current entry.
+    pub fn remove_if<F>(&self, key: &K, f: F) -> Option<(K, V)>
+    where
+        F: FnOnce(&K, &V) -> bool,
+    {
+        self.0.remove_if(key, f)
+    }
+
     /// Check if a key exists.
     pub fn contains_key(&self, key: &K) -> bool {
         self.0.contains_key(key)
