@@ -33,12 +33,18 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
         // Disconnect: downstream may have been cleaned up between message dispatch and handling.
-        let negotiated_extensions = self.downstream_clients.get(&client_id).ok_or_else(|| {
-            JDSError::disconnect(error::JDSErrorKind::ClientNotFound(client_id), client_id)
-        })?;
-        Ok(negotiated_extensions
-            .negotiated_extensions
-            .super_safe_lock(|extensions| extensions.clone()))
+        let Some(negotiated_extensions) = self.downstream_clients.with(&client_id, |downstream| {
+            downstream
+                .negotiated_extensions
+                .get()
+                .map_err(JDSError::shutdown)
+        }) else {
+            return Err(JDSError::disconnect(
+                error::JDSErrorKind::ClientNotFound(client_id),
+                client_id,
+            ));
+        };
+        negotiated_extensions
     }
 
     async fn handle_allocate_mining_job_token(
@@ -79,14 +85,13 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         let client_sender = self
             .job_declarator_io
             .downstream_client_senders
-            .get(&client_id)
+            .with(&client_id, |sender| sender.clone())
             .ok_or_else(|| {
                 error::JDSError::disconnect(
                     error::JDSErrorKind::ClientSenderNotFound(client_id),
                     client_id,
                 )
-            })?
-            .clone();
+            })?;
         client_sender
             .send((
                 JobDeclaration::AllocateMiningJobTokenSuccess(allocate_mining_job_token_success),
@@ -112,14 +117,13 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         let client_sender = self
             .job_declarator_io
             .downstream_client_senders
-            .get(&client_id)
+            .with(&client_id, |sender| sender.clone())
             .ok_or_else(|| {
                 error::JDSError::disconnect(
                     error::JDSErrorKind::ClientSenderNotFound(client_id),
                     client_id,
                 )
-            })?
-            .clone();
+            })?;
 
         // can we parse `DeclareMiningJob.mining_job_token` into a `JdToken`?
         let token: JdToken = match msg.mining_job_token.try_as_array::<8>() {
@@ -133,7 +137,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                         .to_vec()
                         .try_into()
                         .expect("error code must be valid B0_255"),
-                    error_details: Vec::new().try_into().unwrap(),
+                    error_details: Vec::new().try_into().map_err(error::JDSError::shutdown)?,
                 };
 
                 client_sender
@@ -155,7 +159,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                     .to_vec()
                     .try_into()
                     .expect("error code must be valid B0_255"),
-                error_details: Vec::new().try_into().unwrap(),
+                error_details: Vec::new().try_into().map_err(error::JDSError::shutdown)?,
             };
             client_sender
                 .send((JobDeclaration::DeclareMiningJobError(error_message), None))
@@ -223,12 +227,18 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
             // ProvideMissingTransactions
             DeclareMiningJobResult::MissingTransactions(missing_wtxids) => {
                 // Disconnect: downstream may have disconnected between dispatch and handling.
-                let downstream = self.downstream_clients.get(&client_id).ok_or_else(|| {
-                    JDSError::disconnect(error::JDSErrorKind::ClientNotFound(client_id), client_id)
-                })?;
-                downstream
-                    .pending_declare_mining_jobs
-                    .insert(msg.request_id, (Instant::now(), msg.as_static()));
+                self.downstream_clients
+                    .with(&client_id, |downstream| {
+                        downstream
+                            .pending_declare_mining_jobs
+                            .insert(msg.request_id, (Instant::now(), msg.as_static()));
+                    })
+                    .ok_or_else(|| {
+                        JDSError::disconnect(
+                            error::JDSErrorKind::ClientNotFound(client_id),
+                            client_id,
+                        )
+                    })?;
 
                 // Convert missing Wtxids to u16 indices by finding their positions in
                 // DeclareMiningJob.wtxid_list
@@ -277,25 +287,25 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         let client_sender = self
             .job_declarator_io
             .downstream_client_senders
-            .get(&client_id)
+            .with(&client_id, |sender| sender.clone())
             .ok_or_else(|| {
                 error::JDSError::disconnect(
                     error::JDSErrorKind::ClientSenderNotFound(client_id),
                     client_id,
                 )
-            })?
-            .clone();
+            })?;
 
-        // Scope downstream guard so it's dropped before later awaits.
-        let maybe_pending_declare_mining_job = {
-            // Disconnect: downstream may have disconnected between dispatch and handling.
-            let downstream = self.downstream_clients.get(&client_id).ok_or_else(|| {
+        // Disconnect: downstream may have disconnected between dispatch and handling.
+        let maybe_pending_declare_mining_job = self
+            .downstream_clients
+            .with(&client_id, |downstream| {
+                downstream
+                    .pending_declare_mining_jobs
+                    .remove(&msg.request_id)
+            })
+            .ok_or_else(|| {
                 JDSError::disconnect(error::JDSErrorKind::ClientNotFound(client_id), client_id)
             })?;
-            downstream
-                .pending_declare_mining_jobs
-                .remove(&msg.request_id)
-        };
 
         let pending_declare_mining_job = match maybe_pending_declare_mining_job {
             Some((_, (_, declare_mining_job))) => declare_mining_job,

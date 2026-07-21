@@ -10,7 +10,6 @@ use crate::{
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -54,7 +53,7 @@ use stratum_apps::{
             ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
         },
     },
-    sync::SharedMap,
+    sync::{SharedLock, SharedMap},
     tp_type::BitcoinNetwork,
     utils::types::{DownstreamId, JdToken, RequestId},
 };
@@ -284,7 +283,7 @@ pub struct BitcoinCoreIPCEngine {
     request_sender: async_channel::Sender<JdRequest>,
     downstream_states: SharedMap<DownstreamId, DownstreamState>,
     cancellation_token: CancellationToken,
-    jdp_thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    jdp_thread_handle: SharedLock<Option<JoinHandle<()>>>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -451,7 +450,7 @@ impl BitcoinCoreIPCEngine {
             request_sender,
             downstream_states,
             cancellation_token,
-            jdp_thread_handle: Arc::new(Mutex::new(Some(jdp_thread_handle))),
+            jdp_thread_handle: SharedLock::new(Some(jdp_thread_handle)),
         })
     }
 }
@@ -470,13 +469,19 @@ fn validation_context_drifted(
 impl JobValidationEngine for BitcoinCoreIPCEngine {
     fn shutdown(&self) {
         self.cancellation_token.cancel();
-        if let Ok(mut handle_guard) = self.jdp_thread_handle.lock() {
-            if let Some(handle) = handle_guard.take() {
-                if let Err(e) = handle.join() {
-                    tracing::warn!("BitcoinCoreSv2JDP thread join failed during shutdown: {e:?}");
+        self.jdp_thread_handle
+            .with(|handle| {
+                if let Some(handle) = handle.take() {
+                    if let Err(e) = handle.join() {
+                        tracing::warn!(
+                            "BitcoinCoreSv2JDP thread join failed during shutdown: {e:?}"
+                        );
+                    }
                 }
-            }
-        }
+            })
+            .unwrap_or_else(|_| {
+                tracing::warn!("BitcoinCoreSv2JDP thread handle lock poisoned during shutdown");
+            });
     }
 
     fn cleanup_downstream(&self, downstream_id: DownstreamId) {
