@@ -12,7 +12,7 @@
 //! The `Owner` type parameter is a zero-sized marker (e.g. [`JobDeclarator`], [`Downstream`])
 //! that controls which constructors (`shutdown`, `disconnect`) are available at the type level.
 
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData, sync::PoisonError};
 
 use stratum_apps::{
     stratum_core::{
@@ -119,6 +119,13 @@ pub enum JDSErrorKind {
     UnsupportedConnectionFlags,
     OneshotRecv(tokio::sync::oneshot::error::RecvError),
     InvalidConfig(String),
+    PoisonLock,
+}
+
+impl<T> From<PoisonError<T>> for JDSErrorKind {
+    fn from(_: PoisonError<T>) -> Self {
+        JDSErrorKind::PoisonLock
+    }
 }
 
 impl<Owner> From<JDSError<Owner>> for JDSErrorKind {
