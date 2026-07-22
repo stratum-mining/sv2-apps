@@ -141,6 +141,8 @@ JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
 # List fields (supported_extensions, required_extensions) are comma-separated.
 # A lone value is read as a 1-element list:
 JDC__SUPPORTED_EXTENSIONS=2,3
+# Nested list fields work the same way (see Miner Telemetry above):
+JDC__MINER_TELEMETRY__CIDRS=192.168.1.0/24
 ```
 
 #### Upstreams via the environment

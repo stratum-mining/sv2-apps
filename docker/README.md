@@ -116,8 +116,8 @@ such as its management IP, firmware, hashrate, power, temperature, and uptime.
 
 Set the subnet variable for the app that your miners connect to:
 
-* Use `JDC_MINER_TELEMETRY_CIDR` when SV2 ASIC miners connect directly to JDC.
-* Use `TPROXY_MINER_TELEMETRY_CIDR` when SV1 ASIC miners connect to Translator Proxy.
+* Use `JDC__MINER_TELEMETRY__CIDRS` when SV2 ASIC miners connect directly to JDC.
+* Use `TPROXY__MINER_TELEMETRY__CIDRS` when SV1 ASIC miners connect to Translator Proxy.
 
 Use the LAN subnet that contains the miners' web/API addresses. For example, if your Bitaxe web
 UI is at `192.168.1.63`, use `192.168.1.0/24`. If SV1 miners connect through Translator Proxy and
@@ -162,13 +162,14 @@ If something behaves weirdly, 99% of the time your `docker_env` is the culprit.
 
 * Port **34265**
 * Also mounts the same `node.sock` path from `docker_env`
-* `JDC_MINER_TELEMETRY_CIDR` is the LAN subnet containing directly connected SV2 miners' web/API addresses
+* `JDC__MINER_TELEMETRY__CIDRS` is the LAN subnet containing directly connected SV2 miners' web/API addresses
 
 ### **tproxy_sv2**
 
 * Port **34255**
 * Upstream target (JDC or pool) is set with `TPROXY__UPSTREAM_<NAME>__*` and defaults to
   `jd_client_sv2`. For the `pool_and_miner_apps_no_jd` profile, point it at `pool_sv2:3333` instead.
+* `TPROXY__MINER_TELEMETRY__CIDRS` is the LAN subnet containing connected SV1 miners' web/API addresses
 * `TPROXY__VERIFY_PAYOUT=false` is the standard pool-mining default; set it to `true` only for
   solo/donation identities where the upstream `user_identity` encodes the expected on-chain payout
 

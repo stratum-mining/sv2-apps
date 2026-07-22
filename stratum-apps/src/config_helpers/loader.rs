@@ -14,10 +14,10 @@ use serde::de::DeserializeOwned;
 /// variants are just another path segment, matched case-insensitively, e.g.
 /// `POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet`.
 ///
-/// Fields named in `list_keys` (lowercase `snake_case`) are parsed as
-/// comma-separated lists, e.g. `POOL__SUPPORTED_EXTENSIONS=1,2,3`. A single
-/// value without a separator, e.g. `POOL__SUPPORTED_EXTENSIONS=2`, is a
-/// 1-element list.
+/// Fields named in `list_keys` (lowercase `snake_case`, nested paths joined
+/// with `.`, e.g. `miner_telemetry.cidrs`) are parsed as comma-separated
+/// lists, e.g. `POOL__SUPPORTED_EXTENSIONS=1,2,3`. A single value without a
+/// separator, e.g. `POOL__SUPPORTED_EXTENSIONS=2`, is a 1-element list.
 ///
 /// Upstream arrays cannot be expressed with `__` paths, so they use the
 /// dedicated form `<PREFIX>__UPSTREAM_<NAME>__<FIELD>`. `<NAME>` groups one
@@ -60,7 +60,7 @@ pub fn load_config<T: DeserializeOwned>(
     // the latter reads a separator-less value (`KEY=2`) as a scalar instead of
     // a 1-element list.
     for key in list_keys {
-        let wanted = format!("{prefix_marker}{}", key.to_uppercase());
+        let wanted = format!("{prefix_marker}{}", key.to_uppercase().replace('.', "__"));
         let Some((_, raw)) = std::env::vars().find(|(k, _)| k.to_uppercase() == wanted) else {
             continue;
         };
@@ -253,6 +253,35 @@ mod tests {
         assert_eq!(cfg.supported_extensions, vec![2]);
 
         env::remove_var("SINGLE__SUPPORTED_EXTENSIONS");
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct NestedListConfig {
+        #[serde(default)]
+        telemetry: Telemetry,
+    }
+
+    #[derive(Debug, Deserialize, Default)]
+    struct Telemetry {
+        #[serde(default)]
+        cidrs: Vec<String>,
+    }
+
+    #[test]
+    fn nested_list_key_parses_from_env() {
+        let missing = env::temp_dir().join("loader-test-nested-list.toml");
+
+        env::set_var("NESTEDLIST__TELEMETRY__CIDRS", "192.168.1.0/24");
+
+        let cfg: NestedListConfig = load_config(
+            missing.to_str().unwrap(),
+            "NESTEDLIST",
+            &["telemetry.cidrs"],
+        )
+        .expect("load config");
+        assert_eq!(cfg.telemetry.cidrs, vec!["192.168.1.0/24"]);
+
+        env::remove_var("NESTEDLIST__TELEMETRY__CIDRS");
     }
 
     #[test]

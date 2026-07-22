@@ -36,7 +36,11 @@ pub fn process_cli_args() -> Result<TranslatorConfig, TproxyErrorKind> {
     let mut config: TranslatorConfig = load_config(
         &args.config_path,
         "TPROXY",
-        &["supported_extensions", "required_extensions"],
+        &[
+            "supported_extensions",
+            "required_extensions",
+            "miner_telemetry.cidrs",
+        ],
     )?;
 
     config.set_log_dir(args.log_file);

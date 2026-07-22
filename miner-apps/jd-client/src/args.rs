@@ -29,7 +29,11 @@ pub fn process_cli_args() -> Result<JobDeclaratorClientConfig, JDCErrorKind> {
     let mut config: JobDeclaratorClientConfig = load_config(
         &args.config_path,
         "JDC",
-        &["supported_extensions", "required_extensions"],
+        &[
+            "supported_extensions",
+            "required_extensions",
+            "miner_telemetry.cidrs",
+        ],
     )?;
 
     config.set_log_file(args.log_file);

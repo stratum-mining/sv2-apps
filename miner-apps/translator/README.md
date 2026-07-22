@@ -157,6 +157,8 @@ TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__SHARES_PER_MINUTE=6.0
 # List fields (supported_extensions, required_extensions) are comma-separated.
 # A lone value is read as a 1-element list:
 TPROXY__SUPPORTED_EXTENSIONS=2,3
+# Nested list fields work the same way (see Miner Telemetry above):
+TPROXY__MINER_TELEMETRY__CIDRS=192.168.1.0/24
 ```
 
 #### Upstreams via the environment
