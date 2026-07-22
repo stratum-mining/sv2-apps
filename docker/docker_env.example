@@ -81,9 +81,9 @@ TPROXY__VERIFY_PAYOUT=false
 TPROXY__AGGREGATE_CHANNELS=false
 TPROXY__MONITORING_ADDRESS=0.0.0.0:9092
 TPROXY__MONITORING_CACHE_REFRESH_SECS=15
-# Protocol extensions default to empty. A single numeric extension cannot be set
-# here (a lone number is read as a scalar, not a 1-element list); list two or more
-# values like TPROXY__SUPPORTED_EXTENSIONS=2,3 if you need them.
+# Protocol extensions default to empty. Set them as a comma-separated list like
+# TPROXY__SUPPORTED_EXTENSIONS=2,3 if you need them; a lone value like
+# TPROXY__SUPPORTED_EXTENSIONS=2 is read as a 1-element list.
 # Downstream difficulty params
 TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__MIN_INDIVIDUAL_MINER_HASHRATE=10000000000000.0
 TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__SHARES_PER_MINUTE=6.0

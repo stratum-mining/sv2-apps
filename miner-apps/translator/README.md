@@ -155,8 +155,7 @@ TPROXY__DOWNSTREAM_PORT=34255
 # Nested fields join each level with `__`:
 TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__SHARES_PER_MINUTE=6.0
 # List fields (supported_extensions, required_extensions) are comma-separated.
-# A lone numeric value is read as a scalar, not a 1-element list, so list at
-# least two values:
+# A lone value is read as a 1-element list:
 TPROXY__SUPPORTED_EXTENSIONS=2,3
 ```
 

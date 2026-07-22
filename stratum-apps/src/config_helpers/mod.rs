@@ -13,6 +13,7 @@ pub use coinbase_output::{CoinbaseRewardScript, Error as CoinbaseOutputError};
 pub mod logging;
 
 mod loader;
+pub use ext_config::ConfigError;
 pub use loader::load_config;
 
 mod toml;

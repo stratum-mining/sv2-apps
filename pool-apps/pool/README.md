@@ -92,8 +92,7 @@ POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
 POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
 POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
 # List fields (supported_extensions, required_extensions) are comma-separated.
-# A lone numeric value is read as a scalar, not a 1-element list, so list at
-# least two values:
+# A lone value is read as a 1-element list:
 POOL__SUPPORTED_EXTENSIONS=2,3
 ```
 

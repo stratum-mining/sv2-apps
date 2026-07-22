@@ -16,47 +16,62 @@ use serde::de::DeserializeOwned;
 ///
 /// Fields named in `list_keys` (lowercase `snake_case`) are parsed as
 /// comma-separated lists, e.g. `POOL__SUPPORTED_EXTENSIONS=1,2,3`. A single
-/// numeric value is read as a scalar, not a 1-element list, so list at least
-/// two values.
+/// value without a separator, e.g. `POOL__SUPPORTED_EXTENSIONS=2`, is a
+/// 1-element list.
 ///
 /// Upstream arrays cannot be expressed with `__` paths, so they use the
 /// dedicated form `<PREFIX>__UPSTREAM_<NAME>__<FIELD>`. `<NAME>` groups one
 /// upstream's fields together and orders entries alphabetically; if any such
 /// variable is set, the resulting list replaces the file's `upstreams` array.
 pub fn load_config<T: DeserializeOwned>(
-    config_path: &str,
+    config_path: impl AsRef<Path>,
     env_prefix: &str,
     list_keys: &[&str],
 ) -> Result<T, ConfigError> {
+    let config_path = config_path.as_ref();
     let prefix_marker = format!("{}__", env_prefix.to_uppercase());
-    if !Path::new(config_path).exists()
+    if !config_path.exists()
         && !std::env::vars().any(|(key, _)| key.to_uppercase().starts_with(&prefix_marker))
     {
         return Err(ConfigError::Message(format!(
-            "no configuration found: `{config_path}` does not exist and no `{prefix_marker}*` \
+            "no configuration found: `{}` does not exist and no `{prefix_marker}*` \
              environment variables are set. Supply a TOML file (-c/--config) or set \
-             `{prefix_marker}*` environment variables"
+             `{prefix_marker}*` environment variables",
+            config_path.display()
         )));
     }
 
     // `try_parsing` lets scalar environment values (numbers and booleans) be
     // coerced into their target types instead of staying raw strings.
-    let mut environment = Environment::with_prefix(env_prefix)
+    let environment = Environment::with_prefix(env_prefix)
         .separator("__")
         .try_parsing(true);
 
-    // A list separator can only be enabled together with explicit keys;
-    // otherwise the `config` crate would turn *every* string value into a list.
-    if !list_keys.is_empty() {
-        environment = environment.list_separator(",");
-        for key in list_keys {
-            environment = environment.with_list_parse_key(key);
-        }
-    }
-
     let mut builder = Config::builder()
-        .add_source(File::new(config_path, FileFormat::Toml).required(false))
+        .add_source(
+            File::from(config_path)
+                .format(FileFormat::Toml)
+                .required(false),
+        )
         .add_source(environment);
+
+    // List-valued fields are split on `,` and applied as overrides. This is done
+    // here rather than through the `Environment` source's list support because
+    // the latter reads a separator-less value (`KEY=2`) as a scalar instead of
+    // a 1-element list.
+    for key in list_keys {
+        let wanted = format!("{prefix_marker}{}", key.to_uppercase());
+        let Some((_, raw)) = std::env::vars().find(|(k, _)| k.to_uppercase() == wanted) else {
+            continue;
+        };
+        let items: Vec<Value> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| parse_env_value(item.to_owned()))
+            .collect();
+        builder = builder.set_override(*key, Value::new(None, ValueKind::Array(items)))?;
+    }
 
     // Upstreams defined as `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` are assembled into
     // an array and applied as a single override, which replaces the file's array.
@@ -215,6 +230,29 @@ mod tests {
         ] {
             env::remove_var(var);
         }
+    }
+
+    #[test]
+    fn single_value_list_key_becomes_one_element_list() {
+        let path = write_toml(
+            "single-list",
+            r#"
+                listen_address = "0.0.0.0:1111"
+                cert_validity_sec = 3600
+                supported_extensions = [1, 2]
+                [nested]
+                port = 10
+            "#,
+        );
+
+        // A single value without a separator must become a 1-element list.
+        env::set_var("SINGLE__SUPPORTED_EXTENSIONS", "2");
+
+        let cfg: TestConfig =
+            load_config(path.to_str().unwrap(), "SINGLE", list_keys()).expect("load config");
+        assert_eq!(cfg.supported_extensions, vec![2]);
+
+        env::remove_var("SINGLE__SUPPORTED_EXTENSIONS");
     }
 
     #[test]
