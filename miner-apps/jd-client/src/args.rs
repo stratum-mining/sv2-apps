@@ -3,7 +3,6 @@ use jd_client_sv2::{config::JobDeclaratorClientConfig, error::JDCErrorKind};
 use stratum_apps::config_helpers::load_config;
 
 use std::path::PathBuf;
-use tracing::error;
 #[derive(Debug, Parser)]
 #[command(author, version, about = "JD Client", long_about = None)]
 pub struct Args {
@@ -26,14 +25,9 @@ pub struct Args {
 pub fn process_cli_args() -> Result<JobDeclaratorClientConfig, JDCErrorKind> {
     let args = Args::parse();
 
-    let config_path = args.config_path.to_str().ok_or_else(|| {
-        error!("Invalid configuration path.");
-        JDCErrorKind::BadCliArgs
-    })?;
-
     // Env vars prefixed `JDC__` override values from the optional TOML file.
     let mut config: JobDeclaratorClientConfig = load_config(
-        config_path,
+        &args.config_path,
         "JDC",
         &["supported_extensions", "required_extensions"],
     )?;

@@ -5,7 +5,6 @@
 use clap::Parser;
 use std::path::PathBuf;
 use stratum_apps::config_helpers::load_config;
-use tracing::error;
 use translator_sv2::{config::TranslatorConfig, error::TproxyErrorKind};
 
 /// Holds the parsed CLI arguments.
@@ -33,14 +32,9 @@ pub fn process_cli_args() -> Result<TranslatorConfig, TproxyErrorKind> {
     // Parse CLI arguments
     let args = Args::parse();
 
-    let config_path = args.config_path.to_str().ok_or_else(|| {
-        error!("Invalid configuration path.");
-        TproxyErrorKind::BadCliArgs
-    })?;
-
     // Env vars prefixed `TPROXY__` override values from the optional TOML file.
     let mut config: TranslatorConfig = load_config(
-        config_path,
+        &args.config_path,
         "TPROXY",
         &["supported_extensions", "required_extensions"],
     )?;
