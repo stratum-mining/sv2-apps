@@ -204,6 +204,8 @@ pub enum PoolErrorKind {
     Jds(jd_server_sv2::error::JDSErrorKind),
     /// Timeout error
     Timeout,
+    /// Error deserializing the configuration.
+    BadConfigDeserialize(stratum_apps::config_helpers::ConfigError),
 }
 
 impl std::fmt::Display for PoolErrorKind {
@@ -297,6 +299,7 @@ impl std::fmt::Display for PoolErrorKind {
             PayoutModeError(e) => write!(f, "Unable to parse the PayoutMode: {e}"),
             Jds(e) => write!(f, "JDS error: {e:?}"),
             Timeout => write!(f, "Time out error"),
+            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
         }
     }
 }
@@ -304,6 +307,12 @@ impl std::fmt::Display for PoolErrorKind {
 impl From<std::io::Error> for PoolErrorKind {
     fn from(e: std::io::Error) -> PoolErrorKind {
         PoolErrorKind::Io(e)
+    }
+}
+
+impl From<stratum_apps::config_helpers::ConfigError> for PoolErrorKind {
+    fn from(e: stratum_apps::config_helpers::ConfigError) -> PoolErrorKind {
+        PoolErrorKind::BadConfigDeserialize(e)
     }
 }
 

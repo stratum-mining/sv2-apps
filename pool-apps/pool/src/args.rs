@@ -3,7 +3,7 @@
 //! Defines the `Args` struct and a function to process CLI arguments into a PoolConfig.
 
 use clap::Parser;
-use pool_sv2::config::PoolConfig;
+use pool_sv2::{config::PoolConfig, error::PoolErrorKind};
 use std::path::PathBuf;
 use stratum_apps::config_helpers::load_config;
 
@@ -28,22 +28,18 @@ pub struct Args {
 
 #[cfg_attr(not(test), hotpath::measure)]
 /// Parses CLI arguments and loads the PoolConfig from the specified file.
-pub fn process_cli_args() -> PoolConfig {
+#[allow(clippy::result_large_err)]
+pub fn process_cli_args() -> Result<PoolConfig, PoolErrorKind> {
     let args = Args::parse();
-    let config_path = args.config_path.to_str().expect("Invalid config path");
 
     // Env vars prefixed `POOL__` override values from the optional TOML file.
     let mut config: PoolConfig = load_config(
-        config_path,
+        &args.config_path,
         "POOL",
         &["supported_extensions", "required_extensions"],
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("Failed to load config: {e}");
-        std::process::exit(1);
-    });
+    )?;
 
     config.set_log_dir(args.log_file);
 
-    config
+    Ok(config)
 }
