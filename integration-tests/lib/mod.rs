@@ -451,7 +451,7 @@ pub async fn start_sv2_translator_with_user_identities(
     let translator_v2 = translator_sv2::TranslatorSv2::new(config);
     let clone_translator_v2 = translator_v2.clone();
     tokio::spawn(async move {
-        clone_translator_v2.start().await;
+        let _ = clone_translator_v2.start().await;
     });
     (translator_v2, listening_address, monitoring_address)
 }
@@ -528,7 +528,7 @@ pub async fn start_sv2_translator_with_user_identity(
     let translator_v2 = translator_sv2::TranslatorSv2::new(config);
     let clone_translator_v2 = translator_v2.clone();
     tokio::spawn(async move {
-        clone_translator_v2.start().await;
+        let _ = clone_translator_v2.start().await;
     });
     (translator_v2, listening_address, monitoring_address)
 }

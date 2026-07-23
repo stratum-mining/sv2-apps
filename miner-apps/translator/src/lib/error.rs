@@ -61,6 +61,12 @@ pub enum Action {
     Shutdown,
 }
 
+impl Action {
+    pub fn is_shutdown(self) -> bool {
+        matches!(self, Self::Shutdown)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopControl {
     Continue,
