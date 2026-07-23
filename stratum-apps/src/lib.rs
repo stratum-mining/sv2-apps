@@ -91,5 +91,9 @@ pub mod fallback_coordinator;
 /// Share synchronous primitives
 pub mod sync;
 
+/// Variable difficulty (ckpool-style algorithm with configurable shares/minute).
+#[cfg(feature = "core")]
+pub mod vardiff;
+
 /// Shared async channel cleanup helpers.
 pub mod channel_utils;

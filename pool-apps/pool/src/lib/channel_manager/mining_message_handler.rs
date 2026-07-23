@@ -1,24 +1,27 @@
 use std::{convert::TryFrom, sync::atomic::Ordering};
 
-use stratum_apps::stratum_core::{
-    binary_sv2::Str0255,
-    bitcoin::Target,
-    channels_sv2::{
-        server::{
-            error::{ExtendedChannelError, StandardChannelError},
-            extended::ExtendedChannel,
-            share_accounting::{ShareValidationError, ShareValidationResult},
-            standard::StandardChannel,
+use stratum_apps::{
+    stratum_core::{
+        binary_sv2::Str0255,
+        bitcoin::Target,
+        channels_sv2::{
+            server::{
+                error::{ExtendedChannelError, StandardChannelError},
+                extended::ExtendedChannel,
+                share_accounting::{ShareValidationError, ShareValidationResult},
+                standard::StandardChannel,
+            },
+            Vardiff,
         },
-        Vardiff, VardiffState,
+        extensions_sv2::{
+            UserIdentity, EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
+        },
+        handlers_sv2::{HandleMiningMessagesFromClientAsync, SupportedChannelTypes},
+        mining_sv2::*,
+        parsers_sv2::{Mining, TemplateDistribution, Tlv, TlvField},
+        template_distribution_sv2::SubmitSolution,
     },
-    extensions_sv2::{
-        UserIdentity, EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
-    },
-    handlers_sv2::{HandleMiningMessagesFromClientAsync, SupportedChannelTypes},
-    mining_sv2::*,
-    parsers_sv2::{Mining, TemplateDistribution, Tlv, TlvField},
-    template_distribution_sv2::SubmitSolution,
+    vardiff::VardiffState,
 };
 use tracing::{error, info};
 

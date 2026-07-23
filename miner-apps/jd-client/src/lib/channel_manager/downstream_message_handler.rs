@@ -13,7 +13,7 @@ use stratum_apps::{
                 share_accounting::{ShareValidationError, ShareValidationResult},
                 standard::StandardChannel,
             },
-            Vardiff, VardiffState,
+            Vardiff,
         },
         extensions_sv2::{
             UserIdentity, EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
@@ -25,6 +25,7 @@ use stratum_apps::{
         template_distribution_sv2::SubmitSolution,
     },
     utils::types::Sv2Frame,
+    vardiff::VardiffState,
 };
 use tracing::{debug, error, info, warn};
 

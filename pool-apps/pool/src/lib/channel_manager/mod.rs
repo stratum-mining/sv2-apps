@@ -20,7 +20,7 @@ use stratum_apps::{
         channels_sv2::{
             extranonce_manager::{bytes_needed, ExtranonceAllocator},
             server::{extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel},
-            Vardiff, VardiffState,
+            Vardiff,
         },
         handlers_sv2::{
             HandleMiningMessagesFromClientAsync, HandleTemplateDistributionMessagesFromServerAsync,
@@ -32,6 +32,7 @@ use stratum_apps::{
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
     utils::types::{ChannelId, DownstreamId, SharesPerMinute, VardiffKey},
+    vardiff::VardiffState,
 };
 use tokio::{net::TcpListener, select};
 use tracing::{debug, error, info, warn};

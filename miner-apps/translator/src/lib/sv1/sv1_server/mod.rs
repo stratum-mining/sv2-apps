@@ -52,7 +52,7 @@ use stratum_apps::{
         bitcoin::Target,
         channels_sv2::{
             target::{hash_rate_from_target, hash_rate_to_target},
-            Vardiff, VardiffState,
+            Vardiff,
         },
         extensions_sv2::UserIdentity,
         mining_sv2::{CloseChannel, SetNewPrevHash, SetTarget},
@@ -72,6 +72,7 @@ use stratum_apps::{
     },
     task_manager::TaskManager,
     utils::types::{ChannelId, DownstreamId, Hashrate, RequestId, SharesPerMinute},
+    vardiff::VardiffState,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;

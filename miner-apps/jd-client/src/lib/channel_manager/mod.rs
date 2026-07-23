@@ -24,7 +24,7 @@ use stratum_apps::{
             extranonce_manager::{bytes_needed, ExtranonceAllocator},
             outputs::deserialize_outputs,
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
-            Vardiff, VardiffState,
+            Vardiff,
         },
         framing_sv2,
         handlers_sv2::{
@@ -48,6 +48,7 @@ use stratum_apps::{
             TemplateId, UpstreamJobId, VardiffKey,
         },
     },
+    vardiff::VardiffState,
 };
 use tokio::{net::TcpListener, select};
 use tracing::{debug, error, info, warn};
