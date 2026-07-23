@@ -25,6 +25,8 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     // Extension 0x0002 for worker hashrate tracking
     let supported_extensions = vec![EXTENSION_TYPE_WORKER_HASHRATE_TRACKING];
     let required_extensions = vec![EXTENSION_TYPE_WORKER_HASHRATE_TRACKING];
+    let sv1_username = "account.SRI-miner";
+    let expected_tlv_user_identity = "SRI-miner";
 
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     // Start pool with extension 0x0002 support
@@ -37,8 +39,8 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     .await;
     let (pool_translator_sniffer, pool_translator_sniffer_addr) =
         start_sniffer("pool-translator", pool_addr, false, vec![], None);
-    // Start translator with extension 0x0002 support and user_identity configured
-    // aggregate_channels = false ensures TLV fields are added
+    // Start translator with extension 0x0002 support. TLV emission is gated by
+    // extension negotiation, not by aggregate_channels.
     let (translator, tproxy_addr, _) = start_sv2_translator(
         &[pool_translator_sniffer_addr],
         false, // aggregate_channels = false
@@ -48,10 +50,11 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
         false,
     )
     .await;
-    // Start SV1 miner (minerd) connected to translator with username "SRI-miner"
+    // Start SV1 miner (minerd) with a full SV1 username so the TLV can prove
+    // that only the worker name suffix is forwarded.
     let (_minerd_process, _minerd_addr) = start_minerd(
         tproxy_addr,
-        Some("SRI-miner".to_string()),
+        Some(sv1_username.to_string()),
         Some("password".to_string()),
         false,
     )
@@ -177,27 +180,17 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
                     "TLV field_type should be user_identity"
                 );
                 let payload_len = tlv.value.len();
-                assert!(
-                    payload_len == 9,
-                    "user_identity TLV payload should be 9 bytes"
+                assert_eq!(
+                    payload_len,
+                    expected_tlv_user_identity.len(),
+                    "user_identity TLV payload length should match the SV1 worker name"
                 );
-                // Try to convert value to string for logging
-                if let Ok(user_identity_str) = std::str::from_utf8(&tlv.value) {
-                    // Verify user_identity format (should be "SRI-miner")
-                    assert_eq!(
-                        user_identity_str, "SRI-miner",
-                        "user_identity should be 'SRI-miner', got: {}",
-                        user_identity_str
-                    );
-                } else {
-                    // If not UTF-8, just log hex representation
-                    let hex_str = tlv
-                        .value
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<String>();
-                    info!("✅ user_identity TLV payload (hex): {}", hex_str);
-                }
+                let user_identity_str =
+                    std::str::from_utf8(&tlv.value).expect("user_identity TLV must be UTF-8");
+                assert_eq!(
+                    user_identity_str, expected_tlv_user_identity,
+                    "user_identity TLV should contain the SV1 worker name suffix"
+                );
             }
         }
         _ => panic!("Expected SubmitSharesExtended message with TLV fields"),
