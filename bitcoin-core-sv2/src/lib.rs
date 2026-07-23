@@ -38,16 +38,3 @@ pub mod unix_capnp;
 
 /// Shared runtime cancellation primitive used by both TDP and JDP APIs.
 pub use tokio_util::sync::CancellationToken;
-
-/// The minimum block reserved weight established by Bitcoin Core.
-pub const MIN_BLOCK_RESERVED_WEIGHT: u64 = 2000;
-
-/// Bitcoin Core's `MAX_MONEY` consensus constant, in satoshis (21,000,000 BTC).
-///
-/// Used as a `fee_threshold` sentinel in `waitNext` requests: Bitcoin Core skips fee-based
-/// template updates when `fee_threshold >= MAX_MONEY`, while still returning a new template
-/// immediately on chain tip changes.
-pub const MAX_MONEY: i64 = 21_000_000 * 100_000_000;
-
-/// Max time a `waitNext` request is allowed to block before timing out (in milliseconds).
-pub const WAIT_NEXT_TIMEOUT_MS: f64 = 10_000.0;

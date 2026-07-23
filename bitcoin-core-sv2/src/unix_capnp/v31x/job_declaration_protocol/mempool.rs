@@ -1,4 +1,5 @@
-//! Local mempool mirror shared by Bitcoin Core v30.x and v31.x Sv2 Job Declaration Protocol.
+//! Local mempool mirror for Bitcoin Core v31.x Sv2 Job Declaration Protocol via capnp over UNIX
+//! socket.
 
 use std::collections::HashMap;
 use stratum_core::bitcoin::{Block, BlockHash, CompactTarget, Transaction, Wtxid};

@@ -176,19 +176,6 @@ pub struct ChannelManager {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl ChannelManager {
-    fn reset_state(&self) {
-        self.pending_downstream_channels.clear();
-        self.extended_channels.clear();
-        self.group_channels.clear();
-        self.share_sequence_counters.clear();
-        self.negotiated_extensions
-            .super_safe_lock(|data| data.clear());
-        self.aggregated_extranonce_allocator
-            .super_safe_lock(|allocator| *allocator = None);
-        self.aggregated_channel_state
-            .set(AggregatedState::NoChannel);
-    }
-
     fn expected_payout_distribution(&self) -> &Option<PayoutMode> {
         self.expected_payout_distribution
             .get()
@@ -344,13 +331,11 @@ impl ChannelManager {
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
-                        info!("ChannelManager: received shutdown signal, resetting state");
-                        self.reset_state();
+                        info!("ChannelManager: received shutdown signal");
                         break;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("ChannelManager: fallback triggered, resetting state");
-                        self.reset_state();
+                        info!("ChannelManager: fallback triggered");
                         break;
                     }
                     res = self.clone().handle_upstream_frame() => {

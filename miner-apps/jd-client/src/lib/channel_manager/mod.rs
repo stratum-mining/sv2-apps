@@ -18,7 +18,7 @@ use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::accept_noise_connection,
     stratum_core::{
-        bitcoin::{consensus, Amount, Target, TxOut},
+        bitcoin::{Amount, Target, TxOut},
         channels_sv2::{
             client::extended::ExtendedChannel,
             extranonce_manager::{bytes_needed, ExtranonceAllocator},
@@ -37,7 +37,9 @@ use stratum_apps::{
         },
         mining_sv2::{OpenExtendedMiningChannel, SetCustomMiningJob, SetTarget, UpdateChannel},
         parsers_sv2::{AnyMessage, JobDeclaration, Mining, TemplateDistribution, Tlv},
-        template_distribution_sv2::{NewTemplate, SetNewPrevHash as SetNewPrevHashTdp},
+        template_distribution_sv2::{
+            NewTemplate, RequestTransactionData, SetNewPrevHash as SetNewPrevHashTdp,
+        },
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
@@ -212,12 +214,6 @@ impl MinerTelemetryState {
         }
     }
 
-    fn clear(&self) {
-        self.telemetry.clear();
-        self.management_ips.clear();
-        self.statuses.clear();
-    }
-
     fn remove_downstream(&self, downstream_id: DownstreamId) {
         self.telemetry.remove(&downstream_id);
         self.management_ips.remove(&downstream_id);
@@ -318,60 +314,6 @@ pub struct ChannelManager {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl ChannelManager {
-    #[allow(clippy::result_large_err)]
-    fn reset_runtime_state(
-        &self,
-        coinbase_outputs: Vec<u8>,
-    ) -> JDCResult<(), error::ChannelManager> {
-        self.downstream.clear();
-        #[cfg(feature = "monitoring")]
-        self.miner_telemetry.clear();
-        self.template_store.clear();
-        self.last_declare_job_store.clear();
-        self.template_id_to_upstream_job_id.clear();
-        self.downstream_channel_id_and_job_id_to_template_id.clear();
-        self.pending_downstream_requests
-            .with(|pending| pending.clear())
-            .map_err(JDCError::shutdown)?;
-        self.cached_shares.clear();
-        self.allocate_tokens
-            .with(|tokens| tokens.clear())
-            .map_err(JDCError::shutdown)?;
-        self.upstream_channel
-            .with(|channel| *channel = None)
-            .map_err(JDCError::shutdown)?;
-        self.pool_tag_string
-            .with(|pool_tag| *pool_tag = None)
-            .map_err(JDCError::shutdown)?;
-        self.job_factory
-            .with(|job_factory| *job_factory = None)
-            .map_err(JDCError::shutdown)?;
-        self.last_future_template
-            .with(|template| *template = None)
-            .map_err(JDCError::shutdown)?;
-        self.last_new_prev_hash
-            .with(|prev_hash| *prev_hash = None)
-            .map_err(JDCError::shutdown)?;
-        self.negotiated_extensions
-            .with(|extensions| extensions.clear())
-            .map_err(JDCError::shutdown)?;
-        self.coinbase_outputs
-            .with(|outputs| *outputs = coinbase_outputs)
-            .map_err(JDCError::shutdown)?;
-        self.request_id_factory.store(0, Ordering::Relaxed);
-        self.downstream_id_factory.store(0, Ordering::Relaxed);
-        self.sequence_number_factory.store(1, Ordering::Relaxed);
-        self.vardiff.clear();
-
-        let allocator =
-            ExtranonceAllocator::new(Vec::new(), SOLO_FULL_EXTRANONCE_SIZE, JDC_MAX_CHANNELS)
-                .expect("Failed to create ExtranonceAllocator with valid parameters");
-        self.extranonce_allocator
-            .with(|inner| *inner = allocator)
-            .map_err(JDCError::shutdown)?;
-        Ok(())
-    }
-
     fn handle_error_action(
         &self,
         context: &str,
@@ -778,10 +720,6 @@ impl ChannelManager {
         task_manager: Arc<TaskManager>,
         coinbase_outputs: Vec<TxOut>,
     ) {
-        // Serialize coinbase outputs before moving into async block
-        // todo: should we really be serializing here?
-        let serialized_coinbase_outputs = consensus::serialize(&coinbase_outputs);
-
         if let Err(e) = self.coinbase_output_constraints(coinbase_outputs).await {
             error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
             if let Action::Shutdown = e.action {
@@ -817,13 +755,7 @@ impl ChannelManager {
                         break;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("Channel Manager: fallback triggered, resetting state");
-                        self.upstream_state.set(UpstreamState::SoloMining);
-                        if let Err(e) = self.reset_runtime_state(serialized_coinbase_outputs.clone()) {
-                            error!(error = ?e, "Failed to reset channel manager state");
-                            cancellation_token.cancel();
-                        }
-
+                        info!("Channel Manager: fallback triggered");
                         break;
                     }
                     res = &mut vardiff_future => {
@@ -1194,6 +1126,25 @@ impl ChannelManager {
             }
         }
 
+        Ok(())
+    }
+
+    /// Sends a transaction-data request for the template.
+    ///
+    /// Only call this when the response can be consumed (i.e., `UpstreamState::Connected`
+    /// in full-template mode). Templates received before the upstream channel opens are
+    /// covered by the re-request in `handle_open_extended_mining_channel_success`.
+    async fn request_transaction_data(
+        &self,
+        template_id: TemplateId,
+    ) -> JDCResult<(), error::ChannelManager> {
+        let message =
+            TemplateDistribution::RequestTransactionData(RequestTransactionData { template_id });
+        self.channel_manager_io
+            .tp_sender
+            .send(message)
+            .await
+            .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
         Ok(())
     }
 

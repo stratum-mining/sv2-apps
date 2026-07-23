@@ -1,7 +1,10 @@
 //! Module for interacting with Bitcoin Core v30.x via Sv2 Template Distribution Protocol via
 //! capnp over UNIX socket.
 
-use crate::unix_capnp::v30x::template_distribution_protocol::template_data::TemplateData;
+use crate::unix_capnp::{
+    MIN_BLOCK_RESERVED_WEIGHT, STALE_TEMPLATE_GRACE_PERIOD_SECS, WEIGHT_FACTOR,
+    v30x::template_distribution_protocol::template_data::TemplateData,
+};
 use async_channel::{Receiver, Sender};
 use bitcoin_capnp_types::{
     capnp,
@@ -42,13 +45,8 @@ use tracing::{debug, error, info, warn};
 
 pub mod error;
 mod handlers;
-#[allow(clippy::duplicate_mod)]
-#[path = "../../v31x_v30x/template_distribution_protocol/monitors.rs"]
 mod monitors;
 mod template_data;
-
-const WEIGHT_FACTOR: u32 = 4;
-const MIN_BLOCK_RESERVED_WEIGHT: u64 = 2000;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Template Distribution Protocol.
 ///
@@ -622,14 +620,14 @@ impl BitcoinCoreSv2TDP {
         Ok(wait_next_request)
     }
 
-    // Spawns a task that processes stale template data after a 10-second grace period.
+    // Spawns a task that processes stale template data after a `STALE_TEMPLATE_GRACE_PERIOD_SECS` grace period.
     //
     // Takes a snapshot of [`current_template_ids`] at call time, then schedules their
     // retirement. This ensures the snapshot is always taken at the epoch boundary rather
     // than relying on the caller to pre-compute the stale set.
     //
     // The grace period allows in-flight RequestTransactionData and SubmitSolution requests
-    // to complete before the template data is retired. After the 10-second window:
+    // to complete before the template data is retired. After the grace period:
     // - Stale template IDs are written to stale_template_ids, causing
     //   handle_request_transaction_data to return an error.
     // - Stale entries are removed from template_data, causing both handle_request_transaction_data
@@ -642,7 +640,10 @@ impl BitcoinCoreSv2TDP {
         }
         let self_clone = self.clone();
         tokio::task::spawn_local(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                STALE_TEMPLATE_GRACE_PERIOD_SECS,
+            ))
+            .await;
 
             // update the stale template ids
             {

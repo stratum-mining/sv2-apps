@@ -14,8 +14,7 @@ use stratum_apps::{
             SupportedChannelTypes,
         },
         mining_sv2::*,
-        parsers_sv2::{AnyMessage, Mining, TemplateDistribution, Tlv},
-        template_distribution_sv2::RequestTransactionData,
+        parsers_sv2::{AnyMessage, Mining, Tlv},
     },
     utils::types::Sv2Frame,
 };
@@ -275,15 +274,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         if channel_state == UpstreamState::Connected {
             if self.mode.is_full_template() {
                 if let Some(template) = template {
-                    let tx_data_request =
-                        TemplateDistribution::RequestTransactionData(RequestTransactionData {
-                            template_id: template.template_id,
-                        });
-                    self.channel_manager_io
-                        .tp_sender
-                        .send(tx_data_request)
-                        .await
-                        .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
+                    self.request_transaction_data(template.template_id).await?;
                 }
             }
 

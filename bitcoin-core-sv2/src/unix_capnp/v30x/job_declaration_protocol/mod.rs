@@ -4,8 +4,8 @@
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
-        v30x::job_declaration_protocol::error::BitcoinCoreSv2JDPError,
-        v31x_v30x::job_declaration_protocol::mempool::MempoolMirror,
+        FORCE_UPDATE_MAX_ATTEMPTS, FORCE_UPDATE_RETRY_BACKOFF_MS,
+        v30x::job_declaration_protocol::{error::BitcoinCoreSv2JDPError, mempool::MempoolMirror},
     },
 };
 use async_channel::Receiver;
@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 
 pub mod error;
 mod handlers;
+mod mempool;
 mod monitors;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Job Declaration Protocol.
@@ -48,9 +49,9 @@ mod monitors;
 /// - Using Bitcoin Core's `checkBlock` to validate block structure
 ///
 /// If transactions are missing, a
-/// [`crate::common::job_declaration_protocol::io::JdResponse::MissingTransactions`] response is
+/// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::MissingTransactions`] response is
 /// sent. If validation succeeds, a
-/// [`crate::common::job_declaration_protocol::io::JdResponse::Success`] response with current
+/// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::Success`] response with current
 /// template parameters is sent.
 ///
 /// Incoming [`JdRequest::PushSolution`] requests are used to submit mining solutions to Bitcoin
@@ -279,12 +280,9 @@ impl BitcoinCoreSv2JDP {
     /// On transient `"thread busy"` IPC contention, this method retries a few times with
     /// a short backoff before returning the error.
     pub(crate) async fn force_update_mempool_mirror(&self) -> Result<(), BitcoinCoreSv2JDPError> {
-        const MAX_ATTEMPTS: usize = 3;
-        const RETRY_BACKOFF_MS: u64 = 25;
-
         let mut last_error: Option<BitcoinCoreSv2JDPError> = None;
 
-        for attempt in 1..=MAX_ATTEMPTS {
+        for attempt in 1..=FORCE_UPDATE_MAX_ATTEMPTS {
             let result = async {
                 let mut create_new_block_request =
                     self.mining_ipc_client.create_new_block_request();
@@ -327,15 +325,18 @@ impl BitcoinCoreSv2JDP {
 
             match result {
                 Ok(()) => return Ok(()),
-                Err(e) if e.is_thread_busy() && attempt < MAX_ATTEMPTS => {
+                Err(e) if e.is_thread_busy() && attempt < FORCE_UPDATE_MAX_ATTEMPTS => {
                     warn!(
                         error = ?e,
                         attempt,
-                        max_attempts = MAX_ATTEMPTS,
+                        max_attempts = FORCE_UPDATE_MAX_ATTEMPTS,
                         "Transient IPC contention during force_update_mempool_mirror (thread busy); retrying"
                     );
                     last_error = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        FORCE_UPDATE_RETRY_BACKOFF_MS,
+                    ))
+                    .await;
                 }
                 Err(e) => return Err(e),
             }

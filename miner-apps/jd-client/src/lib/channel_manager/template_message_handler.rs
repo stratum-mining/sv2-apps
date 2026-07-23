@@ -7,14 +7,15 @@ use stratum_apps::stratum_core::{
     handlers_sv2::HandleTemplateDistributionMessagesFromServerAsync,
     job_declaration_sv2::DeclareMiningJob,
     mining_sv2::SetNewPrevHash as SetNewPrevHashMp,
-    parsers_sv2::{JobDeclaration, Mining, TemplateDistribution, Tlv},
+    parsers_sv2::{JobDeclaration, Mining, Tlv},
     template_distribution_sv2::*,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     channel_manager::{ChannelManager, DeclaredJob},
     error::{self, JDCError, JDCErrorKind},
+    utils::UpstreamState,
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -52,16 +53,13 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
         .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
         coinbase_outputs[0].value = Amount::from_sat(msg.coinbase_tx_value_remaining);
 
-        if self.mode.is_full_template() {
-            self.channel_manager_io
-                .tp_sender
-                .send(TemplateDistribution::RequestTransactionData(
-                    RequestTransactionData {
-                        template_id: msg.template_id,
-                    },
-                ))
-                .await
-                .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
+        // Only request transaction data when the response can be consumed: building a
+        // `DeclareMiningJob` requires the upstream channel and job factory, which only
+        // exist once `UpstreamState::Connected`. Templates received before the channel
+        // opens are still stored, and `handle_open_extended_mining_channel_success`
+        // requests their transaction data once the channel is established.
+        if self.mode.is_full_template() && self.upstream_state.get() == UpstreamState::Connected {
+            self.request_transaction_data(msg.template_id).await?;
         }
 
         let upstream_ready = self
@@ -310,6 +308,17 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
+
+        // Transaction data is only ever requested in full-template mode while the
+        // upstream channel is open. Ignore anything else as unsolicited or late, so
+        // stored templates stay available for the request sent when the channel opens.
+        if !self.mode.is_full_template() || self.upstream_state.get() != UpstreamState::Connected {
+            debug!(
+                template_id = msg.template_id,
+                "Ignoring unexpected RequestTransactionData.Success"
+            );
+            return Ok(());
+        }
 
         let transactions_data = msg.transaction_list;
         let excess_data = msg.excess_data;
