@@ -247,6 +247,9 @@ impl<K: Eq + Hash + Clone, V> SharedMap<K, V> {
     }
 
     /// Remove a key only when the predicate matches the current entry.
+    ///
+    /// Caution: `f` runs while `DashMap` is mutating internal shards. Avoid
+    /// re-entering this `SharedMap` from inside the predicate.
     pub fn remove_if<F>(&self, key: &K, f: F) -> Option<(K, V)>
     where
         F: FnOnce(&K, &V) -> bool,
@@ -351,6 +354,9 @@ impl<K: Eq + Hash + Clone> SharedSet<K> {
     }
 
     /// Remove a key if the predicate returns `true`, returning it if present.
+    ///
+    /// Caution: `f` runs while `DashSet` is mutating internal shards. Avoid
+    /// re-entering this `SharedSet` from inside the predicate.
     pub fn remove_if<F>(&self, key: &K, f: F) -> Option<K>
     where
         F: FnOnce(&K) -> bool,
