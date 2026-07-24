@@ -54,9 +54,8 @@ use stratum_apps::{
             target::{hash_rate_from_target, hash_rate_to_target},
             Vardiff,
         },
-        extensions_sv2::UserIdentity,
         mining_sv2::{CloseChannel, SetNewPrevHash, SetTarget},
-        parsers_sv2::{Mining, Tlv, TlvField},
+        parsers_sv2::Mining,
         stratum_translation::{
             sv1_to_sv2::{
                 build_sv2_open_extended_mining_channel,
@@ -85,15 +84,16 @@ struct Sv1ServerIo {
     sv1_server_to_downstream_sender: Arc<Mutex<HashMap<DownstreamId, Sender<json_rpc::Message>>>>,
     downstream_to_sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
     downstream_to_sv1_server_receiver: Receiver<(DownstreamId, json_rpc::Message)>,
-    channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
-    channel_manager_sender: Sender<(Mining<'static>, Option<Vec<Tlv>>)>,
+    channel_manager_receiver: Receiver<Mining<'static>>,
+    // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
+    channel_manager_sender: Sender<(Mining<'static>, Option<String>)>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Sv1ServerIo {
     fn new(
-        channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
-        channel_manager_sender: Sender<(Mining<'static>, Option<Vec<Tlv>>)>,
+        channel_manager_receiver: Receiver<Mining<'static>>,
+        channel_manager_sender: Sender<(Mining<'static>, Option<String>)>,
     ) -> Self {
         let (downstream_to_sv1_server_sender, downstream_to_sv1_server_receiver) = unbounded();
 
@@ -349,8 +349,8 @@ impl Sv1Server {
     /// A new Sv1Server instance ready to accept connections
     pub fn new(
         listener_addr: SocketAddr,
-        channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
-        channel_manager_sender: Sender<(Mining<'static>, Option<Vec<Tlv>>)>,
+        channel_manager_receiver: Receiver<Mining<'static>>,
+        channel_manager_sender: Sender<(Mining<'static>, Option<String>)>,
         config: TranslatorConfig,
         mode: TproxyMode,
     ) -> Self {
@@ -713,43 +713,30 @@ impl Sv1Server {
         )
         .map_err(|_| TproxyError::shutdown(TproxyErrorKind::SV1Error))?;
 
-        // Only add TLV fields with user identity in non-aggregated mode
-        let tlv_fields = if self.mode.is_non_aggregated() {
-            let Some(downstream) = self
-                .downstreams
-                .get(&message.downstream_id)
-                .map(|r| r.value().clone())
-            else {
-                warn!(
-                    "Downstream {} disconnected before share could be submitted, dropping share",
-                    message.downstream_id
-                );
-                return Ok(());
-            };
-            let user_identity = downstream
-                .downstream_data
-                .super_safe_lock(|d| d.user_identity.clone());
-            // Considering we are trucating user identity to 32 bytes,
-            // If an error happen we should disconnect the downstream.
-            UserIdentity::new(&user_identity)
-                .map_err(|e| {
-                    TproxyError::disconnect(
-                        TproxyErrorKind::General(e.into()),
-                        message.downstream_id,
-                    )
-                })?
-                .to_tlv()
-                .ok()
-                .map(|tlv| vec![tlv])
-        } else {
-            None
+        let Some(downstream) = self
+            .downstreams
+            .get(&message.downstream_id)
+            .map(|r| r.value().clone())
+        else {
+            warn!(
+                "Downstream {} disconnected before share could be submitted, dropping share",
+                message.downstream_id
+            );
+            return Ok(());
         };
+        let sv1_worker_name = downstream.downstream_data.super_safe_lock(|d| {
+            if d.sv1_worker_name.is_empty() {
+                None
+            } else {
+                Some(d.sv1_worker_name.clone())
+            }
+        });
 
         self.sv1_server_io
             .channel_manager_sender
             .send((
                 Mining::SubmitSharesExtended(submit_share_extended),
-                tlv_fields,
+                sv1_worker_name,
             ))
             .await
             .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
@@ -806,7 +793,7 @@ impl Sv1Server {
         &self,
         first_target: Target,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let (message, _tlv_fields) = self
+        let message = self
             .sv1_server_io
             .channel_manager_receiver
             .recv()
@@ -1016,17 +1003,13 @@ impl Sv1Server {
         downstream_id: DownstreamId,
     ) -> TproxyResult<(), error::Sv1Server> {
         let config = &self.config.downstream_difficulty_config;
-        let Some(downstream) = self
-            .downstreams
-            .get(&downstream_id)
-            .map(|r| r.value().clone())
-        else {
+        if !self.downstreams.contains_key(&downstream_id) {
             warn!(
                 "Downstream {} disconnected before channel could be opened, skipping",
                 downstream_id
             );
             return Ok(());
-        };
+        }
 
         let hashrate = config.min_individual_miner_hashrate as f64;
         let shares_per_min = config.shares_per_minute as f64;
@@ -1051,11 +1034,6 @@ impl Sv1Server {
         } else {
             format!("{user_identity}.miner{miner_id}")
         };
-
-        downstream
-            .downstream_data
-            .safe_lock(|d| d.user_identity = user_identity.clone())
-            .map_err(TproxyError::shutdown)?;
 
         if let Ok(open_channel_msg) = build_sv2_open_extended_mining_channel(
             request_id,

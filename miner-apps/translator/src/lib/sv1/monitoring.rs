@@ -36,8 +36,8 @@ fn downstream_to_sv1_client_info(
             channel_id: dd.channel_id,
             connection_ip: dd.connection_ip,
             management_ip,
-            authorized_worker_name: dd.authorized_worker_name.clone(),
-            user_identity: dd.user_identity.clone(),
+            sv1_username: dd.sv1_username.clone(),
+            sv1_worker_name: dd.sv1_worker_name.clone(),
             target_hex: hex::encode(dd.target.to_be_bytes()),
             hashrate: dd.hashrate,
             miner_telemetry,
@@ -190,7 +190,7 @@ impl Sv1Server {
         collector: &MinerTelemetryCollector,
         discovered_miners: &[DiscoveredMiner],
     ) {
-        let downstreams = self.current_downstream_authorized_worker_names();
+        let downstreams = self.current_downstream_sv1_usernames();
         let active_downstream_ids = downstreams
             .iter()
             .map(|(downstream_id, _)| *downstream_id)
@@ -199,7 +199,7 @@ impl Sv1Server {
             ?downstreams,
             ?discovered_miners,
             pool_port = self.config.downstream_port,
-            "SV1 miner telemetry matching discovered active pool users to authorized worker names and downstream port"
+            "SV1 miner telemetry matching discovered active pool users to SV1 usernames and downstream port"
         );
         let match_result = match_discovered_miners_to_downstreams_by_worker_and_port(
             &downstreams,
@@ -267,14 +267,14 @@ impl Sv1Server {
         }
     }
 
-    fn current_downstream_authorized_worker_names(&self) -> Vec<(DownstreamId, String)> {
+    fn current_downstream_sv1_usernames(&self) -> Vec<(DownstreamId, String)> {
         self.downstreams
             .iter()
             .filter_map(|downstream| {
                 downstream
                     .value()
                     .downstream_data
-                    .safe_lock(|data| (*downstream.key(), data.authorized_worker_name.clone()))
+                    .safe_lock(|data| (*downstream.key(), data.sv1_username.clone()))
                     .ok()
             })
             .collect()

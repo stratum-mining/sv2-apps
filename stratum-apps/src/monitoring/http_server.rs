@@ -1000,8 +1000,8 @@ mod tests {
                 .expect("test IP address must be valid"),
             #[cfg(feature = "asic-rs-telemetry")]
             management_ip: None,
-            authorized_worker_name: format!("worker-{}", id),
-            user_identity: format!("miner-{}", id),
+            sv1_username: format!("account.worker-{}", id),
+            sv1_worker_name: format!("worker-{}", id),
             target_hex: "00ff".into(),
             hashrate,
             #[cfg(feature = "asic-rs-telemetry")]

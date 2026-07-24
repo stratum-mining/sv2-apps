@@ -3,7 +3,10 @@ mod mining_message_handler;
 
 use crate::{
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
-    utils::{AggregatedState, AtomicAggregatedState, AGGREGATED_CHANNEL_ID},
+    utils::{
+        aggregated_upstream_user_identity, tlv_user_identity_from_sv1_worker_name, AggregatedState,
+        AtomicAggregatedState, AGGREGATED_CHANNEL_ID,
+    },
     TproxyMode,
 };
 use async_channel::{Receiver, Sender};
@@ -20,11 +23,11 @@ use stratum_apps::{
             extranonce_manager::{bytes_needed, ExtranonceAllocator},
         },
         codec_sv2::StandardSv2Frame,
-        extensions_sv2::{EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY},
+        extensions_sv2::EXTENSION_TYPE_WORKER_HASHRATE_TRACKING,
         framing_sv2,
         handlers_sv2::{HandleExtensionsFromServerAsync, HandleMiningMessagesFromServerAsync},
         mining_sv2::OpenExtendedMiningChannelSuccess,
-        parsers_sv2::{AnyMessage, Mining, Tlv, TlvList},
+        parsers_sv2::{AnyMessage, Mining, TlvField, TlvList},
     },
     task_manager::TaskManager,
     utils::{
@@ -69,8 +72,9 @@ pub(crate) const NON_AGGREGATED_TPROXY_MAX_CHANNELS: u32 = 1;
 struct ChannelManagerIo {
     upstream_sender: Sender<Sv2Frame>,
     upstream_receiver: Receiver<Sv2Frame>,
-    sv1_server_sender: Sender<(Mining<'static>, Option<Vec<Tlv>>)>,
-    sv1_server_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+    sv1_server_sender: Sender<Mining<'static>>,
+    // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
+    sv1_server_receiver: Receiver<(Mining<'static>, Option<String>)>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -78,8 +82,8 @@ impl ChannelManagerIo {
     fn new(
         upstream_sender: Sender<Sv2Frame>,
         upstream_receiver: Receiver<Sv2Frame>,
-        sv1_server_sender: Sender<(Mining<'static>, Option<Vec<Tlv>>)>,
-        sv1_server_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+        sv1_server_sender: Sender<Mining<'static>>,
+        sv1_server_receiver: Receiver<(Mining<'static>, Option<String>)>,
     ) -> Self {
         Self {
             upstream_sender,
@@ -265,8 +269,8 @@ impl ChannelManager {
     pub fn new(
         upstream_sender: Sender<Sv2Frame>,
         upstream_receiver: Receiver<Sv2Frame>,
-        sv1_server_sender: Sender<(Mining<'static>, Option<Vec<Tlv>>)>,
-        sv1_server_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+        sv1_server_sender: Sender<Mining<'static>>,
+        sv1_server_receiver: Receiver<(Mining<'static>, Option<String>)>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
         tproxy_mode: TproxyMode,
@@ -448,7 +452,7 @@ impl ChannelManager {
     /// * `Ok(())` - Message processed successfully
     /// * `Err(TproxyError)` - Error processing the message
     async fn handle_downstream_message(self: Arc<Self>) -> TproxyResult<(), error::ChannelManager> {
-        let (message, tlv_fields) = self
+        let (message, sv1_worker_name) = self
             .channel_manager_io
             .sv1_server_receiver
             .recv()
@@ -489,14 +493,7 @@ impl ChannelManager {
                             // Modify user_identity for the upstream `OpenExtendedMiningChannel`.
                             // SRI patterns are passed unchanged to preserve pool-side parsing.
                             // See: https://github.com/stratum-mining/sv2-apps/issues/369
-                            let translator_identity = if user_identity.starts_with("sri/") {
-                                user_identity.clone()
-                            } else if let Some(dot_index) = user_identity.find('.') {
-                                format!("{}.translator-proxy", &user_identity[..dot_index])
-                            } else {
-                                format!("{user_identity}.translator-proxy")
-                            };
-                            user_identity = translator_identity;
+                            user_identity = aggregated_upstream_user_identity(&user_identity);
                             open_channel_msg.user_identity =
                                 user_identity.as_str().try_into().unwrap();
                         }
@@ -650,27 +647,16 @@ impl ChannelManager {
                         data.contains(&EXTENSION_TYPE_WORKER_HASHRATE_TRACKING)
                     });
 
-                // Check if we should try to include TLV fields
-                let should_send_with_tlv =
-                    contains_type_in_negotiated_extension && tlv_fields.is_some();
-
                 let mut sent = false;
-                if should_send_with_tlv {
-                    info!(
-                        "TLV fields in Channel Manager: {:?}",
-                        tlv_fields.clone().unwrap()
-                    );
-                    // Create frame bytes with TLVs
-                    let user_identity_tlv = tlv_fields.and_then(|tlvs| {
-                        tlvs.iter()
-                            .find(|tlv| {
-                                tlv.r#type.extension_type == EXTENSION_TYPE_WORKER_HASHRATE_TRACKING
-                                    && tlv.r#type.field_type == TLV_FIELD_TYPE_USER_IDENTITY
-                            })
-                            .cloned()
-                    });
-
-                    if let Some(tlv) = user_identity_tlv {
+                if contains_type_in_negotiated_extension {
+                    if let Some(sv1_worker_name) = sv1_worker_name
+                        .as_deref()
+                        .filter(|sv1_worker_name| !sv1_worker_name.is_empty())
+                    {
+                        let tlv_user_identity =
+                            tlv_user_identity_from_sv1_worker_name(sv1_worker_name)
+                                .map_err(TproxyError::shutdown)?;
+                        let tlv = tlv_user_identity.to_tlv().map_err(TproxyError::shutdown)?;
                         let tlv_list = TlvList::from_slice(&[tlv]).map_err(|e| {
                             error!("Failed to create TLV list: {:?}", e);
                             TproxyError::shutdown(e)
@@ -915,7 +901,7 @@ impl ChannelManager {
 
                 self.channel_manager_io
                     .sv1_server_sender
-                    .send((success_message, None))
+                    .send(success_message)
                     .await
                     .map_err(|e| {
                         error!("Failed to send open channel message to SV1Server: {:?}", e);
@@ -971,7 +957,7 @@ impl ChannelManager {
                 if let Some(job) = active_job_for_sv1_server() {
                     self.channel_manager_io
                         .sv1_server_sender
-                        .send((Mining::NewExtendedMiningJob(job), None))
+                        .send(Mining::NewExtendedMiningJob(job))
                         .await
                         .map_err(|e| {
                             error!(

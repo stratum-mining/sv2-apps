@@ -266,7 +266,7 @@ async fn jd_aggregated_topology_monitoring() {
                 "sv2_server_shares_accepted_total",
                 &[
                     ("channel_id", "2"),
-                    ("user_identity", "user_identity.miner1"),
+                    ("user_identity", "user_identity.translator-proxy"),
                 ],
             ),
             1.0,

@@ -12,7 +12,7 @@ use crate::{
     error,
     sv1::Sv1Server,
     utils::{
-        tlv_compatible_username, validate_sv1_share, SubmitShareWithChannelId,
+        sv1_worker_name_from_sv1_username, validate_sv1_share, SubmitShareWithChannelId,
         AGGREGATED_CHANNEL_ID,
     },
 };
@@ -190,7 +190,7 @@ impl IsServer<'static> for Sv1Server {
         };
         let is_authorized = downstream
             .downstream_data
-            .super_safe_lock(|data| data.authorized_worker_name == *name);
+            .super_safe_lock(|data| data.sv1_username == *name);
         Ok(is_authorized)
     }
 
@@ -204,12 +204,12 @@ impl IsServer<'static> for Sv1Server {
         let is_authorized = self.is_authorized(client_id, name)?;
         downstream.downstream_data.super_safe_lock(|data| {
             if !is_authorized {
-                data.authorized_worker_name = name.to_string();
+                data.sv1_username = name.to_string();
             }
-            data.user_identity = tlv_compatible_username(name).to_string();
+            data.sv1_worker_name = sv1_worker_name_from_sv1_username(name).to_string();
             debug!(
-                "Down: Set user_identity to '{}' for downstream {}",
-                data.user_identity, downstream_id
+                "Down: Set sv1_username '{}' and sv1_worker_name '{}' for downstream {}",
+                data.sv1_username, data.sv1_worker_name, downstream_id
             );
         });
         Ok(())
