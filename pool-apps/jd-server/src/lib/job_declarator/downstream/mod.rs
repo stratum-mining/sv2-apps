@@ -14,14 +14,12 @@ use crate::{
     io_task::spawn_io_tasks,
 };
 use async_channel::{unbounded, Receiver, Sender};
-use dashmap::DashMap;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
-    custom_mutex::Mutex,
     network_helpers::noise_stream::NoiseTcpStream,
     stratum_core::{
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
@@ -30,6 +28,7 @@ use stratum_apps::{
         job_declaration_sv2::DeclareMiningJob,
         parsers_sv2::{parse_message_frame_with_tlvs, AnyMessage},
     },
+    sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{protocol_message_type, MessageType},
@@ -58,9 +57,9 @@ pub struct DownstreamIo {
 #[derive(Clone)]
 pub struct Downstream {
     /// Extensions that have been successfully negotiated with this client.
-    pub negotiated_extensions: Arc<Mutex<Vec<u16>>>,
+    pub negotiated_extensions: SharedLock<Vec<u16>>,
     /// Jobs waiting for missing transactions (keyed by `request_id`).
-    pub pending_declare_mining_jobs: Arc<DashMap<RequestId, PendingDeclareMiningJob>>,
+    pub pending_declare_mining_jobs: SharedMap<RequestId, PendingDeclareMiningJob>,
     pub downstream_io: DownstreamIo,
     pub downstream_id: DownstreamId,
     /// Extensions that JDS supports
@@ -137,8 +136,8 @@ impl Downstream {
             downstream_cancellation_token.clone(),
         );
 
-        let negotiated_extensions = Arc::new(Mutex::new(Vec::new()));
-        let pending_declare_mining_jobs = Arc::new(DashMap::new());
+        let negotiated_extensions = SharedLock::new(Vec::new());
+        let pending_declare_mining_jobs = SharedMap::new();
 
         let downstream_io = DownstreamIo {
             to_job_declarator_sender,
@@ -242,7 +241,7 @@ impl Downstream {
     /// older than `ALLOCATED_TOKEN_TIMEOUT_SECS`.
     fn spawn_pending_jobs_janitor(&self, task_manager: Arc<TaskManager>) {
         let cancellation_token = self.downstream_cancellation_token.clone();
-        let pending_declare_mining_jobs = Arc::clone(&self.pending_declare_mining_jobs);
+        let pending_declare_mining_jobs = self.pending_declare_mining_jobs.clone();
         let downstream_id = self.downstream_id;
         let token_timeout = Duration::from_secs(ALLOCATED_TOKEN_TIMEOUT_SECS);
         let janitor_interval = Duration::from_secs(JANITOR_INTERVAL_SECS);
@@ -351,7 +350,8 @@ impl Downstream {
                 debug!("Received mining SV2 frame from downstream.");
                 let negotiated_extensions = self
                     .negotiated_extensions
-                    .super_safe_lock(|extensions| extensions.clone());
+                    .get()
+                    .map_err(error::JDSError::shutdown)?;
                 let (any_message, tlv_fields) = parse_message_frame_with_tlvs(
                     header,
                     sv2_frame.payload(),

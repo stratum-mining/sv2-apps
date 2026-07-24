@@ -25,9 +25,7 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
         &self,
         _client_id: Option<usize>,
     ) -> Result<Vec<u16>, Self::Error> {
-        Ok(self
-            .negotiated_extensions
-            .super_safe_lock(|extensions| extensions.clone()))
+        self.negotiated_extensions.get().map_err(JDSError::shutdown)
     }
 
     async fn handle_setup_connection(

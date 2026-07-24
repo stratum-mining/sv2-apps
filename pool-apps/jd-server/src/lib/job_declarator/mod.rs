@@ -15,7 +15,6 @@ use crate::{
     },
 };
 use async_channel::{unbounded, Receiver, Sender};
-use dashmap::DashMap;
 use std::{
     net::SocketAddr,
     sync::{
@@ -36,6 +35,7 @@ use stratum_apps::{
         },
         parsers_sv2::{JobDeclaration, Tlv},
     },
+    sync::SharedMap,
     task_manager::TaskManager,
     utils::types::{DownstreamId, JdToken},
 };
@@ -98,7 +98,7 @@ impl SetCustomMiningJobResponse<'_> {
 /// - `disconnect_sender/receiver`: channel through which downstreams signal disconnection.
 #[derive(Clone)]
 pub struct JobDeclaratorIo {
-    downstream_client_senders: DashMap<DownstreamId, Sender<JobDeclarationMessage>>,
+    downstream_client_senders: SharedMap<DownstreamId, Sender<JobDeclarationMessage>>,
     job_declarator_sender: Sender<DownstreamJobDeclarationMessage>,
     job_declarator_receiver: Receiver<DownstreamJobDeclarationMessage>,
 }
@@ -113,7 +113,7 @@ pub struct JobDeclarator {
     job_validator: Arc<dyn JobValidationEngine>,
     job_declarator_io: Arc<JobDeclaratorIo>,
     coinbase_reward_script: CoinbaseRewardScript,
-    downstream_clients: Arc<DashMap<DownstreamId, Downstream>>,
+    downstream_clients: SharedMap<DownstreamId, Downstream>,
     downstream_id_factory: Arc<AtomicUsize>,
 }
 
@@ -131,7 +131,7 @@ impl JobDeclarator {
         let job_declarator_io = Arc::new(JobDeclaratorIo {
             job_declarator_sender,
             job_declarator_receiver,
-            downstream_client_senders: DashMap::new(),
+            downstream_client_senders: SharedMap::new(),
         });
 
         let token_manager =
@@ -142,7 +142,7 @@ impl JobDeclarator {
             job_validator: engine,
             job_declarator_io,
             coinbase_reward_script,
-            downstream_clients: Arc::new(DashMap::new()),
+            downstream_clients: SharedMap::new(),
             downstream_id_factory: Arc::new(AtomicUsize::new(0)),
         })
     }

@@ -1,6 +1,6 @@
 [package]
 name = "jd_server_sv2"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["The Stratum V2 Developers"]
 edition = "2021"
 description = "Sv2 Job Declaration Server"
@@ -16,12 +16,11 @@ name = "jd_server_sv2"
 path = "src/lib/mod.rs"
 
 [dependencies]
-stratum-apps = { version = "0.7.0", path = "../../stratum-apps", features = ["jd_server"] }
+stratum-apps = { version = "0.8.0", path = "../../stratum-apps", features = ["jd_server"] }
 async-channel = "1.5.1"
 serde = { version = "1.0.89", features = ["derive", "alloc"], default-features = false }
 tracing = { version = "0.1" }
 tokio = { version = "1.44.1", features = ["full"] }
-dashmap = "6.1.0"
 async-trait = "0.1"
 hotpath = "0.14.0"
 
