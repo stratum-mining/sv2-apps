@@ -1,6 +1,6 @@
 [package]
 name = "pool_sv2"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["The Stratum V2 Developers"]
 edition = "2021"
 description = "SV2 pool role"
@@ -17,14 +17,14 @@ name = "pool_sv2"
 path = "src/lib/mod.rs"
 
 [dependencies]
-stratum-apps = { version = "0.7.0", path = "../../stratum-apps", features = ["pool"] }
+stratum-apps = { version = "0.8.0", path = "../../stratum-apps", features = ["pool"] }
 async-channel = "1.5.1"
 serde = { version = "1.0.89", features = ["derive", "alloc"], default-features = false }
 tokio = { version = "1.44.1", features = ["full"] }
 ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
 tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
-jd_server_sv2 = { version = "0.5.0", path = "../jd-server" }
+jd_server_sv2 = { version = "0.6.0", path = "../jd-server" }
 hex = "0.4.3"
 hotpath = "0.14.0"
 
