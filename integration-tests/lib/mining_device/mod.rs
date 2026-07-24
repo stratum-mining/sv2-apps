@@ -15,7 +15,6 @@ use std::{
 };
 pub use stratum_apps::key_utils::Secp256k1PublicKey;
 use stratum_apps::{
-    custom_mutex::Mutex,
     network_helpers::noise_connection::Connection,
     stratum_core::{
         bitcoin::{
@@ -33,6 +32,7 @@ use stratum_apps::{
         noise_sv2::Initiator,
         parsers_sv2::{CommonMessages, Mining, MiningDeviceMessages, ParserError},
     },
+    sync::SharedLock,
 };
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
@@ -202,7 +202,7 @@ impl SetupConnectionHandler {
         }
     }
     pub async fn setup(
-        self_: Arc<Mutex<Self>>,
+        self_: SharedLock<Self>,
         receiver: &mut Receiver<EitherFrame>,
         sender: &mut Sender<EitherFrame>,
         device_id: Option<String>,
@@ -224,13 +224,13 @@ impl SetupConnectionHandler {
     }
 
     fn handle_message_common(
-        self_: Arc<Mutex<Self>>,
+        self_: SharedLock<Self>,
         message_type: u8,
         payload: &mut [u8],
     ) -> Result<(), ParserError> {
         let message: CommonMessages<'_> = (message_type, payload).try_into()?;
         self_
-            .safe_lock(|handler| match message {
+            .with(|handler| match message {
                 CommonMessages::SetupConnectionSuccess(m) => {
                     handler.handle_setup_connection_success(m);
                     Ok(())
@@ -289,7 +289,7 @@ pub struct Device {
     #[allow(dead_code)]
     channel_opened: bool,
     channel_id: Option<u32>,
-    miner: Arc<Mutex<Miner>>,
+    miner: SharedLock<Miner>,
     jobs: Vec<NewMiningJob<'static>>,
     prev_hash: Option<SetNewPrevHash<'static>>,
     sequence_numbers: Id,
@@ -338,7 +338,7 @@ impl Device {
         nominal_hashrate_multiplier: Option<f32>,
         single_submit: bool,
     ) {
-        let setup_connection_handler = Arc::new(Mutex::new(SetupConnectionHandler::new()));
+        let setup_connection_handler = SharedLock::new(SetupConnectionHandler::new());
         SetupConnectionHandler::setup(
             setup_connection_handler,
             &mut receiver,
@@ -348,7 +348,7 @@ impl Device {
         )
         .await;
         info!("Pool sv2 connection established at {}", addr);
-        let miner = Arc::new(Mutex::new(Miner::new(handicap)));
+        let miner = SharedLock::new(Miner::new(handicap));
         let (notify_changes_to_mining_thread, update_miners) = async_channel::unbounded();
         let self_ = Self {
             channel_opened: false,
@@ -369,7 +369,7 @@ impl Device {
         ));
         let frame: StdFrame = open_channel.try_into().unwrap();
         self_.sender.send(frame.into()).await.unwrap();
-        let self_mutex = std::sync::Arc::new(Mutex::new(self_));
+        let self_mutex = SharedLock::new(self_);
         let cloned = self_mutex.clone();
 
         let (share_send, share_recv) = async_channel::unbounded();
@@ -392,7 +392,7 @@ impl Device {
             let payload = incoming.payload();
             Device::handle_message_mining(self_mutex.clone(), message_type, payload).unwrap();
             let mut notify_changes_to_mining_thread = self_mutex
-                .safe_lock(|s| s.notify_changes_to_mining_thread.clone())
+                .with(|s| s.notify_changes_to_mining_thread.clone())
                 .unwrap();
             if notify_changes_to_mining_thread.should_send
                 && (message_type == mining_sv2::MESSAGE_TYPE_NEW_MINING_JOB
@@ -410,7 +410,7 @@ impl Device {
     }
 
     async fn send_share(
-        self_mutex: Arc<Mutex<Self>>,
+        self_mutex: SharedLock<Self>,
         nonce: u32,
         job_id: u32,
         version: u32,
@@ -418,26 +418,26 @@ impl Device {
     ) {
         let share =
             MiningDeviceMessages::Mining(Mining::SubmitSharesStandard(SubmitSharesStandard {
-                channel_id: self_mutex.safe_lock(|s| s.channel_id.unwrap()).unwrap(),
-                sequence_number: self_mutex.safe_lock(|s| s.sequence_numbers.next()).unwrap(),
+                channel_id: self_mutex.with(|s| s.channel_id.unwrap()).unwrap(),
+                sequence_number: self_mutex.with(|s| s.sequence_numbers.next()).unwrap(),
                 job_id,
                 nonce,
                 ntime,
                 version,
             }));
         let frame: StdFrame = share.try_into().unwrap();
-        let sender = self_mutex.safe_lock(|s| s.sender.clone()).unwrap();
+        let sender = self_mutex.with(|s| s.sender.clone()).unwrap();
         sender.send(frame.into()).await.unwrap();
     }
 
     fn handle_message_mining(
-        self_: Arc<Mutex<Self>>,
+        self_: SharedLock<Self>,
         message_type: u8,
         payload: &mut [u8],
     ) -> Result<(), ParserError> {
         let message: Mining<'_> = (message_type, payload).try_into()?;
         self_
-            .safe_lock(|device| match message {
+            .with(|device| match message {
                 Mining::OpenStandardMiningChannelSuccess(m) => {
                     device.handle_open_standard_mining_channel_success(m);
                     Ok(())
@@ -492,7 +492,7 @@ impl Device {
             m.group_channel_id, m.channel_id, req_id
         );
         self.miner
-            .safe_lock(|miner| miner.new_target(m.target.to_owned_bytes()))
+            .with(|miner| miner.new_target(m.target.to_owned_bytes()))
             .unwrap();
         self.notify_changes_to_mining_thread.should_send = true;
     }
@@ -535,9 +535,7 @@ impl Device {
         debug!("NewMiningJob: {}", m);
         match (m.is_future(), self.prev_hash.as_ref()) {
             (false, Some(p_h)) => {
-                self.miner
-                    .safe_lock(|miner| miner.new_header(p_h, &m))
-                    .unwrap();
+                self.miner.with(|miner| miner.new_header(p_h, &m)).unwrap();
                 self.jobs = vec![m.as_static()];
                 self.notify_changes_to_mining_thread.should_send = true;
             }
@@ -565,7 +563,7 @@ impl Device {
             }
             1 => {
                 self.miner
-                    .safe_lock(|miner| miner.new_header(&m, jobs[0]))
+                    .with(|miner| miner.new_header(&m, jobs[0]))
                     .unwrap();
                 self.jobs = vec![jobs[0].clone()];
                 self.prev_hash = Some(m.as_static());
@@ -579,7 +577,7 @@ impl Device {
         info!("Received SetTarget for channel id: {}", m.channel_id);
         debug!("SetTarget: {}", m);
         self.miner
-            .safe_lock(|miner| miner.new_target(m.maximum_target.to_owned_bytes()))
+            .with(|miner| miner.new_target(m.maximum_target.to_owned_bytes()))
             .unwrap();
         self.notify_changes_to_mining_thread.should_send = true;
     }
@@ -939,7 +937,7 @@ fn generate_random_32_byte_array() -> [u8; 32] {
 
 fn start_mining_threads(
     have_new_job: Receiver<()>,
-    miner: Arc<Mutex<Miner>>,
+    miner: SharedLock<Miner>,
     share_send: Sender<(u32, u32, u32, u32)>,
 ) {
     tokio::task::spawn(async move {
@@ -952,7 +950,7 @@ fn start_mining_threads(
                 while let Some(killer) = killers.pop() {
                     killer.store(true, Ordering::Relaxed);
                 }
-                let miner = miner.safe_lock(|m| m.clone()).unwrap();
+                let miner = miner.with(|m| m.clone()).unwrap();
                 for i in 0..p {
                     let mut miner = miner.clone();
                     let share_send = share_send.clone();
