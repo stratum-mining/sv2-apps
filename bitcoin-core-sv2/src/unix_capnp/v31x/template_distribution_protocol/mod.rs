@@ -60,8 +60,8 @@ mod template_data;
 /// It is instantiated with:
 /// - A `&`[`std::path::Path`] to the Bitcoin Core UNIX socket
 /// - A `u64` for the fee delta threshold in satoshis
-/// - A `u8` for the minimum interval in seconds between mempool-driven template updates
-///   (chain tip updates are never throttled)
+/// - A `u8` for the minimum interval in seconds between mempool-driven template updates (chain tip
+///   updates are never throttled)
 /// - A [`async_channel::Receiver`] for incoming [`TemplateDistribution`] messages (handles
 ///   [`CoinbaseOutputConstraints`],
 ///   [`stratum_core::template_distribution_sv2::RequestTransactionData`], and
@@ -653,7 +653,8 @@ impl BitcoinCoreSv2TDP {
         Ok(wait_next_request)
     }
 
-    // Spawns a task that processes stale template data after a `STALE_TEMPLATE_GRACE_PERIOD_SECS` grace period.
+    // Spawns a task that processes stale template data after a `STALE_TEMPLATE_GRACE_PERIOD_SECS`
+    // grace period.
     //
     // Takes a snapshot of [`current_template_ids`] at call time, then schedules their
     // retirement. This ensures the snapshot is always taken at the epoch boundary rather

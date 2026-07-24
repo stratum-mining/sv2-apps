@@ -224,9 +224,7 @@ impl VardiffState {
             return None;
         }
 
-        let Some(first_share) = self.first_share else {
-            return None;
-        };
+        let first_share = self.first_share?;
 
         let bdiff = sane_tdiff(now.duration_since(first_share).as_secs_f64());
         let tdiff = sane_tdiff(now.duration_since(self.last_diff_change).as_secs_f64());
@@ -498,7 +496,10 @@ mod tests {
         let result = state
             .try_vardiff(hashrate, &target, SPM_CKPOOL)
             .expect("try_vardiff");
-        assert!(result.is_none(), "should not adjust before share/time threshold");
+        assert!(
+            result.is_none(),
+            "should not adjust before share/time threshold"
+        );
     }
 
     #[test]
