@@ -85,23 +85,19 @@ impl Downstream {
             error::Action::Log => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} returned a log-only error"
                 );
                 LoopControl::Continue
             }
             error::Action::Disconnect(_) => {
-                warn!(
-                    downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested disconnect"
-                );
+                warn!(error = %e, "{context} requested disconnect");
                 LoopControl::Break
             }
             error::Action::Shutdown => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} requested shutdown"
                 );
                 LoopControl::Break
@@ -171,7 +167,7 @@ impl Downstream {
     ) {
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
-            error!(?e, "Failed to set up downstream connection");
+            error!(%e, "Failed to set up downstream connection");
 
             // sleep to make sure SetupConnectionError is sent
             // before we break the TCP connection
@@ -206,7 +202,7 @@ impl Downstream {
 
                     res = self_clone_1.handle_message_from_downstream() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling downstream message for {downstream_id}");
+                            error!(%e, "Error handling downstream message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_message_from_downstream",
                                 &e,
@@ -217,7 +213,7 @@ impl Downstream {
                     }
                     res = self_clone_2.handle_job_declarator_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling job declarator message for {downstream_id}");
+                            error!(%e, "Error handling job declarator message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_job_declarator_message",
                                 &e,
