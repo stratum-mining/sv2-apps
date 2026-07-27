@@ -93,34 +93,27 @@ impl Downstream {
         cancellation_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
         match e.action {
             Action::Log => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} returned a log-only error"
                 );
                 LoopControl::Continue
             }
             Action::Disconnect(_) => {
-                warn!(
-                    downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested disconnect; cancelling downstream token"
-                );
+                warn!(error = %e, "{context} requested disconnect; cancelling downstream token");
                 self.downstream_connection_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} requested shutdown; cancelling global token"
                 );
                 cancellation_token.cancel();
@@ -197,7 +190,7 @@ impl Downstream {
     ) {
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
-            error!(?e, "Failed to set up downstream connection");
+            error!(%e, "Failed to set up downstream connection");
 
             // sleep to make sure SetupConnectionError is sent
             // before we break the TCP connection
@@ -226,7 +219,7 @@ impl Downstream {
                     }
                     res = self_clone_1.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling downstream message for {downstream_id}");
+                            error!(%e, "Error handling downstream message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,
@@ -238,7 +231,7 @@ impl Downstream {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling channel manager message for {downstream_id}");
+                            error!(%e, "Error handling channel manager message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_channel_manager_message",
                                 &e,
