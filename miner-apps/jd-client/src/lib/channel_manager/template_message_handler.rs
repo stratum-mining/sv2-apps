@@ -275,7 +275,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
 
         for message in messages {
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 
@@ -687,7 +687,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
 
         for message in messages {
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 

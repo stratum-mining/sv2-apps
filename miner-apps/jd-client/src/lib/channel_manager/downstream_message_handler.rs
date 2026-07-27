@@ -285,7 +285,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             {
                 Ok(prefix) => prefix,
                 Err(e) => {
-                    error!(?e, "Failed to get extranonce prefix");
+                    error!(%e, "Failed to get extranonce prefix");
                     return Err(JDCError::shutdown(e));
                 }
             };
@@ -420,7 +420,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 
@@ -511,7 +511,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
                 {
                     Ok(prefix) => Some(prefix),
                     Err(e) => {
-                        error!(?e, "Extranonce prefix error");
+                        error!(%e, "Extranonce prefix error");
                         messages.push(
                             (
                                 downstream_id,
@@ -689,7 +689,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 
@@ -860,7 +860,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 
@@ -1128,7 +1128,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 
@@ -1422,7 +1422,7 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 

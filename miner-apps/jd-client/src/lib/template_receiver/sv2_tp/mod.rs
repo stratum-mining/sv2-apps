@@ -90,35 +90,22 @@ impl Sv2Tp {
         cancellation_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
 
         match e.action {
             Action::Log => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} returned a log-only error"
-                );
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Shutdown => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested shutdown"
-                );
+                warn!(error = %e, "{context} requested shutdown");
                 cancellation_token.cancel();
                 LoopControl::Break
             }
             other => {
-                warn!(
-                    action = ?other,
-                    error_kind = ?e.kind,
-                    "{context} returned an unhandled action"
-                );
+                warn!(action = %other, error = %e, "{context} returned an unhandled action");
                 LoopControl::Continue
             }
         }
@@ -200,14 +187,14 @@ impl Sv2Tp {
                                     return Err(JDCError::shutdown(JDCErrorKind::InvalidKey));
                                 }
                                 Err(e) => {
-                                    error!(attempt, error = ?e, "Noise handshake failed");
+                                    error!(attempt, error = %e, "Noise handshake failed");
                                 }
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    warn!(attempt, MAX_RETRIES, error = ?e, "Failed to connect to template provider");
+                    warn!(attempt, MAX_RETRIES, error = %e, "Failed to connect to template provider");
                 }
             }
 
@@ -238,7 +225,7 @@ impl Sv2Tp {
     ) -> JDCResult<(), error::TemplateProvider> {
         info!("Initialized state for starting template receiver");
         if let Err(e) = self.setup_connection(socket_address).await {
-            error!("TemplateReceiver setup connection failed: {e:?}");
+            error!("TemplateReceiver setup connection failed: {e}");
             self.sv2_tp_io.close();
             return Err(e);
         }
@@ -257,7 +244,7 @@ impl Sv2Tp {
                     }
                     res = self_clone_1.handle_template_provider_message() => {
                         if let Err(e) = res {
-                            error!("TemplateReceiver template provider handler failed: {e:?}");
+                            error!("TemplateReceiver template provider handler failed: {e}");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "TemplateReceiver::handle_template_provider_message",
                                 &e,
@@ -269,7 +256,7 @@ impl Sv2Tp {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!("TemplateReceiver channel manager handler failed: {e:?}");
+                            error!("TemplateReceiver channel manager handler failed: {e}");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "TemplateReceiver::handle_channel_manager_message",
                                 &e,
@@ -330,7 +317,7 @@ impl Sv2Tp {
                     .send(message)
                     .await
                     .map_err(|e| {
-                        error!(error=?e, "Failed to send template distribution message to channel manager.");
+                        error!(error=%e, "Failed to send template distribution message to channel manager.");
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
@@ -387,7 +374,7 @@ impl Sv2Tp {
 
         info!("Waiting for upstream handshake response");
         let mut incoming: Sv2Frame = self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
-            error!(?e, "Upstream connection closed during handshake");
+            error!(%e, "Upstream connection closed during handshake");
             JDCError::shutdown(noise_sv2::Error::ExpectedIncomingHandshakeMessage)
         })?;
 

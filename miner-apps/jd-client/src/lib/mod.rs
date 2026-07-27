@@ -78,7 +78,7 @@ impl JobDeclaratorClient {
         let mode = JDMode::new(self.config.mode);
 
         if let Err(e) = miner_coinbase_outputs.consensus_encode(&mut encoded_outputs) {
-            error!(error = ?e, "Invalid coinbase output in config");
+            error!(error = %e, "Invalid coinbase output in config");
             self.cancellation_token.cancel();
             self.shutdown_notify.notify_waiters();
             self.is_alive.store(false, Ordering::Relaxed);
@@ -122,7 +122,7 @@ impl JobDeclaratorClient {
         {
             Ok(channel_manager) => channel_manager,
             Err(e) => {
-                error!(error = ?e, "Failed to initialize channel manager");
+                error!(error = %e, "Failed to initialize channel manager");
                 self.cancellation_token.cancel();
                 self.shutdown_notify.notify_waiters();
                 self.is_alive.store(false, Ordering::Relaxed);
@@ -167,7 +167,7 @@ impl JobDeclaratorClient {
                 {
                     Ok(template_receiver) => template_receiver,
                     Err(e) => {
-                        error!(error = ?e, "Failed to initialize SV2 template receiver");
+                        error!(error = %e, "Failed to initialize SV2 template receiver");
                         self.cancellation_token.cancel();
                         self.shutdown_notify.notify_waiters();
                         self.is_alive.store(false, Ordering::Relaxed);
@@ -182,7 +182,7 @@ impl JobDeclaratorClient {
                     .start(address, cancellation_token_tp, task_manager_cl)
                     .await
                 {
-                    error!(error = ?e, "Failed to start SV2 template receiver");
+                    error!(error = %e, "Failed to start SV2 template receiver");
                     self.cancellation_token.cancel();
                     self.shutdown_notify.notify_waiters();
                     self.is_alive.store(false, Ordering::Relaxed);
@@ -328,7 +328,7 @@ impl JobDeclaratorClient {
                     _ = initial_channel_manager.allocate_tokens(2).await;
                 }
                 Err(e) => {
-                    tracing::error!("Failed to initialize upstream: {:?}", e);
+                    tracing::error!("Failed to initialize upstream: {e}");
                     mode.set_solo_mining();
                 }
             };
@@ -355,7 +355,7 @@ impl JobDeclaratorClient {
                     )
                     .await
                 {
-                    tracing::error!(?e, "Downstream server task exited with error");
+                    tracing::error!(%e, "Downstream server task exited with error");
                     cancellation_token.cancel();
                 }
             }
@@ -415,7 +415,7 @@ impl JobDeclaratorClient {
                     {
                         Ok(channel_manager) => channel_manager,
                         Err(e) => {
-                            error!(error = ?e, "Failed to initialize channel manager during fallback");
+                            error!(error = %e, "Failed to initialize channel manager during fallback");
                             self.cancellation_token.cancel();
                             break;
                         }
@@ -474,7 +474,7 @@ impl JobDeclaratorClient {
                             _ = channel_manager.allocate_tokens(2).await;
                         }
                         Err(e) => {
-                            tracing::error!("Failed to initialize upstream: {:?}", e);
+                            tracing::error!("Failed to initialize upstream: {e}");
                             channel_manager
                                 .upstream_state
                                 .set(UpstreamState::SoloMining);
@@ -520,7 +520,7 @@ impl JobDeclaratorClient {
                                     config.required_extensions().to_vec(),
                                 )
                                 .await {
-                                    tracing::error!(?e, "Downstream server task exited with error");
+                                    tracing::error!(%e, "Downstream server task exited with error");
                                     cancellation_token.cancel();
                                 }
                         }
@@ -615,7 +615,7 @@ impl JobDeclaratorClient {
                 let fallback_handler = monitoring_fallback.register();
 
                 if let Err(e) = monitoring_server.run(shutdown_signal).await {
-                    error!("Monitoring server error: {:?}", e);
+                    error!("Monitoring server error: {e}");
                     cancellation_token.cancel();
                 }
 
@@ -737,7 +737,7 @@ impl JobDeclaratorClient {
                         }
 
                         warn!(
-                            "Attempt {}/{} failed for pool={}:{}, jds={}:{}: {:?}",
+                            "Attempt {}/{} failed for pool={}:{}, jds={}:{}: {}",
                             attempt,
                             MAX_RETRIES,
                             upstream_entry.pool_host,
