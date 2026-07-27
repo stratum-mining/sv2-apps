@@ -15,7 +15,8 @@
 use std::{
     any::type_name,
     fmt::{Debug, Display},
-    marker::PhantomData, sync::PoisonError,
+    marker::PhantomData,
+    sync::PoisonError,
 };
 
 use stratum_apps::{
@@ -43,7 +44,10 @@ pub struct JDSError<Owner> {
 
 impl<Owner> Display for JDSError<Owner> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let owner = type_name::<Owner>().rsplit("::").next().unwrap_or("Unknown");
+        let owner = type_name::<Owner>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Unknown");
         write!(f, "[{owner}] Action: {}, error: {}", self.action, self.kind)
     }
 }

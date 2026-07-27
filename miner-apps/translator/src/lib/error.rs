@@ -443,7 +443,10 @@ impl<Owner> HandlerErrorType for TproxyError<Owner> {
 
 impl<Owner> std::fmt::Display for TproxyError<Owner> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let owner = type_name::<Owner>().rsplit("::").next().unwrap_or("Unknown");
+        let owner = type_name::<Owner>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Unknown");
         write!(f, "[{owner}] Action: {}, error: {}", self.action, self.kind)
     }
 }
