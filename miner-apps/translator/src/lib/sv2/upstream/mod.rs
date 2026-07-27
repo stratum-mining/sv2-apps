@@ -96,51 +96,32 @@ impl Upstream {
         fallback_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
 
         if fallback_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error during fallback"
-            );
+            debug!(error = %e, "{context} returned an error during fallback");
             return LoopControl::Continue;
         }
 
         match e.action {
             Action::Log => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} returned a log-only error"
-                );
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Fallback => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested fallback"
-                );
+                warn!(error = %e, "{context} requested fallback");
                 fallback_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested shutdown"
-                );
+                warn!(error = %e, "{context} requested shutdown");
                 cancellation_token.cancel();
                 LoopControl::Break
             }
             other => {
-                warn!(
-                    action = ?other,
-                    error_kind = ?e.kind,
-                    "{context} returned an unhandled action"
-                );
+                warn!(action = %other, error = %e, "{context} returned an unhandled action");
                 LoopControl::Continue
             }
         }
@@ -303,7 +284,7 @@ impl Upstream {
             }
             result = self.setup_connection() => {
                 if let Err(e) = result {
-                    error!("Upstream: failed to set up SV2 connection: {e:?}");
+                    error!("Upstream: failed to set up SV2 connection: {e}");
                     return Err(e);
                 }
             }

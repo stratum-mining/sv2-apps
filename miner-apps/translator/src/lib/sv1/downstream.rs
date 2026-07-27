@@ -191,7 +191,7 @@ impl Downstream {
         if cancellation_token.is_cancelled() {
             debug!(
                 downstream_id = self.downstream_id,
-                error_kind = ?e.kind,
+                error = %e,
                 "{context} returned an error after shutdown was requested"
             );
             return LoopControl::Continue;
@@ -200,7 +200,7 @@ impl Downstream {
         if fallback_token.is_cancelled() {
             debug!(
                 downstream_id = self.downstream_id,
-                error_kind = ?e.kind,
+                error = %e,
                 "{context} returned an error during fallback"
             );
             return LoopControl::Continue;
@@ -210,24 +210,20 @@ impl Downstream {
             Action::Log => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} returned a log-only error"
                 );
                 LoopControl::Continue
             }
             Action::Disconnect(_) => {
-                warn!(
-                    downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested disconnect; cancelling downstream token"
-                );
+                warn!(error = %e, "{context} requested disconnect; cancelling downstream token");
                 self.downstream_cancellation_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} requested shutdown; cancelling global token"
                 );
                 cancellation_token.cancel();
@@ -236,8 +232,8 @@ impl Downstream {
             other => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    action = ?other,
-                    error_kind = ?e.kind,
+                    action = %other,
+                    error = %e,
                     "{context} returned an unhandled action"
                 );
                 LoopControl::Continue
@@ -324,7 +320,7 @@ impl Downstream {
                     // Handle downstream -> server message
                     res = self.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!("Downstream {downstream_id}: error in downstream message handler: {e:?}");
+                            error!("Downstream {downstream_id}: error in downstream message handler: {e}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,
@@ -339,7 +335,7 @@ impl Downstream {
                     // Handle server -> downstream message
                     res = self.handle_sv1_server_message() => {
                         if let Err(e) = res {
-                            error!("Downstream {downstream_id}: error in server message handler: {e:?}");
+                            error!("Downstream {downstream_id}: error in server message handler: {e}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_sv1_server_message",
                                 &e,
