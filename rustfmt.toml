@@ -1,4 +1,4 @@
-edition = "2018"
+edition = "2024"
 imports_indent = "Block"
 imports_layout = "Mixed"
 imports_granularity = "Crate"
