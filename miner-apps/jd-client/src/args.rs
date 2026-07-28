@@ -34,6 +34,7 @@ pub fn process_cli_args() -> Result<JobDeclaratorClientConfig, JDCErrorKind> {
             "required_extensions",
             "miner_telemetry.cidrs",
         ],
+        &["template_provider_type"],
     )?;
 
     config.set_log_file(args.log_file);

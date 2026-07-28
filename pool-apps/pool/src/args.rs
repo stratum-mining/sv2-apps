@@ -37,6 +37,7 @@ pub fn process_cli_args() -> Result<PoolConfig, PoolErrorKind> {
         &args.config_path,
         "POOL",
         &["supported_extensions", "required_extensions"],
+        &["template_provider_type"],
     )?;
 
     config.set_log_dir(args.log_file);

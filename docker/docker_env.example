@@ -8,6 +8,8 @@
 # Conventions for non-scalar fields:
 #   * Tagged enums (template_provider_type) take the variant as a path segment,
 #     e.g. POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK. Case-insensitive.
+#     If a TOML file selects a different variant, the environment's variant
+#     replaces it; set only one variant in the environment.
 #   * Upstreams are arrays, so they use `<PREFIX>__UPSTREAM_<NAME>__<FIELD>`; the
 #     <NAME> groups one upstream's fields together and orders entries
 #     alphabetically. Sorting is lexicographic (`10` sorts before `2`, `BACKUP`

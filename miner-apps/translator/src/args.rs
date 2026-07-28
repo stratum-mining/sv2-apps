@@ -41,6 +41,7 @@ pub fn process_cli_args() -> Result<TranslatorConfig, TproxyErrorKind> {
             "required_extensions",
             "miner_telemetry.cidrs",
         ],
+        &[],
     )?;
 
     config.set_log_dir(args.log_file);

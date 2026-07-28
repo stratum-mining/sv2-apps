@@ -19,6 +19,12 @@ use serde::de::DeserializeOwned;
 /// lists, e.g. `POOL__SUPPORTED_EXTENSIONS=1,2,3`. A single value without a
 /// separator, e.g. `POOL__SUPPORTED_EXTENSIONS=2`, is a 1-element list.
 ///
+/// Top-level fields named in `enum_keys` hold externally tagged enums (e.g.
+/// `template_provider_type`). Variant tables from different sources would
+/// otherwise merge — the file choosing one variant and the environment another
+/// leaves two variant keys behind and fails deserialization — so when the
+/// environment names a variant for such a key, it replaces the file's variant.
+///
 /// Upstream arrays cannot be expressed with `__` paths, so they use the
 /// dedicated form `<PREFIX>__UPSTREAM_<NAME>__<FIELD>`. `<NAME>` groups one
 /// upstream's fields together and orders entries alphabetically; if any such
@@ -27,6 +33,7 @@ pub fn load_config<T: DeserializeOwned>(
     config_path: impl AsRef<Path>,
     env_prefix: &str,
     list_keys: &[&str],
+    enum_keys: &[&str],
 ) -> Result<T, ConfigError> {
     let config_path = config_path.as_ref();
     let prefix_marker = format!("{}__", env_prefix.to_uppercase());
@@ -79,7 +86,57 @@ pub fn load_config<T: DeserializeOwned>(
         builder = builder.set_override("upstreams", upstreams)?;
     }
 
-    builder.build()?.try_deserialize()
+    let config = builder.build()?;
+    if enum_keys.is_empty() {
+        return config.try_deserialize();
+    }
+
+    // When the environment picks an enum variant, drop the other variants that
+    // merged in from the file so exactly one variant key remains.
+    let mut root: Map<String, Value> = config.try_deserialize()?;
+    for key in enum_keys {
+        let Some(variant) = env_enum_variant(&prefix_marker, key)? else {
+            continue;
+        };
+        if let Some(value) = root.get_mut(*key) {
+            if let ValueKind::Table(table) = &mut value.kind {
+                table.retain(|name, _| name.eq_ignore_ascii_case(&variant));
+            }
+        }
+    }
+    Value::new(None, ValueKind::Table(root)).try_deserialize()
+}
+
+/// Returns the enum variant that the environment selects for the top-level
+/// field `key` — the path segment following `<PREFIX>__<KEY>__` — or an error
+/// if the environment names more than one variant.
+fn env_enum_variant(prefix_marker: &str, key: &str) -> Result<Option<String>, ConfigError> {
+    let marker = format!("{prefix_marker}{}__", key.to_uppercase());
+    let mut variants: Vec<String> = Vec::new();
+    for (env_key, _) in std::env::vars() {
+        let Some(rest) = env_key
+            .to_uppercase()
+            .strip_prefix(&marker)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let variant = rest.split("__").next().unwrap_or(&rest).to_lowercase();
+        if !variant.is_empty() && !variants.contains(&variant) {
+            variants.push(variant);
+        }
+    }
+    match variants.len() {
+        0 => Ok(None),
+        1 => Ok(variants.pop()),
+        _ => {
+            variants.sort();
+            Err(ConfigError::Message(format!(
+                "conflicting `{marker}*` variants in the environment: {}; set exactly one",
+                variants.join(", ")
+            )))
+        }
+    }
 }
 
 /// Collects `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` environment variables into a
@@ -191,7 +248,7 @@ mod tests {
         env::set_var("OVR__NESTED__PORT", "20");
 
         let cfg: TestConfig =
-            load_config(path.to_str().unwrap(), "OVR", list_keys()).expect("load config");
+            load_config(path.to_str().unwrap(), "OVR", list_keys(), &[]).expect("load config");
 
         assert_eq!(cfg.listen_address, "0.0.0.0:2222"); // from env
         assert_eq!(cfg.cert_validity_sec, 3600); // from file
@@ -212,8 +269,8 @@ mod tests {
         env::set_var("ENVONLY__SUPPORTED_EXTENSIONS", "1,2,3");
         env::set_var("ENVONLY__NESTED__PORT", "42");
 
-        let cfg: TestConfig =
-            load_config(missing.to_str().unwrap(), "ENVONLY", list_keys()).expect("load config");
+        let cfg: TestConfig = load_config(missing.to_str().unwrap(), "ENVONLY", list_keys(), &[])
+            .expect("load config");
 
         assert_eq!(cfg.listen_address, "127.0.0.1:3333");
         assert_eq!(cfg.cert_validity_sec, 1200); // string parsed into u64
@@ -249,7 +306,7 @@ mod tests {
         env::set_var("SINGLE__SUPPORTED_EXTENSIONS", "2");
 
         let cfg: TestConfig =
-            load_config(path.to_str().unwrap(), "SINGLE", list_keys()).expect("load config");
+            load_config(path.to_str().unwrap(), "SINGLE", list_keys(), &[]).expect("load config");
         assert_eq!(cfg.supported_extensions, vec![2]);
 
         env::remove_var("SINGLE__SUPPORTED_EXTENSIONS");
@@ -277,6 +334,7 @@ mod tests {
             missing.to_str().unwrap(),
             "NESTEDLIST",
             &["telemetry.cidrs"],
+            &[],
         )
         .expect("load config");
         assert_eq!(cfg.telemetry.cidrs, vec!["192.168.1.0/24"]);
@@ -291,7 +349,7 @@ mod tests {
         env::set_var("PARTIAL__LISTEN_ADDRESS", "0.0.0.0:1111");
 
         let result: Result<TestConfig, _> =
-            load_config(missing.to_str().unwrap(), "PARTIAL", list_keys());
+            load_config(missing.to_str().unwrap(), "PARTIAL", list_keys(), &[]);
         assert!(result.is_err());
 
         env::remove_var("PARTIAL__LISTEN_ADDRESS");
@@ -302,7 +360,7 @@ mod tests {
         // No file and no `EMPTY__*` env vars: the error must tell the user
         // where configuration can come from.
         let missing = env::temp_dir().join("loader-test-no-sources.toml");
-        let err = load_config::<TestConfig>(missing.to_str().unwrap(), "EMPTY", list_keys())
+        let err = load_config::<TestConfig>(missing.to_str().unwrap(), "EMPTY", list_keys(), &[])
             .expect_err("must fail without any config source");
         let message = err.to_string();
         assert!(message.contains("no configuration found"));
@@ -340,7 +398,7 @@ mod tests {
         env::set_var("UP__UPSTREAM_PRIMARY__USER_IDENTITY", "env-user");
 
         let cfg: UpstreamConfig =
-            load_config(path.to_str().unwrap(), "UP", &[]).expect("load config");
+            load_config(path.to_str().unwrap(), "UP", &[], &[]).expect("load config");
 
         // The env-defined upstream fully replaces the file's array.
         assert_eq!(cfg.upstreams.len(), 1);
@@ -370,7 +428,7 @@ mod tests {
         env::set_var("ORD__UPSTREAM_A__USER_IDENTITY", "a");
 
         let cfg: UpstreamConfig =
-            load_config(missing.to_str().unwrap(), "ORD", &[]).expect("load config");
+            load_config(missing.to_str().unwrap(), "ORD", &[], &[]).expect("load config");
 
         assert_eq!(cfg.upstreams.len(), 2);
         assert_eq!(cfg.upstreams[0].address, "first");
@@ -386,5 +444,129 @@ mod tests {
         ] {
             env::remove_var(var);
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    enum TestTp {
+        Sv2Tp { address: String },
+        BitcoinCoreIpc { version: u16, network: String },
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TpConfig {
+        template_provider_type: TestTp,
+    }
+
+    const ENUM_KEYS: &[&str] = &["template_provider_type"];
+
+    #[test]
+    fn env_switches_enum_variant() {
+        // The file picks one variant; the environment picks the other. The
+        // environment's variant must fully replace the file's.
+        let path = write_toml(
+            "enum-switch",
+            r#"
+                [template_provider_type.Sv2Tp]
+                address = "tp:8442"
+            "#,
+        );
+
+        env::set_var(
+            "TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION",
+            "31",
+        );
+        env::set_var(
+            "TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK",
+            "mainnet",
+        );
+
+        let cfg: TpConfig =
+            load_config(path.to_str().unwrap(), "TPSWITCH", &[], ENUM_KEYS).expect("load config");
+        match cfg.template_provider_type {
+            TestTp::BitcoinCoreIpc { version, network } => {
+                assert_eq!(version, 31);
+                assert_eq!(network, "mainnet");
+            }
+            other => panic!("expected BitcoinCoreIpc, got {other:?}"),
+        }
+
+        env::remove_var("TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
+        env::remove_var("TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK");
+
+        // And the other direction: file picks BitcoinCoreIpc, env picks Sv2Tp.
+        let path = write_toml(
+            "enum-switch-back",
+            r#"
+                [template_provider_type.BitcoinCoreIpc]
+                version = 31
+                network = "mainnet"
+            "#,
+        );
+
+        env::set_var(
+            "TPSWITCHBACK__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
+            "tp:8442",
+        );
+
+        let cfg: TpConfig = load_config(path.to_str().unwrap(), "TPSWITCHBACK", &[], ENUM_KEYS)
+            .expect("load config");
+        match cfg.template_provider_type {
+            TestTp::Sv2Tp { address } => assert_eq!(address, "tp:8442"),
+            other => panic!("expected Sv2Tp, got {other:?}"),
+        }
+
+        env::remove_var("TPSWITCHBACK__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS");
+    }
+
+    #[test]
+    fn env_merges_fields_within_same_enum_variant() {
+        // Same variant on both sides: individual fields still merge, with the
+        // environment taking precedence.
+        let path = write_toml(
+            "enum-merge",
+            r#"
+                [template_provider_type.BitcoinCoreIpc]
+                version = 30
+                network = "signet"
+            "#,
+        );
+
+        env::set_var(
+            "TPMERGE__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION",
+            "31",
+        );
+
+        let cfg: TpConfig =
+            load_config(path.to_str().unwrap(), "TPMERGE", &[], ENUM_KEYS).expect("load config");
+        match cfg.template_provider_type {
+            TestTp::BitcoinCoreIpc { version, network } => {
+                assert_eq!(version, 31); // from env
+                assert_eq!(network, "signet"); // from file
+            }
+            other => panic!("expected BitcoinCoreIpc, got {other:?}"),
+        }
+
+        env::remove_var("TPMERGE__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
+    }
+
+    #[test]
+    fn conflicting_env_enum_variants_error() {
+        let missing = env::temp_dir().join("loader-test-enum-conflict.toml");
+
+        env::set_var(
+            "TPCONFLICT__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
+            "tp:8442",
+        );
+        env::set_var(
+            "TPCONFLICT__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION",
+            "31",
+        );
+
+        let err = load_config::<TpConfig>(missing.to_str().unwrap(), "TPCONFLICT", &[], ENUM_KEYS)
+            .expect_err("must fail with two env variants");
+        assert!(err.to_string().contains("set exactly one"));
+
+        env::remove_var("TPCONFLICT__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS");
+        env::remove_var("TPCONFLICT__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
     }
 }
