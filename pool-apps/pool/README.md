@@ -95,6 +95,9 @@ POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
 # List fields (supported_extensions, required_extensions) are comma-separated.
 # A lone value is read as a 1-element list:
 POOL__SUPPORTED_EXTENSIONS=2,3
+# The embedded JDS has its own extension lists under the `jds` section:
+POOL__JDS__SUPPORTED_EXTENSIONS=2,3
+POOL__JDS__REQUIRED_EXTENSIONS=2
 ```
 
 See `docker/docker_env.example` for a complete working set of variables.

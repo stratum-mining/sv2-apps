@@ -36,7 +36,12 @@ pub fn process_cli_args() -> Result<PoolConfig, PoolErrorKind> {
     let mut config: PoolConfig = load_config(
         &args.config_path,
         "POOL",
-        &["supported_extensions", "required_extensions"],
+        &[
+            "supported_extensions",
+            "required_extensions",
+            "jds.supported_extensions",
+            "jds.required_extensions",
+        ],
         &["template_provider_type"],
     )?;
 

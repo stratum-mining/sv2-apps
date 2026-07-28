@@ -41,6 +41,10 @@ POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__FEE_THRESHOLD=100
 POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__MIN_INTERVAL=5
 # Embedded Job Declaration Server (JDS)
 POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
+# JDS protocol extensions default to empty. Set them as comma-separated lists
+# if you need them, e.g.:
+# POOL__JDS__SUPPORTED_EXTENSIONS=2,3
+# POOL__JDS__REQUIRED_EXTENSIONS=2
 
 # -----------------------------------------------------------------------------
 # Job Declarator Client (jd_client_sv2)
