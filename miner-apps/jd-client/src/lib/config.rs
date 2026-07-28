@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 use stratum_apps::{
-    config_helpers::{opt_path_from_toml, CoinbaseRewardScript},
+    config_helpers::{CoinbaseRewardScript, opt_path_from_toml},
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     stratum_core::bitcoin::{Amount, TxOut},
     tp_type::TemplateProviderType,

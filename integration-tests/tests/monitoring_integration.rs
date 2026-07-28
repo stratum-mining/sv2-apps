@@ -9,9 +9,9 @@ use integration_tests_sv2::{
 };
 use stratum_apps::{
     monitoring::{
-        routes, ErrorResponse, GlobalInfo, HealthResponse, RootResponse, ServerChannelsResponse,
+        ErrorResponse, GlobalInfo, HealthResponse, RootResponse, ServerChannelsResponse,
         ServerResponse, Sv1ClientInfo, Sv1ClientsResponse, Sv2ClientChannelsResponse,
-        Sv2ClientResponse, Sv2ClientsResponse,
+        Sv2ClientResponse, Sv2ClientsResponse, routes,
     },
     stratum_core::mining_sv2::*,
 };

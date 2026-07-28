@@ -17,7 +17,7 @@ pub mod resolve_hostname;
 #[cfg(feature = "sv1")]
 pub mod sv1_connection;
 
-pub use resolve_hostname::{resolve_host, resolve_host_port, ResolveError};
+pub use resolve_hostname::{ResolveError, resolve_host, resolve_host_port};
 
 use async_channel::{RecvError, SendError};
 use std::{fmt, time::Duration};

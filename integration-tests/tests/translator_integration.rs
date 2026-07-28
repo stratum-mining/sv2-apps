@@ -11,7 +11,7 @@ use integration_tests_sv2::{
 use stratum_apps::{
     config_helpers::CoinbaseRewardScript,
     stratum_core::{
-        bitcoin::{consensus::serialize, Amount, TxOut},
+        bitcoin::{Amount, TxOut, consensus::serialize},
         mining_sv2::*,
     },
 };
@@ -24,13 +24,13 @@ use std::{
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq0255, Sv2Option},
     common_messages_sv2::{
-        Protocol, SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION,
-        MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+        MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionError,
+        SetupConnectionSuccess,
     },
     mining_sv2::{
-        CloseChannel, OpenMiningChannelError, MESSAGE_TYPE_CLOSE_CHANNEL,
-        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        CloseChannel, MESSAGE_TYPE_CLOSE_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, OpenMiningChannelError,
     },
     parsers_sv2::{self, AnyMessage, CommonMessages},
     sv1_api,

@@ -9,8 +9,8 @@ use alloc::{
 use bs58::{decode, decode::Error as Bs58DecodeError};
 use core::{convert::TryFrom, fmt::Display, str::FromStr};
 use secp256k1::{
-    schnorr::Signature, Keypair, Message as SecpMessage, Secp256k1, SecretKey, SignOnly,
-    VerifyOnly, XOnlyPublicKey,
+    Keypair, Message as SecpMessage, Secp256k1, SecretKey, SignOnly, VerifyOnly, XOnlyPublicKey,
+    schnorr::Signature,
 };
 use serde::{Deserialize, Serialize};
 

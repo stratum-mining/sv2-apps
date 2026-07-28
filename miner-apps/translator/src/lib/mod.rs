@@ -11,12 +11,12 @@
 //! It relies on several sub-modules (`config`, `downstream_sv1`, `upstream_sv2`, `proxy`, `status`,
 //! etc.) for specialized functionalities.
 #![allow(clippy::module_inception)]
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -24,7 +24,7 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     payout::PayoutMode,
     task_manager::TaskManager,
-    utils::types::{Sv2Frame, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS},
+    utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, Sv2Frame},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;

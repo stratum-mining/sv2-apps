@@ -10,7 +10,7 @@ use std::fmt;
 
 use crate::{
     config_helpers::CoinbaseRewardScript,
-    stratum_core::bitcoin::{consensus::deserialize, Amount, ScriptBuf, Transaction, TxOut},
+    stratum_core::bitcoin::{Amount, ScriptBuf, Transaction, TxOut, consensus::deserialize},
 };
 
 // Legacy solo identities do not encode a fee policy, so allow at most a 10% service fee.
@@ -456,9 +456,9 @@ fn address_part_from_user_identity(user_identity: &str) -> &str {
 mod tests {
     use super::*;
     use crate::stratum_core::bitcoin::{
+        Address,
         consensus::serialize,
         params::{MAINNET, TESTNET4},
-        Address,
     };
 
     const MINER_ADDRESS: &str = "bc1qtzqxqaxyy6lda2fhdtp5dp0v56vlf6g0tljy2x";

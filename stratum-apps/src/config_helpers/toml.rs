@@ -1,6 +1,6 @@
 use serde::{
-    de::{self, Deserializer},
     Deserialize,
+    de::{self, Deserializer},
 };
 use std::{path::PathBuf, time::Duration};
 

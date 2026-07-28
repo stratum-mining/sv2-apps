@@ -3,7 +3,7 @@ use crate::{
     sv1_minerd::MinerdProcess, template_provider::*,
 };
 use interceptor::InterceptAction;
-use jd_client_sv2::{config::ConfigJDCMode, JobDeclaratorClient};
+use jd_client_sv2::{JobDeclaratorClient, config::ConfigJDCMode};
 use once_cell::sync::OnceCell;
 use pool_sv2::PoolSv2;
 use std::{
@@ -18,7 +18,7 @@ use stratum_apps::{
     tp_type::TemplateProviderType,
 };
 use tracing::Level;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use translator_sv2::TranslatorSv2;
 use utils::get_available_address;
 

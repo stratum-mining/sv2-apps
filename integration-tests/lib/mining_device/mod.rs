@@ -2,13 +2,13 @@
 use async_channel::{Receiver, Sender};
 use num_format::{Locale, ToFormattedString};
 use primitive_types::U256;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use std::{
     convert::TryInto,
     net::{SocketAddr, ToSocketAddrs},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread::available_parallelism,
     time::{Duration, Instant},
@@ -18,9 +18,8 @@ use stratum_apps::{
     network_helpers::noise_connection::Connection,
     stratum_core::{
         bitcoin::{
-            block::Version, blockdata::block::Header,
+            CompactTarget, block::Version, blockdata::block::Header,
             consensus::encode::serialize as btc_serialize, hash_types::BlockHash, hashes::Hash,
-            CompactTarget,
         },
         codec_sv2::{HandshakeRole, StandardEitherFrame, StandardSv2Frame},
         common_messages_sv2::{
@@ -40,7 +39,7 @@ use tracing::{debug, error, info};
 // Fast SHA256d midstate hasher
 use sha2::{
     compress256,
-    digest::generic_array::{typenum::U64, GenericArray},
+    digest::generic_array::{GenericArray, typenum::U64},
 };
 
 // Tuneable: how many nonces to try per mining loop iteration when fast hasher is available.

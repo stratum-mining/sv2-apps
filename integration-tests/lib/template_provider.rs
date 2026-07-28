@@ -1,4 +1,4 @@
-use corepc_node::{types::GetBlockchainInfo, Conf, ConnectParams, Node};
+use corepc_node::{Conf, ConnectParams, Node, types::GetBlockchainInfo};
 use std::{
     env,
     fs::create_dir_all,

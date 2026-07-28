@@ -2,21 +2,21 @@
 use std::net::SocketAddr;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
 };
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     fallback_coordinator::FallbackCoordinator,
     stratum_core::{bitcoin::consensus::Encodable, parsers_sv2::JobDeclaration},
     task_manager::TaskManager,
     tp_type::TemplateProviderType,
-    utils::types::{Sv2Frame, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS},
+    utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, Sv2Frame},
 };
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -28,7 +28,7 @@ use crate::{
     jd_mode::JDMode,
     job_declarator::JobDeclarator,
     template_receiver::{
-        bitcoin_core::{connect_to_bitcoin_core, BitcoinCoreSv2TDPConfig},
+        bitcoin_core::{BitcoinCoreSv2TDPConfig, connect_to_bitcoin_core},
         sv2_tp::Sv2Tp,
     },
     upstream::Upstream,

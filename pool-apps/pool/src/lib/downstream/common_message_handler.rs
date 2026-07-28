@@ -6,9 +6,8 @@ use std::{convert::TryInto, sync::atomic::Ordering};
 use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
-            has_requires_std_job, has_work_selection, Protocol, SetupConnection,
-            SetupConnectionError, SetupConnectionSuccess,
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnection,
+            SetupConnectionError, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
         },
         handlers_sv2::HandleCommonMessagesFromClientAsync,
         parsers_sv2::{AnyMessage, Tlv},

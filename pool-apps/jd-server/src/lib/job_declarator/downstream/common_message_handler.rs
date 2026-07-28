@@ -6,9 +6,9 @@ use std::convert::TryInto;
 use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
-            Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
             ERROR_CODE_SETUP_CONNECTION_MISSING_DECLARE_TX_DATA_FLAG,
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnection,
+            SetupConnectionError, SetupConnectionSuccess,
         },
         handlers_sv2::HandleCommonMessagesFromClientAsync,
         parsers_sv2::{AnyMessage, Tlv},

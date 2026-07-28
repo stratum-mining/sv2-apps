@@ -1,12 +1,12 @@
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicUsize},
         Arc,
+        atomic::{AtomicU32, AtomicUsize},
     },
 };
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use core::sync::atomic::Ordering;
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
@@ -18,9 +18,9 @@ use stratum_apps::{
     stratum_core::{
         bitcoin::{Amount, TxOut},
         channels_sv2::{
-            extranonce_manager::{bytes_needed, ExtranonceAllocator},
-            server::{extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel},
             Vardiff, VardiffState,
+            extranonce_manager::{ExtranonceAllocator, bytes_needed},
+            server::{extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel},
         },
         handlers_sv2::{
             HandleMiningMessagesFromClientAsync, HandleTemplateDistributionMessagesFromServerAsync,

@@ -9,9 +9,9 @@ use std::{
 
 use stratum_apps::{
     monitoring::{
+        DiscoveredMiner, MinerTelemetry, MinerTelemetryCollector, MinerTelemetryStatus,
         match_discovered_miners_to_downstreams_by_worker_and_port,
         sv1::{Sv1ClientInfo, Sv1ClientsMonitoring},
-        DiscoveredMiner, MinerTelemetry, MinerTelemetryCollector, MinerTelemetryStatus,
     },
     utils::types::DownstreamId,
 };

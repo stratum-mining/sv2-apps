@@ -9,7 +9,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::types::{Message, Sv2Frame},
 };
-use tracing::{error, trace, warn, Instrument as _};
+use tracing::{Instrument as _, error, trace, warn};
 
 /// Spawns async reader and writer tasks for handling framed I/O with shutdown support.
 #[track_caller]

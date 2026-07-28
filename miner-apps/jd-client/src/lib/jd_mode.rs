@@ -6,8 +6,8 @@
 //! Mode state is stored in `JDMode::inner` (`Arc<AtomicU8>`) to allow safe concurrent access
 //! across threads.
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicU8, Ordering},
 };
 
 use crate::config::ConfigJDCMode;

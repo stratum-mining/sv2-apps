@@ -1,10 +1,9 @@
 use stratum_apps::stratum_core::sv1_api::{
-    client_to_server,
+    IsServer, client_to_server,
     error::Error,
     json_rpc,
     server_to_client::{self, Notify},
     utils::{Extranonce, HexU32Be},
-    IsServer,
 };
 use tracing::{debug, info, warn};
 
@@ -12,8 +11,8 @@ use crate::{
     error,
     sv1::Sv1Server,
     utils::{
-        sv1_worker_name_from_sv1_username, validate_sv1_share, SubmitShareWithChannelId,
-        AGGREGATED_CHANNEL_ID,
+        AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, sv1_worker_name_from_sv1_username,
+        validate_sv1_share,
     },
 };
 

@@ -1,26 +1,26 @@
 use crate::{
     error::{self, TproxyError, TproxyErrorKind},
     sv2::channel_manager::{
-        ChannelManager, AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES, AGGREGATED_TPROXY_MAX_CHANNELS,
+        AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES, AGGREGATED_TPROXY_MAX_CHANNELS, ChannelManager,
         NON_AGGREGATED_TPROXY_MAX_CHANNELS,
     },
-    utils::{aggregated_upstream_user_identity, AggregatedState, AGGREGATED_CHANNEL_ID},
+    utils::{AGGREGATED_CHANNEL_ID, AggregatedState, aggregated_upstream_user_identity},
 };
 use stratum_apps::{
     stratum_core::{
         bitcoin::Target,
         channels_sv2::{
             client::{extended::ExtendedChannel, group::GroupChannel},
-            extranonce_manager::{bytes_needed, ExtranonceAllocator, ExtranoncePrefix},
+            extranonce_manager::{ExtranonceAllocator, ExtranoncePrefix, bytes_needed},
         },
         handlers_sv2::{HandleMiningMessagesFromServerAsync, SupportedChannelTypes},
         mining_sv2::{
-            CloseChannel, NewExtendedMiningJob, NewMiningJob, OpenExtendedMiningChannelSuccess,
+            CloseChannel, MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
+            NewExtendedMiningJob, NewMiningJob, OpenExtendedMiningChannelSuccess,
             OpenMiningChannelError, OpenStandardMiningChannelSuccess, SetCustomMiningJobError,
             SetCustomMiningJobSuccess, SetExtranoncePrefix, SetGroupChannel, SetNewPrevHash,
             SetTarget, SubmitSharesError, SubmitSharesSuccess, UpdateChannelError,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
         },
         parsers_sv2::{Mining, Tlv},
     },
@@ -603,7 +603,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                     if !m_static.is_future() {
                         let mut new_extended_mining_job_message = m_static.clone();
                         new_extended_mining_job_message.channel_id = AGGREGATED_CHANNEL_ID; // this is done so that every aggregated downstream
-                                                                                            // will receive the NewExtendedMiningJob message
+                        // will receive the NewExtendedMiningJob message
                         new_extended_mining_job_messages.push(new_extended_mining_job_message);
                     }
                 } else {

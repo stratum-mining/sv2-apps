@@ -5,8 +5,8 @@ use stratum_apps::{
     stratum_core::{
         codec_sv2::StandardEitherFrame,
         common_messages_sv2::{
-            Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
+            Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
         },
         parsers_sv2::{AnyMessage, CommonMessages, IsSv2Message},
     },

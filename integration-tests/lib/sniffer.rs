@@ -11,7 +11,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use stratum_apps::stratum_core::parsers_sv2::{message_type_to_name, AnyMessage};
+use stratum_apps::stratum_core::parsers_sv2::{AnyMessage, message_type_to_name};
 use tokio::{net::TcpStream, select};
 
 const DEFAULT_TIMEOUT: u64 = 60;

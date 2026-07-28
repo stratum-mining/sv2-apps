@@ -1,7 +1,7 @@
 use core::convert::TryFrom;
 use miniscript::bitcoin::{
-    secp256k1::{All, Secp256k1},
     PublicKey, ScriptBuf, ScriptHash, WScriptHash, XOnlyPublicKey,
+    secp256k1::{All, Secp256k1},
 };
 
 use super::Error;

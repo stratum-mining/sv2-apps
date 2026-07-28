@@ -314,10 +314,12 @@ mod tests {
             None,
         );
 
-        assert!(disabled_config
-            .expected_payout_distribution(payout_address)
-            .unwrap()
-            .is_none());
+        assert!(
+            disabled_config
+                .expected_payout_distribution(payout_address)
+                .unwrap()
+                .is_none()
+        );
 
         let enabled_config = TranslatorConfig::new(
             upstreams,

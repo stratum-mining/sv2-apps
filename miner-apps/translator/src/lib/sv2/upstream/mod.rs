@@ -5,12 +5,12 @@ use crate::{
     io_task::spawn_io_tasks,
     utils::UpstreamEntry,
 };
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use std::{net::SocketAddr, sync::Arc};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
-    network_helpers::{self, connect_with_noise, resolve_host, TCP_CONNECT_TIMEOUT},
+    network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
         binary_sv2::Seq064K,
         common_messages_sv2::{Protocol, SetupConnection},
@@ -20,7 +20,7 @@ use stratum_apps::{
     },
     task_manager::TaskManager,
     utils::{
-        protocol_message_type::{protocol_message_type, MessageType},
+        protocol_message_type::{MessageType, protocol_message_type},
         types::{Message, Sv2Frame},
     },
 };

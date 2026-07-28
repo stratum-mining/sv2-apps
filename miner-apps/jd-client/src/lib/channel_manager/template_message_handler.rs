@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq064K, U256},
-    bitcoin::{consensus, hashes::Hash, Amount, Transaction},
+    bitcoin::{Amount, Transaction, consensus, hashes::Hash},
     channels_sv2::{chain_tip::ChainTip, outputs::deserialize_outputs},
     handlers_sv2::HandleTemplateDistributionMessagesFromServerAsync,
     job_declaration_sv2::DeclareMiningJob,

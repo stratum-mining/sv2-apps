@@ -1,9 +1,9 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32},
     Arc,
+    atomic::{AtomicBool, AtomicU32},
 };
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     channel_utils::ReceiverCleanup,
@@ -15,12 +15,12 @@ use stratum_apps::{
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
         framing_sv2,
         handlers_sv2::{HandleCommonMessagesFromClientAsync, HandleExtensionsFromClientAsync},
-        parsers_sv2::{parse_message_frame_with_tlvs, AnyMessage, Mining, Tlv},
+        parsers_sv2::{AnyMessage, Mining, Tlv, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
     utils::{
-        protocol_message_type::{protocol_message_type, MessageType},
+        protocol_message_type::{MessageType, protocol_message_type},
         types::{ChannelId, DownstreamId, Message, Sv2Frame},
     },
 };

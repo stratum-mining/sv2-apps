@@ -6,7 +6,7 @@
 
 use stratum_apps::monitoring::server::{ServerExtendedChannelInfo, ServerInfo, ServerMonitoring};
 
-use crate::{sv2::ChannelManager, utils::AGGREGATED_CHANNEL_ID, TproxyMode};
+use crate::{TproxyMode, sv2::ChannelManager, utils::AGGREGATED_CHANNEL_ID};
 
 impl ServerMonitoring for ChannelManager {
     fn get_server(&self) -> ServerInfo {

@@ -3,8 +3,8 @@
 use crate::{
     error::JDSErrorKind,
     job_declarator::{
-        job_validation::{DeclareMiningJobResult, JobValidationEngine, SetCustomMiningJobResult},
         ALLOCATED_TOKEN_TIMEOUT_SECS, JANITOR_INTERVAL_SECS,
+        job_validation::{DeclareMiningJobResult, JobValidationEngine, SetCustomMiningJobResult},
     },
 };
 use std::{
@@ -15,31 +15,29 @@ use std::{
 };
 use stratum_apps::{
     bitcoin_core_sv2::runtime_api::{
-        job_declaration_protocol::{
-            self,
-            io::{JdRequest, JdResponse, ValidationContext},
-            CancellationToken,
-        },
         BitcoinCoreVersion,
+        job_declaration_protocol::{
+            self, CancellationToken,
+            io::{JdRequest, JdResponse, ValidationContext},
+        },
     },
     stratum_core::{
         bitcoin::{
-            self,
+            self, BlockHash, CompactTarget, Transaction, TxMerkleNode, Txid, Wtxid,
             block::Version,
             consensus::{Decodable, Encodable},
             hashes::Hash,
-            BlockHash, CompactTarget, Transaction, TxMerkleNode, Txid, Wtxid,
         },
         job_declaration_sv2::{
-            DeclareMiningJob, ProvideMissingTransactionsSuccess, PushSolution,
-            ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+            DeclareMiningJob, ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactionsSuccess,
+            PushSolution,
         },
         mining_sv2::{
-            SetCustomMiningJob, ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX,
+            ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_INPUT_N_SEQUENCE,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_LOCKTIME,
@@ -50,7 +48,7 @@ use stratum_apps::{
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_NBITS,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_VERSION,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED,
-            ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
+            ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, SetCustomMiningJob,
         },
     },
     sync::{SharedLock, SharedMap},

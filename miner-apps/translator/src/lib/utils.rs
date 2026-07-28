@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicU8, Ordering},
 };
 
 use stratum_apps::{
@@ -8,21 +8,21 @@ use stratum_apps::{
     stratum_core::{
         binary_sv2::U256,
         bitcoin::{
+            CompactTarget, Target, TxMerkleNode,
             block::{Header, Version},
             hashes::Hash,
-            CompactTarget, Target, TxMerkleNode,
         },
         channels_sv2::{
             merkle_root::merkle_root_from_path,
             target::{bytes_to_hex, u256_to_block_hash},
         },
-        extensions_sv2::{UserIdentity, MAX_USER_IDENTITY_LENGTH},
+        extensions_sv2::{MAX_USER_IDENTITY_LENGTH, UserIdentity},
         sv1_api::{
+            Message,
             client_to_server::{self, Submit},
             json_rpc,
             server_to_client::Notify,
             utils::HexU32Be,
-            Message,
         },
     },
     utils::types::{ChannelId, DownstreamId},

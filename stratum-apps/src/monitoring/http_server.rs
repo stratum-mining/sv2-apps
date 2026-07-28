@@ -3,6 +3,7 @@
 #[cfg(feature = "asic-rs-telemetry")]
 use super::miner_telemetry::{MinerTelemetry, MinerTelemetryStatus};
 use super::{
+    GlobalInfo,
     client::{
         ExtendedChannelInfo, StandardChannelInfo, Sv2ClientInfo, Sv2ClientKind, Sv2ClientMetadata,
         Sv2ClientsMonitoring, Sv2ClientsSummary,
@@ -14,14 +15,13 @@ use super::{
     },
     snapshot_cache::SnapshotCache,
     sv1::{Sv1ClientInfo, Sv1ClientsMonitoring, Sv1ClientsSummary},
-    GlobalInfo,
 };
 use axum::{
+    Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
     routing::get,
-    Router,
 };
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};

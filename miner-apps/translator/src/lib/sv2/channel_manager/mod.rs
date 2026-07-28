@@ -2,12 +2,12 @@ mod extensions_message_handler;
 mod mining_message_handler;
 
 use crate::{
+    TproxyMode,
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
     utils::{
-        aggregated_upstream_user_identity, tlv_user_identity_from_sv1_worker_name, AggregatedState,
-        AtomicAggregatedState, AGGREGATED_CHANNEL_ID,
+        AGGREGATED_CHANNEL_ID, AggregatedState, AtomicAggregatedState,
+        aggregated_upstream_user_identity, tlv_user_identity_from_sv1_worker_name,
     },
-    TproxyMode,
 };
 use async_channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -20,7 +20,7 @@ use stratum_apps::{
     stratum_core::{
         channels_sv2::{
             client::{extended::ExtendedChannel, group::GroupChannel},
-            extranonce_manager::{bytes_needed, ExtranonceAllocator},
+            extranonce_manager::{ExtranonceAllocator, bytes_needed},
         },
         codec_sv2::StandardSv2Frame,
         extensions_sv2::EXTENSION_TYPE_WORKER_HASHRATE_TRACKING,
@@ -31,7 +31,7 @@ use stratum_apps::{
     },
     task_manager::TaskManager,
     utils::{
-        protocol_message_type::{protocol_message_type, MessageType},
+        protocol_message_type::{MessageType, protocol_message_type},
         types::{ChannelId, DownstreamId, Hashrate, RequestId, Sv2Frame},
     },
 };

@@ -15,8 +15,8 @@ use std::{
     collections::BinaryHeap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicU8, Ordering},
         Arc,
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
 

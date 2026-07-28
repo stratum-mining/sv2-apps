@@ -1,7 +1,7 @@
 use integration_tests_sv2::mining_device::FastSha256d;
-use rand::{thread_rng, Rng};
+use rand::{Rng, thread_rng};
 use stratum_apps::stratum_core::bitcoin::{
-    block::Version, blockdata::block::Header, hash_types::BlockHash, hashes::Hash, CompactTarget,
+    CompactTarget, block::Version, blockdata::block::Header, hash_types::BlockHash, hashes::Hash,
 };
 
 fn random_header() -> Header {

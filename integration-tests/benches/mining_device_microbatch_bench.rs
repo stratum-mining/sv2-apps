@@ -1,9 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use integration_tests_sv2::mining_device::{set_nonces_per_call, FastSha256d};
-use rand::{thread_rng, Rng};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use integration_tests_sv2::mining_device::{FastSha256d, set_nonces_per_call};
+use rand::{Rng, thread_rng};
 use std::time::Duration;
 use stratum_apps::stratum_core::bitcoin::{
-    block::Version, blockdata::block::Header, hash_types::BlockHash, hashes::Hash, CompactTarget,
+    CompactTarget, block::Version, blockdata::block::Header, hash_types::BlockHash, hashes::Hash,
 };
 
 fn random_header() -> Header {

@@ -9,13 +9,13 @@ use hex;
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     monitoring::{
+        DiscoveredMiner, MinerTelemetry, MinerTelemetryCollector, MinerTelemetryStatus,
         client::{
             ExtendedChannelInfo, StandardChannelInfo, Sv2ClientInfo, Sv2ClientKind,
             Sv2ClientsMonitoring,
         },
         match_discovered_miners_to_downstreams_by_worker_and_port,
         server::{ServerExtendedChannelInfo, ServerInfo, ServerMonitoring},
-        DiscoveredMiner, MinerTelemetry, MinerTelemetryCollector, MinerTelemetryStatus,
     },
     utils::types::DownstreamId,
 };

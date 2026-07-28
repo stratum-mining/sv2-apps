@@ -4,18 +4,18 @@
 //! initialization, bootstrap stages, background service loops, and graceful teardown.
 
 use std::{
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     thread::JoinHandle,
 };
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 
 #[cfg(feature = "monitoring")]
 use stratum_apps::monitoring::MonitoringServer;
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     stratum_core::{
-        bitcoin::{consensus::Encodable, TxOut},
+        bitcoin::{TxOut, consensus::Encodable},
         parsers_sv2::{Mining, TemplateDistribution, Tlv},
     },
     task_manager::TaskManager,
@@ -25,8 +25,8 @@ use stratum_apps::{
 use tracing::{error, info, warn};
 
 use jd_server_sv2::job_declarator::{
-    job_validation::{bitcoin_core_ipc::BitcoinCoreIPCEngine, JobValidationEngine},
     JobDeclarator,
+    job_validation::{JobValidationEngine, bitcoin_core_ipc::BitcoinCoreIPCEngine},
 };
 
 use super::PoolSv2;
@@ -34,7 +34,7 @@ use crate::{
     channel_manager::ChannelManager,
     error::PoolErrorKind,
     template_receiver::{
-        bitcoin_core::{connect_to_bitcoin_core, BitcoinCoreSv2TDPConfig},
+        bitcoin_core::{BitcoinCoreSv2TDPConfig, connect_to_bitcoin_core},
         sv2_tp::Sv2Tp,
     },
 };

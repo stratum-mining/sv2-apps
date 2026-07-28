@@ -2,10 +2,10 @@
 
 use crate::utils::types::DownstreamId;
 use asic_rs::{
-    core::data::{collector::DataField, hashrate::HashRateUnit, miner::MinerData, pool::PoolData},
     MinerFactory,
+    core::data::{collector::DataField, hashrate::HashRateUnit, miner::MinerData, pool::PoolData},
 };
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,

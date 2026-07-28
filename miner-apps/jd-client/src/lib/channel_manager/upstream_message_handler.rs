@@ -22,11 +22,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     channel_manager::{
-        downstream_message_handler::RouteMessageTo, ChannelManager, DeclaredJob,
-        JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
+        ChannelManager, DeclaredJob, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
+        downstream_message_handler::RouteMessageTo,
     },
     error::{self, JDCError, JDCErrorKind},
-    utils::{create_close_channel_msg, validate_cached_share, UpstreamState},
+    utils::{UpstreamState, create_close_channel_msg, validate_cached_share},
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]

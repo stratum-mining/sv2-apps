@@ -14,12 +14,12 @@ use crate::{
         token_management::TokenManager,
     },
 };
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use stratum_apps::{
@@ -30,8 +30,8 @@ use stratum_apps::{
     stratum_core::{
         handlers_sv2::HandleJobDeclarationMessagesFromClientAsync,
         mining_sv2::{
-            SetCustomMiningJob, SetCustomMiningJobError, SetCustomMiningJobSuccess,
-            ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+            ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN, SetCustomMiningJob,
+            SetCustomMiningJobError, SetCustomMiningJobSuccess,
         },
         parsers_sv2::{JobDeclaration, Tlv},
     },
