@@ -204,8 +204,8 @@ impl JobDeclaratorClient {
                     Some(unix_socket_path) => unix_socket_path,
                     None => {
                         error!(
-                                "Could not determine Bitcoin data directory. Please set data_dir in config."
-                            );
+                            "Could not determine Bitcoin data directory. Please set data_dir in config."
+                        );
                         self.cancellation_token.cancel();
                         self.shutdown_notify.notify_waiters();
                         self.is_alive.store(false, Ordering::Relaxed);

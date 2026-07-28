@@ -509,7 +509,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             Err(_) => {
                 return DeclareMiningJobResult::Error(
                     ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-                )
+                );
             }
         };
 
@@ -538,7 +538,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 Err(_) => {
                     return DeclareMiningJobResult::Error(
                         ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
-                    )
+                    );
                 }
             }
         };
@@ -851,7 +851,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 Err(_) => {
                     return SetCustomMiningJobResult::Error(
                         ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX,
-                    )
+                    );
                 }
             };
 
@@ -918,7 +918,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 Err(_) => {
                     return SetCustomMiningJobResult::Error(
                         ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED,
-                    )
+                    );
                 }
             };
 

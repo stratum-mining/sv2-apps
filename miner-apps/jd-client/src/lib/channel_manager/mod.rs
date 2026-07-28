@@ -1271,7 +1271,9 @@ impl ChannelManager {
                     )
                         .into(),
                 );
-                debug!("Updated target for standard channel channel_id={channel_id} to {updated_target:?}");
+                debug!(
+                    "Updated target for standard channel channel_id={channel_id} to {updated_target:?}"
+                );
             }
             Err(e) => warn!(
                 "Failed to update standard channel channel_id={channel_id} during vardiff {e:?}"

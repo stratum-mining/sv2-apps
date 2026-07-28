@@ -398,7 +398,9 @@ impl Downstream {
                             "mining.set_difficulty" => {
                                 // Cache the Sv1 set_difficulty message to be sent before the next
                                 // notify
-                                debug!("Down: Caching mining.set_difficulty to send before next mining.notify");
+                                debug!(
+                                    "Down: Caching mining.set_difficulty to send before next mining.notify"
+                                );
                                 self.downstream_data.super_safe_lock(|d| {
                                     d.cached_set_difficulty = Some(message);
                                 });
@@ -440,7 +442,9 @@ impl Downstream {
                                     });
 
                                 if let Some(set_difficulty_msg) = &pending_set_difficulty {
-                                    debug!("Down: Sending pending mining.set_difficulty before mining.notify");
+                                    debug!(
+                                        "Down: Sending pending mining.set_difficulty before mining.notify"
+                                    );
                                     self.downstream_io
                                         .downstream_sv1_sender
                                         .send(set_difficulty_msg.clone())
@@ -489,7 +493,9 @@ impl Downstream {
                         // Handshake not complete - cache mining notifications but skip others
                         match notification.method.as_str() {
                             "mining.set_difficulty" => {
-                                debug!("Down: SV1 handshake not complete, caching mining.set_difficulty");
+                                debug!(
+                                    "Down: SV1 handshake not complete, caching mining.set_difficulty"
+                                );
                                 self.downstream_data.super_safe_lock(|d| {
                                     d.cached_set_difficulty = Some(message);
                                 });

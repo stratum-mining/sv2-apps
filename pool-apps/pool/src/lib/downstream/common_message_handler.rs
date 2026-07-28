@@ -44,7 +44,9 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
         let downstream_id = client_id.expect("downstream id should be present");
 
         if msg.protocol != Protocol::MiningProtocol {
-            info!("Rejecting connection from {downstream_id}: SetupConnection asking for other protocols than mining protocol.");
+            info!(
+                "Rejecting connection from {downstream_id}: SetupConnection asking for other protocols than mining protocol."
+            );
             let response = SetupConnectionError {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL

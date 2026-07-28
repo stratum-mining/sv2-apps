@@ -60,9 +60,7 @@ impl<T> Mutex<T> {
         F: FnOnce(&mut T) -> Ret,
     {
         //#[cfg(feature = "disable_nopanic")]
-        {
-            self.safe_lock(thunk).unwrap()
-        }
+        self.safe_lock(thunk).unwrap()
         //#[cfg(not(feature = "disable_nopanic"))]
         //{
         //    // based on https://github.com/dtolnay/no-panic

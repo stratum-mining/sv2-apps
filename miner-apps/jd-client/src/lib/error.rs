@@ -268,23 +268,23 @@ impl fmt::Display for JDCErrorKind {
         use JDCErrorKind::*;
         match self {
             BadCliArgs => write!(f, "Bad CLI arg input"),
-            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
-            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{e:?}`"),
-            CodecNoise(ref e) => write!(f, "Noise error: `{e:?}"),
-            FramingSv2(ref e) => write!(f, "Framing SV2 error: `{e:?}`"),
-            Io(ref e) => write!(f, "I/O error: `{e:?}"),
-            ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
+            BadConfigDeserialize(e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
+            BinarySv2(e) => write!(f, "Binary SV2 error: `{e:?}`"),
+            CodecNoise(e) => write!(f, "Noise error: `{e:?}"),
+            FramingSv2(e) => write!(f, "Framing SV2 error: `{e:?}`"),
+            Io(e) => write!(f, "I/O error: `{e:?}"),
+            ParseInt(e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
             PoisonLock => write!(f, "Mutex poison lock error"),
-            ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: `{e:?}`"),
-            Parser(ref e) => write!(f, "Parser error: `{e:?}`"),
+            ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
+            Parser(e) => write!(f, "Parser error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
-            NetworkHelpersError(ref e) => write!(f, "Network error: {e:?}"),
+            NetworkHelpersError(e) => write!(f, "Network error: {e:?}"),
             UnexpectedMessage(extension_type, message_type) => {
                 write!(f, "Unexpected Message: {extension_type} {message_type}")
             }
             InvalidUserIdentity(_) => write!(f, "User ID is invalid"),
             BitcoinEncodeError(_) => write!(f, "Error generated during encoding"),
-            InvalidSocketAddress(ref s) => write!(f, "Invalid socket address: {s}"),
+            InvalidSocketAddress(s) => write!(f, "Invalid socket address: {s}"),
             Timeout => write!(f, "Time out error"),
             LastDeclareJobNotFound(request_id) => {
                 write!(f, "last declare job not found for request id: {request_id}")
@@ -337,7 +337,7 @@ impl fmt::Display for JDCErrorKind {
             ExtranonceSizeTooSmall => {
                 write!(f, "Extranonce size too small")
             }
-            FailedToCreateGroupChannel(ref e) => {
+            FailedToCreateGroupChannel(e) => {
                 write!(f, "Failed to create group channel: {e:?}")
             }
             ExtranoncePrefixFactoryError(e) => {
@@ -371,7 +371,10 @@ impl fmt::Display for JDCErrorKind {
                 )
             }
             ServerRequiresUnsupportedExtensions(extensions) => {
-                write!(f, "Server requires extensions that the translator doesn't support: {extensions:?}")
+                write!(
+                    f,
+                    "Server requires extensions that the translator doesn't support: {extensions:?}"
+                )
             }
             BitcoinCoreSv2TDPCancellationTokenActivated => {
                 write!(f, "BitcoinCoreSv2TDP cancellation token activated")

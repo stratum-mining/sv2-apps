@@ -147,7 +147,9 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             return Ok(());
         }
 
-        warn!("⚠️ JDS refused the declared job with a DeclareMiningJobError ❌. Starting fallback mechanism.");
+        warn!(
+            "⚠️ JDS refused the declared job with a DeclareMiningJobError ❌. Starting fallback mechanism."
+        );
         Err(JDCError::fallback(JDCErrorKind::DeclareMiningJobError))
     }
 
@@ -195,7 +197,7 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             Err(_) => {
                 return Err(JDCError::shutdown(
                     JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs,
-                ))
+                ));
             }
         };
 
@@ -328,7 +330,9 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             .await
             .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
 
-        info!("Successfully sent ProvideMissingTransactionsSuccess to the JDS with request_id: {request_id}");
+        info!(
+            "Successfully sent ProvideMissingTransactionsSuccess to the JDS with request_id: {request_id}"
+        );
 
         Ok(())
     }

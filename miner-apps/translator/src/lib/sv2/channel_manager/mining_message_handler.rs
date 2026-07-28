@@ -280,9 +280,9 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                     if (m.extranonce_size as usize) < local_index_bytes + downstream_extranonce_len
                     {
                         error!(
-                                "Upstream-granted rollable size ({} bytes) leaves no room for allocator local_index in non-aggregated mode",
-                                m.extranonce_size,
-                            );
+                            "Upstream-granted rollable size ({} bytes) leaves no room for allocator local_index in non-aggregated mode",
+                            m.extranonce_size,
+                        );
                         return Err(TproxyError::fallback(
                             TproxyErrorKind::OpenMiningChannelError,
                         ));
@@ -475,7 +475,9 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", m);
-        warn!("⚠️ Cannot process SetExtranoncePrefix since set_extranonce is not supported for majority of sv1 clients. Ignoring.");
+        warn!(
+            "⚠️ Cannot process SetExtranoncePrefix since set_extranonce is not supported for majority of sv1 clients. Ignoring."
+        );
         Ok(())
     }
 
@@ -534,7 +536,9 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", m);
-        warn!("⚠️ Cannot process NewMiningJob since Translator Proxy supports only extended mining jobs. Ignoring.");
+        warn!(
+            "⚠️ Cannot process NewMiningJob since Translator Proxy supports only extended mining jobs. Ignoring."
+        );
         Ok(())
     }
 
@@ -886,7 +890,9 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", m);
-        warn!("⚠️ Cannot process SetCustomMiningJobSuccess since Translator Proxy does not support custom mining jobs. Ignoring.");
+        warn!(
+            "⚠️ Cannot process SetCustomMiningJobSuccess since Translator Proxy does not support custom mining jobs. Ignoring."
+        );
         Err(TproxyError::log(TproxyErrorKind::UnexpectedMessage(
             0,
             MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
@@ -900,7 +906,9 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", m);
-        warn!("⚠️ Cannot process SetCustomMiningJobError since Translator Proxy does not support custom mining jobs. Ignoring.");
+        warn!(
+            "⚠️ Cannot process SetCustomMiningJobError since Translator Proxy does not support custom mining jobs. Ignoring."
+        );
         Err(TproxyError::log(TproxyErrorKind::UnexpectedMessage(
             0,
             MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR,

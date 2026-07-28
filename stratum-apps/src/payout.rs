@@ -354,7 +354,10 @@ impl fmt::Display for PayoutModeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoPayoutMode(user_identity) => {
-                write!(f, "no payout mode encoded in user_identity: {user_identity}")
+                write!(
+                    f,
+                    "no payout mode encoded in user_identity: {user_identity}"
+                )
             }
             Self::InvalidUserIdentity(user_identity) => {
                 write!(

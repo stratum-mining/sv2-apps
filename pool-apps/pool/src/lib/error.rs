@@ -230,7 +230,10 @@ impl std::fmt::Display for PoolErrorKind {
                 write!(f, "Received Vardiff Error : {e:?}")
             }
             Parser(e) => write!(f, "Parser error: `{e:?}`"),
-            UnexpectedMessage(extension_type, message_type) => write!(f, "Unexpected message: extension type: {extension_type:?}, message type: {message_type:?}"),
+            UnexpectedMessage(extension_type, message_type) => write!(
+                f,
+                "Unexpected message: extension type: {extension_type:?}, message type: {message_type:?}"
+            ),
             ChannelErrorSender => write!(f, "Channel sender error"),
             InvalidSocketAddress(address) => write!(f, "Invalid socket address: {address:?}"),
             BitcoinEncodeError(_) => write!(f, "Error generated during encoding"),
@@ -253,22 +256,13 @@ impl std::fmt::Display for PoolErrorKind {
                 write!(f, "Channel error: {channel_error:?}")
             }
             InvalidUnsupportedExtensionsSequence(e) => {
-                write!(
-                    f,
-                    "Invalid unsupported extensions sequence: {e:?}"
-                )
+                write!(f, "Invalid unsupported extensions sequence: {e:?}")
             }
             InvalidRequiredExtensionsSequence(e) => {
-                write!(
-                    f,
-                    "Invalid required extensions sequence: {e:?}"
-                )
+                write!(f, "Invalid required extensions sequence: {e:?}")
             }
             InvalidSupportedExtensionsSequence(e) => {
-                write!(
-                    f,
-                    "Invalid supported extensions sequence: {e:?}"
-                )
+                write!(f, "Invalid supported extensions sequence: {e:?}")
             }
             ClientDoesNotSupportRequiredExtensions(extensions) => {
                 write!(
@@ -284,7 +278,7 @@ impl std::fmt::Display for PoolErrorKind {
             }
             BitcoinCoreSv2TDPCancellationTokenActivated => {
                 write!(f, "BitcoinCoreSv2TDP cancellation token activated")
-            },
+            }
             UnsupportedProtocol => write!(f, "Protocol not supported"),
             SetupConnectionError => {
                 write!(f, "Failed to Setup connection")

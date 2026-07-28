@@ -1815,11 +1815,15 @@ mod tests {
 
         // Both metrics MUST appear with the spec-defined error_code labels pre-seeded to 0.
         assert!(
-            body.contains("sv2_server_shares_rejected_total{channel_id=\"1\",error_code=\"stale-share\""),
+            body.contains(
+                "sv2_server_shares_rejected_total{channel_id=\"1\",error_code=\"stale-share\""
+            ),
             "sv2_server_shares_rejected_total stale-share label must be pre-seeded to 0; got:\n{body}"
         );
         assert!(
-            body.contains("sv2_server_shares_rejected_total{channel_id=\"1\",error_code=\"duplicate-share\""),
+            body.contains(
+                "sv2_server_shares_rejected_total{channel_id=\"1\",error_code=\"duplicate-share\""
+            ),
             "sv2_server_shares_rejected_total duplicate-share label must be pre-seeded to 0; got:\n{body}"
         );
         assert!(

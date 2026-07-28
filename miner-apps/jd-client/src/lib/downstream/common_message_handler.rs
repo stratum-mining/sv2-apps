@@ -60,7 +60,9 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
         info!("Received: {}", msg);
 
         if msg.protocol != Protocol::MiningProtocol {
-            info!("Rejecting connection: SetupConnection asking for other protocols than mining protocol.");
+            info!(
+                "Rejecting connection: SetupConnection asking for other protocols than mining protocol."
+            );
             let response = SetupConnectionError {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL

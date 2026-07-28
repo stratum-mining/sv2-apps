@@ -61,11 +61,11 @@ pub async fn wait_for_client(listen_socket: SocketAddr) -> tokio::net::TcpStream
     let listener = tokio::net::TcpListener::bind(listen_socket)
         .await
         .expect("Impossible to listen on given address");
-    if let Ok((stream, _)) = listener.accept().await {
-        stream
-    } else {
-        panic!("Impossible to accept dowsntream connection")
-    }
+    let (stream, _) = listener
+        .accept()
+        .await
+        .expect("Impossible to accept dowsntream connection");
+    stream
 }
 
 pub async fn create_downstream(
@@ -85,26 +85,18 @@ pub async fn create_downstream(
         Responder::from_authority_kp(&pub_key, &prv_key, std::time::Duration::from_secs(10000))
             .unwrap();
 
-    if let Ok((receiver_from_client, sender_to_client)) =
-        Connection::new::<AnyMessage<'static>>(stream, HandshakeRole::Responder(responder)).await
-    {
-        Some((receiver_from_client, sender_to_client))
-    } else {
-        None
-    }
+    Connection::new::<AnyMessage<'static>>(stream, HandshakeRole::Responder(responder))
+        .await
+        .ok()
 }
 
 pub async fn create_upstream(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<MessageFrame>, Sender<MessageFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
-    if let Ok((receiver_from_server, sender_to_server)) =
-        Connection::new::<AnyMessage<'static>>(stream, HandshakeRole::Initiator(initiator)).await
-    {
-        Some((receiver_from_server, sender_to_server))
-    } else {
-        None
-    }
+    Connection::new::<AnyMessage<'static>>(stream, HandshakeRole::Initiator(initiator))
+        .await
+        .ok()
 }
 
 pub async fn recv_from_down_send_to_up(
@@ -123,7 +115,7 @@ pub async fn recv_from_down_send_to_up(
         if let AnyMessage::Extensions(ref ext_msg) = msg {
             use stratum_apps::stratum_core::parsers_sv2::{Extensions, ExtensionsNegotiation};
             if let Extensions::ExtensionsNegotiation(
-                ExtensionsNegotiation::RequestExtensionsSuccess(ref success),
+                ExtensionsNegotiation::RequestExtensionsSuccess(success),
             ) = ext_msg
             {
                 let mut exts = negotiated_extensions.lock().unwrap();
@@ -209,7 +201,7 @@ pub async fn recv_from_up_send_to_down(
         if let AnyMessage::Extensions(ref ext_msg) = msg {
             use stratum_apps::stratum_core::parsers_sv2::{Extensions, ExtensionsNegotiation};
             if let Extensions::ExtensionsNegotiation(
-                ExtensionsNegotiation::RequestExtensionsSuccess(ref success),
+                ExtensionsNegotiation::RequestExtensionsSuccess(success),
             ) = ext_msg
             {
                 let mut exts = negotiated_extensions.lock().unwrap();
@@ -302,7 +294,9 @@ pub fn message_from_frame_with_tlvs(
                             return (header.msg_type(), message, tlv_fields);
                         }
                         Err(e) => {
-                            println!("Failed to parse frame with TLVs: {e:?}, falling back to standard parsing");
+                            println!(
+                                "Failed to parse frame with TLVs: {e:?}, falling back to standard parsing"
+                            );
                         }
                     }
                 }

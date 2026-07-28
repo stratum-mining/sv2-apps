@@ -310,7 +310,7 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     let declare_mining_job = loop {
         match jds_sniffer.next_message_from_downstream() {
             Some((_, AnyMessage::JobDeclaration(JobDeclaration::DeclareMiningJob(message)))) => {
-                break message
+                break message;
             }
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }

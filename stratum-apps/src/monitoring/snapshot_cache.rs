@@ -300,7 +300,7 @@ impl SnapshotCache {
                         ]);
                     }
                 }
-                if let (Some(ref m), Some(hashrate)) = (
+                if let (Some(m), Some(hashrate)) = (
                     &metrics.sv2_server_channel_hashrate,
                     channel.nominal_hashrate,
                 ) {
@@ -340,7 +340,7 @@ impl SnapshotCache {
                         ]);
                     }
                 }
-                if let (Some(ref m), Some(hashrate)) = (
+                if let (Some(m), Some(hashrate)) = (
                     &metrics.sv2_server_channel_hashrate,
                     channel.nominal_hashrate,
                 ) {

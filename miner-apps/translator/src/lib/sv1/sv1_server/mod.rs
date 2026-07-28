@@ -866,7 +866,9 @@ impl Sv1Server {
                                             })?;
 
                                         if is_authorize {
-                                            info!("Down: Handling mining.authorize after upstream channel is open");
+                                            info!(
+                                                "Down: Handling mining.authorize after upstream channel is open"
+                                            );
                                             if let Err(e) =
                                                 downstream.handle_sv1_handshake_completion().await
                                             {
@@ -1078,7 +1080,9 @@ impl Sv1Server {
         let current_downstream = self.downstreams.remove(&downstream_id);
 
         if let Some((downstream_id, downstream)) = current_downstream {
-            info!("🔌 Downstream: {downstream_id} disconnected and removed from sv1 server downstreams");
+            info!(
+                "🔌 Downstream: {downstream_id} disconnected and removed from sv1 server downstreams"
+            );
             // In aggregated mode, send UpdateChannel to reflect the new state (only if vardiff
             // enabled)
             if self.config.downstream_difficulty_config.enable_vardiff {

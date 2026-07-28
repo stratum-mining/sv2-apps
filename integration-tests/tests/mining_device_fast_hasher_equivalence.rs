@@ -6,19 +6,19 @@ use stratum_apps::stratum_core::bitcoin::{
 
 fn random_header() -> Header {
     let mut rng = thread_rng();
-    let prev_hash: [u8; 32] = rng.gen();
+    let prev_hash: [u8; 32] = rng.r#gen();
     let prev_hash = Hash::from_byte_array(prev_hash);
-    let merkle_root: [u8; 32] = rng.gen();
+    let merkle_root: [u8; 32] = rng.r#gen();
     let merkle_root = Hash::from_byte_array(merkle_root);
     Header {
-        version: Version::from_consensus(rng.gen::<i32>()),
+        version: Version::from_consensus(rng.r#gen::<i32>()),
         prev_blockhash: BlockHash::from_raw_hash(prev_hash),
         merkle_root,
         time: std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(60))
             .unwrap()
             .as_secs() as u32,
-        bits: CompactTarget::from_consensus(rng.gen()),
+        bits: CompactTarget::from_consensus(rng.r#gen()),
         nonce: 0,
     }
 }

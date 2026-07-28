@@ -21,11 +21,14 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Error::*;
         match self {
-            Address(ref e) => write!(f, "Bitcoin address: {e}"),
-            Hex(ref e) => write!(f, "Decoding hex-formatted script: {e}"),
+            Address(e) => write!(f, "Bitcoin address: {e}"),
+            Hex(e) => write!(f, "Decoding hex-formatted script: {e}"),
             UnknownOutputScriptType => write!(f, "Unknown script type in config"),
-            InvalidOutputScript => write!(f, "Invalid output_script_value for your script type. It must be a valid public key/script"),
-            Miniscript(ref e) => write!(f, "Miniscript: {e}"),
+            InvalidOutputScript => write!(
+                f,
+                "Invalid output_script_value for your script type. It must be a valid public key/script"
+            ),
+            Miniscript(e) => write!(f, "Miniscript: {e}"),
         }
     }
 }

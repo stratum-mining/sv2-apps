@@ -1406,7 +1406,7 @@ async fn jdc_per_upstream_identity_switches_on_fallback() {
     let allocate_msg = loop {
         match fallback_jds_sniffer.next_message_from_downstream() {
             Some((_, AnyMessage::JobDeclaration(JobDeclaration::AllocateMiningJobToken(msg)))) => {
-                break msg
+                break msg;
             }
             _ => continue,
         }

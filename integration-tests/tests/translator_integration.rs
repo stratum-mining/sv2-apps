@@ -362,7 +362,7 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
     let open_extended_mining_channel: OpenExtendedMiningChannel = loop {
         match primary_sniffer.next_message_from_downstream() {
             Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannel(msg)))) => {
-                break msg
+                break msg;
             }
             _ => continue,
         };
@@ -2534,7 +2534,7 @@ async fn tproxy_sends_per_upstream_user_identity() {
     let oemc = loop {
         match sniffer.next_message_from_downstream() {
             Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannel(msg)))) => {
-                break msg
+                break msg;
             }
             _ => continue,
         }
@@ -2632,7 +2632,7 @@ async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
     let oemc = loop {
         match sniffer_2.next_message_from_downstream() {
             Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannel(msg)))) => {
-                break msg
+                break msg;
             }
             _ => continue,
         }
