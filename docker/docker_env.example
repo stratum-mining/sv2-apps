@@ -1,40 +1,107 @@
+# =============================================================================
+# Docker environment configuration
+# =============================================================================
+# Every app is configured entirely from the environment — there are no mounted
+# config files. Variables use the `<PREFIX>__<FIELD>` naming, with `__` separating
+# nested keys. The prefixes are POOL, JDC and TPROXY.
+#
+# Conventions for non-scalar fields:
+#   * Tagged enums (template_provider_type) take the variant as a path segment,
+#     e.g. POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK. Case-insensitive.
+#     If a TOML file selects a different variant, the environment's variant
+#     replaces it; set only one variant in the environment.
+#   * Upstreams are arrays, so they use `<PREFIX>__UPSTREAM_<NAME>__<FIELD>`; the
+#     <NAME> groups one upstream's fields together and orders entries
+#     alphabetically. Sorting is lexicographic (`10` sorts before `2`, `BACKUP`
+#     before `PRIMARY`), so zero-pad numbered entries (`01`, `02`, ..., `10`) to
+#     control fallback priority.
+# =============================================================================
+
+# Absolute path to your Bitcoin Core node.sock (mounted into pool_sv2 / jd_client_sv2).
 BITCOIN_SOCKET_PATH=/absolute/path/to/your/node.sock
 
-#Pool Settings
-POOL_COINBASE_REWARD_SCRIPT=addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)
-POOL_SIGNATURE="Stratum V2 SRI Pool"
-POOL_SHARES_PER_MINUTE=6.0
-POOL_SHARE_BATCH_SIZE=10
-POOL_FEE_THRESHOLD=100
-POOL_MIN_INTERVAL=5
-POOL_BITCOIN_CORE_IPC_VERSION=31
+# -----------------------------------------------------------------------------
+# Pool (pool_sv2)
+# -----------------------------------------------------------------------------
+POOL__LISTEN_ADDRESS=0.0.0.0:3333
+POOL__AUTHORITY_PUBLIC_KEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
+POOL__AUTHORITY_SECRET_KEY=mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n
+POOL__CERT_VALIDITY_SEC=3600
+POOL__COINBASE_REWARD_SCRIPT=addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)
+POOL__SERVER_ID=1
+POOL__POOL_SIGNATURE=Stratum V2 SRI Pool
+POOL__SHARES_PER_MINUTE=6.0
+POOL__SHARE_BATCH_SIZE=10
+POOL__MONITORING_ADDRESS=0.0.0.0:9090
+POOL__MONITORING_CACHE_REFRESH_SECS=15
+# Template provider (Bitcoin Core IPC). network: mainnet | testnet4 | signet | regtest
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__FEE_THRESHOLD=100
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__MIN_INTERVAL=5
+# Embedded Job Declaration Server (JDS)
+POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
+# JDS protocol extensions default to empty. Set them as comma-separated lists
+# if you need them, e.g.:
+# POOL__JDS__SUPPORTED_EXTENSIONS=2,3
+# POOL__JDS__REQUIRED_EXTENSIONS=2
 
-#JDC Settings
-JDC_USER_IDENTITY=your_username_here
-JDC_SHARES_PER_MINUTE=6.0
-JDC_SHARE_BATCH_SIZE=10
-JDC_SIGNATURE=Sv2MinerSignature
-JDC_COINBASE_REWARD_SCRIPT=addr(tb1qr8xjkrx46yfsch7q2ts2g007haufq48n9pe6qc)
-JDC_FEE_THRESHOLD=100
-JDC_MIN_INTERVAL=5
-JDC_BITCOIN_CORE_IPC_VERSION=31
-JDC_UPSTREAM_AUTHORITY_PUBKEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
-JDC_POOL_ADDRESS=pool_sv2
-JDC_POOL_PORT=3333
-JDC_UPSTREAM_JDS_ADDRESS=pool_sv2 # JDS is now embbeded in the pool
-JDC_UPSTREAM_JDS_PORT=3334
-# LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
-JDC_MINER_TELEMETRY_CIDR=192.168.1.0/24
+# -----------------------------------------------------------------------------
+# Job Declarator Client (jd_client_sv2)
+# -----------------------------------------------------------------------------
+JDC__LISTENING_ADDRESS=0.0.0.0:34265
+JDC__MAX_SUPPORTED_VERSION=2
+JDC__MIN_SUPPORTED_VERSION=2
+JDC__AUTHORITY_PUBLIC_KEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
+JDC__AUTHORITY_SECRET_KEY=mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n
+JDC__CERT_VALIDITY_SEC=3600
+JDC__SHARES_PER_MINUTE=6.0
+JDC__SHARE_BATCH_SIZE=10
+JDC__MODE=FULLTEMPLATE
+JDC__JDC_SIGNATURE=Sv2MinerSignature
+JDC__COINBASE_REWARD_SCRIPT=addr(tb1qr8xjkrx46yfsch7q2ts2g007haufq48n9pe6qc)
+JDC__MONITORING_ADDRESS=0.0.0.0:9091
+JDC__MONITORING_CACHE_REFRESH_SECS=15
+# LAN subnet(s) containing ASIC miner web/API addresses, comma-separated.
+JDC__MINER_TELEMETRY__CIDRS=192.168.1.0/24
+# Upstream (Pool + JDS) — points at the pool_sv2 service.
+JDC__UPSTREAM_PRIMARY__AUTHORITY_PUBKEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
+JDC__UPSTREAM_PRIMARY__POOL_ADDRESS=pool_sv2
+JDC__UPSTREAM_PRIMARY__POOL_PORT=3333
+JDC__UPSTREAM_PRIMARY__JDS_ADDRESS=pool_sv2
+JDC__UPSTREAM_PRIMARY__JDS_PORT=3334
+JDC__UPSTREAM_PRIMARY__USER_IDENTITY=your_username_here
+# Template provider (Bitcoin Core IPC)
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__FEE_THRESHOLD=100
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__MIN_INTERVAL=5
 
-#Tproxy Settings
-TPROXY_USER_IDENTITY=your_username_here
-TPROXY_VERIFY_PAYOUT=false
-TPROXY_AGGREGATE_CHANNELS=false
-TPROXY_MIN_INDIVIDUAL_MINER_HASHRATE=10_000_000_000_000.0
-TPROXY_SHARES_PER_MINUTE=6.0
-TPROXY_ENABLE_VARDIFF=true
-TPROXY_UPSTREAM_ADDRESS=jd_client_sv2 # Use jd_client_sv2 for pool_and_miner_apps, pool_sv2 for pool_and_miner_apps_no_jd
-TPROXY_UPSTREAM_PORT=34265 # Use 34265 for pool_and_miner_apps, 3333 for pool_and_miner_apps_no_jd
-TPROXY_UPSTREAM_AUTHORITY_PUBKEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
-# LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
-TPROXY_MINER_TELEMETRY_CIDR=192.168.1.0/24
+# -----------------------------------------------------------------------------
+# Translator / tProxy (tproxy_sv2)
+# -----------------------------------------------------------------------------
+TPROXY__DOWNSTREAM_ADDRESS=0.0.0.0
+TPROXY__DOWNSTREAM_PORT=34255
+TPROXY__MAX_SUPPORTED_VERSION=2
+TPROXY__MIN_SUPPORTED_VERSION=2
+TPROXY__DOWNSTREAM_EXTRANONCE2_SIZE=4
+TPROXY__VERIFY_PAYOUT=false
+TPROXY__AGGREGATE_CHANNELS=false
+TPROXY__MONITORING_ADDRESS=0.0.0.0:9092
+TPROXY__MONITORING_CACHE_REFRESH_SECS=15
+# LAN subnet(s) containing ASIC miner web/API addresses, comma-separated.
+TPROXY__MINER_TELEMETRY__CIDRS=192.168.1.0/24
+# Protocol extensions default to empty. Set them as a comma-separated list like
+# TPROXY__SUPPORTED_EXTENSIONS=2,3 if you need them; a lone value like
+# TPROXY__SUPPORTED_EXTENSIONS=2 is read as a 1-element list.
+# Downstream difficulty params
+TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__MIN_INDIVIDUAL_MINER_HASHRATE=10000000000000.0
+TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__SHARES_PER_MINUTE=6.0
+TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__ENABLE_VARDIFF=true
+TPROXY__DOWNSTREAM_DIFFICULTY_CONFIG__JOB_KEEPALIVE_INTERVAL_SECS=60
+# Upstream — points at jd_client_sv2; for the pool_and_miner_apps_no_jd profile
+# (no JDC) set ADDRESS=pool_sv2 and PORT=3333.
+TPROXY__UPSTREAM_PRIMARY__ADDRESS=jd_client_sv2
+TPROXY__UPSTREAM_PRIMARY__PORT=34265
+TPROXY__UPSTREAM_PRIMARY__AUTHORITY_PUBKEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
+TPROXY__UPSTREAM_PRIMARY__USER_IDENTITY=your_username_here

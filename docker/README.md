@@ -74,8 +74,8 @@ In the same directory as `docker-compose.yml`, create a `docker_env` file:
 
 ```
 BITCOIN_SOCKET_PATH=/absolute/path/to/your/node.sock
-POOL_BITCOIN_CORE_IPC_VERSION=31
-JDC_BITCOIN_CORE_IPC_VERSION=31
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
 ```
 Make sure the path is correct, if there are spaces (like `Application Support`), keep the value unquoted.
 
@@ -116,8 +116,8 @@ such as its management IP, firmware, hashrate, power, temperature, and uptime.
 
 Set the subnet variable for the app that your miners connect to:
 
-* Use `JDC_MINER_TELEMETRY_CIDR` when SV2 ASIC miners connect directly to JDC.
-* Use `TPROXY_MINER_TELEMETRY_CIDR` when SV1 ASIC miners connect to Translator Proxy.
+* Use `JDC__MINER_TELEMETRY__CIDRS` when SV2 ASIC miners connect directly to JDC.
+* Use `TPROXY__MINER_TELEMETRY__CIDRS` when SV1 ASIC miners connect to Translator Proxy.
 
 Use the LAN subnet that contains the miners' web/API addresses. For example, if your Bitaxe web
 UI is at `192.168.1.63`, use `192.168.1.0/24`. If SV1 miners connect through Translator Proxy and
@@ -136,8 +136,19 @@ an ASIC that has moved to JDC while another miner still uses the same username.
 
 ## Services Overview
 
-Each service loads its settings from a template in `config/`, but **you never touch those templates directly**.
-All configuration comes from a single `docker_env` file, and Docker Compose automatically substitutes the values into the right places.
+Each service is configured **entirely from `docker_env`** — there are no config files to mount.
+Variables use the `<PREFIX>__<FIELD>` naming, with `__` separating nested keys (the prefixes are
+`POOL`, `JDC` and `TPROXY`). Two field shapes need special syntax:
+
+* **Tagged enums** (e.g. `template_provider_type`) take the variant as a path segment and match
+  case-insensitively, e.g. `POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet`.
+* **Upstreams** are arrays, so they use `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` (e.g.
+  `TPROXY__UPSTREAM_PRIMARY__ADDRESS`). `<NAME>` just groups one upstream's fields together; entries
+  are ordered alphabetically by `<NAME>`. Sorting is lexicographic (`10` sorts before `2`, `BACKUP`
+  before `PRIMARY`), so zero-pad numbered entries (`01`, `02`, ..., `10`) to control fallback
+  priority.
+
+See `docker_env.example` for a complete, ready-to-edit set of variables for every service.
 
 If something behaves weirdly, 99% of the time your `docker_env` is the culprit.
 
@@ -151,22 +162,23 @@ If something behaves weirdly, 99% of the time your `docker_env` is the culprit.
 
 * Port **34265**
 * Also mounts the same `node.sock` path from `docker_env`
-* `JDC_MINER_TELEMETRY_CIDR` is the LAN subnet containing directly connected SV2 miners' web/API addresses
+* `JDC__MINER_TELEMETRY__CIDRS` is the LAN subnet containing directly connected SV2 miners' web/API addresses
 
 ### **tproxy_sv2**
 
 * Port **34255**
-* Upstream target (JDC or pool) is fully controlled via `docker_env` variables
-* `TPROXY_MINER_TELEMETRY_CIDR` is the LAN subnet containing connected SV1 miners' web/API addresses
-* `TPROXY_VERIFY_PAYOUT=false` is the standard pool-mining default; set it to `true` only for
-  solo/donation identities where `TPROXY_USER_IDENTITY` encodes the expected on-chain payout
+* Upstream target (JDC or pool) is set with `TPROXY__UPSTREAM_<NAME>__*` and defaults to
+  `jd_client_sv2`. For the `pool_and_miner_apps_no_jd` profile, point it at `pool_sv2:3333` instead.
+* `TPROXY__MINER_TELEMETRY__CIDRS` is the LAN subnet containing connected SV1 miners' web/API addresses
+* `TPROXY__VERIFY_PAYOUT=false` is the standard pool-mining default; set it to `true` only for
+  solo/donation identities where the upstream `user_identity` encodes the expected on-chain payout
 
 ---
 
-## Configuration (centralized)
+## Configuration
 
-Everything lives in your `docker_env`.
-Check `docker_env.example` for all supported options, then create your real one:
+All configuration lives in your `docker_env`.
+Check `docker_env.example` for every supported variable, then create your real one:
 
 ```bash
 cp docker_env.example docker_env

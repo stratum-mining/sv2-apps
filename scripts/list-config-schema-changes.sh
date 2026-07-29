@@ -10,8 +10,8 @@ set -euo pipefail
 #   - scalar types, e.g. integer vs string
 #   - scalar vs array values
 #
-# This script only reads real TOML config examples. Docker templates contain
-# ${...} placeholders and are checked separately by validate-docker-config.sh.
+# This script only reads real TOML config examples. Docker services are
+# configured entirely from environment variables and have no config files.
 
 if [[ "$#" -ne 2 ]]; then
   echo "usage: $0 <before-ref> <after-ref>" >&2
