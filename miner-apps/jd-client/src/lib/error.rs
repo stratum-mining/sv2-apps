@@ -13,7 +13,8 @@
 //! boundaries.
 use ext_config::ConfigError;
 use std::{
-    fmt::{self, Formatter},
+    any::type_name,
+    fmt::{self, Display, Formatter},
     marker::PhantomData,
     sync::PoisonError,
 };
@@ -77,6 +78,19 @@ pub enum Action {
 pub enum LoopControl {
     Continue,
     Break,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Log => f.write_str("Log"),
+            Action::Disconnect(downstream_id) => {
+                write!(f, "Disconnect(downstream_id: {downstream_id})")
+            }
+            Action::Fallback => f.write_str("Fallback"),
+            Action::Shutdown => f.write_str("Shutdown"),
+        }
+    }
 }
 
 impl CanDisconnect for Downstream {}
@@ -148,6 +162,28 @@ pub enum ChannelSv2Error {
     ExtranonceError(ExtranonceAllocatorError),
     StandardChannelServerSide(StandardChannelError),
     GroupChannelServerSide(GroupChannelError),
+}
+
+impl Display for ChannelSv2Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ChannelSv2Error::ExtendedChannelClientSide(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::ExtendedChannelServerSide(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::ExtranonceError(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::StandardChannelServerSide(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::GroupChannelServerSide(error) => {
+                write!(f, "{error:?}")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -268,22 +304,24 @@ impl fmt::Display for JDCErrorKind {
         use JDCErrorKind::*;
         match self {
             BadCliArgs => write!(f, "Bad CLI arg input"),
-            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
-            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{e:?}`"),
-            CodecNoise(ref e) => write!(f, "Noise error: `{e:?}"),
-            FramingSv2(ref e) => write!(f, "Framing SV2 error: `{e:?}`"),
-            Io(ref e) => write!(f, "I/O error: `{e:?}"),
-            ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
+            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: {e}"),
+            BinarySv2(ref e) => write!(f, "Binary SV2 error: {e:?}"),
+            CodecNoise(ref e) => write!(f, "Noise error: {e:?}"),
+            FramingSv2(ref e) => write!(f, "Framing SV2 error: {e:?}"),
+            Io(ref e) => write!(f, "I/O error: {e}"),
+            ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: {e}"),
             PoisonLock => write!(f, "Mutex poison lock error"),
-            ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: `{e:?}`"),
-            Parser(ref e) => write!(f, "Parser error: `{e:?}`"),
+            ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: {e}"),
+            Parser(ref e) => write!(f, "Parser error: {e}"),
             ChannelErrorSender => write!(f, "Sender error"),
-            NetworkHelpersError(ref e) => write!(f, "Network error: {e:?}"),
+            NetworkHelpersError(ref e) => write!(f, "Network error: {e}"),
             UnexpectedMessage(extension_type, message_type) => {
                 write!(f, "Unexpected Message: {extension_type} {message_type}")
             }
-            InvalidUserIdentity(_) => write!(f, "User ID is invalid"),
-            BitcoinEncodeError(_) => write!(f, "Error generated during encoding"),
+            InvalidUserIdentity(user_identity) => {
+                write!(f, "User ID is invalid: {user_identity}")
+            }
+            BitcoinEncodeError(error) => write!(f, "Error generated during encoding: {error}"),
             InvalidSocketAddress(ref s) => write!(f, "Invalid socket address: {s}"),
             Timeout => write!(f, "Time out error"),
             LastDeclareJobNotFound(request_id) => {
@@ -344,7 +382,7 @@ impl fmt::Display for JDCErrorKind {
                 write!(f, "Failed to create ExtranoncePrefixFactory: {e:?}")
             }
             ChannelSv2(channel_error) => {
-                write!(f, "Channel error: {channel_error:?}")
+                write!(f, "Channel error: {channel_error}")
             }
             InvalidUnsupportedExtensionsSequence => {
                 write!(
@@ -541,6 +579,10 @@ impl<Owner> HandlerErrorType for JDCError<Owner> {
 
 impl<Owner> std::fmt::Display for JDCError<Owner> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:?}/{:?}]", self.kind, self.action)
+        let owner = type_name::<Owner>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Unknown");
+        write!(f, "[{owner}] Action: {}, error: {}", self.action, self.kind)
     }
 }

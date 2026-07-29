@@ -321,51 +321,32 @@ impl ChannelManager {
         fallback_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
 
         if fallback_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error during fallback"
-            );
+            debug!(error = %e, "{context} returned an error during fallback");
             return LoopControl::Continue;
         }
 
         match e.action {
             Action::Log => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} returned a log-only error"
-                );
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Fallback => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested fallback"
-                );
+                warn!(error = %e, "{context} requested fallback");
                 fallback_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested shutdown"
-                );
+                warn!(error = %e, "{context} requested shutdown");
                 cancellation_token.cancel();
                 LoopControl::Break
             }
             Action::Disconnect(downstream_id) => {
-                warn!(
-                    downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested downstream disconnect"
-                );
+                warn!(error = %e, "{context} requested downstream disconnect");
                 self.remove_downstream(downstream_id);
                 LoopControl::Continue
             }
@@ -494,7 +475,7 @@ impl ChannelManager {
             Ok(Some(prev_hash)) => prev_hash,
             Ok(None) => unreachable!("No new prevhash found after readiness check"),
             Err(e) => {
-                error!(error = ?JDCErrorKind::from(e), "Failed to access prevhash state");
+                error!(error = %JDCErrorKind::from(e), "Failed to access prevhash state");
                 return None;
             }
         };
@@ -515,7 +496,7 @@ impl ChannelManager {
         let coinbase_outputs = match self.coinbase_outputs.get() {
             Ok(outputs) => outputs,
             Err(e) => {
-                error!(error = ?JDCErrorKind::from(e), "Failed to access channel manager state");
+                error!(error = %JDCErrorKind::from(e), "Failed to access channel manager state");
                 return None;
             }
         };
@@ -597,7 +578,7 @@ impl ChannelManager {
 
         info!("Starting downstream server at {listening_address}");
         let server = TcpListener::bind(listening_address).await.map_err(|e| {
-            error!(error = ?e, "Failed to bind downstream server at {listening_address}");
+            error!(error = %e, "Failed to bind downstream server at {listening_address}");
             JDCError::shutdown(e)
         })?;
 
@@ -640,7 +621,7 @@ impl ChannelManager {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {
-                                                    error!(error = ?e, "Noise handshake failed");
+                                                    error!(error = %e, "Noise handshake failed");
                                                     return;
                                                 }
                                             }
@@ -695,7 +676,7 @@ impl ChannelManager {
                                 }
 
                                 Err(e) => {
-                                    error!(error = ?e, "Failed to accept new downstream connection");
+                                    error!(error = %e, "Failed to accept new downstream connection");
                                 }
                             }
                     }
@@ -720,12 +701,9 @@ impl ChannelManager {
         coinbase_outputs: Vec<TxOut>,
     ) {
         if let Err(e) = self.coinbase_output_constraints(coinbase_outputs).await {
-            error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
+            error!(error = %e, "Failed to send CoinbaseOutputConstraints message to TP");
             if let Action::Shutdown = e.action {
-                warn!(
-                    error_kind = ?e.kind,
-                    "CoinbaseOutputConstraints requested shutdown; cancelling global token"
-                );
+                warn!(error = %e, "CoinbaseOutputConstraints requested shutdown; cancelling global token");
                 cancellation_token.cancel();
             }
             return;
@@ -765,7 +743,7 @@ impl ChannelManager {
                             && !cm.channel_manager_io.jd_receiver.is_closed() =>
                     {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling JDS message");
+                            error!(error = %e, "Error handling JDS message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_jds_message",
                                 &e,
@@ -781,7 +759,7 @@ impl ChannelManager {
                             && !cm.channel_manager_io.upstream_receiver.is_closed() =>
                     {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Pool message");
+                            error!(error = %e, "Error handling Pool message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_pool_message_frame",
                                 &e,
@@ -794,7 +772,7 @@ impl ChannelManager {
                     }
                     res = cm_template.handle_template_provider_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Template Receiver message");
+                            error!(error = %e, "Error handling Template Receiver message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_template_provider_message",
                                 &e,
@@ -807,7 +785,7 @@ impl ChannelManager {
                     }
                     res = cm_downstreams.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Downstreams message");
+                            error!(error = %e, "Error handling Downstreams message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_downstream_message",
                                 &e,
@@ -1177,7 +1155,7 @@ impl ChannelManager {
                 .send(message)
                 .await
                 .map_err(|e| {
-                    info!(error = ?e, "Failed to send AllocateMiningJobToken frame");
+                    info!(error = %e, "Failed to send AllocateMiningJobToken frame");
                     JDCError::fallback(JDCErrorKind::ChannelErrorSender)
                 })?;
         }
@@ -1291,7 +1269,7 @@ impl ChannelManager {
             info!("Starting vardiff loop for downstreams");
 
             if let Err(e) = self.run_vardiff().await {
-                error!(error = ?e, "Vardiff iteration failed");
+                error!(error = %e, "Vardiff iteration failed");
             }
         }
     }
@@ -1394,7 +1372,7 @@ impl ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
 
@@ -1452,7 +1430,7 @@ impl ChannelManager {
             .send(TemplateDistribution::CoinbaseOutputConstraints(msg))
             .await
             .map_err(|e| {
-                error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
+                error!(error = %e, "Failed to send CoinbaseOutputConstraints message to TP");
                 JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
             })?;
 

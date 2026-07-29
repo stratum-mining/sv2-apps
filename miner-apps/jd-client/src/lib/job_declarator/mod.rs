@@ -68,51 +68,32 @@ impl JobDeclarator {
         fallback_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
 
         if fallback_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error during fallback"
-            );
+            debug!(error = %e, "{context} returned an error during fallback");
             return LoopControl::Continue;
         }
 
         match e.action {
             Action::Log => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} returned a log-only error"
-                );
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Fallback => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested fallback"
-                );
+                warn!(error = %e, "{context} requested fallback");
                 fallback_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested shutdown"
-                );
+                warn!(error = %e, "{context} requested shutdown");
                 cancellation_token.cancel();
                 LoopControl::Break
             }
             other => {
-                warn!(
-                    action = ?other,
-                    error_kind = ?e.kind,
-                    "{context} returned an unhandled action"
-                );
+                warn!(action = %other, error = %e, "{context} returned an unhandled action");
                 LoopControl::Continue
             }
         }
@@ -232,7 +213,7 @@ impl JobDeclarator {
                     }
                     res = self_clone_1.handle_job_declarator_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Job Declarator message handling failed");
+                            error!(error = %e, "Job Declarator message handling failed");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "JobDeclarator::handle_job_declarator_message",
                                 &e,
@@ -245,7 +226,7 @@ impl JobDeclarator {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Channel Manager message handling failed");
+                            error!(error = %e, "Channel Manager message handling failed");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "JobDeclarator::handle_channel_manager_message",
                                 &e,
@@ -278,12 +259,12 @@ impl JobDeclarator {
         let sv2_frame: Sv2Frame = Message::Common(setup_connection.into())
             .try_into()
             .map_err(|e| {
-                error!(error=?e, "Failed to serialize SetupConnection message.");
+                error!(error=%e, "Failed to serialize SetupConnection message.");
                 JDCError::shutdown(e)
             })?;
 
         if let Err(e) = self.job_declarator_io.jds_sender.send(sv2_frame).await {
-            error!(error=?e, "Failed to send SetupConnection frame.");
+            error!(error=%e, "Failed to send SetupConnection frame.");
             return Err(JDCError::fallback(JDCErrorKind::ChannelErrorSender));
         }
         debug!("SetupConnection frame sent successfully.");
@@ -294,7 +275,7 @@ impl JobDeclarator {
             .recv()
             .await
             .map_err(|e| {
-                error!(error=?e, "No handshake response received from Job declarator.");
+                error!(error=%e, "No handshake response received from Job declarator.");
                 JDCError::fallback(JDCErrorKind::ChannelErrorSender)
             })?;
 
@@ -326,12 +307,12 @@ impl JobDeclarator {
                     .send(sv2_frame)
                     .await
                     .map_err(|e| {
-                        error!("Failed to send message to outbound channel: {:?}", e);
+                        error!("Failed to send message to outbound channel: {e}");
                         JDCError::fallback(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
             Err(e) => {
-                warn!("Channel manager receiver closed or errored: {:?}", e);
+                warn!("Channel manager receiver closed or errored: {e}");
             }
         }
         Ok(())
@@ -373,7 +354,7 @@ impl JobDeclarator {
                     .send(message)
                     .await
                     .map_err(|e| {
-                        error!(error=?e, "Failed to send Job declaration message to channel manager.");
+                        error!(error=%e, "Failed to send Job declaration message to channel manager.");
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }

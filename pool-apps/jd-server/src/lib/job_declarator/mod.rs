@@ -157,20 +157,16 @@ impl JobDeclarator {
     ) -> LoopControl {
         match e.action {
             error::Action::Log => {
-                warn!(error_kind = ?e.kind, "{context} returned a log-only error");
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             error::Action::Disconnect(downstream_id) => {
-                warn!(
-                    downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested downstream disconnect"
-                );
+                warn!(error = %e, "{context} requested downstream disconnect");
                 self.cleanup_downstream(downstream_id);
                 LoopControl::Continue
             }
             error::Action::Shutdown => {
-                warn!(error_kind = ?e.kind, "{context} requested shutdown");
+                warn!(error = %e, "{context} requested shutdown");
                 LoopControl::Break
             }
         }
@@ -308,7 +304,7 @@ impl JobDeclarator {
                     }
                     res = self.handle_jdp_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling Job Declaration message");
+                            error!(%e, "Error handling Job Declaration message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "JobDeclarator::handle_jdp_message",
                                 &e,

@@ -99,7 +99,7 @@ impl Downstream {
         if cancellation_token.is_cancelled() {
             debug!(
                 downstream_id = self.downstream_id,
-                error_kind = ?e.kind,
+                error = %e,
                 "{context} returned an error after shutdown was requested"
             );
             return LoopControl::Continue;
@@ -108,7 +108,7 @@ impl Downstream {
         if fallback_token.is_cancelled() {
             debug!(
                 downstream_id = self.downstream_id,
-                error_kind = ?e.kind,
+                error = %e,
                 "{context} returned an error during fallback"
             );
             return LoopControl::Continue;
@@ -118,24 +118,20 @@ impl Downstream {
             Action::Log => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} returned a log-only error"
                 );
                 LoopControl::Continue
             }
             Action::Disconnect(_) => {
-                warn!(
-                    downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested disconnect; cancelling downstream token"
-                );
+                warn!(error = %e, "{context} requested disconnect; cancelling downstream token");
                 self.downstream_cancellation_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    error_kind = ?e.kind,
+                    error = %e,
                     "{context} requested shutdown; cancelling global token"
                 );
                 cancellation_token.cancel();
@@ -144,8 +140,8 @@ impl Downstream {
             other => {
                 warn!(
                     downstream_id = self.downstream_id,
-                    action = ?other,
-                    error_kind = ?e.kind,
+                    action = %other,
+                    error = %e,
                     "{context} returned an unhandled action"
                 );
                 LoopControl::Continue
@@ -226,7 +222,7 @@ impl Downstream {
         let fallback_token = fallback_coordinator.token();
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
-            error!(?e, "Failed to set up downstream connection");
+            error!(%e, "Failed to set up downstream connection");
 
             // sleep to make sure SetupConnectionError is sent
             // before we break the TCP connection
@@ -261,7 +257,7 @@ impl Downstream {
                     }
                     res = self_clone_1.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling downstream message for {downstream_id}");
+                            error!(%e, "Error handling downstream message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,
@@ -274,7 +270,7 @@ impl Downstream {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling channel manager message for {downstream_id}");
+                            error!(%e, "Error handling channel manager message for {downstream_id}");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_channel_manager_message",
                                 &e,
@@ -328,7 +324,7 @@ impl Downstream {
             Ok(msg) => msg,
             Err(e) => {
                 warn!(
-                    ?e,
+                    %e,
                     "Channel manager receiver closed - disconnecting downstream"
                 );
                 return Err(JDCError::disconnect(
@@ -346,7 +342,7 @@ impl Downstream {
             .send(sv2_frame)
             .await
             .map_err(|e| {
-                error!(?e, "Downstream send failed");
+                error!(%e, "Downstream send failed");
                 JDCError::disconnect(JDCErrorKind::ChannelErrorSender, self.downstream_id)
             })?;
 
@@ -379,7 +375,7 @@ impl Downstream {
                     .send((self.downstream_id, message, tlv_fields))
                     .await
                     .map_err(|e| {
-                        error!(?e, "Failed to send mining message to channel manager.");
+                        error!(%e, "Failed to send mining message to channel manager.");
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }

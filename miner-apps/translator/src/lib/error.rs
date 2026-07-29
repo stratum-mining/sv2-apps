@@ -10,7 +10,8 @@
 
 use ext_config::ConfigError;
 use std::{
-    fmt::{self, Formatter},
+    any::type_name,
+    fmt::{self, Display, Formatter},
     marker::PhantomData,
     sync::PoisonError,
 };
@@ -64,6 +65,19 @@ pub enum Action {
 pub enum LoopControl {
     Continue,
     Break,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Log => f.write_str("Log"),
+            Action::Disconnect(downstream_id) => {
+                write!(f, "Disconnect(downstream_id: {downstream_id})")
+            }
+            Action::Fallback => f.write_str("Fallback"),
+            Action::Shutdown => f.write_str("Shutdown"),
+        }
+    }
 }
 
 impl CanDisconnect for Downstream {}
@@ -224,19 +238,19 @@ impl fmt::Display for TproxyErrorKind {
         match self {
             General(e) => write!(f, "{e}"),
             BadCliArgs => write!(f, "Bad CLI arg input"),
-            BadSerdeJson(ref e) => write!(f, "Bad serde json: `{e:?}`"),
-            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
-            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{e:?}`"),
-            CodecNoise(ref e) => write!(f, "Noise error: `{e:?}"),
-            FramingSv2(ref e) => write!(f, "Framing SV2 error: `{e:?}`"),
-            Io(ref e) => write!(f, "I/O error: `{e:?}"),
-            ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
+            BadSerdeJson(ref e) => write!(f, "Bad serde json: {e}"),
+            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: {e}"),
+            BinarySv2(ref e) => write!(f, "Binary SV2 error: {e:?}"),
+            CodecNoise(ref e) => write!(f, "Noise error: {e:?}"),
+            FramingSv2(ref e) => write!(f, "Framing SV2 error: {e}"),
+            Io(ref e) => write!(f, "I/O error: {e}"),
+            ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: {e}"),
             PoisonLock => write!(f, "Poison Lock error"),
-            ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: `{e:?}`"),
+            ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: {e}"),
             ChannelErrorSender => write!(f, "Sender error"),
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(ref e) => {
-                write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
+                write!(f, "Error converting SetDifficulty to Message: {e:?}")
             }
             UnexpectedMessage(extension_type, message_type) => {
                 write!(
@@ -266,13 +280,13 @@ impl fmt::Display for TproxyErrorKind {
             }
             SV1Error => write!(f, "Sv1 error"),
             TranslatorCore(ref e) => write!(f, "Translator core error: {e:?}"),
-            NetworkHelpersError(ref e) => write!(f, "Network helpers error: {e:?}"),
-            ParserError(ref e) => write!(f, "Roles logic parser error: {e:?}"),
+            NetworkHelpersError(ref e) => write!(f, "Network helpers error: {e}"),
+            ParserError(ref e) => write!(f, "Roles logic parser error: {e}"),
             DownstreamNotFound(request_id) => write!(
                 f,
                 "Downstream id associated to request id: {request_id} not found"
             ),
-            TlvError(ref e) => write!(f, "TLV error: {e:?}"),
+            TlvError(ref e) => write!(f, "TLV error: {e}"),
             OpenMiningChannelError => write!(f, "failed to open mining channel"),
             SetupConnectionError => write!(f, "failed to setup connection with upstream"),
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
@@ -429,6 +443,10 @@ impl<Owner> HandlerErrorType for TproxyError<Owner> {
 
 impl<Owner> std::fmt::Display for TproxyError<Owner> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:?}/{:?}]", self.kind, self.action)
+        let owner = type_name::<Owner>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Unknown");
+        write!(f, "[{owner}] Action: {}, error: {}", self.action, self.kind)
     }
 }

@@ -149,7 +149,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
         ) {
             Ok(allocator) => allocator,
             Err(e) => {
-                warn!("Failed to build extranonce allocator: {e:?}");
+                warn!("Failed to build extranonce allocator: {e}");
                 self.upstream_state.set(UpstreamState::NoChannel);
                 let close_channel =
                     create_close_channel_msg(msg.channel_id, "downstream not available");
@@ -378,7 +378,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                         match ExtranoncePrefix::from_wire(msg.extranonce_prefix.to_owned_bytes()) {
                             Ok(p) => p,
                             Err(e) => {
-                                warn!("Upstream SetExtranoncePrefix rejected: {e:?}");
+                                warn!("Upstream SetExtranoncePrefix rejected: {e}");
                                 return Err(JDCError::fallback(
                                     JDCErrorKind::ExtranonceSizeTooLarge,
                                 ));
@@ -415,7 +415,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
                         Err(e) => {
                             warn!(
                                 "Failed to build extranonce allocator from SetExtranoncePrefix \
-                                     (new_prefix_len={}, full_extranonce_size={}): {e:?}",
+                                     (new_prefix_len={}, full_extranonce_size={}): {e}",
                                 new_prefix_len, full_extranonce_size
                             );
                             return Err(JDCError::fallback(e));
@@ -514,7 +514,7 @@ impl HandleMiningMessagesFromServerAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                tracing::error!("Failed to forward message {e}");
             }
         }
         Ok(())

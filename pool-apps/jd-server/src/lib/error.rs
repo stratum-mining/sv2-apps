@@ -12,7 +12,12 @@
 //! The `Owner` type parameter is a zero-sized marker (e.g. [`JobDeclarator`], [`Downstream`])
 //! that controls which constructors (`shutdown`, `disconnect`) are available at the type level.
 
-use std::{fmt::Debug, marker::PhantomData, sync::PoisonError};
+use std::{
+    any::type_name,
+    fmt::{Debug, Display},
+    marker::PhantomData,
+    sync::PoisonError,
+};
 
 use stratum_apps::{
     stratum_core::{
@@ -37,6 +42,16 @@ pub struct JDSError<Owner> {
     _owner: PhantomData<Owner>,
 }
 
+impl<Owner> Display for JDSError<Owner> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let owner = type_name::<Owner>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Unknown");
+        write!(f, "[{owner}] Action: {}, error: {}", self.action, self.kind)
+    }
+}
+
 /// Recovery action attached to every [`JDSError`].
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
@@ -46,6 +61,18 @@ pub enum Action {
     Disconnect(DownstreamId),
     /// Unrecoverable — the server must shut down.
     Shutdown,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Action::Log => f.write_str("Log"),
+            Action::Disconnect(downstream_id) => {
+                write!(f, "Disconnect(downstream_id: {downstream_id})")
+            }
+            Action::Shutdown => f.write_str("Shutdown"),
+        }
+    }
 }
 
 /// Loop control signal for message-processing loops.
@@ -125,6 +152,43 @@ pub enum JDSErrorKind {
 impl<T> From<PoisonError<T>> for JDSErrorKind {
     fn from(_: PoisonError<T>) -> Self {
         JDSErrorKind::PoisonLock
+    }
+}
+
+impl Display for JDSErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JDSErrorKind::Io(error) => write!(f, "I/O error: {error}"),
+            JDSErrorKind::ChannelSend(error) => write!(f, "Channel send failed: {error:?}"),
+            JDSErrorKind::ChannelRecv(error) => write!(f, "Channel receive failed: {error}"),
+            JDSErrorKind::BinarySv2(error) => write!(f, "Binary SV2 error: {error:?}"),
+            JDSErrorKind::Codec(error) => write!(f, "Codec SV2 error: {error}"),
+            JDSErrorKind::Noise(error) => write!(f, "Noise error: {error:?}"),
+            JDSErrorKind::Parser(error) => write!(f, "Parser error: {error}"),
+            JDSErrorKind::BitcoinCoreIPC(error) => write!(f, "Bitcoin Core IPC error: {error}"),
+            JDSErrorKind::Framing(error) => write!(f, "Framing SV2 error: {error}"),
+            JDSErrorKind::UnexpectedMessage(extension_type, message_type) => write!(
+                f,
+                "Unexpected message: extension type {extension_type:?}, message type {message_type:?}"
+            ),
+            JDSErrorKind::ClientNotFound(downstream_id) => {
+                write!(f, "Client not found for downstream {downstream_id}")
+            }
+            JDSErrorKind::ClientSenderNotFound(downstream_id) => {
+                write!(f, "Client sender not found for downstream {downstream_id}")
+            }
+            JDSErrorKind::PendingDeclareMiningJobNotFound(request_id) => write!(
+                f,
+                "Pending DeclareMiningJob not found for request_id {request_id}"
+            ),
+            JDSErrorKind::UnsupportedProtocol => f.write_str("Unsupported protocol"),
+            JDSErrorKind::UnsupportedConnectionFlags => {
+                f.write_str("Unsupported connection flags")
+            }
+            JDSErrorKind::OneshotRecv(error) => write!(f, "Oneshot receive failed: {error}"),
+            JDSErrorKind::InvalidConfig(error) => write!(f, "Invalid config: {error}"),
+            JDSErrorKind::PoisonLock => write!(f, "Lock Poisoned")
+        }
     }
 }
 

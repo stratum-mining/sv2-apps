@@ -217,51 +217,32 @@ impl Sv1Server {
         fallback_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
 
         if fallback_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error during fallback"
-            );
+            debug!(error = %e, "{context} returned an error during fallback");
             return LoopControl::Continue;
         }
 
         match e.action {
             Action::Log => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} returned a log-only error"
-                );
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Disconnect(downstream_id) => {
-                warn!(
-                    downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested disconnect; cancelling downstream token"
-                );
+                warn!(error = %e, "{context} requested disconnect; cancelling downstream token");
                 self.handle_downstream_disconnect(downstream_id).await;
                 LoopControl::Continue
             }
             Action::Fallback => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested fallback"
-                );
+                warn!(error = %e, "{context} requested fallback");
                 fallback_token.cancel();
                 LoopControl::Break
             }
             Action::Shutdown => {
-                warn!(
-                    error_kind = ?e.kind,
-                    "{context} requested shutdown; cancelling global token"
-                );
+                warn!(error = %e, "{context} requested shutdown; cancelling global token");
                 cancellation_token.cancel();
                 LoopControl::Break
             }

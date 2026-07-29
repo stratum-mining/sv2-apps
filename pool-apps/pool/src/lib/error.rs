@@ -1,6 +1,7 @@
 use std::{
+    any::type_name,
     convert::From,
-    fmt::{self, Debug, Formatter},
+    fmt::{self, Debug, Display, Formatter},
     marker::PhantomData,
     sync::{MutexGuard, PoisonError},
 };
@@ -56,6 +57,18 @@ pub enum Action {
 pub enum LoopControl {
     Continue,
     Break,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Log => f.write_str("Log"),
+            Action::Disconnect(downstream_id) => {
+                write!(f, "Disconnect(downstream_id: {downstream_id})")
+            }
+            Action::Shutdown => f.write_str("Shutdown"),
+        }
+    }
 }
 
 impl CanDisconnect for Downstream {}
@@ -114,6 +127,28 @@ pub enum ChannelSv2Error {
     GroupChannelServerSide(GroupChannelError),
     ExtranonceError(ExtranonceAllocatorError),
     ShareValidationError(ShareValidationError),
+}
+
+impl Display for ChannelSv2Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ChannelSv2Error::ExtendedChannelServerSide(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::StandardChannelServerSide(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::GroupChannelServerSide(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::ExtranonceError(error) => {
+                write!(f, "{error:?}")
+            }
+            ChannelSv2Error::ShareValidationError(error) => {
+                write!(f, "{error:?}")
+            }
+        }
+    }
 }
 
 /// Represents various errors that can occur in the pool implementation.
@@ -212,28 +247,28 @@ impl std::fmt::Display for PoolErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use PoolErrorKind::*;
         match self {
-            Io(e) => write!(f, "I/O error: `{e:?}"),
-            ChannelSend(e) => write!(f, "Channel send failed: `{e:?}`"),
-            ChannelRecv(e) => write!(f, "Channel recv failed: `{e:?}`"),
-            BinarySv2(e) => write!(f, "Binary SV2 error: `{e:?}`"),
-            Codec(e) => write!(f, "Codec SV2 error: `{e:?}"),
-            CoinbaseOutput(e) => write!(f, "Coinbase output error: `{e:?}"),
-            Framing(e) => write!(f, "Framing SV2 error: `{e:?}`"),
-            Noise(e) => write!(f, "Noise SV2 error: `{e:?}"),
-            PoisonLock(e) => write!(f, "Poison lock: {e:?}"),
-            ComponentShutdown(e) => write!(f, "Component shutdown: {e:?}"),
-            Custom(e) => write!(f, "Custom SV2 error: `{e:?}`"),
+            Io(e) => write!(f, "I/O error: {e}"),
+            ChannelSend(e) => write!(f, "Channel send failed: {e:?}"),
+            ChannelRecv(e) => write!(f, "Channel recv failed: {e}"),
+            BinarySv2(e) => write!(f, "Binary SV2 error: {e:?}"),
+            Codec(e) => write!(f, "Codec SV2 error: {e:?}"),
+            CoinbaseOutput(e) => write!(f, "Coinbase output error: {e}"),
+            Framing(e) => write!(f, "Framing SV2 error: {e:?}"),
+            Noise(e) => write!(f, "Noise SV2 error: {e:?}"),
+            PoisonLock(e) => write!(f, "Poison lock: {e}"),
+            ComponentShutdown(e) => write!(f, "Component shutdown: {e}"),
+            Custom(e) => write!(f, "Custom SV2 error: {e}"),
             Sv2ProtocolError(e) => {
                 write!(f, "Received Sv2 Protocol Error from upstream: `{e:?}`")
             }
             PoolErrorKind::Vardiff(e) => {
-                write!(f, "Received Vardiff Error : {e:?}")
+                write!(f, "Received Vardiff Error: {e:?}")
             }
-            Parser(e) => write!(f, "Parser error: `{e:?}`"),
+            Parser(e) => write!(f, "Parser error: {e}"),
             UnexpectedMessage(extension_type, message_type) => write!(f, "Unexpected message: extension type: {extension_type:?}, message type: {message_type:?}"),
             ChannelErrorSender => write!(f, "Channel sender error"),
-            InvalidSocketAddress(address) => write!(f, "Invalid socket address: {address:?}"),
-            BitcoinEncodeError(_) => write!(f, "Error generated during encoding"),
+            InvalidSocketAddress(address) => write!(f, "Invalid socket address: {address}"),
+            BitcoinEncodeError(error) => write!(f, "Error generated during encoding: {error}"),
             DownstreamNotFoundWithChannelId(channel_id) => {
                 write!(f, "Downstream not found for channel id: {channel_id}")
             }
@@ -248,9 +283,9 @@ impl std::fmt::Display for PoolErrorKind {
                 f,
                 "Vardiff not found available for downstream id: {downstream_id}"
             ),
-            ParseInt(e) => write!(f, "Conversion error: {e:?}"),
+            ParseInt(e) => write!(f, "Conversion error: {e}"),
             ChannelSv2(channel_error) => {
-                write!(f, "Channel error: {channel_error:?}")
+                write!(f, "Channel error: {channel_error}")
             }
             InvalidUnsupportedExtensionsSequence(e) => {
                 write!(
@@ -297,7 +332,7 @@ impl std::fmt::Display for PoolErrorKind {
             JobNotFound => write!(f, "Job not found"),
             InvalidKey => write!(f, "Invalid key used during noise handshake"),
             PayoutModeError(e) => write!(f, "Unable to parse the PayoutMode: {e}"),
-            Jds(e) => write!(f, "JDS error: {e:?}"),
+            Jds(e) => write!(f, "JDS error: {e}"),
             Timeout => write!(f, "Time out error"),
             BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
         }
@@ -456,7 +491,11 @@ impl<Owner> HandlerErrorType for PoolError<Owner> {
 
 impl<Owner> std::fmt::Display for PoolError<Owner> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:?}/{:?}]", self.kind, self.action)
+        let owner = type_name::<Owner>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("Unknown");
+        write!(f, "[{owner}] Action: {}, error: {}", self.action, self.kind)
     }
 }
 

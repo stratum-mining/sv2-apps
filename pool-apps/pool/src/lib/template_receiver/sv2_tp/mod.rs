@@ -56,24 +56,21 @@ impl Sv2Tp {
         cancellation_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
         match e.action {
             Action::Log => {
-                warn!(error_kind = ?e.kind, "{context} returned a log-only error");
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Shutdown => {
-                warn!(error_kind = ?e.kind, "{context} requested shutdown");
+                warn!(error = %e, "{context} requested shutdown");
                 cancellation_token.cancel();
                 LoopControl::Break
             }
             other => {
-                warn!(action = ?other, error_kind = ?e.kind, "{context} returned an unhandled action");
+                warn!(action = %other, error = %e, "{context} returned an unhandled action");
                 LoopControl::Continue
             }
         }
@@ -207,7 +204,7 @@ impl Sv2Tp {
                     }
                     res = self_clone_1.handle_template_provider_message() => {
                         if let Err(e) = res {
-                            error!("TemplateReceiver template provider handler failed: {e:?}");
+                            error!("TemplateReceiver template provider handler failed: {e}");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "Sv2Tp::handle_template_provider_message",
                                 &e,
@@ -219,7 +216,7 @@ impl Sv2Tp {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!("TemplateReceiver channel manager handler failed: {e:?}");
+                            error!("TemplateReceiver channel manager handler failed: {e}");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "Sv2Tp::handle_channel_manager_message",
                                 &e,

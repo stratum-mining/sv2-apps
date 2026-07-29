@@ -125,28 +125,21 @@ impl ChannelManager {
         cancellation_token: &CancellationToken,
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
-            debug!(
-                error_kind = ?e.kind,
-                "{context} returned an error after shutdown was requested"
-            );
+            debug!(error = %e, "{context} returned an error after shutdown was requested");
             return LoopControl::Continue;
         }
         match e.action {
             Action::Log => {
-                warn!(error_kind = ?e.kind, "{context} returned a log-only error");
+                warn!(error = %e, "{context} returned a log-only error");
                 LoopControl::Continue
             }
             Action::Disconnect(downstream_id) => {
-                warn!(
-                    downstream_id,
-                    error_kind = ?e.kind,
-                    "{context} requested downstream disconnect"
-                );
+                warn!(error = %e, "{context} requested downstream disconnect");
                 self.remove_downstream(downstream_id);
                 LoopControl::Continue
             }
             Action::Shutdown => {
-                warn!(error_kind = ?e.kind, "{context} requested shutdown");
+                warn!(error = %e, "{context} requested shutdown");
                 cancellation_token.cancel();
                 LoopControl::Break
             }

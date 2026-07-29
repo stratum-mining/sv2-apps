@@ -50,7 +50,7 @@ pub async fn connect_to_bitcoin_core(
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                tracing::error!("Failed to create Tokio runtime: {:?}", e);
+                tracing::error!("Failed to create Tokio runtime: {e}");
 
                 // we can't use handle_error here because we're not in a async context yet
                 cancellation_token_clone.cancel();
@@ -74,7 +74,7 @@ pub async fn connect_to_bitcoin_core(
             {
                 Ok(sv2_bitcoin_core) => sv2_bitcoin_core,
                 Err(e) => {
-                    tracing::error!("Failed to create BitcoinCoreToSv2: {:?}", e);
+                    tracing::error!("Failed to create BitcoinCoreToSv2: {e}");
                     bitcoin_core_config.cancellation_token.cancel();
                     return;
                 }
