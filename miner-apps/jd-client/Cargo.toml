@@ -3,6 +3,7 @@ name = "jd_client_sv2"
 version = "0.6.0"
 authors = ["The Stratum V2 Developers"]
 edition = "2024"
+rust-version = "1.88"
 description = "Job Declarator Client (JDC) role"
 documentation = "https://docs.rs/jd_client_sv2"
 readme = "README.md"
