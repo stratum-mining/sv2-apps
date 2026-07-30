@@ -231,6 +231,14 @@ mod tests {
         &["supported_extensions", "required_extensions"]
     }
 
+    fn set_env(key: &str, value: &str) {
+        unsafe { env::set_var(key, value) }
+    }
+
+    fn remove_env(key: &str) {
+        unsafe { env::remove_var(key) }
+    }
+
     #[test]
     fn env_overrides_file() {
         let path = write_toml(
@@ -244,8 +252,8 @@ mod tests {
         );
 
         // Same keys present in the file are overridden by the environment.
-        env::set_var("OVR__LISTEN_ADDRESS", "0.0.0.0:2222");
-        env::set_var("OVR__NESTED__PORT", "20");
+        set_env("OVR__LISTEN_ADDRESS", "0.0.0.0:2222");
+        set_env("OVR__NESTED__PORT", "20");
 
         let cfg: TestConfig =
             load_config(path.to_str().unwrap(), "OVR", list_keys(), &[]).expect("load config");
@@ -254,8 +262,8 @@ mod tests {
         assert_eq!(cfg.cert_validity_sec, 3600); // from file
         assert_eq!(cfg.nested.port, 20); // nested override from env
 
-        env::remove_var("OVR__LISTEN_ADDRESS");
-        env::remove_var("OVR__NESTED__PORT");
+        remove_env("OVR__LISTEN_ADDRESS");
+        remove_env("OVR__NESTED__PORT");
     }
 
     #[test]
@@ -263,11 +271,11 @@ mod tests {
         // No file exists at this path: configuration comes entirely from env.
         let missing = env::temp_dir().join("loader-test-does-not-exist.toml");
 
-        env::set_var("ENVONLY__LISTEN_ADDRESS", "127.0.0.1:3333");
-        env::set_var("ENVONLY__CERT_VALIDITY_SEC", "1200");
-        env::set_var("ENVONLY__VERIFY_PAYOUT", "true");
-        env::set_var("ENVONLY__SUPPORTED_EXTENSIONS", "1,2,3");
-        env::set_var("ENVONLY__NESTED__PORT", "42");
+        set_env("ENVONLY__LISTEN_ADDRESS", "127.0.0.1:3333");
+        set_env("ENVONLY__CERT_VALIDITY_SEC", "1200");
+        set_env("ENVONLY__VERIFY_PAYOUT", "true");
+        set_env("ENVONLY__SUPPORTED_EXTENSIONS", "1,2,3");
+        set_env("ENVONLY__NESTED__PORT", "42");
 
         let cfg: TestConfig = load_config(missing.to_str().unwrap(), "ENVONLY", list_keys(), &[])
             .expect("load config");
@@ -285,7 +293,7 @@ mod tests {
             "ENVONLY__SUPPORTED_EXTENSIONS",
             "ENVONLY__NESTED__PORT",
         ] {
-            env::remove_var(var);
+            remove_env(var);
         }
     }
 
@@ -303,13 +311,13 @@ mod tests {
         );
 
         // A single value without a separator must become a 1-element list.
-        env::set_var("SINGLE__SUPPORTED_EXTENSIONS", "2");
+        set_env("SINGLE__SUPPORTED_EXTENSIONS", "2");
 
         let cfg: TestConfig =
             load_config(path.to_str().unwrap(), "SINGLE", list_keys(), &[]).expect("load config");
         assert_eq!(cfg.supported_extensions, vec![2]);
 
-        env::remove_var("SINGLE__SUPPORTED_EXTENSIONS");
+        remove_env("SINGLE__SUPPORTED_EXTENSIONS");
     }
 
     #[derive(Debug, Deserialize)]
@@ -328,7 +336,7 @@ mod tests {
     fn nested_list_key_parses_from_env() {
         let missing = env::temp_dir().join("loader-test-nested-list.toml");
 
-        env::set_var("NESTEDLIST__TELEMETRY__CIDRS", "192.168.1.0/24");
+        set_env("NESTEDLIST__TELEMETRY__CIDRS", "192.168.1.0/24");
 
         let cfg: NestedListConfig = load_config(
             missing.to_str().unwrap(),
@@ -339,20 +347,20 @@ mod tests {
         .expect("load config");
         assert_eq!(cfg.telemetry.cidrs, vec!["192.168.1.0/24"]);
 
-        env::remove_var("NESTEDLIST__TELEMETRY__CIDRS");
+        remove_env("NESTEDLIST__TELEMETRY__CIDRS");
     }
 
     #[test]
     fn missing_required_field_errors() {
         // The env supplies some fields but not all required ones.
         let missing = env::temp_dir().join("loader-test-empty.toml");
-        env::set_var("PARTIAL__LISTEN_ADDRESS", "0.0.0.0:1111");
+        set_env("PARTIAL__LISTEN_ADDRESS", "0.0.0.0:1111");
 
         let result: Result<TestConfig, _> =
             load_config(missing.to_str().unwrap(), "PARTIAL", list_keys(), &[]);
         assert!(result.is_err());
 
-        env::remove_var("PARTIAL__LISTEN_ADDRESS");
+        remove_env("PARTIAL__LISTEN_ADDRESS");
     }
 
     #[test]
@@ -393,9 +401,9 @@ mod tests {
             "#,
         );
 
-        env::set_var("UP__UPSTREAM_PRIMARY__ADDRESS", "jd_client_sv2");
-        env::set_var("UP__UPSTREAM_PRIMARY__PORT", "34265");
-        env::set_var("UP__UPSTREAM_PRIMARY__USER_IDENTITY", "env-user");
+        set_env("UP__UPSTREAM_PRIMARY__ADDRESS", "jd_client_sv2");
+        set_env("UP__UPSTREAM_PRIMARY__PORT", "34265");
+        set_env("UP__UPSTREAM_PRIMARY__USER_IDENTITY", "env-user");
 
         let cfg: UpstreamConfig =
             load_config(path.to_str().unwrap(), "UP", &[], &[]).expect("load config");
@@ -411,7 +419,7 @@ mod tests {
             "UP__UPSTREAM_PRIMARY__PORT",
             "UP__UPSTREAM_PRIMARY__USER_IDENTITY",
         ] {
-            env::remove_var(var);
+            remove_env(var);
         }
     }
 
@@ -420,12 +428,12 @@ mod tests {
         let missing = env::temp_dir().join("loader-test-no-file.toml");
 
         // Defined out of order; entries must come out sorted by <NAME> (A before B).
-        env::set_var("ORD__UPSTREAM_B__ADDRESS", "second");
-        env::set_var("ORD__UPSTREAM_B__PORT", "2");
-        env::set_var("ORD__UPSTREAM_B__USER_IDENTITY", "b");
-        env::set_var("ORD__UPSTREAM_A__ADDRESS", "first");
-        env::set_var("ORD__UPSTREAM_A__PORT", "1");
-        env::set_var("ORD__UPSTREAM_A__USER_IDENTITY", "a");
+        set_env("ORD__UPSTREAM_B__ADDRESS", "second");
+        set_env("ORD__UPSTREAM_B__PORT", "2");
+        set_env("ORD__UPSTREAM_B__USER_IDENTITY", "b");
+        set_env("ORD__UPSTREAM_A__ADDRESS", "first");
+        set_env("ORD__UPSTREAM_A__PORT", "1");
+        set_env("ORD__UPSTREAM_A__USER_IDENTITY", "a");
 
         let cfg: UpstreamConfig =
             load_config(missing.to_str().unwrap(), "ORD", &[], &[]).expect("load config");
@@ -442,7 +450,7 @@ mod tests {
             "ORD__UPSTREAM_A__PORT",
             "ORD__UPSTREAM_A__USER_IDENTITY",
         ] {
-            env::remove_var(var);
+            remove_env(var);
         }
     }
 
@@ -471,11 +479,11 @@ mod tests {
             "#,
         );
 
-        env::set_var(
+        set_env(
             "TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION",
             "31",
         );
-        env::set_var(
+        set_env(
             "TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK",
             "mainnet",
         );
@@ -490,8 +498,8 @@ mod tests {
             other => panic!("expected BitcoinCoreIpc, got {other:?}"),
         }
 
-        env::remove_var("TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
-        env::remove_var("TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK");
+        remove_env("TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
+        remove_env("TPSWITCH__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK");
 
         // And the other direction: file picks BitcoinCoreIpc, env picks Sv2Tp.
         let path = write_toml(
@@ -503,7 +511,7 @@ mod tests {
             "#,
         );
 
-        env::set_var(
+        set_env(
             "TPSWITCHBACK__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
             "tp:8442",
         );
@@ -515,7 +523,7 @@ mod tests {
             other => panic!("expected Sv2Tp, got {other:?}"),
         }
 
-        env::remove_var("TPSWITCHBACK__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS");
+        remove_env("TPSWITCHBACK__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS");
     }
 
     #[test]
@@ -531,7 +539,7 @@ mod tests {
             "#,
         );
 
-        env::set_var(
+        set_env(
             "TPMERGE__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION",
             "31",
         );
@@ -546,18 +554,18 @@ mod tests {
             other => panic!("expected BitcoinCoreIpc, got {other:?}"),
         }
 
-        env::remove_var("TPMERGE__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
+        remove_env("TPMERGE__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
     }
 
     #[test]
     fn conflicting_env_enum_variants_error() {
         let missing = env::temp_dir().join("loader-test-enum-conflict.toml");
 
-        env::set_var(
+        set_env(
             "TPCONFLICT__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
             "tp:8442",
         );
-        env::set_var(
+        set_env(
             "TPCONFLICT__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION",
             "31",
         );
@@ -566,7 +574,7 @@ mod tests {
             .expect_err("must fail with two env variants");
         assert!(err.to_string().contains("set exactly one"));
 
-        env::remove_var("TPCONFLICT__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS");
-        env::remove_var("TPCONFLICT__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
+        remove_env("TPCONFLICT__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS");
+        remove_env("TPCONFLICT__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION");
     }
 }

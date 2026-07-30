@@ -1142,7 +1142,7 @@ mod tests {
         let manager = create_test_channel_manager();
 
         // Test that Debug trait is implemented
-        let debug_str = format!("{:?}", manager);
+        let debug_str = format!("{manager:?}");
         assert!(debug_str.contains("ChannelManager"));
     }
 

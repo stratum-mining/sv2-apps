@@ -293,7 +293,7 @@ impl std::fmt::Display for PoolErrorKind {
             PayoutModeError(e) => write!(f, "Unable to parse the PayoutMode: {e}"),
             Jds(e) => write!(f, "JDS error: {e:?}"),
             Timeout => write!(f, "Time out error"),
-            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
+            BadConfigDeserialize(e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
         }
     }
 }
