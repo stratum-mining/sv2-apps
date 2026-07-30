@@ -4,12 +4,12 @@ use std::{
     collections::{BinaryHeap, VecDeque},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     channel_utils::ReceiverCleanup,
@@ -20,11 +20,11 @@ use stratum_apps::{
     stratum_core::{
         bitcoin::{Amount, Target, TxOut},
         channels_sv2::{
+            Vardiff, VardiffState,
             client::extended::ExtendedChannel,
-            extranonce_manager::{bytes_needed, ExtranonceAllocator},
+            extranonce_manager::{ExtranonceAllocator, bytes_needed},
             outputs::deserialize_outputs,
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
-            Vardiff, VardiffState,
         },
         framing_sv2,
         handlers_sv2::{
@@ -44,7 +44,7 @@ use stratum_apps::{
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
     utils::{
-        protocol_message_type::{protocol_message_type, MessageType},
+        protocol_message_type::{MessageType, protocol_message_type},
         types::{
             ChannelId, DownstreamId, RequestId, SharesBatchSize, SharesPerMinute, Sv2Frame,
             TemplateId, UpstreamJobId, VardiffKey,
@@ -1271,7 +1271,9 @@ impl ChannelManager {
                     )
                         .into(),
                 );
-                debug!("Updated target for standard channel channel_id={channel_id} to {updated_target:?}");
+                debug!(
+                    "Updated target for standard channel channel_id={channel_id} to {updated_target:?}"
+                );
             }
             Err(e) => warn!(
                 "Failed to update standard channel channel_id={channel_id} during vardiff {e:?}"

@@ -17,20 +17,20 @@ use integration_tests_sv2::{
 use std::time::Duration;
 use stratum_apps::{
     bitcoin_core_sv2::{
+        CancellationToken,
         runtime_api::{
+            BitcoinCoreVersion,
             job_declaration_protocol::{
                 self,
                 io::{JdRequest, JdResponse},
             },
-            BitcoinCoreVersion,
         },
-        CancellationToken,
     },
     stratum_core::{
         bitcoin::{
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, Wtxid,
             absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
-            transaction::Version as TxVersion, Amount, OutPoint, ScriptBuf, Sequence, Transaction,
-            TxIn, TxOut, Witness, Wtxid,
+            transaction::Version as TxVersion,
         },
         job_declaration_sv2::ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
     },

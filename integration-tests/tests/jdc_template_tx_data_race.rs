@@ -1,22 +1,22 @@
 use integration_tests_sv2::{
+    POOL_COINBASE_REWARD_ADDRESS,
     interceptor::MessageDirection,
     mock_roles::{MockDownstream, MockUpstream, WithSetup},
     utils::get_available_address,
-    POOL_COINBASE_REWARD_ADDRESS,
 };
 use jd_client_sv2::config::ConfigJDCMode;
 use std::time::Duration;
 use stratum_apps::{
     config_helpers::CoinbaseRewardScript,
     stratum_core::{
-        bitcoin::{consensus::serialize, Amount, TxOut},
+        bitcoin::{Amount, TxOut, consensus::serialize},
         common_messages_sv2::Protocol,
         job_declaration_sv2::AllocateMiningJobTokenSuccess,
         mining_sv2::{OpenExtendedMiningChannel, OpenExtendedMiningChannelSuccess},
         parsers_sv2::{AnyMessage, JobDeclaration, Mining, TemplateDistribution},
         template_distribution_sv2::{
-            NewTemplate, RequestTransactionDataSuccess, SetNewPrevHash,
-            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA,
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, NewTemplate, RequestTransactionDataSuccess,
+            SetNewPrevHash,
         },
     },
 };
@@ -310,7 +310,7 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     let declare_mining_job = loop {
         match jds_sniffer.next_message_from_downstream() {
             Some((_, AnyMessage::JobDeclaration(JobDeclaration::DeclareMiningJob(message)))) => {
-                break message
+                break message;
             }
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }

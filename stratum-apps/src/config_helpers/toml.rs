@@ -1,6 +1,6 @@
 use serde::{
-    de::{self, Deserializer},
     Deserialize,
+    de::{self, Deserializer},
 };
 use std::{path::PathBuf, time::Duration};
 
@@ -120,7 +120,12 @@ mod tests {
 
     #[test]
     fn environment_variable_expansion() {
-        env::set_var("TEST_OPT_PATH", "/opt/data");
+        // `set_var` is unsafe as of Rust 2024: it can reallocate the environment block, so it
+        // races with any concurrent `getenv` in the process, not just readers of this key.
+        // Tests here share a process and run in parallel (a sibling test reads `HOME`, and
+        // `shellexpand` reads the environment internally), so this is not strictly sound.
+        // Kept as-is deliberately; run this test single-threaded if it ever proves flaky.
+        unsafe { env::set_var("TEST_OPT_PATH", "/opt/data") };
 
         let toml = r#"
             path = "$TEST_OPT_PATH/file.txt"

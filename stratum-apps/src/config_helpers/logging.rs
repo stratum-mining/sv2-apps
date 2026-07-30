@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*};
 
 /// Initialize logging to stdout and optionally to a file.
 ///

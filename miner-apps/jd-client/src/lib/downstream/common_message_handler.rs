@@ -8,10 +8,9 @@ use stratum_apps::monitoring::client::Sv2ClientKind;
 use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
-            has_requires_std_job, has_work_selection, Protocol, SetupConnection,
-            SetupConnectionError, SetupConnectionSuccess,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS,
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnection,
+            SetupConnectionError, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
         },
         handlers_sv2::HandleCommonMessagesFromClientAsync,
         parsers_sv2::{AnyMessage, Tlv},
@@ -60,7 +59,9 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
         info!("Received: {}", msg);
 
         if msg.protocol != Protocol::MiningProtocol {
-            info!("Rejecting connection: SetupConnection asking for other protocols than mining protocol.");
+            info!(
+                "Rejecting connection: SetupConnection asking for other protocols than mining protocol."
+            );
             let response = SetupConnectionError {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL

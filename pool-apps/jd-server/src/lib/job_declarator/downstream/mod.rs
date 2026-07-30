@@ -5,15 +5,15 @@
 //! `DeclareMiningJob` map, and a per-downstream [`CancellationToken`] for clean teardown.
 
 use super::{
-    DownstreamJobDeclarationMessage, JobDeclarationMessage, ALLOCATED_TOKEN_TIMEOUT_SECS,
-    JANITOR_INTERVAL_SECS,
+    ALLOCATED_TOKEN_TIMEOUT_SECS, DownstreamJobDeclarationMessage, JANITOR_INTERVAL_SECS,
+    JobDeclarationMessage,
 };
 use crate::{
     error,
     error::{JDSResult, LoopControl},
     io_task::spawn_io_tasks,
 };
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -26,12 +26,12 @@ use stratum_apps::{
         framing_sv2,
         handlers_sv2::HandleCommonMessagesFromClientAsync,
         job_declaration_sv2::DeclareMiningJob,
-        parsers_sv2::{parse_message_frame_with_tlvs, AnyMessage},
+        parsers_sv2::{AnyMessage, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
     utils::{
-        protocol_message_type::{protocol_message_type, MessageType},
+        protocol_message_type::{MessageType, protocol_message_type},
         types::{DownstreamId, Message, RequestId, Sv2Frame},
     },
 };

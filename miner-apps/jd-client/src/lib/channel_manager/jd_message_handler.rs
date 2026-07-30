@@ -1,16 +1,16 @@
 use stratum_apps::{
     stratum_core::{
-        binary_sv2::{Seq064K, B016M},
+        binary_sv2::{B016M, Seq064K},
         bitcoin::{
-            self, absolute::LockTime, transaction::Version, OutPoint, ScriptBuf, Sequence,
-            Transaction, TxIn, TxOut, Witness,
+            self, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            absolute::LockTime, transaction::Version,
         },
         channels_sv2::outputs::deserialize_outputs,
         handlers_sv2::HandleJobDeclarationMessagesFromServerAsync,
         job_declaration_sv2::{
             AllocateMiningJobTokenSuccess, DeclareMiningJobError, DeclareMiningJobSuccess,
-            ProvideMissingTransactions, ProvideMissingTransactionsSuccess,
-            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactions,
+            ProvideMissingTransactionsSuccess,
         },
         parsers_sv2::{AnyMessage, JobDeclaration, Mining, TemplateDistribution, Tlv},
         template_distribution_sv2::CoinbaseOutputConstraints,
@@ -147,7 +147,9 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             return Ok(());
         }
 
-        warn!("⚠️ JDS refused the declared job with a DeclareMiningJobError ❌. Starting fallback mechanism.");
+        warn!(
+            "⚠️ JDS refused the declared job with a DeclareMiningJobError ❌. Starting fallback mechanism."
+        );
         Err(JDCError::fallback(JDCErrorKind::DeclareMiningJobError))
     }
 
@@ -195,7 +197,7 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             Err(_) => {
                 return Err(JDCError::shutdown(
                     JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs,
-                ))
+                ));
             }
         };
 
@@ -328,7 +330,9 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             .await
             .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
 
-        info!("Successfully sent ProvideMissingTransactionsSuccess to the JDS with request_id: {request_id}");
+        info!(
+            "Successfully sent ProvideMissingTransactionsSuccess to the JDS with request_id: {request_id}"
+        );
 
         Ok(())
     }

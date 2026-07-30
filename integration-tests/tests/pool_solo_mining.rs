@@ -22,13 +22,14 @@
 //! - **Regular pool**: Default behavior when no solo pattern detected
 
 use integration_tests_sv2::{
+    POOL_COINBASE_REWARD_ADDRESS,
     interceptor::MessageDirection,
     mock_roles::{MockDownstream, WithSetup},
     template_provider::DifficultyLevel,
-    POOL_COINBASE_REWARD_ADDRESS, *,
+    *,
 };
 use stratum_apps::stratum_core::{
-    bitcoin::{consensus::deserialize, params::TESTNET4, Address, Transaction},
+    bitcoin::{Address, Transaction, consensus::deserialize, params::TESTNET4},
     common_messages_sv2::*,
     mining_sv2::*,
     parsers_sv2::{self, AnyMessage, Mining},

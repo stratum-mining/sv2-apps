@@ -103,8 +103,7 @@ impl MessagesAggregator {
     pub fn next_message_with_tlvs(
         &self,
     ) -> Option<(MsgType, AnyMessage<'static>, Option<Vec<Tlv>>)> {
-        let is_state = self
-            .messages
+        self.messages
             .with(|messages| {
                 let mut cloned = messages.clone();
                 if let Some((msg_type, msg, tlv_fields)) = cloned.pop_front() {
@@ -114,7 +113,6 @@ impl MessagesAggregator {
                     None
                 }
             })
-            .unwrap();
-        is_state
+            .unwrap()
     }
 }

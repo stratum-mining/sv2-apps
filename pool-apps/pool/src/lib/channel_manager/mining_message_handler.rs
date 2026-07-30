@@ -4,16 +4,16 @@ use stratum_apps::stratum_core::{
     binary_sv2::Str0255,
     bitcoin::Target,
     channels_sv2::{
+        Vardiff, VardiffState,
         server::{
             error::{ExtendedChannelError, StandardChannelError},
             extended::ExtendedChannel,
             share_accounting::{ShareValidationError, ShareValidationResult},
             standard::StandardChannel,
         },
-        Vardiff, VardiffState,
     },
     extensions_sv2::{
-        UserIdentity, EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
+        EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY, UserIdentity,
     },
     handlers_sv2::{HandleMiningMessagesFromClientAsync, SupportedChannelTypes},
     mining_sv2::*,
@@ -25,9 +25,9 @@ use tracing::{error, info};
 use jd_server_sv2::job_declarator::SetCustomMiningJobResponse;
 
 use crate::{
-    channel_manager::{ChannelManager, RouteMessageTo, CLIENT_SEARCH_SPACE_BYTES},
+    channel_manager::{CLIENT_SEARCH_SPACE_BYTES, ChannelManager, RouteMessageTo},
     error::{self, PoolError, PoolErrorKind},
-    utils::{create_close_channel_msg, PayoutMode, PayoutModeError},
+    utils::{PayoutMode, PayoutModeError, create_close_channel_msg},
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]

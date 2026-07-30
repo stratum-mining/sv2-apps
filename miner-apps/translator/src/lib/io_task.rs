@@ -10,7 +10,7 @@ use stratum_apps::{
     utils::types::{Message, Sv2Frame},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, trace, warn, Instrument as _};
+use tracing::{Instrument as _, error, trace, warn};
 
 #[cfg_attr(not(test), hotpath::measure)]
 #[track_caller]

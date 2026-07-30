@@ -3,9 +3,9 @@ use std::sync::atomic::Ordering;
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Str0255,
-        bitcoin::{hashes::sha256d, Amount, Target},
+        bitcoin::{Amount, Target, hashes::sha256d},
         channels_sv2::{
-            client,
+            Vardiff, VardiffState, client,
             outputs::deserialize_outputs,
             server::{
                 error::{ExtendedChannelError, StandardChannelError},
@@ -13,10 +13,9 @@ use stratum_apps::{
                 share_accounting::{ShareValidationError, ShareValidationResult},
                 standard::StandardChannel,
             },
-            Vardiff, VardiffState,
         },
         extensions_sv2::{
-            UserIdentity, EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
+            EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY, UserIdentity,
         },
         handlers_sv2::{HandleMiningMessagesFromClientAsync, SupportedChannelTypes},
         job_declaration_sv2::PushSolution,
@@ -30,7 +29,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     channel_manager::{
-        ChannelManager, ChannelManagerIo, SharesOrderedByDiff, SOLO_FULL_EXTRANONCE_SIZE,
+        ChannelManager, ChannelManagerIo, SOLO_FULL_EXTRANONCE_SIZE, SharesOrderedByDiff,
     },
     error::{self, JDCError, JDCErrorKind},
     utils::{add_share_to_cache, create_close_channel_msg},
@@ -805,11 +804,13 @@ impl HandleMiningMessagesFromClientAsync for ChannelManager {
             {
                 messages_
             } else {
-                vec![(
-                    downstream_id,
-                    build_error(ERROR_CODE_UPDATE_CHANNEL_INVALID_CHANNEL_ID),
-                )
-                    .into()]
+                vec![
+                    (
+                        downstream_id,
+                        build_error(ERROR_CODE_UPDATE_CHANNEL_INVALID_CHANNEL_ID),
+                    )
+                        .into(),
+                ]
             };
             Ok(channel_messages)
         })?;

@@ -1,6 +1,6 @@
 use clap::Parser;
 use integration_tests_sv2::mining_device::{self, Secp256k1PublicKey};
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::fmt;
 
 #[derive(Parser, Debug)]

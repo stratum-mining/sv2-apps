@@ -1,9 +1,9 @@
 #![allow(clippy::new_ret_no_self)]
 use crate::network_helpers::{
-    noise_stream::{NoiseTcpReadHalf, NoiseTcpStream, NoiseTcpWriteHalf},
     Error, NOISE_HANDSHAKE_TIMEOUT,
+    noise_stream::{NoiseTcpReadHalf, NoiseTcpStream, NoiseTcpWriteHalf},
 };
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use std::sync::Arc;
 use stratum_core::{
     binary_sv2::{Deserialize, GetSize, Serialize},

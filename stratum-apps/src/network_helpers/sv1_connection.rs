@@ -1,4 +1,4 @@
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use futures::StreamExt;
 use stratum_core::sv1_api::json_rpc;
 use tokio::{

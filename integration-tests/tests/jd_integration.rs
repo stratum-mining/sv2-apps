@@ -7,7 +7,7 @@ use integration_tests_sv2::{
     *,
 };
 use stratum_apps::stratum_core::{
-    binary_sv2::{Seq064K, B032, U256},
+    binary_sv2::{B032, Seq064K, U256},
     common_messages_sv2::*,
     job_declaration_sv2::{ProvideMissingTransactionsSuccess, PushSolution, *},
     mining_sv2::*,
@@ -1406,7 +1406,7 @@ async fn jdc_per_upstream_identity_switches_on_fallback() {
     let allocate_msg = loop {
         match fallback_jds_sniffer.next_message_from_downstream() {
             Some((_, AnyMessage::JobDeclaration(JobDeclaration::AllocateMiningJobToken(msg)))) => {
-                break msg
+                break msg;
             }
             _ => continue,
         }

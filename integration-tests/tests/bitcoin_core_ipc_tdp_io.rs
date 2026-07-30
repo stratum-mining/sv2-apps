@@ -18,15 +18,15 @@ use integration_tests_sv2::{
 use std::time::{Duration, Instant};
 use stratum_apps::{
     bitcoin_core_sv2::{
-        runtime_api::{template_distribution_protocol, BitcoinCoreVersion},
         CancellationToken,
+        runtime_api::{BitcoinCoreVersion, template_distribution_protocol},
     },
     stratum_core::{
         parsers_sv2::TemplateDistribution,
         template_distribution_sv2::{
-            CoinbaseOutputConstraints, RequestTransactionData, RequestTransactionDataSuccess,
-            ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
-            ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND,
+            CoinbaseOutputConstraints, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
+            ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND, RequestTransactionData,
+            RequestTransactionDataSuccess,
         },
     },
 };

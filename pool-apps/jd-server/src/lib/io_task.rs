@@ -14,7 +14,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::types::{Message, Sv2Frame},
 };
-use tracing::{error, trace, warn, Instrument as _};
+use tracing::{Instrument as _, error, trace, warn};
 
 /// Spawns a reader task and a writer task for framed Noise I/O.
 ///

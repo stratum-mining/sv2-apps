@@ -1,12 +1,12 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU32},
         Arc,
+        atomic::{AtomicBool, AtomicU32},
     },
     time::Duration,
 };
 
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 #[cfg(feature = "monitoring")]
 use stratum_apps::monitoring::client::Sv2ClientKind;
 use stratum_apps::{
@@ -20,7 +20,7 @@ use stratum_apps::{
         },
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
         handlers_sv2::{HandleCommonMessagesFromClientAsync, HandleExtensionsFromClientAsync},
-        parsers_sv2::{parse_message_frame_with_tlvs, AnyMessage, Mining, Tlv},
+        parsers_sv2::{AnyMessage, Mining, Tlv, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,

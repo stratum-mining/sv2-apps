@@ -23,11 +23,11 @@ use crate::{
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
     sv1::downstream::Downstream,
     utils::{
-        is_mining_authorize, SubmitShareWithChannelId, TproxyMode, AGGREGATED_CHANNEL_ID,
-        KEEPALIVE_JOB_ID_DELIMITER,
+        AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId, TproxyMode,
+        is_mining_authorize,
     },
 };
-use async_channel::{unbounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, unbounded};
 use dashmap::DashMap;
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
@@ -35,8 +35,8 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -51,8 +51,8 @@ use stratum_apps::{
         binary_sv2::Str0255,
         bitcoin::Target,
         channels_sv2::{
-            target::{hash_rate_from_target, hash_rate_to_target},
             Vardiff, VardiffState,
+            target::{hash_rate_from_target, hash_rate_to_target},
         },
         mining_sv2::{CloseChannel, SetNewPrevHash, SetTarget},
         parsers_sv2::Mining,
@@ -67,7 +67,7 @@ use stratum_apps::{
                 sv1_advertised_target_from_sv2_target,
             },
         },
-        sv1_api::{json_rpc, server_to_client, utils::HexU32Be, IsServer},
+        sv1_api::{IsServer, json_rpc, server_to_client, utils::HexU32Be},
     },
     task_manager::TaskManager,
     utils::types::{ChannelId, DownstreamId, Hashrate, RequestId, SharesPerMinute},
@@ -866,7 +866,9 @@ impl Sv1Server {
                                             })?;
 
                                         if is_authorize {
-                                            info!("Down: Handling mining.authorize after upstream channel is open");
+                                            info!(
+                                                "Down: Handling mining.authorize after upstream channel is open"
+                                            );
                                             if let Err(e) =
                                                 downstream.handle_sv1_handshake_completion().await
                                             {
@@ -1078,7 +1080,9 @@ impl Sv1Server {
         let current_downstream = self.downstreams.remove(&downstream_id);
 
         if let Some((downstream_id, downstream)) = current_downstream {
-            info!("🔌 Downstream: {downstream_id} disconnected and removed from sv1 server downstreams");
+            info!(
+                "🔌 Downstream: {downstream_id} disconnected and removed from sv1 server downstreams"
+            );
             // In aggregated mode, send UpdateChannel to reflect the new state (only if vardiff
             // enabled)
             if self.config.downstream_difficulty_config.enable_vardiff {

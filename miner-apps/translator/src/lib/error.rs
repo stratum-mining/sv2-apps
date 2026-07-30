@@ -224,18 +224,18 @@ impl fmt::Display for TproxyErrorKind {
         match self {
             General(e) => write!(f, "{e}"),
             BadCliArgs => write!(f, "Bad CLI arg input"),
-            BadSerdeJson(ref e) => write!(f, "Bad serde json: `{e:?}`"),
-            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
-            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{e:?}`"),
-            CodecNoise(ref e) => write!(f, "Noise error: `{e:?}"),
-            FramingSv2(ref e) => write!(f, "Framing SV2 error: `{e:?}`"),
-            Io(ref e) => write!(f, "I/O error: `{e:?}"),
-            ParseInt(ref e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
+            BadSerdeJson(e) => write!(f, "Bad serde json: `{e:?}`"),
+            BadConfigDeserialize(e) => write!(f, "Bad `config` TOML deserialize: `{e:?}`"),
+            BinarySv2(e) => write!(f, "Binary SV2 error: `{e:?}`"),
+            CodecNoise(e) => write!(f, "Noise error: `{e:?}"),
+            FramingSv2(e) => write!(f, "Framing SV2 error: `{e:?}`"),
+            Io(e) => write!(f, "I/O error: `{e:?}"),
+            ParseInt(e) => write!(f, "Bad convert from `String` to `int`: `{e:?}`"),
             PoisonLock => write!(f, "Poison Lock error"),
-            ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: `{e:?}`"),
+            ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
             Timeout => write!(f, "Operation timed out"),
-            SetDifficultyToMessage(ref e) => {
+            SetDifficultyToMessage(e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
             }
             UnexpectedMessage(extension_type, message_type) => {
@@ -265,14 +265,14 @@ impl fmt::Display for TproxyErrorKind {
                 )
             }
             SV1Error => write!(f, "Sv1 error"),
-            TranslatorCore(ref e) => write!(f, "Translator core error: {e:?}"),
-            NetworkHelpersError(ref e) => write!(f, "Network helpers error: {e:?}"),
-            ParserError(ref e) => write!(f, "Roles logic parser error: {e:?}"),
+            TranslatorCore(e) => write!(f, "Translator core error: {e:?}"),
+            NetworkHelpersError(e) => write!(f, "Network helpers error: {e:?}"),
+            ParserError(e) => write!(f, "Roles logic parser error: {e:?}"),
             DownstreamNotFound(request_id) => write!(
                 f,
                 "Downstream id associated to request id: {request_id} not found"
             ),
-            TlvError(ref e) => write!(f, "TLV error: {e:?}"),
+            TlvError(e) => write!(f, "TLV error: {e:?}"),
             OpenMiningChannelError => write!(f, "failed to open mining channel"),
             SetupConnectionError => write!(f, "failed to setup connection with upstream"),
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
@@ -284,7 +284,7 @@ impl fmt::Display for TproxyErrorKind {
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")
             }
-            FailedToAddChannelIdToGroupChannel(ref e) => {
+            FailedToAddChannelIdToGroupChannel(e) => {
                 write!(f, "Failed to add channel id to group channel: {e:?}")
             }
             AggregatedChannelClosed => write!(f, "Aggregated channel was closed"),

@@ -1,19 +1,19 @@
 use crate::{
     error,
     error::JDSError,
-    job_declarator::{job_validation::DeclareMiningJobResult, JobDeclarator},
+    job_declarator::{JobDeclarator, job_validation::DeclareMiningJobResult},
 };
 use std::time::Instant;
 use stratum_apps::{
     stratum_core::{
-        bitcoin::{consensus, hashes::Hash, Amount, TxOut, Wtxid},
+        bitcoin::{Amount, TxOut, Wtxid, consensus, hashes::Hash},
         handlers_sv2::HandleJobDeclarationMessagesFromClientAsync,
         job_declaration_sv2::{
             AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob,
-            DeclareMiningJobError, DeclareMiningJobSuccess, ProvideMissingTransactions,
-            ProvideMissingTransactionsSuccess, PushSolution,
+            DeclareMiningJobError, DeclareMiningJobSuccess,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-            ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS,
+            ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS, ProvideMissingTransactions,
+            ProvideMissingTransactionsSuccess, PushSolution,
         },
         parsers_sv2::{JobDeclaration, Tlv},
     },

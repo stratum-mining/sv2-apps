@@ -2,8 +2,8 @@ mod errors;
 mod serde_types;
 
 use miniscript::{
-    bitcoin::{address::NetworkUnchecked, Address, Network, ScriptBuf},
     DefiniteDescriptorKey, Descriptor,
+    bitcoin::{Address, Network, ScriptBuf, address::NetworkUnchecked},
 };
 
 pub use errors::Error;
@@ -170,17 +170,21 @@ mod tests {
         // Expected error: "Bitcoin address: base58 error: incorrect checksum: base58 checksum
         // 0x6c7615f4 does not match expected 0x6b7615f4" (hex-conservative v0.3.0)
         // or "Bitcoin address: base58 error" (hex-conservative v0.2.1)
-        assert!(CoinbaseRewardScript::from_descriptor(
-            "addr(1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3)#5v55uzec"
-        )
-        .is_err());
+        assert!(
+            CoinbaseRewardScript::from_descriptor(
+                "addr(1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN3)#5v55uzec"
+            )
+            .is_err()
+        );
         // Expected error: "Bitcoin address: base58 error: decode: invalid base58 character 0x30"
         // (hex-conservative v0.3.0) or "Bitcoin address: base58 error" (hex-conservative
         // v0.2.1)
-        assert!(CoinbaseRewardScript::from_descriptor(
-            "addr(bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t3)#wfr7lfxf"
-        )
-        .is_err());
+        assert!(
+            CoinbaseRewardScript::from_descriptor(
+                "addr(bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t3)#wfr7lfxf"
+            )
+            .is_err()
+        );
         // Flagrantly bad stuff -- should probably PR these upstream to rust-miniscript.
         // Expected error: "Bitcoin address: base58 error: too short: base58 decoded data was not
         // long enough, must be at least 4 byte: 0" (hex-conservative v0.3.0) or "Bitcoin

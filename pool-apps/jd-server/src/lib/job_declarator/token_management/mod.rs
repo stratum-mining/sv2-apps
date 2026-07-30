@@ -21,8 +21,8 @@
 use super::{ACTIVE_TOKEN_TIMEOUT_SECS, ALLOCATED_TOKEN_TIMEOUT_SECS, JANITOR_INTERVAL_SECS};
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };

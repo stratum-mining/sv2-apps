@@ -1,8 +1,8 @@
 use error::PoolErrorKind;
 use pool_runtime::{Init, PoolRuntime};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use stratum_apps::bitcoin_core_sv2::CancellationToken;
 use tokio::sync::Notify;

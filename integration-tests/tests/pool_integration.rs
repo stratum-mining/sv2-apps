@@ -9,7 +9,7 @@ use integration_tests_sv2::{
 };
 use stratum_apps::stratum_core::{
     binary_sv2::Seq0255,
-    common_messages_sv2::{has_work_selection, Protocol, SetupConnection, *},
+    common_messages_sv2::{Protocol, SetupConnection, has_work_selection, *},
     mining_sv2::*,
     parsers_sv2::{self, AnyMessage, CommonMessages, Mining, TemplateDistribution},
     template_distribution_sv2::*,

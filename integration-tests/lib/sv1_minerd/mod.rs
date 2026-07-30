@@ -2,4 +2,4 @@ pub mod error;
 pub mod process;
 
 pub use error::MinerdError;
-pub use process::{start_minerd, MinerdProcess};
+pub use process::{MinerdProcess, start_minerd};

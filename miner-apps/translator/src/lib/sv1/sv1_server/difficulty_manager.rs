@@ -7,7 +7,7 @@ use crate::sv1::sv1_server::{
 use stratum_apps::{
     stratum_core::{
         bitcoin::Target,
-        channels_sv2::{target::hash_rate_to_target, Vardiff},
+        channels_sv2::{Vardiff, target::hash_rate_to_target},
         mining_sv2::{SetTarget, UpdateChannel},
         parsers_sv2::Mining,
         stratum_translation::sv2_to_sv1::{

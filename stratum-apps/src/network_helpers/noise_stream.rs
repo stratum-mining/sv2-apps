@@ -17,8 +17,8 @@ use stratum_core::{
     noise_sv2::INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE,
 };
 use tokio::net::{
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
     TcpStream,
+    tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
 
 use stratum_core::{

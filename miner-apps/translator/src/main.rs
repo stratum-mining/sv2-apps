@@ -1,6 +1,6 @@
 mod args;
 use stratum_apps::config_helpers::logging::init_logging;
-pub use translator_sv2::{config, error, sv1, sv2, TranslatorSv2};
+pub use translator_sv2::{TranslatorSv2, config, error, sv1, sv2};
 
 use crate::args::process_cli_args;
 

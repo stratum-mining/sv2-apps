@@ -15,8 +15,8 @@ use std::{
     collections::BinaryHeap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicU8, Ordering},
         Arc,
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
 
@@ -327,7 +327,8 @@ pub fn validate_cached_share(
                 sequence_number_factory.fetch_add(1, Ordering::Relaxed);
 
             info!(
-                "Cached SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {}, share_hash: {}  ✅",  upstream_message.channel_id, upstream_message.sequence_number, share_hash
+                "Cached SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {}, share_hash: {}  ✅",
+                upstream_message.channel_id, upstream_message.sequence_number, share_hash
             );
 
             messages.push(Mining::SubmitSharesExtended(upstream_message.into_static()).into());
@@ -369,7 +370,10 @@ pub fn validate_cached_share(
                 _ => unreachable!(),
             };
 
-            debug!("❌ Cached SubmitSharesExtended: SubmitSharesError, not forwarding it to upstream | channel_id={}, sequence_number={}, error={code}", upstream_message.channel_id, upstream_message.sequence_number);
+            debug!(
+                "❌ Cached SubmitSharesExtended: SubmitSharesError, not forwarding it to upstream | channel_id={}, sequence_number={}, error={code}",
+                upstream_message.channel_id, upstream_message.sequence_number
+            );
         }
     }
 }

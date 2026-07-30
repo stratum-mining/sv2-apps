@@ -97,7 +97,7 @@ mod tests {
             ("TPROXY__UPSTREAM_01__USER_IDENTITY", "user"),
         ];
         for (key, value) in vars {
-            std::env::set_var(key, value);
+            unsafe { std::env::set_var(key, value) };
         }
 
         let config: TranslatorConfig = load_config(
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(config.downstream_port, 34255);
 
         for (key, _) in vars {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key) };
         }
     }
 }
