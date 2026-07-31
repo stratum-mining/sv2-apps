@@ -22,7 +22,7 @@ use stratum_apps::{
             client_to_server::{self, Submit},
             json_rpc,
             server_to_client::Notify,
-            utils::HexU32Be,
+            utils::{HexU32Be, VERSION_ROLLING_MASK},
         },
     },
     utils::types::{ChannelId, DownstreamId},
@@ -73,7 +73,9 @@ pub fn validate_sv1_share(
         .clone()
         .map(|vb| vb.0)
         .unwrap_or(job.version.0);
-    let mask = version_rolling_mask.unwrap_or(HexU32Be(0x1FFFE000_u32)).0;
+    let mask = version_rolling_mask
+        .unwrap_or(HexU32Be(VERSION_ROLLING_MASK))
+        .0;
     let version = (job.version.0 & !mask) | (share_version & mask);
 
     let prev_hash: U256Owned = Vec::<u8>::from(job.prev_hash.clone())

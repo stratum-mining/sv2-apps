@@ -1,7 +1,7 @@
 use stratum_apps::stratum_core::sv1_api::{
     IsServer, client_to_server, json_rpc,
     server_to_client::{self, Notify},
-    utils::{Extranonce, HexU32Be},
+    utils::{Extranonce, HexU32Be, VERSION_ROLLING_MASK},
 };
 use tracing::{debug, error, info, warn};
 
@@ -36,7 +36,7 @@ impl IsServer for Sv1Server {
         downstream.downstream_data.super_safe_lock(|data| {
             data.version_rolling_mask = request
                 .version_rolling_mask()
-                .map(|mask| HexU32Be(mask & 0x1FFFE000));
+                .map(|mask| HexU32Be(mask & VERSION_ROLLING_MASK));
 
             data.version_rolling_min_bit = request.version_rolling_min_bit_count();
 
@@ -48,10 +48,6 @@ impl IsServer for Sv1Server {
             let params = server_to_client::VersionRollingParams::new(
                 data.version_rolling_mask.clone().unwrap_or(HexU32Be(0)),
                 data.version_rolling_min_bit.clone().unwrap_or(HexU32Be(0)),
-            )
-            .expect(
-                "Invalid version rolling params: \
-                 automatic mask selection is not supported",
             );
 
             Ok((Some(params), Some(false)))
