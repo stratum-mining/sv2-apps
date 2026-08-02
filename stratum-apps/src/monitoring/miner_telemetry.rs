@@ -216,7 +216,7 @@ impl MinerTelemetryCollector {
             .flat_map(|group| group.pools)
             .filter_map(discovered_miner_pool)
             .collect::<Vec<_>>();
-        miner_pools.sort_by(|a, b| {
+        miner_pools.sort_unstable_by(|a, b| {
             a.user
                 .cmp(&b.user)
                 .then_with(|| a.host.cmp(&b.host))
