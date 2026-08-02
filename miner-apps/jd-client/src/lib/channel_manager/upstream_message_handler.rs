@@ -270,9 +270,12 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             .get()
             .map_err(JDCError::shutdown)?;
         self.downstream.try_for_each(|_, downstream| {
+            // the outer Result is the lock guard, the inner one is the group channel rejecting a
+            // `full_extranonce_size` that would overflow the coinbase scriptSig budget
             downstream
                 .group_channel
                 .with(|group_channel| group_channel.set_full_extranonce_size(full_extranonce_size))
+                .map_err(JDCError::shutdown)?
                 .map_err(JDCError::shutdown)
         })?;
 
