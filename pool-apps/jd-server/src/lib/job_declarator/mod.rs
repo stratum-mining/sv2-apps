@@ -28,12 +28,12 @@ use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::accept_noise_connection,
     stratum_core::{
-        handlers_sv2::HandleJobDeclarationMessagesFromClientAsync,
+        handlers_sv2::HandleJobDeclarationMessagesFromClientOwnedAsync,
         mining_sv2::{
-            ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN, SetCustomMiningJob,
-            SetCustomMiningJobError, SetCustomMiningJobSuccess,
+            ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+            SetCustomMiningJobErrorOwned, SetCustomMiningJobOwned, SetCustomMiningJobSuccess,
         },
-        parsers_sv2::{JobDeclaration, Tlv},
+        parsers_sv2::{JobDeclarationOwned, Tlv},
     },
     sync::SharedMap,
     task_manager::TaskManager,
@@ -61,25 +61,25 @@ pub mod job_validation;
 pub mod token_management;
 
 /// Shared JDP payload exchanged between Job Declarator and downstreams.
-type JobDeclarationMessage = (JobDeclaration<'static>, Option<Vec<Tlv>>);
+type JobDeclarationMessage = (JobDeclarationOwned, Option<Vec<Tlv>>);
 
 /// Shared JDP payload sent from downstreams to Job Declarator, tagged with downstream id.
-type DownstreamJobDeclarationMessage = (DownstreamId, JobDeclaration<'static>, Option<Vec<Tlv>>);
+type DownstreamJobDeclarationMessage = (DownstreamId, JobDeclarationOwned, Option<Vec<Tlv>>);
 
 /// The response produced by [`JobDeclarator::handle_set_custom_mining_job`].
 ///
 /// This is a Mining Protocol (MP) message, not a JDP message — it is returned to the
 /// caller (typically the Pool) rather than sent over the JDP TCP socket.
 #[derive(Debug)]
-pub enum SetCustomMiningJobResponse<'a> {
+pub enum SetCustomMiningJobResponse {
     Ok(SetCustomMiningJobSuccess),
-    Error(SetCustomMiningJobError<'a>),
+    Error(SetCustomMiningJobErrorOwned),
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl SetCustomMiningJobResponse<'_> {
+impl SetCustomMiningJobResponse {
     fn error(request_id: u32, channel_id: u32, error_code: &str) -> Self {
-        SetCustomMiningJobResponse::Error(SetCustomMiningJobError {
+        SetCustomMiningJobResponse::Error(SetCustomMiningJobErrorOwned {
             request_id,
             channel_id,
             error_code: error_code
@@ -408,9 +408,9 @@ impl JobDeclarator {
     /// It is the caller's responsibility to set it.
     pub async fn handle_set_custom_mining_job(
         &mut self,
-        set_custom_mining_job: SetCustomMiningJob<'static>,
+        set_custom_mining_job: SetCustomMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
-    ) -> JDSResult<SetCustomMiningJobResponse<'_>, error::JobDeclarator> {
+    ) -> JDSResult<SetCustomMiningJobResponse, error::JobDeclarator> {
         let request_id = set_custom_mining_job.request_id;
         let channel_id = set_custom_mining_job.channel_id;
 

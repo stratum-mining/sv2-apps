@@ -7,18 +7,18 @@ use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
             ERROR_CODE_SETUP_CONNECTION_MISSING_DECLARE_TX_DATA_FLAG,
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnection,
-            SetupConnectionError, SetupConnectionSuccess,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnectionErrorOwned,
+            SetupConnectionOwned, SetupConnectionSuccess,
         },
-        handlers_sv2::HandleCommonMessagesFromClientAsync,
-        parsers_sv2::{AnyMessage, Tlv},
+        handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
+        parsers_sv2::{AnyMessageOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
 use tracing::info;
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleCommonMessagesFromClientAsync for Downstream {
+impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
     type Error = JDSError<error::Downstream>;
 
     fn get_negotiated_extensions_with_client(
@@ -31,7 +31,7 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
     async fn handle_setup_connection(
         &mut self,
         client_id: Option<usize>,
-        msg: SetupConnection<'_>,
+        msg: SetupConnectionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!(
@@ -45,14 +45,14 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
             info!(
                 "Rejecting connection from {downstream_id}: SetupConnection asking for other protocols than mining protocol."
             );
-            let response = SetupConnectionError {
+            let response = SetupConnectionErrorOwned {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
                     .to_string()
                     .try_into()
                     .expect("error code must be valid string"),
             };
-            let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDSError::shutdown)?;
             self.downstream_io
@@ -79,14 +79,14 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
             info!(
                 "Rejecting connection from {downstream_id}: SetupConnection missing DECLARE_TX_DATA flag."
             );
-            let response = SetupConnectionError {
+            let response = SetupConnectionErrorOwned {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_MISSING_DECLARE_TX_DATA_FLAG
                     .to_string()
                     .try_into()
                     .expect("error code must be valid string"),
             };
-            let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDSError::shutdown)?;
             self.downstream_io
@@ -105,7 +105,7 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
             used_version: 2,
             flags: 0,
         };
-        let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+        let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
             .try_into()
             .map_err(JDSError::shutdown)?;
         self.downstream_io

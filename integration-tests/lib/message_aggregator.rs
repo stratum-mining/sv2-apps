@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use stratum_apps::{
-    stratum_core::parsers_sv2::{AnyMessage, Tlv},
+    stratum_core::parsers_sv2::{AnyMessageOwned, Tlv},
     sync::SharedLock,
 };
 
@@ -9,7 +9,7 @@ use crate::types::MsgType;
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone)]
 pub struct MessagesAggregator {
-    messages: SharedLock<VecDeque<(MsgType, AnyMessage<'static>, Option<Vec<Tlv>>)>>,
+    messages: SharedLock<VecDeque<(MsgType, AnyMessageOwned, Option<Vec<Tlv>>)>>,
 }
 
 impl Default for MessagesAggregator {
@@ -27,7 +27,7 @@ impl MessagesAggregator {
     }
 
     /// Adds a message to the end of the queue.
-    pub fn add_message(&self, msg_type: MsgType, message: AnyMessage<'static>) {
+    pub fn add_message(&self, msg_type: MsgType, message: AnyMessageOwned) {
         self.add_message_with_tlvs(msg_type, message, None);
     }
 
@@ -35,7 +35,7 @@ impl MessagesAggregator {
     pub fn add_message_with_tlvs(
         &self,
         msg_type: MsgType,
-        message: AnyMessage<'static>,
+        message: AnyMessageOwned,
         tlv_fields: Option<Vec<Tlv>>,
     ) {
         self.messages
@@ -91,7 +91,7 @@ impl MessagesAggregator {
     /// the queue.
     ///
     /// The returned message is removed from the queue.
-    pub fn next_message(&self) -> Option<(MsgType, AnyMessage<'static>)> {
+    pub fn next_message(&self) -> Option<(MsgType, AnyMessageOwned)> {
         self.next_message_with_tlvs()
             .map(|(msg_type, msg, _)| (msg_type, msg))
     }
@@ -100,9 +100,7 @@ impl MessagesAggregator {
     /// with its TLV fields in the queue.
     ///
     /// The returned message is removed from the queue.
-    pub fn next_message_with_tlvs(
-        &self,
-    ) -> Option<(MsgType, AnyMessage<'static>, Option<Vec<Tlv>>)> {
+    pub fn next_message_with_tlvs(&self) -> Option<(MsgType, AnyMessageOwned, Option<Vec<Tlv>>)> {
         self.messages
             .with(|messages| {
                 let mut cloned = messages.clone();

@@ -4,6 +4,7 @@ use std::{
     marker::PhantomData,
     sync::{MutexGuard, PoisonError},
 };
+use stratum_apps::stratum_core::parsers_sv2::MiningOwned;
 
 use stratum_apps::{
     stratum_core::{
@@ -19,7 +20,7 @@ use stratum_apps::{
         codec_sv2, framing_sv2,
         handlers_sv2::HandlerErrorType,
         noise_sv2,
-        parsers_sv2::{Mining, ParserError},
+        parsers_sv2::ParserError,
     },
     utils::types::{
         CanDisconnect, CanShutdown, ChannelId, DownstreamId, ExtensionType, MessageType,
@@ -143,7 +144,7 @@ pub enum PoolErrorKind {
     /// Custom error message.
     Custom(String),
     /// Error related to the SV2 protocol, including an error code and a `Mining` message.
-    Sv2ProtocolError((u32, Mining<'static>)),
+    Sv2ProtocolError((u32, MiningOwned)),
     /// Vardiff Error
     Vardiff(VardiffError),
     /// Parser Error
@@ -370,8 +371,8 @@ impl<T> From<PoisonError<MutexGuard<'_, T>>> for PoolErrorKind {
     }
 }
 
-impl From<(u32, Mining<'static>)> for PoolErrorKind {
-    fn from(e: (u32, Mining<'static>)) -> Self {
+impl From<(u32, MiningOwned)> for PoolErrorKind {
+    fn from(e: (u32, MiningOwned)) -> Self {
         PoolErrorKind::Sv2ProtocolError(e)
     }
 }

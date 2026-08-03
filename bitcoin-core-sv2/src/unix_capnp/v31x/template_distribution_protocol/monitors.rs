@@ -3,7 +3,7 @@
 
 use super::{BitcoinCoreSv2TDP, bitcoin_capnp_types::capnp};
 use crate::unix_capnp::{MAX_MONEY, WAIT_NEXT_TIMEOUT_MS};
-use stratum_core::parsers_sv2::TemplateDistribution;
+use stratum_core::parsers_sv2::TemplateDistributionOwned;
 use tracing::{debug, error, info, warn};
 
 impl BitcoinCoreSv2TDP {
@@ -265,7 +265,7 @@ impl BitcoinCoreSv2TDP {
                         debug!("monitor_incoming_messages() processing message");
 
                         match incoming_message {
-                            TemplateDistribution::CoinbaseOutputConstraints(coinbase_output_constraints) => {
+                            TemplateDistributionOwned::CoinbaseOutputConstraints(coinbase_output_constraints) => {
                                 debug!("Received CoinbaseOutputConstraints - max_additional_size: {}, max_additional_sigops: {}",
                                     coinbase_output_constraints.coinbase_output_max_additional_size,
                                     coinbase_output_constraints.coinbase_output_max_additional_sigops);
@@ -276,7 +276,7 @@ impl BitcoinCoreSv2TDP {
                                     break;
                                 }
                             }
-                            TemplateDistribution::RequestTransactionData(request_transaction_data) => {
+                            TemplateDistributionOwned::RequestTransactionData(request_transaction_data) => {
                                 debug!("Received RequestTransactionData for template_id: {}", request_transaction_data.template_id);
                                 if let Err(e) = self_clone.handle_request_transaction_data(request_transaction_data).await {
                                     error!("Failed to handle request transaction data: {:?}", e);
@@ -285,7 +285,7 @@ impl BitcoinCoreSv2TDP {
                                     break;
                                 }
                             }
-                            TemplateDistribution::SubmitSolution(submit_solution) => {
+                            TemplateDistributionOwned::SubmitSolution(submit_solution) => {
                                 debug!("Received SubmitSolution for template_id: {}", submit_solution.template_id);
                                 if let Err(e) = self_clone.handle_submit_solution(submit_solution).await {
                                     error!("Failed to handle submit solution: {:?}", e);

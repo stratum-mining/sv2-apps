@@ -66,7 +66,7 @@ impl DownstreamIo {
 #[derive(Debug)]
 pub struct DownstreamData {
     pub channel_id: Option<ChannelId>,
-    pub extranonce1: Extranonce<'static>,
+    pub extranonce1: Extranonce,
     pub extranonce2_len: usize,
     // Current SV1 share-validation target. This follows the advertised
     // difficulty sent to the miner, including any SV1 pow2 rounding.

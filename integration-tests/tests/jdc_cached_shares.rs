@@ -9,7 +9,7 @@ use std::time::Duration;
 use stratum_apps::stratum_core::{
     common_messages_sv2::Protocol,
     mining_sv2::*,
-    parsers_sv2::{AnyMessage, Mining},
+    parsers_sv2::{AnyMessageOwned, MiningOwned},
 };
 
 // Verifies that the JD client buffers `SubmitSharesExtended` while waiting for
@@ -55,7 +55,9 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
 
     let open_channel_msg = loop {
         match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessage::Mining(Mining::OpenExtendedMiningChannel(msg)))) => break msg,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(msg)))) => {
+                break msg;
+            }
             _ => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -63,8 +65,8 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
     };
 
     let channel_id = 9u32;
-    let open_channel_success = AnyMessage::Mining(Mining::OpenExtendedMiningChannelSuccess(
-        OpenExtendedMiningChannelSuccess {
+    let open_channel_success = AnyMessageOwned::Mining(
+        MiningOwned::OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccessOwned {
             request_id: open_channel_msg.request_id,
             channel_id,
             // Set the target to the maximum value (lowest difficulty)
@@ -74,13 +76,13 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
             extranonce_size: open_channel_msg.min_extranonce_size,
             extranonce_prefix: vec![0x00, 0x00, 0x00, 0x00].try_into().unwrap(),
             group_channel_id: 1,
-        },
-    ));
+        }),
+    );
     mock_pool_sender.send(open_channel_success).await.unwrap();
 
     let set_custom_mining_job = loop {
         match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessage::Mining(Mining::SetCustomMiningJob(msg)))) => break msg,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(msg)))) => break msg,
             _ => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -93,8 +95,8 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
 
     let job_id = 99;
 
-    let set_custom_job_success = AnyMessage::Mining(Mining::SetCustomMiningJobSuccess(
-        SetCustomMiningJobSuccess {
+    let set_custom_job_success = AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobSuccess(
+        SetCustomMiningJobSuccessOwned {
             channel_id: set_custom_mining_job.channel_id,
             request_id: set_custom_mining_job.request_id,
             job_id,
@@ -104,7 +106,9 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
 
     let submit_share_extended = loop {
         match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessage::Mining(Mining::SubmitSharesExtended(msg)))) => break msg,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SubmitSharesExtended(msg)))) => {
+                break msg;
+            }
             _ => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }

@@ -122,7 +122,7 @@ pub async fn connect_with_noise<Message>(
     authority_pub_key: Option<Secp256k1PublicKey>,
 ) -> Result<NoiseTcpStream<Message>, Error>
 where
-    Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
 {
     let initiator = match authority_pub_key {
         Some(key) => Initiator::from_raw_k(key.into_bytes()).map_err(|_| Error::InvalidKey)?,
@@ -151,7 +151,7 @@ pub async fn accept_noise_connection<Message>(
     cert_validity: u64,
 ) -> Result<NoiseTcpStream<Message>, Error>
 where
-    Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
 {
     let responder = Responder::from_authority_kp(
         &pub_key.into_bytes(),

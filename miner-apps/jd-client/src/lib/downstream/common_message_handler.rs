@@ -9,18 +9,18 @@ use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS,
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnection,
-            SetupConnectionError, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnectionErrorOwned,
+            SetupConnectionOwned, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
         },
-        handlers_sv2::HandleCommonMessagesFromClientAsync,
-        parsers_sv2::{AnyMessage, Tlv},
+        handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
+        parsers_sv2::{AnyMessageOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
 use tracing::{error, info};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleCommonMessagesFromClientAsync for Downstream {
+impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
     type Error = JDCError<error::Downstream>;
 
     fn get_negotiated_extensions_with_client(
@@ -53,23 +53,23 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
     async fn handle_setup_connection(
         &mut self,
         _client_id: Option<usize>,
-        msg: SetupConnection<'_>,
+        msg: SetupConnectionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         if msg.protocol != Protocol::MiningProtocol {
             info!(
                 "Rejecting connection: SetupConnection asking for other protocols than mining protocol."
             );
-            let response = SetupConnectionError {
+            let response = SetupConnectionErrorOwned {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
                     .to_string()
                     .try_into()
                     .map_err(JDCError::shutdown)?,
             };
-            let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
@@ -87,14 +87,14 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
 
         if has_work_selection(msg.flags) {
             info!("Rejecting: work selection not allowed.");
-            let response = SetupConnectionError {
+            let response = SetupConnectionErrorOwned {
                 flags: 0b0000_0000_0000_0010,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS
                     .to_string()
                     .try_into()
                     .map_err(JDCError::shutdown)?,
             };
-            let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
@@ -130,7 +130,7 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
             used_version: 2,
             flags: 0, // !REQUIRES_FIXED_VERSION, !REQUIRES_EXTENDED_CHANNELS
         };
-        let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+        let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
             .try_into()
             .map_err(JDCError::shutdown)?;
 

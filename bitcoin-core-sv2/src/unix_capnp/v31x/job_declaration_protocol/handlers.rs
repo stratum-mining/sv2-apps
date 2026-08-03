@@ -15,7 +15,7 @@ use stratum_core::{
     },
     job_declaration_sv2::{
         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
-        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, PushSolution,
+        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, PushSolutionOwned,
     },
 };
 use tokio::sync::oneshot;
@@ -328,7 +328,7 @@ impl BitcoinCoreSv2JDP {
     /// Submits a mining solution to Bitcoin Core.
     ///
     /// Not yet implemented — deliberately left as a stub for future work.
-    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolution<'_>) {
+    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolutionOwned) {
         // todo
     }
 }

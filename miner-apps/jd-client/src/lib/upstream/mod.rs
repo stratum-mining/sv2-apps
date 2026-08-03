@@ -10,6 +10,9 @@
 //! - Handle common messages from upstream
 
 use std::{net::SocketAddr, sync::Arc};
+use stratum_apps::stratum_core::{
+    binary_sv2::Seq064KOwned, extensions_sv2::RequestExtensionsOwned,
+};
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -18,8 +21,8 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
-        binary_sv2::Seq064K, extensions_sv2::RequestExtensions, framing_sv2,
-        handlers_sv2::HandleCommonMessagesFromServerAsync, parsers_sv2::AnyMessage,
+        framing_sv2, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        parsers_sv2::AnyMessageOwned,
     },
     task_manager::TaskManager,
     utils::{
@@ -272,9 +275,9 @@ impl Upstream {
         }
 
         let requested_extensions =
-            Seq064K::new(self.required_extensions.clone()).map_err(JDCError::shutdown)?;
+            Seq064KOwned::new(self.required_extensions.clone()).map_err(JDCError::shutdown)?;
 
-        let request_extensions = RequestExtensions {
+        let request_extensions = RequestExtensionsOwned {
             request_id: 0,
             requested_extensions,
         };
@@ -284,7 +287,7 @@ impl Upstream {
             self.required_extensions
         );
 
-        let sv2_frame: Sv2Frame = AnyMessage::Extensions(request_extensions.into_static().into())
+        let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(request_extensions.into())
             .try_into()
             .map_err(JDCError::shutdown)?;
 

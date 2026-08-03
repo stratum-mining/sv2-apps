@@ -15,6 +15,11 @@
 //! maintaining state for multiple downstream connections and ensuring seamless translation
 //! between SV1 and SV2 protocols.
 
+use stratum_apps::stratum_core::{
+    binary_sv2::Str0255Owned,
+    mining_sv2::{CloseChannelOwned, SetNewPrevHashOwned, SetTargetOwned},
+    parsers_sv2::MiningOwned,
+};
 mod difficulty_manager;
 pub mod downstream_message_handler;
 
@@ -48,14 +53,11 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::sv1_connection::ConnectionSV1,
     stratum_core::{
-        binary_sv2::Str0255,
         bitcoin::Target,
         channels_sv2::{
             Vardiff, VardiffState,
             target::{hash_rate_from_target, hash_rate_to_target},
         },
-        mining_sv2::{CloseChannel, SetNewPrevHash, SetTarget},
-        parsers_sv2::Mining,
         stratum_translation::{
             sv1_to_sv2::{
                 build_sv2_open_extended_mining_channel,
@@ -83,16 +85,16 @@ struct Sv1ServerIo {
     sv1_server_to_downstream_sender: Arc<Mutex<HashMap<DownstreamId, Sender<json_rpc::Message>>>>,
     downstream_to_sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
     downstream_to_sv1_server_receiver: Receiver<(DownstreamId, json_rpc::Message)>,
-    channel_manager_receiver: Receiver<Mining<'static>>,
+    channel_manager_receiver: Receiver<MiningOwned>,
     // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
-    channel_manager_sender: Sender<(Mining<'static>, Option<String>)>,
+    channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Sv1ServerIo {
     fn new(
-        channel_manager_receiver: Receiver<Mining<'static>>,
-        channel_manager_sender: Sender<(Mining<'static>, Option<String>)>,
+        channel_manager_receiver: Receiver<MiningOwned>,
+        channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
     ) -> Self {
         let (downstream_to_sv1_server_sender, downstream_to_sv1_server_receiver) = unbounded();
 
@@ -197,12 +199,12 @@ pub struct Sv1Server {
     pub(crate) vardiff: Arc<DashMap<DownstreamId, Arc<Mutex<VardiffState>>>>,
     /// HashMap to store the SetNewPrevHash for each channel
     /// Used in both aggregated and non-aggregated mode
-    pub(crate) prevhashes: Arc<DashMap<ChannelId, SetNewPrevHash<'static>>>,
+    pub(crate) prevhashes: Arc<DashMap<ChannelId, SetNewPrevHashOwned>>,
     /// Tracks pending target updates that are waiting for SetTarget response from upstream
     pub(crate) pending_target_updates: Arc<Mutex<Vec<PendingTargetUpdate>>>,
     /// Valid Sv1 jobs storage, containing only a single shared entry (AGGREGATED_CHANNEL_ID) in
     /// case of channels aggregation (aggregated mode)
-    pub(crate) valid_sv1_jobs: Arc<DashMap<ChannelId, Vec<server_to_client::Notify<'static>>>>,
+    pub(crate) valid_sv1_jobs: Arc<DashMap<ChannelId, Vec<server_to_client::Notify>>>,
     pub(crate) mode: TproxyMode,
     user_identity: Arc<OnceLock<String>>,
 }
@@ -348,8 +350,8 @@ impl Sv1Server {
     /// A new Sv1Server instance ready to accept connections
     pub fn new(
         listener_addr: SocketAddr,
-        channel_manager_receiver: Receiver<Mining<'static>>,
-        channel_manager_sender: Sender<(Mining<'static>, Option<String>)>,
+        channel_manager_receiver: Receiver<MiningOwned>,
+        channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
         config: TranslatorConfig,
         mode: TproxyMode,
     ) -> Self {
@@ -734,7 +736,7 @@ impl Sv1Server {
         self.sv1_server_io
             .channel_manager_sender
             .send((
-                Mining::SubmitSharesExtended(submit_share_extended),
+                MiningOwned::SubmitSharesExtended(submit_share_extended),
                 sv1_worker_name,
             ))
             .await
@@ -800,7 +802,7 @@ impl Sv1Server {
             .map_err(TproxyError::shutdown)?;
 
         match message {
-            Mining::OpenExtendedMiningChannelSuccess(m) => {
+            MiningOwned::OpenExtendedMiningChannelSuccess(m) => {
                 debug!(
                     "Received OpenExtendedMiningChannelSuccess for channel id: {}",
                     m.channel_id
@@ -919,7 +921,7 @@ impl Sv1Server {
                 }
             }
 
-            Mining::NewExtendedMiningJob(m) => {
+            MiningOwned::NewExtendedMiningJob(m) => {
                 debug!(
                     "Received NewExtendedMiningJob for channel id: {}",
                     m.channel_id
@@ -930,11 +932,9 @@ impl Sv1Server {
                     .get(&m.channel_id)
                     .map(|r| r.value().clone())
                 {
-                    let prevhash = prevhash.as_static();
                     let clean_jobs = m.job_id == prevhash.job_id;
-                    let notify =
-                        build_sv1_notify_from_sv2(prevhash, m.clone().into_static(), clean_jobs)
-                            .map_err(TproxyError::shutdown)?;
+                    let notify = build_sv1_notify_from_sv2(prevhash, m.clone(), clean_jobs)
+                        .map_err(TproxyError::shutdown)?;
 
                     // Update job storage based on the configured mode
                     let notify_parsed = notify.clone();
@@ -959,13 +959,12 @@ impl Sv1Server {
                 }
             }
 
-            Mining::SetNewPrevHash(m) => {
+            MiningOwned::SetNewPrevHash(m) => {
                 debug!("Received SetNewPrevHash for channel id: {}", m.channel_id);
-                self.prevhashes
-                    .insert(m.channel_id, m.clone().into_static());
+                self.prevhashes.insert(m.channel_id, m.clone());
             }
 
-            Mining::SetTarget(m) => {
+            MiningOwned::SetTarget(m) => {
                 debug!("Received SetTarget for channel id: {}", m.channel_id);
                 if self.config.downstream_difficulty_config.enable_vardiff {
                     // Vardiff enabled - use full difficulty management
@@ -1045,7 +1044,10 @@ impl Sv1Server {
         ) {
             self.sv1_server_io
                 .channel_manager_sender
-                .send((Mining::OpenExtendedMiningChannel(open_channel_msg), None))
+                .send((
+                    MiningOwned::OpenExtendedMiningChannel(open_channel_msg),
+                    None,
+                ))
                 .await
                 .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
         } else {
@@ -1101,12 +1103,13 @@ impl Sv1Server {
                 // in aggregated mode the upstream channel is shared across
                 // all downstreams and must stay open.
                 info!("Sending CloseChannel message: {channel_id} for downstream: {downstream_id}");
-                let reason_code = Str0255::try_from("downstream disconnected".to_string()).unwrap();
+                let reason_code =
+                    Str0255Owned::try_from("downstream disconnected".to_string()).unwrap();
                 _ = self
                     .sv1_server_io
                     .channel_manager_sender
                     .send((
-                        Mining::CloseChannel(CloseChannel {
+                        MiningOwned::CloseChannel(CloseChannelOwned {
                             channel_id,
                             reason_code,
                         }),
@@ -1128,7 +1131,7 @@ impl Sv1Server {
     /// meaningful SV1 downstream hashrate values.
     async fn handle_set_target_without_vardiff(
         &self,
-        set_target: SetTarget<'_>,
+        set_target: SetTargetOwned,
     ) -> TproxyResult<(), error::Sv1Server> {
         let new_target = Target::from_le_bytes(set_target.maximum_target.to_array());
         debug!(
@@ -1138,7 +1141,7 @@ impl Sv1Server {
 
         // Derive hashrate from the upstream target so monitoring can report it
         let derived_hashrate = match hash_rate_from_target(
-            set_target.maximum_target.clone().into_static(),
+            set_target.maximum_target.clone(),
             self.shares_per_minute as f64,
         ) {
             Ok(hr) => {
@@ -1268,11 +1271,12 @@ impl Sv1Server {
                 channel_id
             );
             info!("Sending CloseChannel message: Channel id {channel_id}");
-            let reason_code = Str0255::try_from("downstream disconnected".to_string()).unwrap();
+            let reason_code =
+                Str0255Owned::try_from("downstream disconnected".to_string()).unwrap();
             self.sv1_server_io
                 .channel_manager_sender
                 .send((
-                    Mining::CloseChannel(CloseChannel {
+                    MiningOwned::CloseChannel(CloseChannelOwned {
                         channel_id,
                         reason_code,
                     }),
@@ -1503,7 +1507,7 @@ impl Sv1Server {
     /// Gets the last job from the jobs storage.
     /// In aggregated mode, returns the last job from the shared job list.
     /// In non-aggregated mode, returns the last job for the specified channel.
-    fn get_last_job(&self, channel_id: Option<u32>) -> Option<server_to_client::Notify<'static>> {
+    fn get_last_job(&self, channel_id: Option<u32>) -> Option<server_to_client::Notify> {
         let channel_id = if self.mode.is_aggregated() {
             AGGREGATED_CHANNEL_ID
         } else {
@@ -1521,7 +1525,7 @@ impl Sv1Server {
         &self,
         job_id: &str,
         channel_id: Option<u32>,
-    ) -> Option<server_to_client::Notify<'static>> {
+    ) -> Option<server_to_client::Notify> {
         let channel_id = if self.mode.is_aggregated() {
             AGGREGATED_CHANNEL_ID
         } else {
@@ -1651,7 +1655,7 @@ mod tests {
         let server = Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode);
         let target: Target = hash_rate_to_target(200.0, 5.0).unwrap();
 
-        let set_target = SetTarget {
+        let set_target = SetTargetOwned {
             channel_id: 1,
             maximum_target: target.to_le_bytes().into(),
         };
@@ -1672,7 +1676,7 @@ mod tests {
         let server = Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode);
         let target: Target = hash_rate_to_target(200.0, 5.0).unwrap();
 
-        let set_target = SetTarget {
+        let set_target = SetTargetOwned {
             channel_id: 1,
             maximum_target: target.to_le_bytes().into(),
         };

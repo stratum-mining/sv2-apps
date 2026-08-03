@@ -6,18 +6,18 @@ use std::{convert::TryInto, sync::atomic::Ordering};
 use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnection,
-            SetupConnectionError, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnectionErrorOwned,
+            SetupConnectionOwned, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
         },
-        handlers_sv2::HandleCommonMessagesFromClientAsync,
-        parsers_sv2::{AnyMessage, Tlv},
+        handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
+        parsers_sv2::{AnyMessageOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
 use tracing::info;
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleCommonMessagesFromClientAsync for Downstream {
+impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
     type Error = PoolError<error::Downstream>;
 
     fn get_negotiated_extensions_with_client(
@@ -32,7 +32,7 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
     async fn handle_setup_connection(
         &mut self,
         client_id: Option<usize>,
-        msg: SetupConnection<'_>,
+        msg: SetupConnectionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!(
@@ -46,14 +46,14 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
             info!(
                 "Rejecting connection from {downstream_id}: SetupConnection asking for other protocols than mining protocol."
             );
-            let response = SetupConnectionError {
+            let response = SetupConnectionErrorOwned {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
                     .to_string()
                     .try_into()
                     .expect("error code must be valid string"),
             };
-            let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
@@ -92,7 +92,7 @@ impl HandleCommonMessagesFromClientAsync for Downstream {
             used_version: 2,
             flags: response_flags,
         };
-        let frame: Sv2Frame = AnyMessage::Common(response.into_static().into())
+        let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
             .try_into()
             .map_err(PoolError::shutdown)?;
         self.downstream_io

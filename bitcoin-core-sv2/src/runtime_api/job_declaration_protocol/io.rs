@@ -2,7 +2,7 @@
 
 use stratum_core::{
     bitcoin::{BlockHash, CompactTarget, Transaction, Txid, Wtxid, block::Version},
-    job_declaration_sv2::PushSolution,
+    job_declaration_sv2::PushSolutionOwned,
 };
 use tokio::sync::oneshot;
 
@@ -34,9 +34,7 @@ pub enum JdRequest {
         response_tx: oneshot::Sender<JdResponse>,
     },
     /// Submit a mining solution to Bitcoin Core (fire-and-forget).
-    PushSolution {
-        push_solution: PushSolution<'static>,
-    },
+    PushSolution { push_solution: PushSolutionOwned },
 }
 
 /// The result of trying to handle a DeclareMiningJob request.

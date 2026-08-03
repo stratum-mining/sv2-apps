@@ -6,9 +6,9 @@ use stratum_apps::{
         codec_sv2::StandardEitherFrame,
         common_messages_sv2::{
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
-            Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
+            Protocol, SetupConnectionErrorOwned, SetupConnectionOwned, SetupConnectionSuccessOwned,
         },
-        parsers_sv2::{AnyMessage, CommonMessages, IsSv2Message},
+        parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, IsSv2Message},
     },
     utils::types::Sv2Frame,
 };
@@ -16,13 +16,13 @@ use tokio::net::TcpStream;
 use tracing::info;
 
 pub enum WithSetup {
-    Yes(SetupConnection<'static>),
+    Yes(SetupConnectionOwned),
     No,
 }
 
 impl WithSetup {
     pub fn yes_with_defaults(protocol: Protocol, flags: u32) -> Self {
-        WithSetup::Yes(SetupConnection {
+        WithSetup::Yes(SetupConnectionOwned {
             protocol,
             min_version: 2,
             max_version: 2,
@@ -36,7 +36,7 @@ impl WithSetup {
         })
     }
 
-    pub fn yes(setup_connection: SetupConnection<'static>) -> Self {
+    pub fn yes(setup_connection: SetupConnectionOwned) -> Self {
         WithSetup::Yes(setup_connection)
     }
 
@@ -58,10 +58,10 @@ impl MockDownstream {
         }
     }
 
-    pub async fn start(self) -> Sender<AnyMessage<'static>> {
+    pub async fn start(self) -> Sender<AnyMessageOwned> {
         let upstream_address = self.upstream_address;
 
-        let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessage<'static>>();
+        let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessageOwned>();
 
         let (upstream_receiver, upstream_sender) = create_upstream(loop {
             match TcpStream::connect(upstream_address).await {
@@ -80,9 +80,10 @@ impl MockDownstream {
         if let WithSetup::Yes(setup_connection) = self.setup {
             let protocol = setup_connection.protocol;
             let flags = setup_connection.flags;
-            let msg = AnyMessage::Common(CommonMessages::SetupConnection(setup_connection));
+            let msg =
+                AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(setup_connection));
             let message_type = msg.message_type();
-            let frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+            let frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                 Sv2Frame::from_message(msg, message_type, 0, false)
                     .expect("Failed to create SetupConnection frame"),
             );
@@ -109,7 +110,7 @@ impl MockDownstream {
         tokio::spawn(async move {
             while let Ok(message) = proxy_receiver.recv().await {
                 let message_type = message.message_type();
-                let frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+                let frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                     Sv2Frame::from_message(message, message_type, 0, false)
                         .expect("Failed to create frame from message"),
                 );
@@ -143,10 +144,10 @@ impl MockUpstream {
         self
     }
 
-    pub async fn start(self) -> Sender<AnyMessage<'static>> {
+    pub async fn start(self) -> Sender<AnyMessageOwned> {
         let listening_address = self.listening_address;
 
-        let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessage<'static>>();
+        let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessageOwned>();
 
         tokio::spawn(async move {
             let (downstream_receiver, downstream_sender) =
@@ -169,16 +170,21 @@ impl MockUpstream {
                 );
 
                 if msg_type == MESSAGE_TYPE_SETUP_CONNECTION {
-                    if let AnyMessage::Common(CommonMessages::SetupConnection(setup_msg)) = &msg {
+                    if let AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(
+                        setup_msg,
+                    )) = &msg
+                    {
                         if setup_msg.protocol == expected_protocol {
-                            let success = AnyMessage::Common(
-                                CommonMessages::SetupConnectionSuccess(SetupConnectionSuccess {
-                                    used_version: 2,
-                                    flags,
-                                }),
+                            let success = AnyMessageOwned::Common(
+                                CommonMessagesOwned::SetupConnectionSuccess(
+                                    SetupConnectionSuccessOwned {
+                                        used_version: 2,
+                                        flags,
+                                    },
+                                ),
                             );
                             let success_type = success.message_type();
-                            let response_frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+                            let response_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                                 Sv2Frame::from_message(success, success_type, 0, false)
                                     .expect("Failed to create SetupConnectionSuccess frame"),
                             );
@@ -198,18 +204,20 @@ impl MockUpstream {
                                 return;
                             }
                         } else {
-                            let error = AnyMessage::Common(CommonMessages::SetupConnectionError(
-                                SetupConnectionError {
-                                    flags: 0,
-                                    error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
-                                        .to_string()
-                                        .into_bytes()
-                                        .try_into()
-                                        .unwrap(),
-                                },
-                            ));
+                            let error =
+                                AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(
+                                    SetupConnectionErrorOwned {
+                                        flags: 0,
+                                        error_code:
+                                            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
+                                                .to_string()
+                                                .into_bytes()
+                                                .try_into()
+                                                .unwrap(),
+                                    },
+                                ));
                             let error_type = error.message_type();
-                            let response_frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+                            let response_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                                 Sv2Frame::from_message(error, error_type, 0, false)
                                     .expect("Failed to create SetupConnectionError frame"),
                             );
@@ -240,7 +248,7 @@ impl MockUpstream {
 
             while let Ok(message) = proxy_receiver.recv().await {
                 let message_type = message.message_type();
-                let frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+                let frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                     Sv2Frame::from_message(message, message_type, 0, false)
                         .expect("Failed to create frame from message"),
                 );

@@ -5,7 +5,7 @@ use stratum_apps::{
         CancellationToken,
         runtime_api::{BitcoinCoreVersion, template_distribution_protocol},
     },
-    stratum_core::parsers_sv2::TemplateDistribution,
+    stratum_core::parsers_sv2::TemplateDistributionOwned,
     task_manager::TaskManager,
 };
 
@@ -15,8 +15,8 @@ pub struct BitcoinCoreSv2TDPConfig {
     pub unix_socket_path: PathBuf,
     pub fee_threshold: u64,
     pub min_interval: u8,
-    pub incoming_tdp_receiver: Receiver<TemplateDistribution<'static>>,
-    pub outgoing_tdp_sender: Sender<TemplateDistribution<'static>>,
+    pub incoming_tdp_receiver: Receiver<TemplateDistributionOwned>,
+    pub outgoing_tdp_sender: Sender<TemplateDistributionOwned>,
     pub cancellation_token: CancellationToken,
 }
 

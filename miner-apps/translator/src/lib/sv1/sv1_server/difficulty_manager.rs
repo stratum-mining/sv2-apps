@@ -1,4 +1,8 @@
 use std::sync::Arc;
+use stratum_apps::stratum_core::{
+    mining_sv2::{SetTargetOwned, UpdateChannelOwned},
+    parsers_sv2::MiningOwned,
+};
 
 use crate::sv1::sv1_server::{
     PendingTargetUpdate, SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
@@ -8,8 +12,6 @@ use stratum_apps::{
     stratum_core::{
         bitcoin::Target,
         channels_sv2::{Vardiff, target::hash_rate_to_target},
-        mining_sv2::{SetTarget, UpdateChannel},
-        parsers_sv2::Mining,
         stratum_translation::sv2_to_sv1::{
             build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding,
             sv1_advertised_target_from_sv2_target,
@@ -276,7 +278,7 @@ impl Sv1Server {
         };
         let downstream_count = self.downstreams.len();
 
-        let update_channel = UpdateChannel {
+        let update_channel = UpdateChannelOwned {
             channel_id: *channel_id,
             nominal_hash_rate: total_hashrate,
             maximum_target: min_target.to_le_bytes().into(),
@@ -294,7 +296,7 @@ impl Sv1Server {
         if let Err(e) = self
             .sv1_server_io
             .channel_manager_sender
-            .send((Mining::UpdateChannel(update_channel), None))
+            .send((MiningOwned::UpdateChannel(update_channel), None))
             .await
         {
             error!("Failed to send aggregated UpdateChannel: {:?}", e);
@@ -306,7 +308,7 @@ impl Sv1Server {
         all_updates: Vec<(DownstreamId, ChannelId, Target, Hashrate)>,
     ) {
         for (downstream_id, channel_id, new_target, new_hashrate) in all_updates {
-            let update_channel = UpdateChannel {
+            let update_channel = UpdateChannelOwned {
                 channel_id,
                 nominal_hash_rate: new_hashrate,
                 maximum_target: new_target.to_le_bytes().into(),
@@ -320,7 +322,7 @@ impl Sv1Server {
             if let Err(e) = self
                 .sv1_server_io
                 .channel_manager_sender
-                .send((Mining::UpdateChannel(update_channel), None))
+                .send((MiningOwned::UpdateChannel(update_channel), None))
                 .await
             {
                 error!(
@@ -336,7 +338,7 @@ impl Sv1Server {
     /// Aggregated mode: Single SetTarget updates all downstreams and processes all pending updates
     /// Non-aggregated mode: Each SetTarget updates one specific downstream and processes its
     /// pending update
-    pub(super) async fn handle_set_target_message(&self, set_target: SetTarget<'_>) {
+    pub(super) async fn handle_set_target_message(&self, set_target: SetTargetOwned) {
         let new_upstream_target = Target::from_le_bytes(set_target.maximum_target.to_array());
         debug!(
             "Received SetTarget for channel {}: new_upstream_target = {}",
@@ -561,13 +563,13 @@ impl Sv1Server {
             AggregatedSnapshot::Active {
                 total_hashrate,
                 min_target,
-            } => UpdateChannel {
+            } => UpdateChannelOwned {
                 channel_id: 0, // ChannelManager will rewrite to upstream extended channel id
                 nominal_hash_rate: total_hashrate,
                 maximum_target: min_target.to_le_bytes().into(),
             },
 
-            AggregatedSnapshot::NoDownstreams => UpdateChannel {
+            AggregatedSnapshot::NoDownstreams => UpdateChannelOwned {
                 channel_id: 0,
                 nominal_hash_rate: 0.0,
                 maximum_target: [0xFF; 32].into(),
@@ -577,7 +579,7 @@ impl Sv1Server {
         if let Err(e) = self
             .sv1_server_io
             .channel_manager_sender
-            .send((Mining::UpdateChannel(update), None))
+            .send((MiningOwned::UpdateChannel(update), None))
             .await
         {
             error!(

@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
     thread::JoinHandle,
 };
+use stratum_apps::stratum_core::parsers_sv2::{MiningOwned, TemplateDistributionOwned};
 
 use async_channel::{Receiver, Sender, unbounded};
 
@@ -16,7 +17,7 @@ use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     stratum_core::{
         bitcoin::{TxOut, consensus::Encodable},
-        parsers_sv2::{Mining, TemplateDistribution, Tlv},
+        parsers_sv2::Tlv,
     },
     task_manager::TaskManager,
     tp_type::TemplateProviderType,
@@ -40,13 +41,12 @@ use crate::{
 };
 
 struct Io {
-    downstream_to_channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
-    downstream_to_channel_manager_receiver:
-        Receiver<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
-    channel_manager_to_tp_sender: Sender<TemplateDistribution<'static>>,
-    channel_manager_to_tp_receiver: Receiver<TemplateDistribution<'static>>,
-    tp_to_channel_manager_sender: Sender<TemplateDistribution<'static>>,
-    tp_to_channel_manager_receiver: Receiver<TemplateDistribution<'static>>,
+    downstream_to_channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
+    downstream_to_channel_manager_receiver: Receiver<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
+    channel_manager_to_tp_sender: Sender<TemplateDistributionOwned>,
+    channel_manager_to_tp_receiver: Receiver<TemplateDistributionOwned>,
+    tp_to_channel_manager_sender: Sender<TemplateDistributionOwned>,
+    tp_to_channel_manager_receiver: Receiver<TemplateDistributionOwned>,
 }
 
 struct BitcoinCoreSv2Handle {

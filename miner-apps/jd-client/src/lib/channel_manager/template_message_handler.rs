@@ -1,14 +1,20 @@
 use std::sync::atomic::Ordering;
+use stratum_apps::stratum_core::{
+    binary_sv2::{Seq064KOwned, U256Owned},
+    job_declaration_sv2::DeclareMiningJobOwned,
+    parsers_sv2::{JobDeclarationOwned, MiningOwned},
+    template_distribution_sv2::{
+        NewTemplateOwned, RequestTransactionDataErrorOwned, RequestTransactionDataSuccessOwned,
+    },
+};
 
 use stratum_apps::stratum_core::{
-    binary_sv2::{Seq064K, U256},
     bitcoin::{Amount, Transaction, consensus, hashes::Hash},
     channels_sv2::{chain_tip::ChainTip, outputs::deserialize_outputs},
-    handlers_sv2::HandleTemplateDistributionMessagesFromServerAsync,
-    job_declaration_sv2::DeclareMiningJob,
-    mining_sv2::SetNewPrevHash as SetNewPrevHashMp,
-    parsers_sv2::{JobDeclaration, Mining, Tlv},
-    template_distribution_sv2::*,
+    handlers_sv2::HandleTemplateDistributionMessagesFromServerOwnedAsync,
+    mining_sv2::SetNewPrevHashOwned as SetNewPrevHashMp,
+    parsers_sv2::Tlv,
+    template_distribution_sv2::{SetNewPrevHashOwned as SetNewPrevHashTdpOwned, *},
 };
 use tracing::{debug, error, info, warn};
 
@@ -19,7 +25,7 @@ use crate::{
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
+impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     type Error = JDCError<error::ChannelManager>;
 
     fn get_negotiated_extensions_with_server(
@@ -34,16 +40,15 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
     async fn handle_new_template(
         &mut self,
         _server_id: Option<usize>,
-        msg: NewTemplate<'_>,
+        msg: NewTemplateOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
-        self.template_store
-            .insert(msg.template_id, msg.clone().into_static());
+        self.template_store.insert(msg.template_id, msg.clone());
         if msg.future_template {
             self.last_future_template
-                .set(Some(msg.clone().into_static()))
+                .set(Some(msg.clone()))
                 .map_err(JDCError::shutdown)?;
         }
 
@@ -107,7 +112,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 .group_channel
                 .with(|group_channel| {
                     group_channel
-                        .on_new_template(msg.clone().into_static(), coinbase_outputs.clone())
+                        .on_new_template(msg.clone(), coinbase_outputs.clone())
                         .map_err(|e| {
                             tracing::error!("Error while adding template to group channel: {e:?}");
                             JDCError::shutdown(e)
@@ -159,14 +164,14 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                         request_id,
                         DeclaredJob {
                             declare_mining_job: None,
-                            template: msg.clone().into_static(),
+                            template: msg.clone(),
                             prev_hash: Some(prevhash),
-                            set_custom_mining_job: Some(custom_job.clone().into_static()),
+                            set_custom_mining_job: Some(custom_job.clone()),
                             coinbase_output: coinbase_output_bytes.clone(),
                             tx_list: Vec::new(),
                         },
                     );
-                    messages.push(Mining::SetCustomMiningJob(custom_job).into());
+                    messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
                 }
             }
 
@@ -179,7 +184,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 messages.push(
                     (
                         downstream_id,
-                        Mining::NewExtendedMiningJob(group_channel_job.get_job_message().clone()),
+                        MiningOwned::NewExtendedMiningJob(group_channel_job.get_job_message().clone()),
                     )
                         .into(),
                 );
@@ -205,7 +210,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                             })?;
                     } else {
                         standard_channel
-                            .on_new_template(msg.clone().into_static(), coinbase_outputs.clone())
+                            .on_new_template(msg.clone(), coinbase_outputs.clone())
                             .map_err(|e| {
                                 tracing::error!(
                                     "Error while adding template to standard channel: {channel_id:?} {e:?}"
@@ -223,7 +228,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                             messages.push(
                                 (
                                     downstream_id,
-                                    Mining::NewMiningJob(job.get_job_message().clone()),
+                                    MiningOwned::NewMiningJob(job.get_job_message().clone()),
                                 )
                                     .into(),
                             );
@@ -236,7 +241,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                             messages.push(
                                 (
                                     downstream_id,
-                                    Mining::NewMiningJob(job.get_job_message().clone()),
+                                    MiningOwned::NewMiningJob(job.get_job_message().clone()),
                                 )
                                     .into(),
                             );
@@ -285,10 +290,10 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
     async fn handle_request_tx_data_error(
         &mut self,
         _server_id: Option<usize>,
-        msg: RequestTransactionDataError<'_>,
+        msg: RequestTransactionDataErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        warn!("Received: {:?}", msg);
         let error_code = msg.error_code.as_utf8_or_hex();
 
         if matches!(
@@ -304,7 +309,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
     async fn handle_request_tx_data_success(
         &mut self,
         _server_id: Option<usize>,
-        msg: RequestTransactionDataSuccess<'_>,
+        msg: RequestTransactionDataSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
@@ -366,14 +371,14 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
             .map(|raw_tx| consensus::deserialize(raw_tx).expect("invalid tx"))
             .collect();
 
-        let wtxids_as_u256: Vec<U256<'static>> = tx_list
+        let wtxids_as_u256: Vec<U256Owned> = tx_list
             .iter()
             .map(|tx| {
                 let txid = tx.compute_wtxid();
-                U256::from(*txid.as_byte_array())
+                U256Owned::from(*txid.as_byte_array())
             })
             .collect();
-        let wtx_ids = Seq064K::new(wtxids_as_u256).map_err(JDCError::shutdown)?;
+        let wtx_ids = Seq064KOwned::new(wtxids_as_u256).map_err(JDCError::shutdown)?;
 
         let is_activated_future_template = template_message.future_template
             && prevhash
@@ -401,7 +406,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                             full_extranonce_size,
                         )
                     {
-                        let declare_job = DeclareMiningJob {
+                        let declare_job = DeclareMiningJobOwned {
                             request_id,
                             mining_job_token: mining_token,
                             version: template_message.version,
@@ -409,8 +414,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                             coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
                             wtxid_list: wtx_ids,
                             excess_data,
-                        }
-                        .into_static();
+                        };
 
                         self.last_declare_job_store.insert(
                             request_id,
@@ -444,7 +448,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
             _ = self
                 .channel_manager_io
                 .jd_sender
-                .send(JobDeclaration::DeclareMiningJob(declare_job))
+                .send(JobDeclarationOwned::DeclareMiningJob(declare_job))
                 .await;
         }
 
@@ -454,10 +458,10 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
     async fn handle_set_new_prev_hash(
         &mut self,
         _server_id: Option<usize>,
-        msg: SetNewPrevHash<'_>,
+        msg: SetNewPrevHashTdpOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         let outputs = deserialize_outputs(self.coinbase_outputs.get().map_err(JDCError::shutdown)?)
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
@@ -488,20 +492,20 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
             if let Some(Some(job)) = declare_job {
                 self.channel_manager_io
                     .jd_sender
-                    .send(JobDeclaration::DeclareMiningJob(job))
+                    .send(JobDeclarationOwned::DeclareMiningJob(job))
                     .await
                     .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
             }
         }
 
         self.last_new_prev_hash
-            .set(Some(msg.clone().into_static()))
+            .set(Some(msg.clone()))
             .map_err(JDCError::shutdown)?;
         self.last_declare_job_store.for_each_mut(|_, declared_job| {
             if declared_job.template.future_template
                 && declared_job.template.template_id == msg.template_id
             {
-                declared_job.prev_hash = Some(msg.clone().into_static());
+                declared_job.prev_hash = Some(msg.clone());
                 declared_job.template.future_template = false;
             }
         });
@@ -531,11 +535,8 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                         .clone()
                         .expect("future_template checked above");
                     let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
-                    let chain_tip = ChainTip::new(
-                        msg.prev_hash.clone().into_static(),
-                        msg.n_bits,
-                        msg.header_timestamp,
-                    );
+                    let chain_tip =
+                        ChainTip::new(msg.prev_hash.clone(), msg.n_bits, msg.header_timestamp);
 
                     let custom_job = self
                         .job_factory
@@ -559,9 +560,9 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                             request_id,
                             DeclaredJob {
                                 declare_mining_job: None,
-                                template: template.into_static(),
-                                prev_hash: Some(msg.clone().into_static()),
-                                set_custom_mining_job: Some(custom_job.clone().into_static()),
+                                template,
+                                prev_hash: Some(msg.clone()),
+                                set_custom_mining_job: Some(custom_job.clone()),
                                 coinbase_output: self
                                     .coinbase_outputs
                                     .get()
@@ -569,7 +570,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                                 tx_list: vec![],
                             },
                         );
-                        messages.push(Mining::SetCustomMiningJob(custom_job).into());
+                        messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
                     }
                 }
             }
@@ -580,7 +581,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 .group_channel
                 .with(|group_channel| {
                     group_channel
-                        .on_set_new_prev_hash(msg.clone().into_static())
+                        .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
                             tracing::error!(
                                 "Error while adding new prev hash to group channel: {e:?}"
@@ -616,7 +617,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 messages.push(
                     (
                         downstream_id,
-                        Mining::SetNewPrevHash(SetNewPrevHashMp {
+                        MiningOwned::SetNewPrevHash(SetNewPrevHashMp {
                             channel_id: group_channel_id,
                             job_id: activated_group_job_id,
                             prev_hash: msg.prev_hash.clone(),
@@ -632,7 +633,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 .standard_channels
                 .try_for_each_mut(|channel_id, standard_channel| {
                     standard_channel
-                        .on_set_new_prev_hash(msg.clone().into_static())
+                        .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
                             tracing::error!(
                                 "Error while adding new prev hash to standard channel: {channel_id:?} {e:?}"
@@ -652,7 +653,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                         messages.push(
                             (
                                 downstream_id,
-                                Mining::SetNewPrevHash(SetNewPrevHashMp {
+                                MiningOwned::SetNewPrevHash(SetNewPrevHashMp {
                                     channel_id,
                                     job_id: activated_standard_job_id,
                                     prev_hash: msg.prev_hash.clone(),
@@ -670,7 +671,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 .extended_channels
                 .try_for_each_mut(|_, extended_channel| {
                     extended_channel
-                        .on_set_new_prev_hash(msg.clone().into_static())
+                        .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
                             tracing::error!(
                                 "Error while adding new prev hash to extended channel: {e:?}"

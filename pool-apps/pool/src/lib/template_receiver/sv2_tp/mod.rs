@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, TemplateDistributionOwned};
 mod common_message_handler;
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -7,9 +8,8 @@ use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host_port},
     stratum_core::{
-        framing_sv2,
-        handlers_sv2::HandleCommonMessagesFromServerAsync,
-        parsers_sv2::{AnyMessage, TemplateDistribution},
+        framing_sv2, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        parsers_sv2::TemplateDistribution,
     },
     task_manager::TaskManager,
     utils::{
@@ -28,8 +28,8 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Sv2TpIo {
-    channel_manager_sender: Sender<TemplateDistribution<'static>>,
-    channel_manager_receiver: Receiver<TemplateDistribution<'static>>,
+    channel_manager_sender: Sender<TemplateDistributionOwned>,
+    channel_manager_receiver: Receiver<TemplateDistributionOwned>,
     tp_sender: Sender<Sv2Frame>,
     tp_receiver: Receiver<Sv2Frame>,
 }
@@ -89,8 +89,8 @@ impl Sv2Tp {
     pub async fn new(
         tp_address: String,
         public_key: Option<Secp256k1PublicKey>,
-        channel_manager_receiver: Receiver<TemplateDistribution<'static>>,
-        channel_manager_sender: Sender<TemplateDistribution<'static>>,
+        channel_manager_receiver: Receiver<TemplateDistributionOwned>,
+        channel_manager_sender: Sender<TemplateDistributionOwned>,
         cancellation_token: CancellationToken,
         task_manager: Arc<TaskManager>,
     ) -> PoolResult<Sv2Tp, error::TemplateProvider> {
@@ -273,7 +273,7 @@ impl Sv2Tp {
                 let message =
                     TemplateDistribution::try_from((header.msg_type(), sv2_frame.payload()))
                         .map_err(PoolError::shutdown)?
-                        .into_static();
+                        .into_owned();
 
                 self.sv2_tp_io
                     .channel_manager_sender
@@ -305,7 +305,7 @@ impl Sv2Tp {
             .recv()
             .await
             .map_err(PoolError::shutdown)?;
-        let message = AnyMessage::TemplateDistribution(msg).into_static();
+        let message = AnyMessageOwned::TemplateDistribution(msg);
         let frame: Sv2Frame = message.try_into().map_err(PoolError::shutdown)?;
 
         debug!("Forwarding message from channel manager to outbound_tx");

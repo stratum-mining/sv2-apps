@@ -1,4 +1,5 @@
 use std::{net::SocketAddr, sync::Arc};
+use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, JobDeclarationOwned};
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -7,9 +8,8 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
-        framing_sv2,
-        handlers_sv2::HandleCommonMessagesFromServerAsync,
-        parsers_sv2::{AnyMessage, JobDeclaration},
+        framing_sv2, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        parsers_sv2::JobDeclaration,
     },
     task_manager::TaskManager,
     utils::{
@@ -32,8 +32,8 @@ mod message_handler;
 /// Holds all channels required for Job Declarator communication.
 #[derive(Clone)]
 pub struct JobDeclaratorIo {
-    channel_manager_sender: Sender<JobDeclaration<'static>>,
-    channel_manager_receiver: Receiver<JobDeclaration<'static>>,
+    channel_manager_sender: Sender<JobDeclarationOwned>,
+    channel_manager_receiver: Receiver<JobDeclarationOwned>,
     jds_sender: Sender<Sv2Frame>,
     jds_receiver: Receiver<Sv2Frame>,
 }
@@ -126,8 +126,8 @@ impl JobDeclarator {
     /// - Spawns background IO tasks for reading/writing frames.
     pub async fn new(
         upstream_entry: &UpstreamEntry,
-        channel_manager_sender: Sender<JobDeclaration<'static>>,
-        channel_manager_receiver: Receiver<JobDeclaration<'static>>,
+        channel_manager_sender: Sender<JobDeclarationOwned>,
+        channel_manager_receiver: Receiver<JobDeclarationOwned>,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         mode: JDMode,
@@ -319,7 +319,7 @@ impl JobDeclarator {
         match self.job_declarator_io.channel_manager_receiver.recv().await {
             Ok(msg) => {
                 debug!("Forwarding message from channel manager to JDS.");
-                let message = AnyMessage::JobDeclaration(msg);
+                let message = AnyMessageOwned::JobDeclaration(msg);
                 let sv2_frame: Sv2Frame = message.try_into().map_err(JDCError::shutdown)?;
                 self.job_declarator_io
                     .jds_sender
@@ -367,7 +367,7 @@ impl JobDeclarator {
             MessageType::JobDeclaration => {
                 let message = JobDeclaration::try_from((message_type, sv2_frame.payload()))
                     .map_err(JDCError::fallback)?
-                    .into_static();
+                    .into_owned();
                 self.job_declarator_io
                     .channel_manager_sender
                     .send(message)

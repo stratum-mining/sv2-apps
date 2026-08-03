@@ -1,12 +1,16 @@
 use std::sync::atomic::Ordering;
+use stratum_apps::stratum_core::{
+    parsers_sv2::MiningOwned,
+    template_distribution_sv2::{
+        NewTemplateOwned, RequestTransactionDataErrorOwned, RequestTransactionDataSuccessOwned,
+    },
+};
 
 use stratum_apps::stratum_core::{
-    bitcoin::Amount,
-    channels_sv2::outputs::deserialize_outputs,
-    handlers_sv2::HandleTemplateDistributionMessagesFromServerAsync,
-    mining_sv2::SetNewPrevHash as SetNewPrevHashMp,
-    parsers_sv2::{Mining, Tlv},
-    template_distribution_sv2::*,
+    bitcoin::Amount, channels_sv2::outputs::deserialize_outputs,
+    handlers_sv2::HandleTemplateDistributionMessagesFromServerOwnedAsync,
+    mining_sv2::SetNewPrevHashOwned as SetNewPrevHashMp, parsers_sv2::Tlv,
+    template_distribution_sv2::SetNewPrevHashOwned as SetNewPrevHashTdp,
 };
 use tracing::{info, warn};
 
@@ -16,7 +20,7 @@ use crate::{
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
+impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     type Error = PoolError<error::ChannelManager>;
 
     fn get_negotiated_extensions_with_server(
@@ -29,14 +33,14 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
     async fn handle_new_template(
         &mut self,
         _server_id: Option<usize>,
-        msg: NewTemplate<'_>,
+        msg: NewTemplateOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         if msg.future_template {
             self.last_future_template
-                .set(Some(msg.clone().into_static()))
+                .set(Some(msg.clone()))
                 .map_err(PoolError::shutdown)?;
         }
 
@@ -71,7 +75,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 .with(|group_channel| {
                     group_channel
                         .on_new_template(
-                            msg.clone().into_static(),
+                            msg.clone(),
                             downstream_coinbase_outputs.clone(),
                         )
                         .map_err(PoolError::shutdown)?;
@@ -98,7 +102,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                         downstream_messages.push(
                             (
                                 downstream_id,
-                                Mining::NewExtendedMiningJob(group_job.get_job_message().clone()),
+                                MiningOwned::NewExtendedMiningJob(group_job.get_job_message().clone()),
                             )
                                 .into(),
                         );
@@ -123,7 +127,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 } else {
                     standard_channel
                         .on_new_template(
-                            msg.clone().into_static(),
+                            msg.clone(),
                             downstream_coinbase_outputs.clone(),
                         )
                         .map_err(|e| {
@@ -145,7 +149,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                     downstream_messages.push(
                         (
                             downstream_id,
-                            Mining::NewMiningJob(standard_job.get_job_message().clone()),
+                            MiningOwned::NewMiningJob(standard_job.get_job_message().clone()),
                         )
                             .into(),
                     );
@@ -182,33 +186,33 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
     async fn handle_request_tx_data_error(
         &mut self,
         _server_id: Option<usize>,
-        msg: RequestTransactionDataError<'_>,
+        msg: RequestTransactionDataErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        warn!("Received: {:?}", msg);
         Ok(())
     }
 
     async fn handle_request_tx_data_success(
         &mut self,
         _server_id: Option<usize>,
-        msg: RequestTransactionDataSuccess<'_>,
+        msg: RequestTransactionDataSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
         Ok(())
     }
 
     async fn handle_set_new_prev_hash(
         &mut self,
         _server_id: Option<usize>,
-        msg: SetNewPrevHash<'_>,
+        msg: SetNewPrevHashTdp,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         self.last_new_prev_hash
-            .set(Some(msg.clone().into_static()))
+            .set(Some(msg.clone()))
             .map_err(PoolError::shutdown)?;
 
         let mut messages: Vec<RouteMessageTo> = vec![];
@@ -228,7 +232,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                     // Call on_set_new_prev_hash on the group channel to update the channel
                     // state.
                     group_channel
-                        .on_set_new_prev_hash(msg.clone().into_static())
+                        .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
                             tracing::error!("Error while adding new prev hash to group channel");
                             PoolError::shutdown(e)
@@ -244,7 +248,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                         downstream_messages.push(
                             (
                                 downstream_id,
-                                Mining::SetNewPrevHash(SetNewPrevHashMp {
+                                MiningOwned::SetNewPrevHash(SetNewPrevHashMp {
                                     channel_id: group_channel.get_group_channel_id(),
                                     job_id: active_job_id,
                                     prev_hash: msg.prev_hash.clone(),
@@ -263,7 +267,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
             // extended channel to update the channel state.
             downstream.extended_channels.try_for_each_mut(|channel_id, channel| {
                 channel
-                    .on_set_new_prev_hash(msg.clone().into_static())
+                    .on_set_new_prev_hash(msg.clone())
                     .map_err(|e| {
                         tracing::error!("Error while adding new prev hash to extended channel: {channel_id:?} {e:?}");
                         PoolError::shutdown(e)
@@ -276,7 +280,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                 // Call on_set_new_prev_hash on the standard channel to update the channel
                 // state.
                 channel
-                    .on_set_new_prev_hash(msg.clone().into_static())
+                    .on_set_new_prev_hash(msg.clone())
                     .map_err(|e| {
                         tracing::error!("Error while adding new prev hash to standard channel: {channel_id:?} {e:?}");
                         PoolError::shutdown(e)
@@ -292,7 +296,7 @@ impl HandleTemplateDistributionMessagesFromServerAsync for ChannelManager {
                     downstream_messages.push(
                         (
                             downstream_id,
-                            Mining::SetNewPrevHash(SetNewPrevHashMp {
+                            MiningOwned::SetNewPrevHash(SetNewPrevHashMp {
                                 channel_id,
                                 job_id: active_job_id,
                                 prev_hash: msg.prev_hash.clone(),

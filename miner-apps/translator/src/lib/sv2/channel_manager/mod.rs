@@ -1,3 +1,7 @@
+use stratum_apps::stratum_core::{
+    mining_sv2::OpenExtendedMiningChannelSuccessOwned,
+    parsers_sv2::{AnyMessageOwned, MiningOwned},
+};
 mod extensions_message_handler;
 mod mining_message_handler;
 
@@ -25,9 +29,10 @@ use stratum_apps::{
         codec_sv2::StandardSv2Frame,
         extensions_sv2::EXTENSION_TYPE_WORKER_HASHRATE_TRACKING,
         framing_sv2,
-        handlers_sv2::{HandleExtensionsFromServerAsync, HandleMiningMessagesFromServerAsync},
-        mining_sv2::OpenExtendedMiningChannelSuccess,
-        parsers_sv2::{AnyMessage, Mining, TlvField, TlvList},
+        handlers_sv2::{
+            HandleExtensionsFromServerOwnedAsync, HandleMiningMessagesFromServerOwnedAsync,
+        },
+        parsers_sv2::{TlvField, TlvList},
     },
     task_manager::TaskManager,
     utils::{
@@ -72,9 +77,9 @@ pub(crate) const NON_AGGREGATED_TPROXY_MAX_CHANNELS: u32 = 1;
 struct ChannelManagerIo {
     upstream_sender: Sender<Sv2Frame>,
     upstream_receiver: Receiver<Sv2Frame>,
-    sv1_server_sender: Sender<Mining<'static>>,
+    sv1_server_sender: Sender<MiningOwned>,
     // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
-    sv1_server_receiver: Receiver<(Mining<'static>, Option<String>)>,
+    sv1_server_receiver: Receiver<(MiningOwned, Option<String>)>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -82,8 +87,8 @@ impl ChannelManagerIo {
     fn new(
         upstream_sender: Sender<Sv2Frame>,
         upstream_receiver: Receiver<Sv2Frame>,
-        sv1_server_sender: Sender<Mining<'static>>,
-        sv1_server_receiver: Receiver<(Mining<'static>, Option<String>)>,
+        sv1_server_sender: Sender<MiningOwned>,
+        sv1_server_receiver: Receiver<(MiningOwned, Option<String>)>,
     ) -> Self {
         Self {
             upstream_sender,
@@ -151,9 +156,9 @@ pub struct ChannelManager {
     /// Map of active extended channels by channel ID.
     /// In aggregated mode, the shared upstream channel is stored under AGGREGATED_CHANNEL_ID.
     /// In non-aggregated mode, each downstream has its own channel with its assigned ID.
-    pub extended_channels: Arc<DashMap<ChannelId, ExtendedChannel<'static>>>,
+    pub extended_channels: Arc<DashMap<ChannelId, ExtendedChannel>>,
     /// Map of active group channels by group channel ID
-    pub group_channels: Arc<DashMap<ChannelId, GroupChannel<'static>>>,
+    pub group_channels: Arc<DashMap<ChannelId, GroupChannel>>,
     /// Share sequence number counter for tracking valid shares forwarded upstream.
     /// In aggregated mode: single counter for all shares going to the upstream channel.
     /// In non-aggregated mode: one counter per downstream channel.
@@ -269,8 +274,8 @@ impl ChannelManager {
     pub fn new(
         upstream_sender: Sender<Sv2Frame>,
         upstream_receiver: Receiver<Sv2Frame>,
-        sv1_server_sender: Sender<Mining<'static>>,
-        sv1_server_receiver: Receiver<(Mining<'static>, Option<String>)>,
+        sv1_server_sender: Sender<MiningOwned>,
+        sv1_server_receiver: Receiver<(MiningOwned, Option<String>)>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
         tproxy_mode: TproxyMode,
@@ -459,7 +464,7 @@ impl ChannelManager {
             .await
             .map_err(TproxyError::shutdown)?;
         match message {
-            Mining::OpenExtendedMiningChannel(m) => {
+            MiningOwned::OpenExtendedMiningChannel(m) => {
                 let mut open_channel_msg = m.clone();
                 let mut user_identity = m.user_identity.as_utf8_or_hex();
                 let hashrate = m.nominal_hash_rate;
@@ -529,12 +534,12 @@ impl ChannelManager {
                 }
 
                 info!(
-                    "Sending OpenExtendedMiningChannel message to upstream: {}",
+                    "Sending OpenExtendedMiningChannel message to upstream: {:?}",
                     open_channel_msg
                 );
 
-                let message = Mining::OpenExtendedMiningChannel(open_channel_msg);
-                let sv2_frame: Sv2Frame = AnyMessage::Mining(message)
+                let message = MiningOwned::OpenExtendedMiningChannel(open_channel_msg);
+                let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
                     .try_into()
                     .map_err(TproxyError::shutdown)?;
                 self.channel_manager_io
@@ -546,7 +551,7 @@ impl ChannelManager {
                         TproxyError::fallback(TproxyErrorKind::ChannelErrorSender)
                     })?;
             }
-            Mining::SubmitSharesExtended(mut m) => {
+            MiningOwned::SubmitSharesExtended(mut m) => {
                 if self.mode.is_aggregated()
                     && self.extended_channels.contains_key(&AGGREGATED_CHANNEL_ID)
                 {
@@ -662,7 +667,9 @@ impl ChannelManager {
                             TproxyError::shutdown(e)
                         })?;
                         let frame_bytes = tlv_list
-                            .build_frame_bytes_with_tlvs(Mining::SubmitSharesExtended(m.clone()))
+                            .build_frame_bytes_with_tlvs(MiningOwned::SubmitSharesExtended(
+                                m.clone(),
+                            ))
                             .map_err(|e| {
                                 error!("Failed to build frame bytes with TLVs: {:?}", e);
                                 TproxyError::shutdown(e)
@@ -693,8 +700,8 @@ impl ChannelManager {
                 }
 
                 if !sent {
-                    let message = Mining::SubmitSharesExtended(m);
-                    let sv2_frame: Sv2Frame = AnyMessage::Mining(message)
+                    let message = MiningOwned::SubmitSharesExtended(m);
+                    let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
                         .try_into()
                         .map_err(TproxyError::shutdown)?;
                     self.channel_manager_io
@@ -710,8 +717,8 @@ impl ChannelManager {
                         })?;
                 }
             }
-            Mining::UpdateChannel(mut m) => {
-                debug!("Received UpdateChannel from SV1Server: {}", m);
+            MiningOwned::UpdateChannel(mut m) => {
+                debug!("Received UpdateChannel from SV1Server: {:?}", m);
 
                 if self.mode.is_aggregated() {
                     // Update the aggregated channel's nominal hashrate so
@@ -724,7 +731,7 @@ impl ChannelManager {
                         m.channel_id = aggregated_extended_channel.get_channel_id();
                     } else {
                         warn!(
-                            "Ignoring aggregated UpdateChannel before upstream channel is open: {}",
+                            "Ignoring aggregated UpdateChannel before upstream channel is open: {:?}",
                             m
                         );
                         return Ok(());
@@ -741,8 +748,8 @@ impl ChannelManager {
                     m.channel_id
                 );
                 // Forward UpdateChannel message to upstream
-                let message = Mining::UpdateChannel(m);
-                let sv2_frame: Sv2Frame = AnyMessage::Mining(message)
+                let message = MiningOwned::UpdateChannel(m);
+                let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
                     .try_into()
                     .map_err(TproxyError::shutdown)?;
 
@@ -755,8 +762,8 @@ impl ChannelManager {
                         TproxyError::fallback(TproxyErrorKind::ChannelErrorSender)
                     })?;
             }
-            Mining::CloseChannel(m) => {
-                debug!("Received CloseChannel from Sv1Server: {m}");
+            MiningOwned::CloseChannel(m) => {
+                debug!("Received CloseChannel from Sv1Server: {m:?}");
 
                 // Guard: never remove the aggregated upstream sentinel entry
                 // here. `AGGREGATED_CHANNEL_ID` represents the single shared
@@ -800,8 +807,8 @@ impl ChannelManager {
                 // across all SV1 miners and must stay open when any one of
                 // them disconnects.
                 if !self.mode.is_aggregated() {
-                    let message = Mining::CloseChannel(m);
-                    let sv2_frame: Sv2Frame = AnyMessage::Mining(message)
+                    let message = MiningOwned::CloseChannel(m);
+                    let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
                         .try_into()
                         .map_err(TproxyError::shutdown)?;
 
@@ -885,8 +892,8 @@ impl ChannelManager {
                 );
                 self.extended_channels
                     .insert(next_channel_id, new_downstream_extended_channel);
-                let success_message =
-                    Mining::OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccess {
+                let success_message = MiningOwned::OpenExtendedMiningChannelSuccess(
+                    OpenExtendedMiningChannelSuccessOwned {
                         request_id,
                         channel_id: next_channel_id,
                         target: target.to_le_bytes().into(),
@@ -897,7 +904,8 @@ impl ChannelManager {
                         group_channel_id: 0, /* use a dummy value, this
                                               * shouldn't
                                               * matter for the Sv1 server */
-                    });
+                    },
+                );
 
                 self.channel_manager_io
                     .sv1_server_sender
@@ -957,7 +965,7 @@ impl ChannelManager {
                 if let Some(job) = active_job_for_sv1_server() {
                     self.channel_manager_io
                         .sv1_server_sender
-                        .send(Mining::NewExtendedMiningJob(job))
+                        .send(MiningOwned::NewExtendedMiningJob(job))
                         .await
                         .map_err(|e| {
                             error!(
@@ -991,7 +999,7 @@ mod tests {
     use super::*;
     use async_channel::unbounded;
     use stratum_apps::stratum_core::mining_sv2::{
-        OpenExtendedMiningChannel, SubmitSharesExtended, UpdateChannel,
+        OpenExtendedMiningChannelOwned, SubmitSharesExtendedOwned, UpdateChannelOwned,
     };
 
     fn create_test_channel_manager() -> ChannelManager {
@@ -1018,7 +1026,7 @@ mod tests {
         let manager = create_test_channel_manager();
 
         // Create an OpenExtendedMiningChannel message
-        let open_channel = OpenExtendedMiningChannel {
+        let open_channel = OpenExtendedMiningChannelOwned {
             request_id: 1,
             user_identity: "test_user".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -1034,11 +1042,11 @@ mod tests {
         // Test that the message can be handled without panicking
         // In a real test environment, we would need to mock the upstream sender
         // For now, we just verify the channel manager can process the message type
-        let mining_message = Mining::OpenExtendedMiningChannel(open_channel);
+        let mining_message = MiningOwned::OpenExtendedMiningChannel(open_channel);
 
         // Verify the message can be processed (would normally be sent to upstream)
         match mining_message {
-            Mining::OpenExtendedMiningChannel(msg) => {
+            MiningOwned::OpenExtendedMiningChannel(msg) => {
                 assert_eq!(msg.request_id, 1);
                 assert_eq!(msg.nominal_hash_rate, 1000.0);
                 assert_eq!(msg.min_extranonce_size, 4);
@@ -1052,7 +1060,7 @@ mod tests {
         let _manager = create_test_channel_manager();
 
         // Create a SubmitSharesExtended message
-        let submit_shares = SubmitSharesExtended {
+        let submit_shares = SubmitSharesExtendedOwned {
             channel_id: 1,
             sequence_number: 100,
             job_id: 42,
@@ -1063,11 +1071,11 @@ mod tests {
         };
 
         // Test that the message can be handled
-        let mining_message = Mining::SubmitSharesExtended(submit_shares);
+        let mining_message = MiningOwned::SubmitSharesExtended(submit_shares);
 
         // Verify the message structure
         match mining_message {
-            Mining::SubmitSharesExtended(msg) => {
+            MiningOwned::SubmitSharesExtended(msg) => {
                 assert_eq!(msg.channel_id, 1);
                 assert_eq!(msg.sequence_number, 100);
                 assert_eq!(msg.job_id, 42);
@@ -1082,18 +1090,18 @@ mod tests {
         let _manager = create_test_channel_manager();
 
         // Create an UpdateChannel message
-        let update_channel = UpdateChannel {
+        let update_channel = UpdateChannelOwned {
             channel_id: 1,
             nominal_hash_rate: 2000.0,
             maximum_target: [0xFFu8; 32].into(),
         };
 
         // Test that the message can be handled
-        let mining_message = Mining::UpdateChannel(update_channel);
+        let mining_message = MiningOwned::UpdateChannel(update_channel);
 
         // Verify the message structure
         match mining_message {
-            Mining::UpdateChannel(msg) => {
+            MiningOwned::UpdateChannel(msg) => {
                 assert_eq!(msg.channel_id, 1);
                 assert_eq!(msg.nominal_hash_rate, 2000.0);
             }
@@ -1120,14 +1128,14 @@ mod tests {
             true,
         ));
 
-        let update_channel = UpdateChannel {
+        let update_channel = UpdateChannelOwned {
             channel_id: 0,
             nominal_hash_rate: 0.0,
             maximum_target: [0xFFu8; 32].into(),
         };
 
         sv1_server_sender_for_test
-            .send((Mining::UpdateChannel(update_channel), None))
+            .send((MiningOwned::UpdateChannel(update_channel), None))
             .await
             .unwrap();
 

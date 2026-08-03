@@ -8,6 +8,11 @@ use std::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
+use stratum_apps::stratum_core::{
+    job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
+    mining_sv2::{OpenExtendedMiningChannelOwned, SetTargetOwned, UpdateChannelOwned},
+    template_distribution_sv2::RequestTransactionDataOwned,
+};
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -28,18 +33,16 @@ use stratum_apps::{
         },
         framing_sv2,
         handlers_sv2::{
-            HandleExtensionsFromServerAsync, HandleJobDeclarationMessagesFromServerAsync,
-            HandleMiningMessagesFromClientAsync, HandleMiningMessagesFromServerAsync,
-            HandleTemplateDistributionMessagesFromServerAsync,
+            HandleExtensionsFromServerOwnedAsync, HandleJobDeclarationMessagesFromServerOwnedAsync,
+            HandleMiningMessagesFromClientOwnedAsync, HandleMiningMessagesFromServerOwnedAsync,
+            HandleTemplateDistributionMessagesFromServerOwnedAsync,
         },
-        job_declaration_sv2::{
-            AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob,
+        job_declaration_sv2::DeclareMiningJobOwned,
+        mining_sv2::SetCustomMiningJobOwned,
+        parsers_sv2::{
+            AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned, Tlv,
         },
-        mining_sv2::{OpenExtendedMiningChannel, SetCustomMiningJob, SetTarget, UpdateChannel},
-        parsers_sv2::{AnyMessage, JobDeclaration, Mining, TemplateDistribution, Tlv},
-        template_distribution_sv2::{
-            NewTemplate, RequestTransactionData, SetNewPrevHash as SetNewPrevHashTdp,
-        },
+        template_distribution_sv2::{NewTemplateOwned, SetNewPrevHashOwned as SetNewPrevHashTdp},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
@@ -118,14 +121,14 @@ pub const SOLO_FULL_EXTRANONCE_SIZE: u8 = 20;
 pub struct DeclaredJob {
     // The original `DeclareMiningJob` message associated with this job,
     // if one was sent.
-    declare_mining_job: Option<DeclareMiningJob<'static>>,
+    declare_mining_job: Option<DeclareMiningJobOwned>,
     // The template associated with the declared job.
-    template: NewTemplate<'static>,
+    template: NewTemplateOwned,
     // The `SetNewPrevHashTdp` message associated with this job, if available.
-    prev_hash: Option<SetNewPrevHashTdp<'static>>,
+    prev_hash: Option<SetNewPrevHashTdp>,
     // The `SetCustomMiningJob` message associated with this job,
     // if a custom job was created.
-    set_custom_mining_job: Option<SetCustomMiningJob<'static>>,
+    set_custom_mining_job: Option<SetCustomMiningJobOwned>,
     // The coinbase output for this job.
     coinbase_output: Vec<u8>,
     // The list of transactions included in the job’s template.
@@ -162,12 +165,12 @@ pub struct DeclaredJob {
 pub struct ChannelManagerIo {
     upstream_sender: Sender<Sv2Frame>,
     upstream_receiver: Receiver<Sv2Frame>,
-    jd_sender: Sender<JobDeclaration<'static>>,
-    jd_receiver: Receiver<JobDeclaration<'static>>,
-    tp_sender: Sender<TemplateDistribution<'static>>,
-    tp_receiver: Receiver<TemplateDistribution<'static>>,
+    jd_sender: Sender<JobDeclarationOwned>,
+    jd_receiver: Receiver<JobDeclarationOwned>,
+    tp_sender: Sender<TemplateDistributionOwned>,
+    tp_receiver: Receiver<TemplateDistributionOwned>,
     downstream_sender: SharedMap<DownstreamId, Sender<DownstreamMessage>>,
-    downstream_receiver: Receiver<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
+    downstream_receiver: Receiver<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
 }
 
 impl ChannelManagerIo {
@@ -256,14 +259,14 @@ pub struct ChannelManager {
     // submitted from the JDC to the upstream.
     pub sequence_number_factory: Arc<AtomicU32>,
     // The last future template received from the template provider.
-    pub last_future_template: SharedLock<Option<NewTemplate<'static>>>,
+    pub last_future_template: SharedLock<Option<NewTemplateOwned>>,
     // The last new-prevhash received from the template provider.
-    pub last_new_prev_hash: SharedLock<Option<SetNewPrevHashTdp<'static>>>,
+    pub last_new_prev_hash: SharedLock<Option<SetNewPrevHashTdp>>,
     // FIFO buffer of allocation tokens received from the JDS.
     // Oldest token is consumed first to minimize risk of JDS-side expiration.
-    pub allocate_tokens: SharedLock<VecDeque<AllocateMiningJobTokenSuccess<'static>>>,
+    pub allocate_tokens: SharedLock<VecDeque<AllocateMiningJobTokenSuccessOwned>>,
     // Stores templates as they arrive, keyed by template ID.
-    pub template_store: SharedMap<TemplateId, NewTemplate<'static>>,
+    pub template_store: SharedMap<TemplateId, NewTemplateOwned>,
     // Stores the last declared job, keyed by the request ID used
     // when declaring the job to the JDS.
     pub last_declare_job_store: SharedMap<RequestId, DeclaredJob>,
@@ -275,7 +278,7 @@ pub struct ChannelManager {
     // The coinbase outputs currently in use.
     pub coinbase_outputs: SharedLock<Vec<u8>>,
     // The active upstream extended channel (client-side instance), if any.
-    pub upstream_channel: SharedLock<Option<ExtendedChannel<'static>>>,
+    pub upstream_channel: SharedLock<Option<ExtendedChannel>>,
     // Optional "pool tag" string identifying the upstream pool.
     pub pool_tag_string: SharedLock<Option<String>>,
     // Pending downstream open-channel requests buffered while JDC is
@@ -378,11 +381,11 @@ impl ChannelManager {
         config: JobDeclaratorClientConfig,
         upstream_sender: Sender<Sv2Frame>,
         upstream_receiver: Receiver<Sv2Frame>,
-        jd_sender: Sender<JobDeclaration<'static>>,
-        jd_receiver: Receiver<JobDeclaration<'static>>,
-        tp_sender: Sender<TemplateDistribution<'static>>,
-        tp_receiver: Receiver<TemplateDistribution<'static>>,
-        downstream_receiver: Receiver<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
+        jd_sender: Sender<JobDeclarationOwned>,
+        jd_receiver: Receiver<JobDeclarationOwned>,
+        tp_sender: Sender<TemplateDistributionOwned>,
+        tp_receiver: Receiver<TemplateDistributionOwned>,
+        downstream_receiver: Receiver<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
         coinbase_outputs: Vec<u8>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
@@ -462,7 +465,7 @@ impl ChannelManager {
     // Returns a `GroupChannel` if successful, otherwise returns `None`.
     //
     // To be called before calling Downstream::new.
-    fn bootstrap_group_channel(&self, channel_id: ChannelId) -> Option<GroupChannel<'static>> {
+    fn bootstrap_group_channel(&self, channel_id: ChannelId) -> Option<GroupChannel> {
         let full_extranonce_size = match self.upstream_channel.with(|channel| {
             channel
                 .as_ref()
@@ -556,7 +559,7 @@ impl ChannelManager {
         task_manager: Arc<TaskManager>,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
-        channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
+        channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
     ) -> JDCResult<(), error::ChannelManager> {
@@ -971,8 +974,8 @@ impl ChannelManager {
             .map_err(JDCError::shutdown)?;
 
         match message {
-            Mining::OpenExtendedMiningChannel(downstream_channel_request) => {
-                let downstream_msg = downstream_channel_request.clone().into_static();
+            MiningOwned::OpenExtendedMiningChannel(downstream_channel_request) => {
+                let downstream_msg = downstream_channel_request.clone();
 
                 match self.upstream_state.get() {
                     UpstreamState::NoChannel => {
@@ -990,7 +993,7 @@ impl ChannelManager {
                             let mut upstream_message = downstream_channel_request;
                             let identity = self.user_identity().to_string();
                             upstream_message.user_identity =
-                                identity.try_into().map_err(JDCError::shutdown)?;
+                                identity.as_str().try_into().map_err(JDCError::shutdown)?;
                             upstream_message.request_id = 1;
                             // The upstream extended channel is opened once and its
                             // `extranonce_size` is fixed. Size its rollable region to fit:
@@ -1009,8 +1012,8 @@ impl ChannelManager {
                             );
                             upstream_message.min_extranonce_size = upstream_min as u16;
                             let upstream_message =
-                                Mining::OpenExtendedMiningChannel(upstream_message).into_static();
-                            let sv2_frame: Sv2Frame = AnyMessage::Mining(upstream_message)
+                                MiningOwned::OpenExtendedMiningChannel(upstream_message);
+                            let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(upstream_message)
                                 .try_into()
                                 .map_err(JDCError::shutdown)?;
                             self.channel_manager_io
@@ -1032,7 +1035,7 @@ impl ChannelManager {
                     UpstreamState::Connected => {
                         self.handle_mining_message_from_client(
                             Some(downstream_id),
-                            Mining::OpenExtendedMiningChannel(downstream_msg),
+                            MiningOwned::OpenExtendedMiningChannel(downstream_msg),
                             tlvs.as_deref(),
                         )
                         .await?;
@@ -1040,15 +1043,15 @@ impl ChannelManager {
                     UpstreamState::SoloMining => {
                         self.handle_mining_message_from_client(
                             Some(downstream_id),
-                            Mining::OpenExtendedMiningChannel(downstream_msg),
+                            MiningOwned::OpenExtendedMiningChannel(downstream_msg),
                             tlvs.as_deref(),
                         )
                         .await?;
                     }
                 }
             }
-            Mining::OpenStandardMiningChannel(downstream_channel_request) => {
-                let downstream_msg = downstream_channel_request.clone().into_static();
+            MiningOwned::OpenStandardMiningChannel(downstream_channel_request) => {
+                let downstream_msg = downstream_channel_request.clone();
 
                 match self.upstream_state.get() {
                     UpstreamState::NoChannel => {
@@ -1070,17 +1073,16 @@ impl ChannelManager {
                             let upstream_min_extranonce_size = (JDC_LOCAL_PREFIX_BYTES as u16)
                                 + self.reserved_downstream_rollable_extranonce_size as u16;
                             let identity = self.user_identity().to_string();
-                            let upstream_open = OpenExtendedMiningChannel {
-                                user_identity: identity.try_into().unwrap(),
+                            let upstream_open = OpenExtendedMiningChannelOwned {
+                                user_identity: identity.as_str().try_into().unwrap(),
                                 request_id: 1,
                                 nominal_hash_rate: downstream_channel_request.nominal_hash_rate,
                                 max_target: downstream_channel_request.max_target,
                                 min_extranonce_size: upstream_min_extranonce_size,
                             };
 
-                            let message =
-                                Mining::OpenExtendedMiningChannel(upstream_open).into_static();
-                            let sv2_frame: Sv2Frame = AnyMessage::Mining(message)
+                            let message = MiningOwned::OpenExtendedMiningChannel(upstream_open);
+                            let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
                                 .try_into()
                                 .map_err(JDCError::shutdown)?;
                             self.channel_manager_io
@@ -1100,7 +1102,7 @@ impl ChannelManager {
                     UpstreamState::Connected => {
                         self.handle_mining_message_from_client(
                             Some(downstream_id),
-                            Mining::OpenStandardMiningChannel(downstream_msg),
+                            MiningOwned::OpenStandardMiningChannel(downstream_msg),
                             tlvs.as_deref(),
                         )
                         .await?;
@@ -1108,7 +1110,7 @@ impl ChannelManager {
                     UpstreamState::SoloMining => {
                         self.handle_mining_message_from_client(
                             Some(downstream_id),
-                            Mining::OpenStandardMiningChannel(downstream_msg),
+                            MiningOwned::OpenStandardMiningChannel(downstream_msg),
                             tlvs.as_deref(),
                         )
                         .await?;
@@ -1138,7 +1140,9 @@ impl ChannelManager {
         template_id: TemplateId,
     ) -> JDCResult<(), error::ChannelManager> {
         let message =
-            TemplateDistribution::RequestTransactionData(RequestTransactionData { template_id });
+            TemplateDistributionOwned::RequestTransactionData(RequestTransactionDataOwned {
+                template_id,
+            });
         self.channel_manager_io
             .tp_sender
             .send(message)
@@ -1165,12 +1169,14 @@ impl ChannelManager {
             );
 
             let identifier = self.user_identity().to_string();
-            let message = JobDeclaration::AllocateMiningJobToken(AllocateMiningJobToken {
-                user_identifier: identifier
-                    .try_into()
-                    .expect("Static string should always convert"),
-                request_id,
-            });
+            let message =
+                JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                    user_identifier: identifier
+                        .as_str()
+                        .try_into()
+                        .expect("Static string should always convert"),
+                    request_id,
+                });
 
             self.channel_manager_io
                 .jd_sender
@@ -1190,7 +1196,7 @@ impl ChannelManager {
     fn run_vardiff_on_extended_channel(
         downstream_id: DownstreamId,
         channel_id: ChannelId,
-        channel_state: &mut stratum_apps::stratum_core::channels_sv2::server::extended::ExtendedChannel<'static>,
+        channel_state: &mut stratum_apps::stratum_core::channels_sv2::server::extended::ExtendedChannel,
         vardiff_state: &mut VardiffState,
         updates: &mut Vec<RouteMessageTo>,
     ) {
@@ -1219,7 +1225,7 @@ impl ChannelManager {
                 updates.push(
                     (
                         downstream_id,
-                        Mining::SetTarget(SetTarget {
+                        MiningOwned::SetTarget(SetTargetOwned {
                             channel_id,
                             maximum_target: updated_target.to_le_bytes().into(),
                         }),
@@ -1238,7 +1244,7 @@ impl ChannelManager {
     fn run_vardiff_on_standard_channel(
         downstream_id: DownstreamId,
         channel_id: ChannelId,
-        channel: &mut StandardChannel<'static>,
+        channel: &mut StandardChannel,
         vardiff_state: &mut VardiffState,
         updates: &mut Vec<RouteMessageTo>,
     ) {
@@ -1264,7 +1270,7 @@ impl ChannelManager {
                 updates.push(
                     (
                         downstream_id,
-                        Mining::SetTarget(SetTarget {
+                        MiningOwned::SetTarget(SetTargetOwned {
                             channel_id,
                             maximum_target: updated_target.to_le_bytes().into(),
                         }),
@@ -1379,7 +1385,7 @@ impl ChannelManager {
 
                         info!("Sending update channel message upstream");
                         messages.push(
-                            Mining::UpdateChannel(UpdateChannel {
+                            MiningOwned::UpdateChannel(UpdateChannelOwned {
                                 channel_id: upstream_channel.get_channel_id(),
                                 nominal_hash_rate: downstream_hashrate,
                                 maximum_target: min_target.into(),
@@ -1451,7 +1457,7 @@ impl ChannelManager {
 
         self.channel_manager_io
             .tp_sender
-            .send(TemplateDistribution::CoinbaseOutputConstraints(msg))
+            .send(TemplateDistributionOwned::CoinbaseOutputConstraints(msg))
             .await
             .map_err(|e| {
                 error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");

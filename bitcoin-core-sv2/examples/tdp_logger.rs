@@ -25,8 +25,8 @@ use std::path::Path;
 
 use async_channel::unbounded;
 use stratum_core::{
-    parsers_sv2::TemplateDistribution,
-    template_distribution_sv2::{CoinbaseOutputConstraints, RequestTransactionData},
+    parsers_sv2::TemplateDistributionOwned,
+    template_distribution_sv2::{CoinbaseOutputConstraintsOwned, RequestTransactionDataOwned},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -137,9 +137,9 @@ async fn main() {
                     info!("Message received: {}", template_distribution_message);
 
                     // send a RequestTransactionData every time a NewTemplate message is received
-                    if let TemplateDistribution::NewTemplate(new_template) = template_distribution_message {
+                    if let TemplateDistributionOwned::NewTemplate(new_template) = template_distribution_message {
                         let template_id = new_template.template_id;
-                        let request_transaction_data = TemplateDistribution::RequestTransactionData(RequestTransactionData {
+                        let request_transaction_data = TemplateDistributionOwned::RequestTransactionData(RequestTransactionDataOwned {
                             template_id,
                         });
 
@@ -162,7 +162,7 @@ async fn main() {
     // `BitcoinCoreSv2TDP` will not start distributing new templates until it receives the first
     // `CoinbaseOutputConstraints` message.
     let new_coinbase_output_constraints =
-        TemplateDistribution::CoinbaseOutputConstraints(CoinbaseOutputConstraints {
+        TemplateDistributionOwned::CoinbaseOutputConstraints(CoinbaseOutputConstraintsOwned {
             coinbase_output_max_additional_size: 2,
             coinbase_output_max_additional_sigops: 2,
         });

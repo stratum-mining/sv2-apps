@@ -8,12 +8,13 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
+use stratum_apps::stratum_core::parsers_sv2::JobDeclarationOwned;
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     fallback_coordinator::FallbackCoordinator,
-    stratum_core::{bitcoin::consensus::Encodable, parsers_sv2::JobDeclaration},
+    stratum_core::bitcoin::consensus::Encodable,
     task_manager::TaskManager,
     tp_type::TemplateProviderType,
     utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, Sv2Frame},
@@ -660,8 +661,8 @@ impl JobDeclaratorClient {
         upstreams: &mut [UpstreamEntry],
         channel_manager_to_upstream_receiver: Receiver<Sv2Frame>,
         upstream_to_channel_manager_sender: Sender<Sv2Frame>,
-        channel_manager_to_jd_receiver: Receiver<JobDeclaration<'static>>,
-        jd_to_channel_manager_sender: Sender<JobDeclaration<'static>>,
+        channel_manager_to_jd_receiver: Receiver<JobDeclarationOwned>,
+        jd_to_channel_manager_sender: Sender<JobDeclarationOwned>,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         mode: JDMode,
@@ -773,8 +774,8 @@ async fn try_initialize_single(
     upstream_entry: &UpstreamEntry,
     upstream_to_channel_manager_sender: Sender<Sv2Frame>,
     channel_manager_to_upstream_receiver: Receiver<Sv2Frame>,
-    jd_to_channel_manager_sender: Sender<JobDeclaration<'static>>,
-    channel_manager_to_jd_receiver: Receiver<JobDeclaration<'static>>,
+    jd_to_channel_manager_sender: Sender<JobDeclarationOwned>,
+    channel_manager_to_jd_receiver: Receiver<JobDeclarationOwned>,
     cancellation_token: CancellationToken,
     fallback_coordinator: FallbackCoordinator,
     mode: JDMode,

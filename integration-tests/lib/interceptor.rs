@@ -1,7 +1,7 @@
 use std::fmt;
+use stratum_apps::stratum_core::parsers_sv2::AnyMessageOwned;
 
 use crate::types::MsgType;
-use stratum_apps::stratum_core::parsers_sv2::AnyMessage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageDirection {
@@ -87,7 +87,7 @@ impl From<IgnoreMessage> for InterceptAction {
 pub struct ReplaceMessage {
     direction: MessageDirection,
     expected_message_type: MsgType,
-    pub(crate) replacement_message: AnyMessage<'static>,
+    pub(crate) replacement_message: AnyMessageOwned,
 }
 
 impl ReplaceMessage {
@@ -99,7 +99,7 @@ impl ReplaceMessage {
     pub fn new(
         direction: MessageDirection,
         expected_message_type: MsgType,
-        replacement_message: AnyMessage<'static>,
+        replacement_message: AnyMessageOwned,
     ) -> Self {
         Self {
             direction,

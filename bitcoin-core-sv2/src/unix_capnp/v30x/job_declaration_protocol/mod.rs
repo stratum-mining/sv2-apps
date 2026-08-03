@@ -49,8 +49,8 @@ mod monitors;
 /// - Using Bitcoin Core's `checkBlock` to validate block structure
 ///
 /// If transactions are missing, a
-/// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::MissingTransactions`] response is
-/// sent. If validation succeeds, a
+/// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::MissingTransactions`] response
+/// is sent. If validation succeeds, a
 /// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::Success`] response with current
 /// template parameters is sent.
 ///

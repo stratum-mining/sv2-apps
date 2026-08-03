@@ -22,11 +22,11 @@ use stratum_apps::{
         runtime_api::{BitcoinCoreVersion, template_distribution_protocol},
     },
     stratum_core::{
-        parsers_sv2::TemplateDistribution,
+        parsers_sv2::TemplateDistributionOwned,
         template_distribution_sv2::{
-            CoinbaseOutputConstraints, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
-            ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND, RequestTransactionData,
-            RequestTransactionDataSuccess,
+            CoinbaseOutputConstraintsOwned, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
+            ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND, RequestTransactionDataOwned,
+            RequestTransactionDataSuccessOwned,
         },
     },
 };
@@ -97,13 +97,13 @@ async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
 }
 
 async fn bootstrap_tdp_and_get_template_id(
-    incoming_sender: &Sender<TemplateDistribution<'static>>,
-    outgoing_receiver: &Receiver<TemplateDistribution<'static>>,
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
 ) -> u64 {
     // TDP requires CoinbaseOutputConstraints first; this triggers initial template publication.
     incoming_sender
-        .send(TemplateDistribution::CoinbaseOutputConstraints(
-            CoinbaseOutputConstraints {
+        .send(TemplateDistributionOwned::CoinbaseOutputConstraints(
+            CoinbaseOutputConstraintsOwned {
                 coinbase_output_max_additional_size: 2,
                 coinbase_output_max_additional_sigops: 2,
             },
@@ -112,20 +112,20 @@ async fn bootstrap_tdp_and_get_template_id(
         .expect("failed to send CoinbaseOutputConstraints");
 
     let new_template = recv_tdp_message(outgoing_receiver, Duration::from_secs(20), |msg| {
-        matches!(msg, TemplateDistribution::NewTemplate(_))
+        matches!(msg, TemplateDistributionOwned::NewTemplate(_))
     })
     .await;
     let new_template = match new_template {
-        TemplateDistribution::NewTemplate(message) => message,
+        TemplateDistributionOwned::NewTemplate(message) => message,
         _ => unreachable!("message kind already filtered"),
     };
 
     let set_new_prev_hash = recv_tdp_message(outgoing_receiver, Duration::from_secs(20), |msg| {
-        matches!(msg, TemplateDistribution::SetNewPrevHash(_))
+        matches!(msg, TemplateDistributionOwned::SetNewPrevHash(_))
     })
     .await;
     let set_new_prev_hash = match set_new_prev_hash {
-        TemplateDistribution::SetNewPrevHash(message) => message,
+        TemplateDistributionOwned::SetNewPrevHash(message) => message,
         _ => unreachable!("message kind already filtered"),
     };
 
@@ -134,8 +134,8 @@ async fn bootstrap_tdp_and_get_template_id(
 }
 
 async fn assert_tdp_request_tx_data_success(
-    incoming_sender: &Sender<TemplateDistribution<'static>>,
-    outgoing_receiver: &Receiver<TemplateDistribution<'static>>,
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
     template_id: u64,
 ) {
     let response = request_tdp_tx_data_and_recv_response_for_template_id(
@@ -146,8 +146,8 @@ async fn assert_tdp_request_tx_data_success(
     )
     .await;
 
-    let request_tx_data_success: RequestTransactionDataSuccess<'static> = match response {
-        TemplateDistribution::RequestTransactionDataSuccess(message) => message,
+    let request_tx_data_success: RequestTransactionDataSuccessOwned = match response {
+        TemplateDistributionOwned::RequestTransactionDataSuccess(message) => message,
         _ => unreachable!("message kind already filtered"),
     };
 
@@ -158,8 +158,8 @@ async fn assert_tdp_request_tx_data_success(
 }
 
 async fn assert_tdp_request_tx_data_not_found(
-    incoming_sender: &Sender<TemplateDistribution<'static>>,
-    outgoing_receiver: &Receiver<TemplateDistribution<'static>>,
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
 ) {
     let not_found_response = request_tdp_tx_data_and_recv_response_for_template_id(
         incoming_sender,
@@ -170,7 +170,7 @@ async fn assert_tdp_request_tx_data_not_found(
     .await;
 
     match not_found_response {
-        TemplateDistribution::RequestTransactionDataError(message) => {
+        TemplateDistributionOwned::RequestTransactionDataError(message) => {
             assert_eq!(
                 message.error_code.as_utf8_or_hex(),
                 ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND,
@@ -183,8 +183,8 @@ async fn assert_tdp_request_tx_data_not_found(
 
 async fn assert_tdp_old_template_eventually_stale(
     bitcoin_core: &BitcoinCore,
-    incoming_sender: &Sender<TemplateDistribution<'static>>,
-    outgoing_receiver: &Receiver<TemplateDistribution<'static>>,
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
     old_template_id: u64,
 ) {
     // Force a tip change so the previously active template becomes non-current.
@@ -194,13 +194,13 @@ async fn assert_tdp_old_template_eventually_stale(
         recv_tdp_message(outgoing_receiver, Duration::from_secs(20), |msg| {
             matches!(
                 msg,
-                TemplateDistribution::SetNewPrevHash(message)
+                TemplateDistributionOwned::SetNewPrevHash(message)
                     if message.template_id != old_template_id
             )
         })
         .await;
     match next_set_new_prev_hash {
-        TemplateDistribution::SetNewPrevHash(_) => {}
+        TemplateDistributionOwned::SetNewPrevHash(_) => {}
         _ => unreachable!("message kind already filtered"),
     }
 
@@ -221,14 +221,14 @@ async fn assert_tdp_old_template_eventually_stale(
         .await;
 
         match stale_response {
-            TemplateDistribution::RequestTransactionDataError(message) => {
+            TemplateDistributionOwned::RequestTransactionDataError(message) => {
                 let error_code = message.error_code.as_utf8_or_hex();
                 if error_code == ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID {
                     break;
                 }
                 panic!("expected stale-template-id, got error code: {error_code}");
             }
-            TemplateDistribution::RequestTransactionDataSuccess(_) => {
+            TemplateDistributionOwned::RequestTransactionDataSuccess(_) => {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             _ => unreachable!("message kind already filtered"),
@@ -237,12 +237,12 @@ async fn assert_tdp_old_template_eventually_stale(
 }
 
 async fn recv_tdp_message<F>(
-    receiver: &Receiver<TemplateDistribution<'static>>,
+    receiver: &Receiver<TemplateDistributionOwned>,
     timeout: Duration,
     predicate: F,
-) -> TemplateDistribution<'static>
+) -> TemplateDistributionOwned
 where
-    F: Fn(&TemplateDistribution<'static>) -> bool,
+    F: Fn(&TemplateDistributionOwned) -> bool,
 {
     let deadline = Instant::now() + timeout;
 
@@ -264,15 +264,15 @@ where
 }
 
 async fn request_tdp_tx_data_and_recv_response_for_template_id(
-    incoming_sender: &Sender<TemplateDistribution<'static>>,
-    outgoing_receiver: &Receiver<TemplateDistribution<'static>>,
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
     template_id: u64,
     timeout: Duration,
-) -> TemplateDistribution<'static> {
+) -> TemplateDistributionOwned {
     // Send request and then wait for either success or error that matches the same template id.
     incoming_sender
-        .send(TemplateDistribution::RequestTransactionData(
-            RequestTransactionData { template_id },
+        .send(TemplateDistributionOwned::RequestTransactionData(
+            RequestTransactionDataOwned { template_id },
         ))
         .await
         .expect("failed to send RequestTransactionData");
@@ -280,11 +280,11 @@ async fn request_tdp_tx_data_and_recv_response_for_template_id(
     recv_tdp_message(outgoing_receiver, timeout, |msg| {
         matches!(
             msg,
-            TemplateDistribution::RequestTransactionDataSuccess(message)
+            TemplateDistributionOwned::RequestTransactionDataSuccess(message)
                 if message.template_id == template_id
         ) || matches!(
             msg,
-            TemplateDistribution::RequestTransactionDataError(message)
+            TemplateDistributionOwned::RequestTransactionDataError(message)
                 if message.template_id == template_id
         )
     })

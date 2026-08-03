@@ -193,7 +193,7 @@ impl JobDeclaratorClientConfig {
     pub fn get_txout(&self) -> TxOut {
         TxOut {
             value: Amount::from_sat(0),
-            script_pubkey: self.coinbase_reward_script.script_pubkey().to_owned(),
+            script_pubkey: self.coinbase_reward_script.script_pubkey(),
         }
     }
 
