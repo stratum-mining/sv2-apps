@@ -5,7 +5,7 @@ use stratum_core::{
         transaction::{OutPoint, Sequence, Transaction, TxIn, TxOut, Version},
         witness::Witness,
     },
-    template_distribution_sv2::CoinbaseOutputConstraints,
+    template_distribution_sv2::CoinbaseOutputConstraintsOwned,
 };
 
 /// Offset added to the calculated max size to account for the additional space required by
@@ -39,7 +39,7 @@ const OFFSET_MAX_SIGOPS: u16 = 4;
 /// CoinbaseOutputConstraints with exact size and sigops values based on the provided outputs
 pub fn coinbase_output_constraints_message(
     coinbase_outputs: Vec<TxOut>,
-) -> CoinbaseOutputConstraints {
+) -> CoinbaseOutputConstraintsOwned {
     // calculate the max coinbase output size for CoinbaseOutputConstraints
     let max_size: u32 = coinbase_outputs.iter().map(|o| o.size() as u32).sum();
     tracing::debug!(
@@ -65,7 +65,7 @@ pub fn coinbase_output_constraints_message(
     let max_sigops = dummy_coinbase.total_sigop_cost(|_| None) as u16;
     tracing::debug!(max_sigops, "Calculated max sigops for coinbase");
 
-    CoinbaseOutputConstraints {
+    CoinbaseOutputConstraintsOwned {
         coinbase_output_max_additional_size: max_size,
         coinbase_output_max_additional_sigops: max_sigops,
     }
@@ -93,10 +93,10 @@ pub fn coinbase_output_constraints_message(
 /// - **Sigops**: +4 to accommodate Pay-to-Public-Key-Hash (p2pkh) addresses
 pub fn coinbase_output_constraints_message_with_offset(
     coinbase_outputs: Vec<TxOut>,
-) -> CoinbaseOutputConstraints {
+) -> CoinbaseOutputConstraintsOwned {
     let constraints = coinbase_output_constraints_message(coinbase_outputs);
 
-    CoinbaseOutputConstraints {
+    CoinbaseOutputConstraintsOwned {
         coinbase_output_max_additional_size: constraints.coinbase_output_max_additional_size
             + OFFSET_ADDITIONAL_SIZE,
         coinbase_output_max_additional_sigops: constraints.coinbase_output_max_additional_sigops

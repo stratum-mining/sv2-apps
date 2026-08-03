@@ -9,7 +9,7 @@ use stratum_apps::stratum_core::{
     common_messages_sv2::Protocol,
     job_declaration_sv2::*,
     mining_sv2::*,
-    parsers_sv2::{AnyMessage, JobDeclaration, Mining},
+    parsers_sv2::{AnyMessageOwned, JobDeclarationOwned, MiningOwned},
 };
 
 #[tokio::test]
@@ -76,27 +76,27 @@ async fn jds_isolates_state_for_colliding_request_ids_across_downstreams() {
 
     // Trigger both JDCs to start job declaration for their mining channel.
     send_to_jdc1
-        .send(AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-            OpenExtendedMiningChannel {
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
-                user_identity: b"user_identity".to_vec().try_into().unwrap(),
+                user_identity: "user_identity".try_into().unwrap(),
                 nominal_hash_rate: 1000.0,
-                max_target: vec![0xff; 32].try_into().unwrap(),
+                max_target: [0xff; 32].into(),
                 min_extranonce_size: 0,
-            },
-        )))
+            }),
+        ))
         .await
         .unwrap();
     send_to_jdc2
-        .send(AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-            OpenExtendedMiningChannel {
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
-                user_identity: b"user_identity".to_vec().try_into().unwrap(),
+                user_identity: "user_identity".try_into().unwrap(),
                 nominal_hash_rate: 1000.0,
                 max_target: vec![0xff; 32].try_into().unwrap(),
                 min_extranonce_size: 0,
-            },
-        )))
+            }),
+        ))
         .await
         .unwrap();
 
@@ -146,8 +146,10 @@ async fn jds_isolates_state_for_colliding_request_ids_across_downstreams() {
 // Returns the first DeclareMiningJob request_id observed from a given sniffer.
 fn next_declare_mining_job_request_id(sniffer: &Sniffer<'_>) -> u32 {
     loop {
-        if let Some((_, AnyMessage::JobDeclaration(JobDeclaration::DeclareMiningJob(msg)))) =
-            sniffer.next_message_from_downstream()
+        if let Some((
+            _,
+            AnyMessageOwned::JobDeclaration(JobDeclarationOwned::DeclareMiningJob(msg)),
+        )) = sniffer.next_message_from_downstream()
         {
             return msg.request_id;
         }
@@ -157,7 +159,7 @@ fn next_declare_mining_job_request_id(sniffer: &Sniffer<'_>) -> u32 {
 // Scans captured downstream responses and ensures no SetCustomMiningJobError is emitted.
 fn assert_no_set_custom_mining_job_error(sniffer: &Sniffer<'_>) {
     while let Some((_, message)) = sniffer.next_message_from_upstream() {
-        if let AnyMessage::Mining(Mining::SetCustomMiningJobError(msg)) = message {
+        if let AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobError(msg)) = message {
             panic!(
                 "unexpected SetCustomMiningJobError while validating colliding request_id flow: {}",
                 msg.error_code.as_utf8_or_hex()

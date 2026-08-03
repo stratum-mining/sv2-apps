@@ -5,6 +5,7 @@ use std::{
     },
     time::Duration,
 };
+use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, MiningOwned};
 
 use async_channel::{Receiver, Sender, unbounded};
 #[cfg(feature = "monitoring")]
@@ -19,8 +20,10 @@ use stratum_apps::{
             extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel,
         },
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
-        handlers_sv2::{HandleCommonMessagesFromClientAsync, HandleExtensionsFromClientAsync},
-        parsers_sv2::{AnyMessage, Mining, Tlv, parse_message_frame_with_tlvs},
+        handlers_sv2::{
+            HandleCommonMessagesFromClientOwnedAsync, HandleExtensionsFromClientOwnedAsync,
+        },
+        parsers_sv2::{Tlv, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
@@ -48,8 +51,8 @@ mod extensions_message_handler;
 /// - `downstream_receiver`: receives frames from the downstream.
 #[derive(Clone)]
 pub struct DownstreamIo {
-    channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
-    channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+    channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
+    channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
     downstream_sender: Sender<Sv2Frame>,
     downstream_receiver: Receiver<Sv2Frame>,
 }
@@ -69,9 +72,9 @@ pub struct Downstream {
     pub client_kind: SharedLock<Sv2ClientKind>,
     /// Whether the downstream requires standard jobs.
     pub require_std_job: Arc<AtomicBool>,
-    pub group_channel: SharedLock<GroupChannel<'static>>,
-    pub extended_channels: SharedMap<ChannelId, ExtendedChannel<'static>>,
-    pub standard_channels: SharedMap<ChannelId, StandardChannel<'static>>,
+    pub group_channel: SharedLock<GroupChannel>,
+    pub extended_channels: SharedMap<ChannelId, ExtendedChannel>,
+    pub standard_channels: SharedMap<ChannelId, StandardChannel>,
     pub channel_id_factory: Arc<AtomicU32>,
     /// Extensions that have been successfully negotiated with this client.
     pub negotiated_extensions: SharedLock<Vec<u16>>,
@@ -158,9 +161,9 @@ impl Downstream {
     pub fn new(
         downstream_id: DownstreamId,
         channel_id_factory: AtomicU32,
-        group_channel: GroupChannel<'static>,
-        channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
-        channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+        group_channel: GroupChannel,
+        channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
+        channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
         noise_stream: NoiseTcpStream<Message>,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
@@ -338,7 +341,7 @@ impl Downstream {
             }
         };
 
-        let message = AnyMessage::Mining(message);
+        let message = AnyMessageOwned::Mining(message);
         let sv2_frame: Sv2Frame = message.try_into().map_err(JDCError::shutdown)?;
 
         self.downstream_io
@@ -372,8 +375,8 @@ impl Downstream {
         let (any_message, tlv_fields) =
             parse_message_frame_with_tlvs(header, payload, &negotiated_extensions)
                 .map_err(|error| JDCError::disconnect(error, self.downstream_id))?;
-        match any_message {
-            AnyMessage::Mining(message) => {
+        match any_message.into_owned() {
+            AnyMessageOwned::Mining(message) => {
                 self.downstream_io
                     .channel_manager_sender
                     .send((self.downstream_id, message, tlv_fields))
@@ -383,7 +386,7 @@ impl Downstream {
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
-            AnyMessage::Extensions(message) => {
+            AnyMessageOwned::Extensions(message) => {
                 self.handle_extensions_message_from_client(None, message, tlv_fields.as_deref())
                     .await?;
             }

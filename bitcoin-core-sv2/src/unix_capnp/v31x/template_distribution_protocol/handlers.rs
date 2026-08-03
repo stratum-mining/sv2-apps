@@ -4,11 +4,11 @@ use crate::unix_capnp::v31x::template_distribution_protocol::{
     BitcoinCoreSv2TDP, error::BitcoinCoreSv2TDPError,
 };
 use stratum_core::{
-    parsers_sv2::TemplateDistribution,
+    parsers_sv2::TemplateDistributionOwned,
     template_distribution_sv2::{
-        CoinbaseOutputConstraints, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
-        ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND, RequestTransactionData,
-        RequestTransactionDataError, SubmitSolution,
+        CoinbaseOutputConstraintsOwned, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
+        ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND,
+        RequestTransactionDataErrorOwned, RequestTransactionDataOwned, SubmitSolutionOwned,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -17,7 +17,7 @@ use tracing::{debug, error};
 impl BitcoinCoreSv2TDP {
     pub(crate) async fn handle_coinbase_output_constraints(
         &mut self,
-        coinbase_output_constraints: CoinbaseOutputConstraints,
+        coinbase_output_constraints: CoinbaseOutputConstraintsOwned,
     ) -> Result<(), BitcoinCoreSv2TDPError> {
         debug!("handle_coinbase_output_constraints() called");
 
@@ -66,7 +66,7 @@ impl BitcoinCoreSv2TDP {
 
     pub(crate) async fn handle_request_transaction_data(
         &self,
-        request_transaction_data: RequestTransactionData,
+        request_transaction_data: RequestTransactionDataOwned,
     ) -> Result<(), BitcoinCoreSv2TDPError> {
         debug!(
             "handle_request_transaction_data() called for template_id: {}",
@@ -85,7 +85,7 @@ impl BitcoinCoreSv2TDP {
                 "Template {} is stale, sending error response",
                 request_transaction_data.template_id
             );
-            let request_transaction_data_error = RequestTransactionDataError {
+            let request_transaction_data_error = RequestTransactionDataErrorOwned {
                 template_id: request_transaction_data.template_id,
                 error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
                     .to_string()
@@ -95,7 +95,7 @@ impl BitcoinCoreSv2TDP {
 
             if let Err(e) = self
                 .outgoing_messages
-                .send(TemplateDistribution::RequestTransactionDataError(
+                .send(TemplateDistributionOwned::RequestTransactionDataError(
                     request_transaction_data_error.clone(),
                 ))
                 .await
@@ -142,7 +142,7 @@ impl BitcoinCoreSv2TDP {
                             return Err(BitcoinCoreSv2TDPError::FailedToFetchTemplateTxData);
                         }
                     };
-                    TemplateDistribution::RequestTransactionDataSuccess(
+                    TemplateDistributionOwned::RequestTransactionDataSuccess(
                         request_transaction_data_success,
                     )
                 }
@@ -151,13 +151,15 @@ impl BitcoinCoreSv2TDP {
                         "Template {} not found, sending error response",
                         request_transaction_data.template_id
                     );
-                    TemplateDistribution::RequestTransactionDataError(RequestTransactionDataError {
-                        template_id: request_transaction_data.template_id,
-                        error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND
-                            .to_string()
-                            .try_into()
-                            .expect("error code must be valid string"),
-                    })
+                    TemplateDistributionOwned::RequestTransactionDataError(
+                        RequestTransactionDataErrorOwned {
+                            template_id: request_transaction_data.template_id,
+                            error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND
+                                .to_string()
+                                .try_into()
+                                .expect("error code must be valid string"),
+                        },
+                    )
                 }
             }
         };
@@ -172,7 +174,7 @@ impl BitcoinCoreSv2TDP {
 
     pub(crate) async fn handle_submit_solution(
         &self,
-        submit_solution: SubmitSolution<'static>,
+        submit_solution: SubmitSolutionOwned,
     ) -> Result<(), BitcoinCoreSv2TDPError> {
         debug!(
             "handle_submit_solution() called for template_id: {}",

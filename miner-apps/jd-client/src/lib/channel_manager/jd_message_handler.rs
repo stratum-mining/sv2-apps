@@ -1,19 +1,21 @@
 use stratum_apps::{
     stratum_core::{
-        binary_sv2::{B016M, Seq064K},
+        binary_sv2::{B016MOwned, Seq064KOwned},
         bitcoin::{
             self, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
             absolute::LockTime, transaction::Version,
         },
         channels_sv2::outputs::deserialize_outputs,
-        handlers_sv2::HandleJobDeclarationMessagesFromServerAsync,
+        handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync,
         job_declaration_sv2::{
-            AllocateMiningJobTokenSuccess, DeclareMiningJobError, DeclareMiningJobSuccess,
-            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactions,
-            ProvideMissingTransactionsSuccess,
+            AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
+            DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+            ProvideMissingTransactionsOwned, ProvideMissingTransactionsSuccessOwned,
         },
-        parsers_sv2::{AnyMessage, JobDeclaration, Mining, TemplateDistribution, Tlv},
-        template_distribution_sv2::CoinbaseOutputConstraints,
+        parsers_sv2::{
+            AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned, Tlv,
+        },
+        template_distribution_sv2::CoinbaseOutputConstraintsOwned,
     },
     utils::types::Sv2Frame,
 };
@@ -25,7 +27,7 @@ use crate::{
 };
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
+impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     type Error = JDCError<error::ChannelManager>;
 
     fn get_negotiated_extensions_with_server(
@@ -49,10 +51,10 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
     async fn handle_allocate_mining_job_token_success(
         &mut self,
         _server_id: Option<usize>,
-        msg: AllocateMiningJobTokenSuccess<'_>,
+        msg: AllocateMiningJobTokenSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
         let coinbase_changed = self
@@ -64,7 +66,7 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             })
             .map_err(JDCError::shutdown)?;
         self.allocate_tokens
-            .with(|tokens| tokens.push_back(msg.clone().into_static()))
+            .with(|tokens| tokens.push_back(msg.clone()))
             .map_err(JDCError::shutdown)?;
 
         if coinbase_changed {
@@ -100,10 +102,12 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             );
 
             let coinbase_output_constraints_message =
-                TemplateDistribution::CoinbaseOutputConstraints(CoinbaseOutputConstraints {
-                    coinbase_output_max_additional_size: max_additional_size as u32,
-                    coinbase_output_max_additional_sigops: max_additional_sigops,
-                });
+                TemplateDistributionOwned::CoinbaseOutputConstraints(
+                    CoinbaseOutputConstraintsOwned {
+                        coinbase_output_max_additional_size: max_additional_size as u32,
+                        coinbase_output_max_additional_sigops: max_additional_sigops,
+                    },
+                );
 
             self.channel_manager_io
                 .tp_sender
@@ -133,10 +137,10 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
     async fn handle_declare_mining_job_error(
         &mut self,
         _server_id: Option<usize>,
-        msg: DeclareMiningJobError<'_>,
+        msg: DeclareMiningJobErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        warn!("Received: {:?}", msg);
 
         let error_code = msg.error_code.as_utf8_or_hex();
         if error_code == ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP {
@@ -172,10 +176,10 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
     async fn handle_declare_mining_job_success(
         &mut self,
         _server_id: Option<usize>,
-        msg: DeclareMiningJobSuccess<'_>,
+        msg: DeclareMiningJobSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         let Some(last_declare_job) = self.last_declare_job_store.get_cloned(&msg.request_id) else {
             error!(
@@ -240,7 +244,7 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
         let updated = self
             .last_declare_job_store
             .with_mut(&msg.request_id, |value| {
-                value.set_custom_mining_job = Some(custom_job.clone().into_static());
+                value.set_custom_mining_job = Some(custom_job.clone());
             });
         if updated.is_none() {
             return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
@@ -251,8 +255,8 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
         let channel_id = custom_job.channel_id;
 
         debug!("Sending SetCustomMiningJob to the upstream with channel_id: {channel_id}");
-        let message = Mining::SetCustomMiningJob(custom_job).into_static();
-        let sv2_frame: Sv2Frame = AnyMessage::Mining(message)
+        let message = MiningOwned::SetCustomMiningJob(custom_job);
+        let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
             .try_into()
             .map_err(JDCError::shutdown)?;
         self.channel_manager_io
@@ -276,12 +280,12 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
     async fn handle_provide_missing_transactions(
         &mut self,
         _server_id: Option<usize>,
-        msg: ProvideMissingTransactions<'_>,
+        msg: ProvideMissingTransactionsOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         let request_id = msg.request_id;
 
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         let tx_store_entry = self.last_declare_job_store.get_cloned(&request_id);
 
@@ -295,7 +299,7 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             )));
         };
 
-        let full_tx_list: Vec<B016M<'static>> = entry
+        let full_tx_list: Vec<B016MOwned> = entry
             .tx_list
             .iter()
             .cloned()
@@ -309,7 +313,7 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             "Resolving missing transactions"
         );
 
-        let missing_txns: Vec<B016M<'static>> = unknown_positions
+        let missing_txns: Vec<B016MOwned> = unknown_positions
             .iter()
             .filter_map(|&pos| full_tx_list.get(pos as usize).cloned())
             .collect();
@@ -318,11 +322,11 @@ impl HandleJobDeclarationMessagesFromServerAsync for ChannelManager {
             warn!("No matching transactions found for request_id={request_id}");
         }
 
-        let response = ProvideMissingTransactionsSuccess {
+        let response = ProvideMissingTransactionsSuccessOwned {
             request_id: msg.request_id,
-            transaction_list: Seq064K::new(missing_txns).map_err(JDCError::shutdown)?,
+            transaction_list: Seq064KOwned::new(missing_txns).map_err(JDCError::shutdown)?,
         };
-        let message = JobDeclaration::ProvideMissingTransactionsSuccess(response);
+        let message = JobDeclarationOwned::ProvideMissingTransactionsSuccess(response);
 
         self.channel_manager_io
             .jd_sender

@@ -42,7 +42,7 @@ impl Connection {
         Error,
     >
     where
-        Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+        Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
     {
         let (sender_incoming, receiver_incoming) = unbounded();
         let (sender_outgoing, receiver_outgoing) = unbounded();
@@ -69,7 +69,7 @@ impl Connection {
         conn_state: Arc<ConnectionState<Message>>,
     ) -> task::JoinHandle<()>
     where
-        Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+        Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
     {
         let sender_incoming = conn_state.sender_incoming.clone();
 
@@ -104,7 +104,7 @@ impl Connection {
         conn_state: Arc<ConnectionState<Message>>,
     ) -> task::JoinHandle<()>
     where
-        Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+        Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
     {
         let receiver_outgoing = conn_state.receiver_outgoing.clone();
 

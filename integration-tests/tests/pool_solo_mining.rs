@@ -32,14 +32,16 @@ use stratum_apps::stratum_core::{
     bitcoin::{Address, Transaction, consensus::deserialize, params::TESTNET4},
     common_messages_sv2::*,
     mining_sv2::*,
-    parsers_sv2::{self, AnyMessage, Mining},
+    parsers_sv2::{
+        AnyMessageOwned, MiningOwned, {self},
+    },
 };
 
 const MINER_COINBASE_REWARD_ADDR: &str = "tb1qpusf5256yxv50qt0pm0tue8k952fsu5lzsphft";
 
 fn build_coinbase_tx(
-    channel_success: &OpenExtendedMiningChannelSuccess,
-    new_job: &NewExtendedMiningJob,
+    channel_success: &OpenExtendedMiningChannelSuccessOwned,
+    new_job: &NewExtendedMiningJobOwned,
 ) -> Transaction {
     let prefix = new_job.coinbase_tx_prefix.as_bytes();
     let suffix = new_job.coinbase_tx_suffix.as_bytes();
@@ -128,8 +130,8 @@ async fn pool_solo_mining_invalid_payout_address() {
         .await;
 
     // === Extended Channel - invalid payout address ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/solo/tb1qbalieiro/worker.1"
                 .to_string()
@@ -149,9 +151,12 @@ async fn pool_solo_mining_invalid_payout_address() {
         )
         .await;
 
-    let error_ext: OpenMiningChannelError = loop {
+    let error_ext: OpenMiningChannelErrorOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenMiningChannelError(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -163,8 +168,8 @@ async fn pool_solo_mining_invalid_payout_address() {
     );
 
     // === Standard Channel - invalid payout address ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/solo/tb1qbalieiro/worker.1"
                 .to_string()
@@ -183,9 +188,12 @@ async fn pool_solo_mining_invalid_payout_address() {
         )
         .await;
 
-    let error_std: OpenMiningChannelError = loop {
+    let error_std: OpenMiningChannelErrorOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenMiningChannelError(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -220,8 +228,8 @@ async fn pool_solo_mining_wrong_user_identity() {
         .await;
 
     // === Extended Channel - missing keyword ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/worker.1".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -238,9 +246,12 @@ async fn pool_solo_mining_wrong_user_identity() {
         )
         .await;
 
-    let error_ext: OpenMiningChannelError = loop {
+    let error_ext: OpenMiningChannelErrorOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenMiningChannelError(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -252,8 +263,8 @@ async fn pool_solo_mining_wrong_user_identity() {
     );
 
     // === Standard Channel - missing keyword ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/worker.1".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -269,9 +280,12 @@ async fn pool_solo_mining_wrong_user_identity() {
         )
         .await;
 
-    let error_std: OpenMiningChannelError = loop {
+    let error_std: OpenMiningChannelErrorOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::OpenMiningChannelError(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -307,8 +321,8 @@ async fn pool_solo_mining_random_user_identity() {
         .await;
 
     // === Extended Channel - random user_identity, pool gets 100% ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: "cool_miner/worker.1".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -325,19 +339,24 @@ async fn pool_solo_mining_random_user_identity() {
         )
         .await;
 
-    let channel_success_ext: OpenExtendedMiningChannelSuccess = loop {
+    let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
         match sniffer.next_message_from_upstream() {
             Some((
                 _,
-                AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannelSuccess(msg)),
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
             )) => break msg,
             _ => continue,
         }
     };
 
-    let new_job_ext: NewExtendedMiningJob = loop {
+    let new_job_ext: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -365,9 +384,12 @@ async fn pool_solo_mining_random_user_identity() {
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
-    let new_job_ext_second: NewExtendedMiningJob = loop {
+    let new_job_ext_second: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -402,9 +424,12 @@ async fn pool_solo_mining_random_user_identity() {
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
-    let new_job_ext_third: NewExtendedMiningJob = loop {
+    let new_job_ext_third: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -429,8 +454,8 @@ async fn pool_solo_mining_random_user_identity() {
     );
 
     // === Standard Channel - random user_identity ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: "cool_miner/worker.1".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -471,8 +496,8 @@ async fn pool_solo_mining_legacy_pattern() {
         .await;
 
     // === Extended Channel - legacy pattern, miner gets 100% ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: MINER_COINBASE_REWARD_ADDR.try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -489,19 +514,24 @@ async fn pool_solo_mining_legacy_pattern() {
         )
         .await;
 
-    let channel_success_ext: OpenExtendedMiningChannelSuccess = loop {
+    let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
         match sniffer.next_message_from_upstream() {
             Some((
                 _,
-                AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannelSuccess(msg)),
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
             )) => break msg,
             _ => continue,
         }
     };
 
-    let new_job_ext: NewExtendedMiningJob = loop {
+    let new_job_ext: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -529,9 +559,12 @@ async fn pool_solo_mining_legacy_pattern() {
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
-    let new_job_ext_second: NewExtendedMiningJob = loop {
+    let new_job_ext_second: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -566,9 +599,12 @@ async fn pool_solo_mining_legacy_pattern() {
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
-    let new_job_ext_third: NewExtendedMiningJob = loop {
+    let new_job_ext_third: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -593,8 +629,8 @@ async fn pool_solo_mining_legacy_pattern() {
     );
 
     // === Standard Channel - legacy pattern ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: MINER_COINBASE_REWARD_ADDR.try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -635,8 +671,8 @@ async fn pool_solo_mining_solo_pattern() {
         .await;
 
     // === Extended Channel - sri/solo pattern, miner gets 100% ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: format!("sri/solo/{}/worker.1", MINER_COINBASE_REWARD_ADDR)
                 .try_into()
@@ -655,19 +691,24 @@ async fn pool_solo_mining_solo_pattern() {
         )
         .await;
 
-    let channel_success_ext: OpenExtendedMiningChannelSuccess = loop {
+    let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
         match sniffer.next_message_from_upstream() {
             Some((
                 _,
-                AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannelSuccess(msg)),
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
             )) => break msg,
             _ => continue,
         }
     };
 
-    let new_job_ext: NewExtendedMiningJob = loop {
+    let new_job_ext: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -695,9 +736,12 @@ async fn pool_solo_mining_solo_pattern() {
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
-    let new_job_ext_second: NewExtendedMiningJob = loop {
+    let new_job_ext_second: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -732,9 +776,12 @@ async fn pool_solo_mining_solo_pattern() {
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
-    let new_job_ext_third: NewExtendedMiningJob = loop {
+    let new_job_ext_third: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -759,8 +806,8 @@ async fn pool_solo_mining_solo_pattern() {
     );
 
     // === Standard Channel - sri/solo pattern ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: format!("sri/solo/{}/worker.1", MINER_COINBASE_REWARD_ADDR)
                 .try_into()
@@ -803,8 +850,8 @@ async fn pool_solo_mining_full_donate() {
         .await;
 
     // === Extended Channel - sri/donate, pool gets 100% ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/donate/worker.1".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -821,19 +868,24 @@ async fn pool_solo_mining_full_donate() {
         )
         .await;
 
-    let channel_success_ext: OpenExtendedMiningChannelSuccess = loop {
+    let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
         match sniffer.next_message_from_upstream() {
             Some((
                 _,
-                AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannelSuccess(msg)),
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
             )) => break msg,
             _ => continue,
         }
     };
 
-    let new_job_ext: NewExtendedMiningJob = loop {
+    let new_job_ext: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -861,9 +913,12 @@ async fn pool_solo_mining_full_donate() {
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
-    let new_job_ext_second: NewExtendedMiningJob = loop {
+    let new_job_ext_second: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -898,9 +953,12 @@ async fn pool_solo_mining_full_donate() {
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
-    let new_job_ext_third: NewExtendedMiningJob = loop {
+    let new_job_ext_third: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -925,8 +983,8 @@ async fn pool_solo_mining_full_donate() {
     );
 
     // === Standard Channel - sri/donate ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/donate/worker.1".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -967,8 +1025,8 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
         .await;
 
     // === Extended Channel - sri/donate (no worker name), pool gets 100% ===
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/donate".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -985,19 +1043,24 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
         )
         .await;
 
-    let channel_success_ext: OpenExtendedMiningChannelSuccess = loop {
+    let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
         match sniffer.next_message_from_upstream() {
             Some((
                 _,
-                AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannelSuccess(msg)),
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
             )) => break msg,
             _ => continue,
         }
     };
 
-    let new_job_ext: NewExtendedMiningJob = loop {
+    let new_job_ext: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -1025,9 +1088,12 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
-    let new_job_ext_second: NewExtendedMiningJob = loop {
+    let new_job_ext_second: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -1062,9 +1128,12 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
-    let new_job_ext_third: NewExtendedMiningJob = loop {
+    let new_job_ext_third: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -1089,8 +1158,8 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
     );
 
     // === Standard Channel - sri/donate (no worker name) ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: "sri/donate".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -1132,8 +1201,8 @@ async fn pool_solo_mining_partial_donation() {
 
     // === Extended Channel - sri/donate/5%, pool gets 5%, miner gets 95% ===
     let user_identity = format!("sri/donate/5/{}/worker.1", MINER_COINBASE_REWARD_ADDR);
-    let open_extended = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended = AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
             request_id: 0u32,
             user_identity: user_identity.clone().try_into().unwrap(),
             nominal_hash_rate: 1000.0,
@@ -1150,19 +1219,24 @@ async fn pool_solo_mining_partial_donation() {
         )
         .await;
 
-    let channel_success_ext: OpenExtendedMiningChannelSuccess = loop {
+    let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
         match sniffer.next_message_from_upstream() {
             Some((
                 _,
-                AnyMessage::Mining(parsers_sv2::Mining::OpenExtendedMiningChannelSuccess(msg)),
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
             )) => break msg,
             _ => continue,
         }
     };
 
-    let new_job_ext: NewExtendedMiningJob = loop {
+    let new_job_ext: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -1198,9 +1272,12 @@ async fn pool_solo_mining_partial_donation() {
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
-    let new_job_ext_second: NewExtendedMiningJob = loop {
+    let new_job_ext_second: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -1242,9 +1319,12 @@ async fn pool_solo_mining_partial_donation() {
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
-    let new_job_ext_third: NewExtendedMiningJob = loop {
+    let new_job_ext_third: NewExtendedMiningJobOwned = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(parsers_sv2::Mining::NewExtendedMiningJob(msg)))) => {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
                 break msg;
             }
             _ => continue,
@@ -1276,8 +1356,8 @@ async fn pool_solo_mining_partial_donation() {
     );
 
     // === Standard Channel - sri/donate/5% ===
-    let open_standard = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-        OpenStandardMiningChannel {
+    let open_standard = AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
             request_id: 0u32,
             user_identity: user_identity.try_into().unwrap(),
             nominal_hash_rate: 1000.0,

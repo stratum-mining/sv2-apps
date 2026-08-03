@@ -31,10 +31,10 @@ use std::{
     time::Instant,
 };
 use stratum_core::{
-    binary_sv2::U256,
+    binary_sv2::U256Owned,
     bitcoin::{Transaction, block::Header, consensus::deserialize},
-    parsers_sv2::TemplateDistribution,
-    template_distribution_sv2::CoinbaseOutputConstraints,
+    parsers_sv2::TemplateDistributionOwned,
+    template_distribution_sv2::CoinbaseOutputConstraintsOwned,
 };
 
 use std::sync::RwLock;
@@ -53,8 +53,8 @@ mod template_data;
 /// It is instantiated with:
 /// - A `&`[`std::path::Path`] to the Bitcoin Core UNIX socket
 /// - A `u64` for the fee delta threshold in satoshis
-/// - A `u8` for the minimum interval in seconds between mempool-driven template updates
-///   (chain tip updates are never throttled)
+/// - A `u8` for the minimum interval in seconds between mempool-driven template updates (chain tip
+///   updates are never throttled)
 /// - A [`async_channel::Receiver`] for incoming [`TemplateDistribution`] messages (handles
 ///   [`CoinbaseOutputConstraints`],
 ///   [`stratum_core::template_distribution_sv2::RequestTransactionData`], and
@@ -90,12 +90,12 @@ pub struct BitcoinCoreSv2TDP {
     mining_ipc_client: MiningIpcClient,
     monitor_ipc_templates_handle: Rc<RefCell<Option<JoinHandle<()>>>>,
     current_template_ipc_client: Rc<RefCell<Option<BlockTemplateIpcClient>>>,
-    current_prev_hash: Rc<RefCell<Option<U256<'static>>>>,
+    current_prev_hash: Rc<RefCell<Option<U256Owned>>>,
     template_data: Rc<RwLock<HashMap<u64, TemplateData>>>,
     stale_template_ids: Rc<RwLock<HashSet<u64>>>,
     template_id_factory: Rc<AtomicU64>,
-    incoming_messages: Receiver<TemplateDistribution<'static>>,
-    outgoing_messages: Sender<TemplateDistribution<'static>>,
+    incoming_messages: Receiver<TemplateDistributionOwned>,
+    outgoing_messages: Sender<TemplateDistributionOwned>,
     global_cancellation_token: CancellationToken,
     template_ipc_client_cancellation_token: CancellationToken,
     last_sent_template_instant: Option<Instant>,
@@ -109,8 +109,8 @@ impl BitcoinCoreSv2TDP {
         bitcoin_core_unix_socket_path: P,
         fee_threshold: u64,
         min_interval: u8,
-        incoming_messages: Receiver<TemplateDistribution<'static>>,
-        outgoing_messages: Sender<TemplateDistribution<'static>>,
+        incoming_messages: Receiver<TemplateDistributionOwned>,
+        outgoing_messages: Sender<TemplateDistributionOwned>,
         global_cancellation_token: CancellationToken,
     ) -> Result<Self, BitcoinCoreSv2TDPError>
     where
@@ -216,7 +216,7 @@ impl BitcoinCoreSv2TDP {
                 Ok(message) = self.incoming_messages.recv() => {
                     debug!("run() received message during initial loop: {:?}", message);
                     match message {
-                        TemplateDistribution::CoinbaseOutputConstraints(coinbase_output_constraints) => {
+                        TemplateDistributionOwned::CoinbaseOutputConstraints(coinbase_output_constraints) => {
                             info!("Received: {:?}", coinbase_output_constraints);
                             debug!("First CoinbaseOutputConstraints received - max_additional_size: {}, max_additional_sigops: {}",
                                 coinbase_output_constraints.coinbase_output_max_additional_size,
@@ -465,7 +465,7 @@ impl BitcoinCoreSv2TDP {
             template_data.get_template_id()
         );
         self.outgoing_messages
-            .send(TemplateDistribution::NewTemplate(new_template))
+            .send(TemplateDistributionOwned::NewTemplate(new_template))
             .await
             .map_err(|e| {
                 error!("Failed to send NewTemplate message: {:?}", e);
@@ -479,7 +479,7 @@ impl BitcoinCoreSv2TDP {
                 template_data.get_prev_hash()
             );
             self.outgoing_messages
-                .send(TemplateDistribution::SetNewPrevHash(set_new_prev_hash))
+                .send(TemplateDistributionOwned::SetNewPrevHash(set_new_prev_hash))
                 .await
                 .map_err(|e| {
                     error!("Failed to send SetNewPrevHash message: {:?}", e);
@@ -510,7 +510,7 @@ impl BitcoinCoreSv2TDP {
     /// - stores the client as `current_template_ipc_client`
     async fn bootstrap_template_ipc_client_from_coinbase_output_constraints(
         &mut self,
-        coinbase_output_constraints: CoinbaseOutputConstraints,
+        coinbase_output_constraints: CoinbaseOutputConstraintsOwned,
     ) -> Result<(), BitcoinCoreSv2TDPError> {
         debug!(
             "bootstrap_template_ipc_client_from_coinbase_output_constraints() called - max_size: {}, max_sigops: {}",
@@ -620,7 +620,8 @@ impl BitcoinCoreSv2TDP {
         Ok(wait_next_request)
     }
 
-    // Spawns a task that processes stale template data after a `STALE_TEMPLATE_GRACE_PERIOD_SECS` grace period.
+    // Spawns a task that processes stale template data after a `STALE_TEMPLATE_GRACE_PERIOD_SECS`
+    // grace period.
     //
     // Takes a snapshot of [`current_template_ids`] at call time, then schedules their
     // retirement. This ensures the snapshot is always taken at the epoch boundary rather

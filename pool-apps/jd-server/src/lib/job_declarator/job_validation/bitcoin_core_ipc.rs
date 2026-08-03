@@ -29,12 +29,12 @@ use stratum_apps::{
             hashes::Hash,
         },
         job_declaration_sv2::{
-            DeclareMiningJob, ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+            DeclareMiningJobOwned, ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactionsSuccess,
-            PushSolution,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactionsSuccessOwned,
+            PushSolutionOwned,
         },
         mining_sv2::{
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX,
@@ -48,7 +48,7 @@ use stratum_apps::{
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_NBITS,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_VERSION,
             ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED,
-            ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, SetCustomMiningJob,
+            ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, SetCustomMiningJobOwned,
         },
     },
     sync::{SharedLock, SharedMap},
@@ -63,7 +63,7 @@ use stratum_apps::{
 /// subsequent `SetCustomMiningJob` matches the original declaration.
 #[derive(Clone)]
 struct DeclaredCustomJob {
-    declare_mining_job: DeclareMiningJob<'static>,
+    declare_mining_job: DeclareMiningJobOwned,
     validation_context: ValidationContext, // committed at the time we receive DeclareMiningJob
     txid_list: Option<Vec<Txid>>,          // populated only on JdResponse::Success
     validated: bool,
@@ -497,8 +497,8 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     async fn handle_declare_mining_job(
         &self,
         downstream_id: DownstreamId,
-        declare_mining_job: DeclareMiningJob<'_>,
-        provide_missing_transactions_success: Option<ProvideMissingTransactionsSuccess<'_>>,
+        declare_mining_job: DeclareMiningJobOwned,
+        provide_missing_transactions_success: Option<ProvideMissingTransactionsSuccessOwned>,
     ) -> DeclareMiningJobResult {
         // Extract allocated token from the message
         let allocated_token: JdToken = match declare_mining_job.mining_job_token.try_as_array::<8>()
@@ -512,7 +512,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         };
 
         // Create temporary DeclaredCustomJob for extracting coinbase (without prev_hash/nbits yet)
-        let declare_mining_job_static = declare_mining_job.clone().into_static();
+        let declare_mining_job_static = declare_mining_job.clone();
 
         // Extract and validate coinbase transaction
         let declared_coinbase_tx = {
@@ -727,10 +727,10 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     async fn handle_push_solution(
         &self,
         downstream_id: DownstreamId,
-        push_solution: PushSolution<'_>,
+        push_solution: PushSolutionOwned,
     ) {
         // Convert to static lifetime for channel transfer
-        let push_solution_static = push_solution.into_static();
+        let push_solution_static = push_solution;
 
         // Send request to BitcoinCoreSv2JDP (fire-and-forget)
         let request = JdRequest::PushSolution {
@@ -756,7 +756,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     async fn handle_set_custom_mining_job(
         &self,
         downstream_id: DownstreamId,
-        set_custom_mining_job: SetCustomMiningJob<'_>,
+        set_custom_mining_job: SetCustomMiningJobOwned,
         allocated_token: JdToken, // Note: This is the corresponding DeclareMiningJob token
     ) -> SetCustomMiningJobResult {
         let declared_custom_job = match self

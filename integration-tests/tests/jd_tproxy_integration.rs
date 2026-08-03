@@ -9,7 +9,7 @@ use integration_tests_sv2::{
 use stratum_apps::stratum_core::{
     common_messages_sv2::*,
     mining_sv2::*,
-    parsers_sv2::{AnyMessage, CommonMessages, Mining},
+    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, MiningOwned},
 };
 
 #[tokio::test]
@@ -231,12 +231,12 @@ async fn jdc_sends_per_upstream_identity() {
 
     // Respond with success so JDC proceeds to connect to JDS and open channels.
     pool_sender
-        .send(AnyMessage::Common(CommonMessages::SetupConnectionSuccess(
-            SetupConnectionSuccess {
+        .send(AnyMessageOwned::Common(
+            CommonMessagesOwned::SetupConnectionSuccess(SetupConnectionSuccessOwned {
                 used_version: 2,
                 flags: 0,
-            },
-        )))
+            }),
+        ))
         .await
         .unwrap();
 
@@ -253,7 +253,9 @@ async fn jdc_sends_per_upstream_identity() {
 
     let oemc = loop {
         match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessage::Mining(Mining::OpenExtendedMiningChannel(msg)))) => break msg,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(msg)))) => {
+                break msg;
+            }
             _ => continue,
         }
     };

@@ -24,9 +24,9 @@ use stratum_apps::{
     stratum_core::{
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
         framing_sv2,
-        handlers_sv2::HandleCommonMessagesFromClientAsync,
-        job_declaration_sv2::DeclareMiningJob,
-        parsers_sv2::{AnyMessage, parse_message_frame_with_tlvs},
+        handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
+        job_declaration_sv2::DeclareMiningJobOwned,
+        parsers_sv2::{AnyMessageOwned, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
@@ -42,7 +42,7 @@ mod common_message_handler;
 /// Data associated with a pending declare mining job.
 /// - Instant is the insertion timestamp
 /// - DeclareMiningJob is the declare mining job
-pub type PendingDeclareMiningJob = (Instant, DeclareMiningJob<'static>);
+pub type PendingDeclareMiningJob = (Instant, DeclareMiningJobOwned);
 
 /// Channel endpoints for a single downstream connection.
 #[derive(Clone)]
@@ -318,7 +318,7 @@ impl Downstream {
             }
         };
 
-        let message = AnyMessage::JobDeclaration(msg);
+        let message = AnyMessageOwned::JobDeclaration(msg);
         let std_frame: Sv2Frame = message
             .try_into()
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
@@ -359,8 +359,8 @@ impl Downstream {
                 )
                 .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
 
-                let jd_message = match any_message {
-                    AnyMessage::JobDeclaration(msg) => msg,
+                let jd_message = match any_message.into_owned() {
+                    AnyMessageOwned::JobDeclaration(msg) => msg,
                     _ => {
                         error!("Expected JobDeclaration message but got different type");
                         return Err(error::JDSError::disconnect(

@@ -6,8 +6,8 @@ use integration_tests_sv2::{
 };
 use std::convert::TryInto;
 use stratum_apps::stratum_core::{
-    common_messages_sv2::{Protocol, SetupConnection, SetupConnectionSuccess, *},
-    parsers_sv2::{AnyMessage, CommonMessages},
+    common_messages_sv2::{Protocol, SetupConnectionOwned, *},
+    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned},
     template_distribution_sv2::*,
 };
 
@@ -20,14 +20,18 @@ async fn test_sniffer_interception() {
     let ignore_message =
         IgnoreMessage::new(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_TEMPLATE);
     let setup_connection_message =
-        AnyMessage::Common(CommonMessages::SetupConnection(SetupConnection {
+        AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(SetupConnectionOwned {
             protocol: Protocol::TemplateDistributionProtocol,
             min_version: 2,
             max_version: 2,
             flags: 0,
-            endpoint_host: "0.0.0.0".try_into().unwrap(),
+            endpoint_host: stratum_apps::stratum_core::binary_sv2::Str0255Owned::try_from(
+                "0.0.0.0",
+            )
+            .unwrap(),
             endpoint_port: 8081,
-            vendor: "Bitmain".try_into().unwrap(),
+            vendor: stratum_apps::stratum_core::binary_sv2::Str0255Owned::try_from("Bitmain")
+                .unwrap(),
             hardware_version: "901".try_into().unwrap(),
             firmware: "abcX".try_into().unwrap(),
             device_id: "89567".try_into().unwrap(),
@@ -37,8 +41,8 @@ async fn test_sniffer_interception() {
         MESSAGE_TYPE_SETUP_CONNECTION,
         setup_connection_message,
     );
-    let setup_connection_error_message = AnyMessage::Common(
-        CommonMessages::SetupConnectionSuccess(SetupConnectionSuccess {
+    let setup_connection_error_message = AnyMessageOwned::Common(
+        CommonMessagesOwned::SetupConnectionSuccess(SetupConnectionSuccessOwned {
             flags: 0,
             used_version: 0,
         }),
@@ -81,11 +85,11 @@ async fn test_sniffer_interception() {
         max_version,
         2,
         endpoint_host,
-        "0.0.0.0".to_string().into_bytes().try_into().unwrap(),
+        stratum_apps::stratum_core::binary_sv2::Str0255Owned::try_from("0.0.0.0").unwrap(),
         endpoint_port,
         8081,
         vendor,
-        "Bitmain".to_string().into_bytes().try_into().unwrap()
+        stratum_apps::stratum_core::binary_sv2::Str0255Owned::try_from("Bitmain").unwrap()
     );
     sniffer_b
         .wait_for_message_type(

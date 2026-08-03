@@ -38,7 +38,9 @@ use tracing::{debug, error};
 /// If `read_frame()` or `write_frame()` is canceled mid-way,
 /// internal state may be left in an inconsistent state, which can lead to
 /// protocol errors or dropped frames.
-pub struct NoiseTcpStream<Message: Serialize + Deserialize<'static> + GetSize + Send + 'static> {
+pub struct NoiseTcpStream<
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+> {
     reader: NoiseTcpReadHalf<Message>,
     writer: NoiseTcpWriteHalf<Message>,
 }
@@ -47,7 +49,9 @@ pub struct NoiseTcpStream<Message: Serialize + Deserialize<'static> + GetSize + 
 ///
 /// It buffers incoming encrypted bytes, attempts to decode full Noise frames,
 /// and exposes a method to retrieve structured messages of type `Message`.
-pub struct NoiseTcpReadHalf<Message: Serialize + Deserialize<'static> + GetSize + Send + 'static> {
+pub struct NoiseTcpReadHalf<
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+> {
     reader: OwnedReadHalf,
     decoder: StandardNoiseDecoder<Message>,
     state: State,
@@ -59,7 +63,9 @@ pub struct NoiseTcpReadHalf<Message: Serialize + Deserialize<'static> + GetSize 
 ///
 /// It accepts structured messages, encodes them via the Noise protocol,
 /// and writes the result to the socket.
-pub struct NoiseTcpWriteHalf<Message: Serialize + Deserialize<'static> + GetSize + Send + 'static> {
+pub struct NoiseTcpWriteHalf<
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+> {
     writer: OwnedWriteHalf,
     encoder: NoiseEncoder<Message>,
     state: State,
@@ -67,7 +73,7 @@ pub struct NoiseTcpWriteHalf<Message: Serialize + Deserialize<'static> + GetSize
 
 impl<Message> NoiseTcpStream<Message>
 where
-    Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
 {
     /// Constructs a new `NoiseTcpStream` over the given TCP stream,
     /// performing the Noise handshake in the given `role`.
@@ -181,7 +187,7 @@ where
 
 impl<Message> NoiseTcpWriteHalf<Message>
 where
-    Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
 {
     /// Encrypts and writes a full message frame to the socket.
     ///
@@ -227,7 +233,7 @@ where
 
 impl<Message> NoiseTcpReadHalf<Message>
 where
-    Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
 {
     /// Reads and decodes a complete frame from the socket.
     ///
@@ -317,7 +323,9 @@ where
     }
 }
 
-async fn send_message<Message: Serialize + Deserialize<'static> + GetSize + Send + 'static>(
+async fn send_message<
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+>(
     writer: &mut OwnedWriteHalf,
     msg: StandardEitherFrame<Message>,
     state: &mut State,
@@ -331,7 +339,9 @@ async fn send_message<Message: Serialize + Deserialize<'static> + GetSize + Send
     Ok(())
 }
 
-async fn receive_message<Message: Serialize + Deserialize<'static> + GetSize + Send + 'static>(
+async fn receive_message<
+    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+>(
     reader: &mut OwnedReadHalf,
     state: &mut State,
     decoder: &mut StandardNoiseDecoder<Message>,

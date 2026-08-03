@@ -1,3 +1,7 @@
+use stratum_apps::stratum_core::{
+    binary_sv2::Seq064KOwned, common_messages_sv2::SetupConnectionOwned,
+    extensions_sv2::RequestExtensionsOwned, parsers_sv2::AnyMessageOwned,
+};
 pub mod common_message_handler;
 
 use crate::{
@@ -12,11 +16,7 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
-        binary_sv2::Seq064K,
-        common_messages_sv2::{Protocol, SetupConnection},
-        extensions_sv2::RequestExtensions,
-        handlers_sv2::HandleCommonMessagesFromServerAsync,
-        parsers_sv2::AnyMessage,
+        common_messages_sv2::Protocol, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
     },
     task_manager::TaskManager,
     utils::{
@@ -370,21 +370,20 @@ impl Upstream {
 
         // Send RequestExtensions message if there are any required extensions
         if !self.required_extensions.is_empty() {
-            let require_extensions = RequestExtensions {
+            let require_extensions = RequestExtensionsOwned {
                 request_id: 1,
-                requested_extensions: Seq064K::new(self.required_extensions.clone())
+                requested_extensions: Seq064KOwned::new(self.required_extensions.clone())
                     .map_err(TproxyError::shutdown)?,
             };
 
             info!(
-                "Sending RequestExtensions message to upstream: {}",
+                "Sending RequestExtensions message to upstream: {:?}",
                 require_extensions
             );
 
-            let sv2_frame: Sv2Frame =
-                AnyMessage::Extensions(require_extensions.into_static().into())
-                    .try_into()
-                    .map_err(TproxyError::shutdown)?;
+            let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(require_extensions.into())
+                .try_into()
+                .map_err(TproxyError::shutdown)?;
 
             self.upstream_io
                 .upstream_sender
@@ -551,7 +550,7 @@ impl Upstream {
         max_version: u16,
         address: &SocketAddr,
         is_work_selection_enabled: bool,
-    ) -> Result<SetupConnection<'static>, TproxyErrorKind> {
+    ) -> Result<SetupConnectionOwned, TproxyErrorKind> {
         let endpoint_host = address.ip().to_string().try_into()?;
         let vendor = "SRI".try_into()?;
         let hardware_version = "Translator Proxy".try_into()?;
@@ -563,7 +562,7 @@ impl Upstream {
             0b100
         };
 
-        Ok(SetupConnection {
+        Ok(SetupConnectionOwned {
             protocol: Protocol::MiningProtocol,
             min_version,
             max_version,

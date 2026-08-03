@@ -365,8 +365,8 @@ impl From<SetDifficulty> for TproxyErrorKind {
     }
 }
 
-impl<'a> From<stratum_apps::stratum_core::sv1_api::error::Error<'a>> for TproxyErrorKind {
-    fn from(_: stratum_apps::stratum_core::sv1_api::error::Error<'a>) -> Self {
+impl From<stratum_apps::stratum_core::sv1_api::error::Error> for TproxyErrorKind {
+    fn from(_: stratum_apps::stratum_core::sv1_api::error::Error) -> Self {
         TproxyErrorKind::SV1Error
     }
 }

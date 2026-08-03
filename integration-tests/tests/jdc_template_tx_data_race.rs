@@ -11,12 +11,14 @@ use stratum_apps::{
     stratum_core::{
         bitcoin::{Amount, TxOut, consensus::serialize},
         common_messages_sv2::Protocol,
-        job_declaration_sv2::AllocateMiningJobTokenSuccess,
-        mining_sv2::{OpenExtendedMiningChannel, OpenExtendedMiningChannelSuccess},
-        parsers_sv2::{AnyMessage, JobDeclaration, Mining, TemplateDistribution},
+        job_declaration_sv2::AllocateMiningJobTokenSuccessOwned,
+        mining_sv2::{OpenExtendedMiningChannelOwned, OpenExtendedMiningChannelSuccessOwned},
+        parsers_sv2::{
+            AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned,
+        },
         template_distribution_sv2::{
-            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, NewTemplate, RequestTransactionDataSuccess,
-            SetNewPrevHash,
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, NewTemplateOwned,
+            RequestTransactionDataSuccessOwned, SetNewPrevHashOwned,
         },
     },
 };
@@ -101,7 +103,9 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
         match jds_sniffer.next_message_from_downstream() {
             Some((
                 _,
-                AnyMessage::JobDeclaration(JobDeclaration::AllocateMiningJobToken(message)),
+                AnyMessageOwned::JobDeclaration(JobDeclarationOwned::AllocateMiningJobToken(
+                    message,
+                )),
             )) => break message,
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }
@@ -111,7 +115,9 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
         match jds_sniffer.next_message_from_downstream() {
             Some((
                 _,
-                AnyMessage::JobDeclaration(JobDeclaration::AllocateMiningJobToken(message)),
+                AnyMessageOwned::JobDeclaration(JobDeclarationOwned::AllocateMiningJobToken(
+                    message,
+                )),
             )) => break message,
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }
@@ -133,33 +139,37 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     // Return both allocated tokens. After this step, JDC has every JDS-side prerequisite needed
     // to declare a job; only the upstream mining channel is intentionally still missing.
     mock_jds_sender
-        .send(AnyMessage::JobDeclaration(
-            JobDeclaration::AllocateMiningJobTokenSuccess(AllocateMiningJobTokenSuccess {
-                request_id: first_token_request.request_id,
-                mining_job_token: 0_u64
-                    .to_le_bytes()
-                    .try_into()
-                    .expect("u64 token must fit into B0255"),
-                coinbase_outputs: coinbase_outputs
-                    .clone()
-                    .try_into()
-                    .expect("serialized coinbase outputs must fit into B064K"),
-            }),
+        .send(AnyMessageOwned::JobDeclaration(
+            JobDeclarationOwned::AllocateMiningJobTokenSuccess(
+                AllocateMiningJobTokenSuccessOwned {
+                    request_id: first_token_request.request_id,
+                    mining_job_token: 0_u64
+                        .to_le_bytes()
+                        .try_into()
+                        .expect("u64 token must fit into B0255"),
+                    coinbase_outputs: coinbase_outputs
+                        .clone()
+                        .try_into()
+                        .expect("serialized coinbase outputs must fit into B064K"),
+                },
+            ),
         ))
         .await
         .expect("mock JDS should send the first token");
     mock_jds_sender
-        .send(AnyMessage::JobDeclaration(
-            JobDeclaration::AllocateMiningJobTokenSuccess(AllocateMiningJobTokenSuccess {
-                request_id: second_token_request.request_id,
-                mining_job_token: 1_u64
-                    .to_le_bytes()
-                    .try_into()
-                    .expect("u64 token must fit into B0255"),
-                coinbase_outputs: coinbase_outputs
-                    .try_into()
-                    .expect("serialized coinbase outputs must fit into B064K"),
-            }),
+        .send(AnyMessageOwned::JobDeclaration(
+            JobDeclarationOwned::AllocateMiningJobTokenSuccess(
+                AllocateMiningJobTokenSuccessOwned {
+                    request_id: second_token_request.request_id,
+                    mining_job_token: 1_u64
+                        .to_le_bytes()
+                        .try_into()
+                        .expect("u64 token must fit into B0255"),
+                    coinbase_outputs: coinbase_outputs
+                        .try_into()
+                        .expect("serialized coinbase outputs must fit into B064K"),
+                },
+            ),
         ))
         .await
         .expect("mock JDS should send the second token");
@@ -170,8 +180,8 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     // Keeping the transaction list empty makes the scenario focused on JDC's template-state
     // lifecycle rather than on transaction validation.
     mock_tp_sender
-        .send(AnyMessage::TemplateDistribution(
-            TemplateDistribution::NewTemplate(NewTemplate {
+        .send(AnyMessageOwned::TemplateDistribution(
+            TemplateDistributionOwned::NewTemplate(NewTemplateOwned {
                 template_id: TEMPLATE_ID,
                 future_template: true,
                 version: 536_870_912,
@@ -196,8 +206,8 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
         .await
         .expect("mock TP should send NewTemplate");
     mock_tp_sender
-        .send(AnyMessage::TemplateDistribution(
-            TemplateDistribution::SetNewPrevHash(SetNewPrevHash {
+        .send(AnyMessageOwned::TemplateDistribution(
+            TemplateDistributionOwned::SetNewPrevHash(SetNewPrevHashOwned {
                 template_id: TEMPLATE_ID,
                 prev_hash: [0x11; 32].into(),
                 header_timestamp: 1_700_000_000,
@@ -233,15 +243,15 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     .start()
     .await;
     downstream_sender
-        .send(AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-            OpenExtendedMiningChannel {
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
                 user_identity: "tx-data-race".try_into().unwrap(),
                 nominal_hash_rate: 1_000.0,
                 max_target: [0xff; 32].into(),
                 min_extranonce_size: 0,
-            },
-        )))
+            }),
+        ))
         .await
         .expect("mock downstream should open an extended channel");
 
@@ -250,15 +260,15 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     // factory needed to declare the previously received template.
     let open_channel_request = loop {
         match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessage::Mining(Mining::OpenExtendedMiningChannel(message)))) => {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(message)))) => {
                 break message;
             }
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }
     };
     mock_pool_sender
-        .send(AnyMessage::Mining(
-            Mining::OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccess {
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_channel_request.request_id,
                 channel_id: 9,
                 target: [0xff; 32].into(),
@@ -278,9 +288,9 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
         match tp_sniffer.next_message_from_downstream() {
             Some((
                 _,
-                AnyMessage::TemplateDistribution(TemplateDistribution::RequestTransactionData(
-                    message,
-                )),
+                AnyMessageOwned::TemplateDistribution(
+                    TemplateDistributionOwned::RequestTransactionData(message),
+                ),
             )) => break message,
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }
@@ -290,16 +300,18 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     // The response to this request must be enough to declare the job: every prerequisite
     // (upstream channel, job factory, token, prev hash) is now in place.
     mock_tp_sender
-        .send(AnyMessage::TemplateDistribution(
-            TemplateDistribution::RequestTransactionDataSuccess(RequestTransactionDataSuccess {
-                template_id: TEMPLATE_ID,
-                excess_data: vec![]
-                    .try_into()
-                    .expect("empty excess data must fit into B064K"),
-                transaction_list: vec![]
-                    .try_into()
-                    .expect("empty transaction list must be valid"),
-            }),
+        .send(AnyMessageOwned::TemplateDistribution(
+            TemplateDistributionOwned::RequestTransactionDataSuccess(
+                RequestTransactionDataSuccessOwned {
+                    template_id: TEMPLATE_ID,
+                    excess_data: vec![]
+                        .try_into()
+                        .expect("empty excess data must fit into B064K"),
+                    transaction_list: vec![]
+                        .try_into()
+                        .expect("empty transaction list must be valid"),
+                },
+            ),
         ))
         .await
         .expect("mock TP should send RequestTransactionDataSuccess");
@@ -309,7 +321,10 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
     // declaration.
     let declare_mining_job = loop {
         match jds_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessage::JobDeclaration(JobDeclaration::DeclareMiningJob(message)))) => {
+            Some((
+                _,
+                AnyMessageOwned::JobDeclaration(JobDeclarationOwned::DeclareMiningJob(message)),
+            )) => {
                 break message;
             }
             _ => tokio::time::sleep(Duration::from_secs(1)).await,

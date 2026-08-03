@@ -5,6 +5,10 @@ use std::{
         atomic::{AtomicU32, AtomicUsize},
     },
 };
+use stratum_apps::stratum_core::{
+    mining_sv2::SetTargetOwned,
+    parsers_sv2::{MiningOwned, TemplateDistributionOwned},
+};
 
 use async_channel::{Receiver, Sender, unbounded};
 use core::sync::atomic::Ordering;
@@ -23,11 +27,11 @@ use stratum_apps::{
             server::{extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel},
         },
         handlers_sv2::{
-            HandleMiningMessagesFromClientAsync, HandleTemplateDistributionMessagesFromServerAsync,
+            HandleMiningMessagesFromClientOwnedAsync,
+            HandleTemplateDistributionMessagesFromServerOwnedAsync,
         },
-        mining_sv2::SetTarget,
-        parsers_sv2::{Mining, TemplateDistribution, Tlv},
-        template_distribution_sv2::{NewTemplate, SetNewPrevHash},
+        parsers_sv2::Tlv,
+        template_distribution_sv2::{NewTemplateOwned, SetNewPrevHashOwned},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
@@ -64,10 +68,10 @@ pub const FULL_EXTRANONCE_SIZE: u8 = POOL_ALLOCATION_BYTES + CLIENT_SEARCH_SPACE
 
 #[derive(Clone)]
 pub struct ChannelManagerIo {
-    tp_sender: Sender<TemplateDistribution<'static>>,
-    tp_receiver: Receiver<TemplateDistribution<'static>>,
+    tp_sender: Sender<TemplateDistributionOwned>,
+    tp_receiver: Receiver<TemplateDistributionOwned>,
     downstream_sender: SharedMap<DownstreamId, Sender<DownstreamMessage>>,
-    downstream_receiver: Receiver<(usize, Mining<'static>, Option<Vec<Tlv>>)>,
+    downstream_receiver: Receiver<(usize, MiningOwned, Option<Vec<Tlv>>)>,
 }
 
 impl ChannelManagerIo {
@@ -100,9 +104,9 @@ pub struct ChannelManager {
     // Coinbase outputs.
     pub(crate) coinbase_outputs: Vec<u8>,
     // Last new prevhash.
-    pub(crate) last_new_prev_hash: SharedLock<Option<SetNewPrevHash<'static>>>,
+    pub(crate) last_new_prev_hash: SharedLock<Option<SetNewPrevHashOwned>>,
     // Last future template.
-    pub(crate) last_future_template: SharedLock<Option<NewTemplate<'static>>>,
+    pub(crate) last_future_template: SharedLock<Option<NewTemplateOwned>>,
     channel_manager_io: ChannelManagerIo,
     pool_tag_string: String,
     share_batch_size: usize,
@@ -157,9 +161,9 @@ impl ChannelManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         config: PoolConfig,
-        tp_sender: Sender<TemplateDistribution<'static>>,
-        tp_receiver: Receiver<TemplateDistribution<'static>>,
-        downstream_receiver: Receiver<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
+        tp_sender: Sender<TemplateDistributionOwned>,
+        tp_receiver: Receiver<TemplateDistributionOwned>,
+        downstream_receiver: Receiver<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
         coinbase_outputs: Vec<u8>,
         job_declarator: Option<JobDeclarator>,
     ) -> PoolResult<Self, error::ChannelManager> {
@@ -208,7 +212,7 @@ impl ChannelManager {
     fn bootstrap_group_channel(
         &self,
         channel_id: ChannelId,
-    ) -> PoolResult<Option<GroupChannel<'static>>, error::ChannelManager> {
+    ) -> PoolResult<Option<GroupChannel>, error::ChannelManager> {
         let last_future_template = self
             .last_future_template
             .get()
@@ -261,7 +265,7 @@ impl ChannelManager {
         listening_address: SocketAddr,
         task_manager: Arc<TaskManager>,
         cancellation_token: CancellationToken,
-        channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
+        channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
     ) -> PoolResult<(), error::ChannelManager> {
         // todo: let start_downstream_server accept Arc, instead of clone.
         let this = Arc::new(self);
@@ -511,7 +515,7 @@ impl ChannelManager {
     fn run_vardiff_on_extended_channel(
         downstream_id: DownstreamId,
         channel_id: ChannelId,
-        channel_state: &mut ExtendedChannel<'static>,
+        channel_state: &mut ExtendedChannel,
         vardiff_state: &mut VardiffState,
         updates: &mut Vec<RouteMessageTo>,
     ) {
@@ -540,7 +544,7 @@ impl ChannelManager {
                 updates.push(
                     (
                         downstream_id,
-                        Mining::SetTarget(SetTarget {
+                        MiningOwned::SetTarget(SetTargetOwned {
                             channel_id,
                             maximum_target: updated_target.to_le_bytes().into(),
                         }),
@@ -559,7 +563,7 @@ impl ChannelManager {
     fn run_vardiff_on_standard_channel(
         downstream_id: DownstreamId,
         channel_id: ChannelId,
-        channel: &mut StandardChannel<'static>,
+        channel: &mut StandardChannel,
         vardiff_state: &mut VardiffState,
         updates: &mut Vec<RouteMessageTo>,
     ) {
@@ -585,7 +589,7 @@ impl ChannelManager {
                 updates.push(
                     (
                         downstream_id,
-                        Mining::SetTarget(SetTarget {
+                        MiningOwned::SetTarget(SetTargetOwned {
                             channel_id,
                             maximum_target: updated_target.to_le_bytes().into(),
                         }),
@@ -696,7 +700,7 @@ impl ChannelManager {
 
         self.channel_manager_io
             .tp_sender
-            .send(TemplateDistribution::CoinbaseOutputConstraints(msg))
+            .send(TemplateDistributionOwned::CoinbaseOutputConstraints(msg))
             .await
             .map_err(|e| {
                 error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
@@ -740,26 +744,26 @@ impl ChannelManager {
 }
 
 #[derive(Debug, Clone)]
-pub enum RouteMessageTo<'a> {
+pub enum RouteMessageTo {
     /// Route to the template provider subsystem.
-    TemplateProvider(TemplateDistribution<'a>),
+    TemplateProvider(TemplateDistributionOwned),
     /// Route to a specific downstream client by ID, along with its mining message.
-    Downstream((DownstreamId, Mining<'a>)),
+    Downstream((DownstreamId, MiningOwned)),
 }
 
-impl<'a> From<TemplateDistribution<'a>> for RouteMessageTo<'a> {
-    fn from(value: TemplateDistribution<'a>) -> Self {
+impl From<TemplateDistributionOwned> for RouteMessageTo {
+    fn from(value: TemplateDistributionOwned) -> Self {
         Self::TemplateProvider(value)
     }
 }
 
-impl<'a> From<(DownstreamId, Mining<'a>)> for RouteMessageTo<'a> {
-    fn from(value: (DownstreamId, Mining<'a>)) -> Self {
+impl From<(DownstreamId, MiningOwned)> for RouteMessageTo {
+    fn from(value: (DownstreamId, MiningOwned)) -> Self {
         Self::Downstream(value)
     }
 }
 
-impl RouteMessageTo<'_> {
+impl RouteMessageTo {
     pub async fn forward(self, channel_manager_io: &ChannelManagerIo) -> Result<(), PoolErrorKind> {
         match self {
             RouteMessageTo::Downstream((downstream_id, message)) => {
@@ -768,16 +772,13 @@ impl RouteMessageTo<'_> {
                     .get_cloned(&downstream_id);
 
                 if let Some(sender) = sender {
-                    sender.send((message.into_static(), None)).await?;
+                    sender.send((message, None)).await?;
                 } else {
                     debug!("Dropping message for downstream {downstream_id}: no longer connected");
                 }
             }
             RouteMessageTo::TemplateProvider(message) => {
-                channel_manager_io
-                    .tp_sender
-                    .send(message.into_static())
-                    .await?;
+                channel_manager_io.tp_sender.send(message).await?;
             }
         }
         Ok(())

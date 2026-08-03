@@ -23,13 +23,16 @@ use stratum_apps::{
         },
         codec_sv2::{HandshakeRole, StandardEitherFrame, StandardSv2Frame},
         common_messages_sv2::{
-            ChannelEndpointChanged, Protocol, Reconnect, SetupConnection, SetupConnectionError,
-            SetupConnectionSuccess,
+            ChannelEndpointChangedOwned, Protocol, ReconnectOwned, SetupConnectionErrorOwned,
+            SetupConnectionOwned, SetupConnectionSuccessOwned,
         },
         mining_sv2,
         mining_sv2::*,
         noise_sv2::Initiator,
-        parsers_sv2::{CommonMessages, Mining, MiningDeviceMessages, ParserError},
+        parsers_sv2::{
+            CommonMessages, CommonMessagesOwned, Mining, MiningDeviceMessagesOwned, MiningOwned,
+            ParserError,
+        },
     },
     sync::SharedLock,
 };
@@ -148,7 +151,7 @@ pub async fn connect(
     .await
 }
 
-pub type Message = MiningDeviceMessages<'static>;
+pub type Message = MiningDeviceMessagesOwned;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
 
@@ -177,7 +180,7 @@ impl SetupConnectionHandler {
     fn get_setup_connection_message(
         address: SocketAddr,
         device_id: Option<String>,
-    ) -> SetupConnection<'static> {
+    ) -> SetupConnectionOwned {
         let endpoint_host = address.ip().to_string().try_into().unwrap();
         let vendor = "".try_into().unwrap();
         let hardware_version = "".try_into().unwrap();
@@ -187,7 +190,7 @@ impl SetupConnectionHandler {
             "Creating SetupConnection message with device id: {:?}",
             device_id
         );
-        SetupConnection {
+        SetupConnectionOwned {
             protocol: Protocol::MiningProtocol,
             min_version: 2,
             max_version: 2,
@@ -209,7 +212,7 @@ impl SetupConnectionHandler {
     ) {
         let setup_connection = Self::get_setup_connection_message(address, device_id);
 
-        let sv2_frame: StdFrame = MiningDeviceMessages::Common(setup_connection.into())
+        let sv2_frame: StdFrame = MiningDeviceMessagesOwned::Common(setup_connection.into())
             .try_into()
             .unwrap();
         let sv2_frame = sv2_frame.into();
@@ -227,49 +230,50 @@ impl SetupConnectionHandler {
         message_type: u8,
         payload: &mut [u8],
     ) -> Result<(), ParserError> {
-        let message: CommonMessages<'_> = (message_type, payload).try_into()?;
+        let message: CommonMessagesOwned =
+            CommonMessages::try_from((message_type, payload))?.into_owned();
         self_
             .with(|handler| match message {
-                CommonMessages::SetupConnectionSuccess(m) => {
+                CommonMessagesOwned::SetupConnectionSuccess(m) => {
                     handler.handle_setup_connection_success(m);
                     Ok(())
                 }
-                CommonMessages::SetupConnectionError(m) => {
+                CommonMessagesOwned::SetupConnectionError(m) => {
                     handler.handle_setup_connection_error(m);
                     Ok(())
                 }
-                CommonMessages::ChannelEndpointChanged(m) => {
+                CommonMessagesOwned::ChannelEndpointChanged(m) => {
                     handler.handle_channel_endpoint_changed(m);
                     Ok(())
                 }
-                CommonMessages::Reconnect(m) => {
+                CommonMessagesOwned::Reconnect(m) => {
                     handler.handle_reconnect(m);
                     Ok(())
                 }
-                CommonMessages::SetupConnection(_) => {
+                CommonMessagesOwned::SetupConnection(_) => {
                     Err(ParserError::UnexpectedMessage(message_type))
                 }
             })
             .unwrap()
     }
 
-    fn handle_setup_connection_success(&mut self, m: SetupConnectionSuccess) {
+    fn handle_setup_connection_success(&mut self, m: SetupConnectionSuccessOwned) {
         info!(
             "Received `SetupConnectionSuccess`: version={}, flags={:b}",
             m.used_version, m.flags
         );
     }
 
-    fn handle_setup_connection_error(&mut self, _: SetupConnectionError) {
+    fn handle_setup_connection_error(&mut self, _: SetupConnectionErrorOwned) {
         error!("Setup connection error");
         todo!()
     }
 
-    fn handle_channel_endpoint_changed(&mut self, _: ChannelEndpointChanged) {
+    fn handle_channel_endpoint_changed(&mut self, _: ChannelEndpointChangedOwned) {
         todo!()
     }
 
-    fn handle_reconnect(&mut self, _m: Reconnect) {
+    fn handle_reconnect(&mut self, _m: ReconnectOwned) {
         todo!()
     }
 }
@@ -289,8 +293,8 @@ pub struct Device {
     channel_opened: bool,
     channel_id: Option<u32>,
     miner: SharedLock<Miner>,
-    jobs: Vec<NewMiningJob<'static>>,
-    prev_hash: Option<SetNewPrevHash<'static>>,
+    jobs: Vec<NewMiningJobOwned>,
+    prev_hash: Option<SetNewPrevHashOwned>,
     sequence_numbers: Id,
     notify_changes_to_mining_thread: NewWorkNotifier,
 }
@@ -299,7 +303,7 @@ fn open_channel(
     device_id: Option<String>,
     nominal_hashrate_multiplier: Option<f32>,
     handicap: u32,
-) -> OpenStandardMiningChannel<'static> {
+) -> OpenStandardMiningChannelOwned {
     let user_identity = device_id.unwrap_or_default().try_into().unwrap();
     let id: u32 = 10;
     info!("Measuring CPU hashrate");
@@ -317,11 +321,11 @@ fn open_channel(
 
     info!("MINING DEVICE: send open channel with request id {}", id);
 
-    OpenStandardMiningChannel {
+    OpenStandardMiningChannelOwned {
         request_id: id,
         user_identity,
         nominal_hash_rate,
-        max_target: vec![0xFF_u8; 32].try_into().unwrap(),
+        max_target: [0xFF_u8; 32].into(),
     }
 }
 
@@ -363,9 +367,10 @@ impl Device {
                 sender: notify_changes_to_mining_thread,
             },
         };
-        let open_channel = MiningDeviceMessages::Mining(Mining::OpenStandardMiningChannel(
-            open_channel(user_id, nominal_hashrate_multiplier, handicap),
-        ));
+        let open_channel =
+            MiningDeviceMessagesOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+                open_channel(user_id, nominal_hashrate_multiplier, handicap),
+            ));
         let frame: StdFrame = open_channel.try_into().unwrap();
         self_.sender.send(frame.into()).await.unwrap();
         let self_mutex = SharedLock::new(self_);
@@ -415,15 +420,16 @@ impl Device {
         version: u32,
         ntime: u32,
     ) {
-        let share =
-            MiningDeviceMessages::Mining(Mining::SubmitSharesStandard(SubmitSharesStandard {
+        let share = MiningDeviceMessagesOwned::Mining(MiningOwned::SubmitSharesStandard(
+            SubmitSharesStandardOwned {
                 channel_id: self_mutex.with(|s| s.channel_id.unwrap()).unwrap(),
                 sequence_number: self_mutex.with(|s| s.sequence_numbers.next()).unwrap(),
                 job_id,
                 nonce,
                 ntime,
                 version,
-            }));
+            },
+        ));
         let frame: StdFrame = share.try_into().unwrap();
         let sender = self_mutex.with(|s| s.sender.clone()).unwrap();
         sender.send(frame.into()).await.unwrap();
@@ -434,46 +440,46 @@ impl Device {
         message_type: u8,
         payload: &mut [u8],
     ) -> Result<(), ParserError> {
-        let message: Mining<'_> = (message_type, payload).try_into()?;
+        let message: MiningOwned = Mining::try_from((message_type, payload))?.into_owned();
         self_
             .with(|device| match message {
-                Mining::OpenStandardMiningChannelSuccess(m) => {
+                MiningOwned::OpenStandardMiningChannelSuccess(m) => {
                     device.handle_open_standard_mining_channel_success(m);
                     Ok(())
                 }
-                Mining::OpenMiningChannelError(m) => {
+                MiningOwned::OpenMiningChannelError(m) => {
                     device.handle_open_mining_channel_error(m);
                     Ok(())
                 }
-                Mining::UpdateChannelError(m) => {
+                MiningOwned::UpdateChannelError(m) => {
                     device.handle_update_channel_error(m);
                     Ok(())
                 }
-                Mining::CloseChannel(m) => {
+                MiningOwned::CloseChannel(m) => {
                     device.handle_close_channel(m);
                     Ok(())
                 }
-                Mining::SetExtranoncePrefix(m) => {
+                MiningOwned::SetExtranoncePrefix(m) => {
                     device.handle_set_extranonce_prefix(m);
                     Ok(())
                 }
-                Mining::SubmitSharesSuccess(m) => {
+                MiningOwned::SubmitSharesSuccess(m) => {
                     device.handle_submit_shares_success(m);
                     Ok(())
                 }
-                Mining::SubmitSharesError(m) => {
+                MiningOwned::SubmitSharesError(m) => {
                     device.handle_submit_shares_error(m);
                     Ok(())
                 }
-                Mining::NewMiningJob(m) => {
+                MiningOwned::NewMiningJob(m) => {
                     device.handle_new_mining_job(m);
                     Ok(())
                 }
-                Mining::SetNewPrevHash(m) => {
+                MiningOwned::SetNewPrevHash(m) => {
                     device.handle_set_new_prev_hash(m);
                     Ok(())
                 }
-                Mining::SetTarget(m) => {
+                MiningOwned::SetTarget(m) => {
                     device.handle_set_target(m);
                     Ok(())
                 }
@@ -482,10 +488,13 @@ impl Device {
             .unwrap()
     }
 
-    fn handle_open_standard_mining_channel_success(&mut self, m: OpenStandardMiningChannelSuccess) {
+    fn handle_open_standard_mining_channel_success(
+        &mut self,
+        m: OpenStandardMiningChannelSuccessOwned,
+    ) {
         self.channel_opened = true;
         self.channel_id = Some(m.channel_id);
-        let req_id = m.get_request_id_as_u32();
+        let req_id = m.request_id;
         info!(
             "MINING DEVICE: channel opened with: group id {}, channel id {}, request id {}",
             m.group_channel_id, m.channel_id, req_id
@@ -496,85 +505,85 @@ impl Device {
         self.notify_changes_to_mining_thread.should_send = true;
     }
 
-    fn handle_open_mining_channel_error(&mut self, _: OpenMiningChannelError) {
+    fn handle_open_mining_channel_error(&mut self, _: OpenMiningChannelErrorOwned) {
         todo!()
     }
 
-    fn handle_update_channel_error(&mut self, _: UpdateChannelError) {
+    fn handle_update_channel_error(&mut self, _: UpdateChannelErrorOwned) {
         todo!()
     }
 
-    fn handle_close_channel(&mut self, _: CloseChannel) {
+    fn handle_close_channel(&mut self, _: CloseChannelOwned) {
         todo!()
     }
 
-    fn handle_set_extranonce_prefix(&mut self, _: SetExtranoncePrefix) {
+    fn handle_set_extranonce_prefix(&mut self, _: SetExtranoncePrefixOwned) {
         todo!()
     }
 
-    fn handle_submit_shares_success(&mut self, m: SubmitSharesSuccess) {
+    fn handle_submit_shares_success(&mut self, m: SubmitSharesSuccessOwned) {
         info!("Received SubmitSharesSuccess");
         debug!("SubmitSharesSuccess: {}", m);
     }
 
-    fn handle_submit_shares_error(&mut self, m: SubmitSharesError) {
+    fn handle_submit_shares_error(&mut self, m: SubmitSharesErrorOwned) {
         error!(
             "Received SubmitSharesError with error code {}",
             std::str::from_utf8(m.error_code.as_ref()).unwrap_or("unknown error code")
         );
     }
 
-    fn handle_new_mining_job(&mut self, m: NewMiningJob) {
+    fn handle_new_mining_job(&mut self, m: NewMiningJobOwned) {
         info!(
             "Received new mining job for channel id: {} with job id: {} is future: {}",
             m.channel_id,
             m.job_id,
             m.is_future()
         );
-        debug!("NewMiningJob: {}", m);
+        debug!("NewMiningJob: {:?}", m);
         match (m.is_future(), self.prev_hash.as_ref()) {
             (false, Some(p_h)) => {
                 self.miner.with(|miner| miner.new_header(p_h, &m)).unwrap();
-                self.jobs = vec![m.as_static()];
+                self.jobs = vec![m];
                 self.notify_changes_to_mining_thread.should_send = true;
             }
-            (true, _) => self.jobs.push(m.as_static()),
+            (true, _) => self.jobs.push(m),
             (false, None) => {
                 panic!()
             }
         }
     }
 
-    fn handle_set_new_prev_hash(&mut self, m: SetNewPrevHash) {
+    fn handle_set_new_prev_hash(&mut self, m: SetNewPrevHashOwned) {
         info!(
             "Received SetNewPrevHash channel id: {}, job id: {}",
             m.channel_id, m.job_id
         );
-        debug!("SetNewPrevHash: {}", m);
-        let jobs: Vec<&NewMiningJob<'static>> = self
+        debug!("SetNewPrevHash: {:?}", m);
+        let jobs: Vec<&NewMiningJobOwned> = self
             .jobs
             .iter()
             .filter(|j| j.job_id == m.job_id && j.is_future())
             .collect();
         match jobs.len() {
             0 => {
-                self.prev_hash = Some(m.as_static());
+                self.prev_hash = Some(m);
             }
             1 => {
                 self.miner
                     .with(|miner| miner.new_header(&m, jobs[0]))
                     .unwrap();
                 self.jobs = vec![jobs[0].clone()];
-                self.prev_hash = Some(m.as_static());
+                self.prev_hash = Some(m);
                 self.notify_changes_to_mining_thread.should_send = true;
             }
             _ => panic!(),
         }
     }
 
-    fn handle_set_target(&mut self, m: SetTarget) {
+    fn handle_set_target(&mut self, m: SetTargetOwned) {
         info!("Received SetTarget for channel id: {}", m.channel_id);
-        debug!("SetTarget: {}", m);
+        debug!("SetTarget: {:?}", m);
         self.miner
             .with(|miner| miner.new_target(m.maximum_target.to_owned_bytes()))
             .unwrap();
@@ -620,7 +629,7 @@ impl Miner {
         self.target = Some(U256::from_little_endian(target.as_slice()));
     }
 
-    fn new_header(&mut self, set_new_prev_hash: &SetNewPrevHash, new_job: &NewMiningJob) {
+    fn new_header(&mut self, set_new_prev_hash: &SetNewPrevHashOwned, new_job: &NewMiningJobOwned) {
         self.job_id = Some(new_job.job_id);
         self.version = Some(new_job.version);
         let prev_hash = set_new_prev_hash.prev_hash.to_array();

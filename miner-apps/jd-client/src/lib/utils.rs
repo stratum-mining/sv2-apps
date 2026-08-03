@@ -19,21 +19,23 @@ use std::{
         atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
+use stratum_apps::stratum_core::{
+    binary_sv2::Str0255Owned,
+    job_declaration_sv2::PushSolutionOwned,
+    mining_sv2::{
+        CloseChannelOwned, OpenExtendedMiningChannelOwned, OpenStandardMiningChannelOwned,
+    },
+};
 
 use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     stratum_core::{
-        binary_sv2::Str0255,
         bitcoin::hashes::sha256d,
-        channels_sv2::{client, client::extended::ExtendedChannel},
-        common_messages_sv2::{Protocol, SetupConnection},
-        job_declaration_sv2::PushSolution,
-        mining_sv2::{
-            CloseChannel, OpenExtendedMiningChannel, OpenStandardMiningChannel,
-            SubmitSharesExtended,
-        },
-        parsers_sv2::{JobDeclaration, Mining, Tlv},
-        template_distribution_sv2::SetNewPrevHash as SetNewPrevHashTdp,
+        channels_sv2::client::{self, extended::ExtendedChannel},
+        common_messages_sv2::{Protocol, SetupConnectionOwned},
+        mining_sv2::SubmitSharesExtendedOwned,
+        parsers_sv2::{JobDeclarationOwned, MiningOwned, Tlv},
+        template_distribution_sv2::SetNewPrevHashOwned as SetNewPrevHashTdp,
     },
     utils::types::{ChannelId, DownstreamId, Hashrate, JobId},
 };
@@ -44,7 +46,7 @@ use crate::{
     jd_mode::JDMode,
 };
 
-pub(crate) type DownstreamMessage = (Mining<'static>, Option<Vec<Tlv>>);
+pub(crate) type DownstreamMessage = (MiningOwned, Option<Vec<Tlv>>);
 
 /// Represents a single upstream entry (Pool + JDS pair) with raw address strings
 /// that are resolved via DNS at connection time.
@@ -66,14 +68,15 @@ pub fn get_setup_connection_message(
     min_version: u16,
     max_version: u16,
     address: &SocketAddr,
-) -> Result<SetupConnection<'static>, JDCErrorKind> {
-    let endpoint_host = address.ip().to_string().try_into()?;
+) -> Result<SetupConnectionOwned, JDCErrorKind> {
+    let address_str = address.ip().to_string();
+    let endpoint_host = address_str.as_str().try_into()?;
     let vendor = "".try_into()?;
     let hardware_version = "".try_into()?;
     let firmware = "".try_into()?;
     let device_id = "".try_into()?;
     let flags = 0b0000_0000_0000_0000_0000_0000_0000_0110;
-    Ok(SetupConnection {
+    Ok(SetupConnectionOwned {
         protocol: Protocol::MiningProtocol,
         min_version,
         max_version,
@@ -91,13 +94,14 @@ pub fn get_setup_connection_message(
 pub fn get_setup_connection_message_jds(
     proxy_address: &SocketAddr,
     mode: &JDMode,
-) -> SetupConnection<'static> {
-    let endpoint_host = proxy_address.ip().to_string().try_into().unwrap();
+) -> SetupConnectionOwned {
+    let address_str = proxy_address.ip().to_string();
+    let endpoint_host = address_str.as_str().try_into().unwrap();
     let vendor = "".try_into().unwrap();
     let hardware_version = "".try_into().unwrap();
     let firmware = "".try_into().unwrap();
     let device_id = "".try_into().unwrap();
-    let mut setup_connection = SetupConnection {
+    let mut setup_connection = SetupConnectionOwned {
         protocol: Protocol::JobDeclarationProtocol,
         min_version: 2,
         max_version: 2,
@@ -118,13 +122,14 @@ pub fn get_setup_connection_message_jds(
 }
 
 /// Constructs a `SetupConnection` message for the Template Provider (TP).
-pub fn get_setup_connection_message_tp(address: SocketAddr) -> SetupConnection<'static> {
-    let endpoint_host = address.ip().to_string().try_into().unwrap();
+pub fn get_setup_connection_message_tp(address: SocketAddr) -> SetupConnectionOwned {
+    let address_str = address.ip().to_string();
+    let endpoint_host = address_str.as_str().try_into().unwrap();
     let vendor = "".try_into().unwrap();
     let hardware_version = "".try_into().unwrap();
     let firmware = "".try_into().unwrap();
     let device_id = "".try_into().unwrap();
-    SetupConnection {
+    SetupConnectionOwned {
         protocol: Protocol::TemplateDistributionProtocol,
         min_version: 2,
         max_version: 2,
@@ -215,17 +220,17 @@ pub enum PendingChannelRequest {
     /// A request to open an extended mining channel.
     ExtendedChannel {
         downstream_id: DownstreamId,
-        message: OpenExtendedMiningChannel<'static>,
+        message: OpenExtendedMiningChannelOwned,
     },
     /// A request to open a standard mining channel.
     StandardChannel {
         downstream_id: DownstreamId,
-        message: OpenStandardMiningChannel<'static>,
+        message: OpenStandardMiningChannelOwned,
     },
 }
 
-impl From<(DownstreamId, OpenExtendedMiningChannel<'static>)> for PendingChannelRequest {
-    fn from(value: (DownstreamId, OpenExtendedMiningChannel<'static>)) -> Self {
+impl From<(DownstreamId, OpenExtendedMiningChannelOwned)> for PendingChannelRequest {
+    fn from(value: (DownstreamId, OpenExtendedMiningChannelOwned)) -> Self {
         PendingChannelRequest::ExtendedChannel {
             downstream_id: value.0,
             message: value.1,
@@ -233,8 +238,8 @@ impl From<(DownstreamId, OpenExtendedMiningChannel<'static>)> for PendingChannel
     }
 }
 
-impl From<(DownstreamId, OpenStandardMiningChannel<'static>)> for PendingChannelRequest {
-    fn from(value: (DownstreamId, OpenStandardMiningChannel<'static>)) -> Self {
+impl From<(DownstreamId, OpenStandardMiningChannelOwned)> for PendingChannelRequest {
+    fn from(value: (DownstreamId, OpenStandardMiningChannelOwned)) -> Self {
         PendingChannelRequest::StandardChannel {
             downstream_id: value.0,
             message: value.1,
@@ -256,16 +261,16 @@ impl PendingChannelRequest {
         }
     }
 
-    pub fn message(self) -> Mining<'static> {
+    pub fn message(self) -> MiningOwned {
         match self {
             PendingChannelRequest::ExtendedChannel {
                 downstream_id: _,
                 message: open_channel_message,
-            } => Mining::OpenExtendedMiningChannel(open_channel_message),
+            } => MiningOwned::OpenExtendedMiningChannel(open_channel_message),
             PendingChannelRequest::StandardChannel {
                 downstream_id: _,
                 message: open_channel_message,
-            } => Mining::OpenStandardMiningChannel(open_channel_message),
+            } => MiningOwned::OpenStandardMiningChannel(open_channel_message),
         }
     }
 
@@ -287,10 +292,10 @@ impl PendingChannelRequest {
 ///
 /// The `msg` is converted into a [`Str0255`] reason code.  
 /// If conversion fails, this function will panic.
-pub(crate) fn create_close_channel_msg(channel_id: ChannelId, msg: &str) -> CloseChannel<'_> {
-    CloseChannel {
+pub(crate) fn create_close_channel_msg(channel_id: ChannelId, msg: &str) -> CloseChannelOwned {
+    CloseChannelOwned {
         channel_id,
-        reason_code: Str0255::try_from(msg.to_string()).expect("Could not convert message."),
+        reason_code: Str0255Owned::try_from(msg).expect("Could not convert message."),
     }
 }
 
@@ -315,9 +320,9 @@ impl From<(DownstreamId, ChannelId, JobId)> for DownstreamChannelJobId {
 /// arrives. This method also appends response to route queue to be sent
 /// to upstream.
 pub fn validate_cached_share(
-    mut upstream_message: SubmitSharesExtended<'static>,
-    upstream_channel: &mut ExtendedChannel<'static>,
-    prev_hash: &SetNewPrevHashTdp<'static>,
+    mut upstream_message: SubmitSharesExtendedOwned,
+    upstream_channel: &mut ExtendedChannel,
+    prev_hash: &SetNewPrevHashTdp,
     sequence_number_factory: &AtomicU32,
     messages: &mut Vec<RouteMessageTo>,
 ) {
@@ -331,7 +336,7 @@ pub fn validate_cached_share(
                 upstream_message.channel_id, upstream_message.sequence_number, share_hash
             );
 
-            messages.push(Mining::SubmitSharesExtended(upstream_message.into_static()).into());
+            messages.push(MiningOwned::SubmitSharesExtended(upstream_message).into());
         }
 
         Ok(client::share_accounting::ShareValidationResult::BlockFound(share_hash)) => {
@@ -343,7 +348,7 @@ pub fn validate_cached_share(
             let mut channel_extranonce = upstream_channel.get_extranonce_prefix().to_vec();
             channel_extranonce.extend_from_slice(upstream_message.extranonce.as_bytes());
 
-            let push_solution = PushSolution {
+            let push_solution = PushSolutionOwned {
                 extranonce: channel_extranonce.try_into().expect("extranonce"),
                 ntime: upstream_message.ntime,
                 nonce: upstream_message.nonce,
@@ -352,8 +357,8 @@ pub fn validate_cached_share(
                 prev_hash: prev_hash.prev_hash.clone(),
             };
 
-            messages.push(JobDeclaration::PushSolution(push_solution).into());
-            messages.push(Mining::SubmitSharesExtended(upstream_message.into_static()).into());
+            messages.push(JobDeclarationOwned::PushSolution(push_solution).into());
+            messages.push(MiningOwned::SubmitSharesExtended(upstream_message).into());
         }
 
         Err(err) => {
@@ -384,12 +389,12 @@ const CACHED_SHARES_CAPACITY: usize = 100;
 /// A wrapper around [`SubmitSharesExtended`] that adds ordering by share difficulty.
 #[derive(Clone, Debug)]
 pub struct SharesOrderedByDiff {
-    pub share: SubmitSharesExtended<'static>,
+    pub share: SubmitSharesExtendedOwned,
     share_hash: sha256d::Hash,
 }
 
 impl SharesOrderedByDiff {
-    pub fn new(share: SubmitSharesExtended<'static>, share_hash: sha256d::Hash) -> Self {
+    pub fn new(share: SubmitSharesExtendedOwned, share_hash: sha256d::Hash) -> Self {
         Self { share, share_hash }
     }
 }

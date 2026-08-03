@@ -20,7 +20,7 @@ use crate::{
 };
 use async_channel::{Receiver, Sender};
 use std::path::Path;
-use stratum_core::parsers_sv2::TemplateDistribution;
+use stratum_core::parsers_sv2::TemplateDistributionOwned;
 pub use tokio_util::sync::CancellationToken;
 
 /// Version-agnostic TDP runtime handle.
@@ -50,8 +50,8 @@ pub async fn new<P>(
     bitcoin_core_unix_socket_path: P,
     fee_threshold: u64,
     min_interval: u8,
-    incoming_messages: Receiver<TemplateDistribution<'static>>,
-    outgoing_messages: Sender<TemplateDistribution<'static>>,
+    incoming_messages: Receiver<TemplateDistributionOwned>,
+    outgoing_messages: Sender<TemplateDistributionOwned>,
     global_cancellation_token: CancellationToken,
 ) -> Result<BitcoinCoreSv2TDP, BitcoinCoreSv2TDPError>
 where

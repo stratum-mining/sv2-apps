@@ -7,22 +7,22 @@ use std::time::Instant;
 use stratum_apps::{
     stratum_core::{
         bitcoin::{Amount, TxOut, Wtxid, consensus, hashes::Hash},
-        handlers_sv2::HandleJobDeclarationMessagesFromClientAsync,
+        handlers_sv2::HandleJobDeclarationMessagesFromClientOwnedAsync,
         job_declaration_sv2::{
-            AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob,
-            DeclareMiningJobError, DeclareMiningJobSuccess,
+            AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned,
+            DeclareMiningJobErrorOwned, DeclareMiningJobOwned, DeclareMiningJobSuccessOwned,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-            ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS, ProvideMissingTransactions,
-            ProvideMissingTransactionsSuccess, PushSolution,
+            ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS, ProvideMissingTransactionsOwned,
+            ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
         },
-        parsers_sv2::{JobDeclaration, Tlv},
+        parsers_sv2::{JobDeclarationOwned, Tlv},
     },
     utils::types::JdToken,
 };
 use tracing::info;
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
+impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
     type Error = JDSError<error::JobDeclarator>;
 
     fn get_negotiated_extensions_with_client(
@@ -50,10 +50,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
     async fn handle_allocate_mining_job_token(
         &mut self,
         client_id: Option<usize>,
-        msg: AllocateMiningJobToken<'_>,
+        msg: AllocateMiningJobTokenOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
@@ -70,7 +70,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         let serialized_coinbase_tx_outputs = consensus::serialize(&coinbase_tx_outputs);
 
         // response message
-        let allocate_mining_job_token_success = AllocateMiningJobTokenSuccess {
+        let allocate_mining_job_token_success = AllocateMiningJobTokenSuccessOwned {
             request_id: msg.request_id,
             mining_job_token: allocated_token
                 .to_le_bytes()
@@ -94,7 +94,9 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
             })?;
         client_sender
             .send((
-                JobDeclaration::AllocateMiningJobTokenSuccess(allocate_mining_job_token_success),
+                JobDeclarationOwned::AllocateMiningJobTokenSuccess(
+                    allocate_mining_job_token_success,
+                ),
                 None,
             ))
             .await
@@ -106,10 +108,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
     async fn handle_declare_mining_job(
         &mut self,
         client_id: Option<usize>,
-        msg: DeclareMiningJob<'_>,
+        msg: DeclareMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
@@ -130,7 +132,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
             Ok(token_bytes) => u64::from_le_bytes(token_bytes),
             Err(_) => {
                 // Send DeclareMiningJobError back to client
-                let error_message = DeclareMiningJobError {
+                let error_message = DeclareMiningJobErrorOwned {
                     request_id: msg.request_id,
                     error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN
                         .as_bytes()
@@ -141,7 +143,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                 };
 
                 client_sender
-                    .send((JobDeclaration::DeclareMiningJobError(error_message), None))
+                    .send((
+                        JobDeclarationOwned::DeclareMiningJobError(error_message),
+                        None,
+                    ))
                     .await
                     .map_err(|e| error::JDSError::disconnect(e, client_id))?;
 
@@ -152,7 +157,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
         // was `DeclareMiningJob.mining_job_token` previously allocated for this client?
         if !self.token_manager.is_allocated(token, client_id) {
             // Send DeclareMiningJobError back to client
-            let error_message = DeclareMiningJobError {
+            let error_message = DeclareMiningJobErrorOwned {
                 request_id: msg.request_id,
                 error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN
                     .as_bytes()
@@ -162,7 +167,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                 error_details: Vec::new().try_into().map_err(error::JDSError::shutdown)?,
             };
             client_sender
-                .send((JobDeclaration::DeclareMiningJobError(error_message), None))
+                .send((
+                    JobDeclarationOwned::DeclareMiningJobError(error_message),
+                    None,
+                ))
                 .await
                 .map_err(|e| error::JDSError::disconnect(e, client_id))?;
 
@@ -179,7 +187,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
             DeclareMiningJobResult::Success => {
                 match self.token_manager.activate(token, client_id) {
                     Some(activated_token) => {
-                        let declare_mining_job_success = DeclareMiningJobSuccess {
+                        let declare_mining_job_success = DeclareMiningJobSuccessOwned {
                             request_id: msg.request_id,
                             new_mining_job_token: activated_token
                                 .to_le_bytes()
@@ -187,10 +195,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                                 .try_into()
                                 .expect("must always be valid B0_255"),
                         };
-                        JobDeclaration::DeclareMiningJobSuccess(declare_mining_job_success)
+                        JobDeclarationOwned::DeclareMiningJobSuccess(declare_mining_job_success)
                     }
                     None => {
-                        let declare_mining_job_error = DeclareMiningJobError {
+                        let declare_mining_job_error = DeclareMiningJobErrorOwned {
                             request_id: msg.request_id,
                             error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN
                                 .as_bytes()
@@ -201,7 +209,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                                 .try_into()
                                 .expect("empty array must be valid B0_64K"),
                         };
-                        JobDeclaration::DeclareMiningJobError(declare_mining_job_error)
+                        JobDeclarationOwned::DeclareMiningJobError(declare_mining_job_error)
                     }
                 }
             }
@@ -210,7 +218,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                 // make sure we clean up the allocated token
                 self.token_manager.deallocate(token);
 
-                let declare_mining_job_error = DeclareMiningJobError {
+                let declare_mining_job_error = DeclareMiningJobErrorOwned {
                     request_id: msg.request_id,
                     error_code: error
                         .as_bytes()
@@ -221,7 +229,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                         .try_into()
                         .expect("empty array must be valid B0_64K"),
                 };
-                JobDeclaration::DeclareMiningJobError(declare_mining_job_error)
+                JobDeclarationOwned::DeclareMiningJobError(declare_mining_job_error)
             }
             // if missing transactions, add to pending declare mining jobs and return
             // ProvideMissingTransactions
@@ -231,7 +239,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                     .with(&client_id, |downstream| {
                         downstream
                             .pending_declare_mining_jobs
-                            .insert(msg.request_id, (Instant::now(), msg.as_static()));
+                            .insert(msg.request_id, (Instant::now(), msg.clone()));
                     })
                     .ok_or_else(|| {
                         JDSError::disconnect(
@@ -255,13 +263,13 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                     })
                     .collect();
 
-                let provide_missing_transactions = ProvideMissingTransactions {
+                let provide_missing_transactions = ProvideMissingTransactionsOwned {
                     request_id: msg.request_id,
                     unknown_tx_position_list: unknown_tx_position_list
                         .try_into()
                         .map_err(error::JDSError::shutdown)?,
                 };
-                JobDeclaration::ProvideMissingTransactions(provide_missing_transactions)
+                JobDeclarationOwned::ProvideMissingTransactions(provide_missing_transactions)
             }
         };
 
@@ -276,10 +284,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
     async fn handle_provide_missing_transactions_success(
         &mut self,
         client_id: Option<usize>,
-        msg: ProvideMissingTransactionsSuccess<'_>,
+        msg: ProvideMissingTransactionsSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
@@ -339,7 +347,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                     .activate(pending_declare_mining_job_token, client_id)
                 {
                     Some(activated_token) => {
-                        let declare_mining_job_success = DeclareMiningJobSuccess {
+                        let declare_mining_job_success = DeclareMiningJobSuccessOwned {
                             request_id: msg.request_id,
                             new_mining_job_token: activated_token
                                 .to_le_bytes()
@@ -347,10 +355,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                                 .try_into()
                                 .expect("must always be valid B0_255"),
                         };
-                        JobDeclaration::DeclareMiningJobSuccess(declare_mining_job_success)
+                        JobDeclarationOwned::DeclareMiningJobSuccess(declare_mining_job_success)
                     }
                     None => {
-                        let declare_mining_job_error = DeclareMiningJobError {
+                        let declare_mining_job_error = DeclareMiningJobErrorOwned {
                             request_id: msg.request_id,
                             error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN
                                 .as_bytes()
@@ -361,7 +369,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                                 .try_into()
                                 .expect("empty array must be valid B0_64K"),
                         };
-                        JobDeclaration::DeclareMiningJobError(declare_mining_job_error)
+                        JobDeclarationOwned::DeclareMiningJobError(declare_mining_job_error)
                     }
                 }
             }
@@ -371,7 +379,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                 self.token_manager
                     .deallocate(pending_declare_mining_job_token);
 
-                let declare_mining_job_error = DeclareMiningJobError {
+                let declare_mining_job_error = DeclareMiningJobErrorOwned {
                     request_id: msg.request_id,
                     error_code: error_code
                         .as_bytes()
@@ -382,7 +390,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                         .try_into()
                         .expect("empty array must be valid B0_64K"),
                 };
-                JobDeclaration::DeclareMiningJobError(declare_mining_job_error)
+                JobDeclarationOwned::DeclareMiningJobError(declare_mining_job_error)
             }
             // if we're still missing transactions, just reject this DeclareMiningJob
             DeclareMiningJobResult::MissingTransactions(_) => {
@@ -390,7 +398,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                 self.token_manager
                     .deallocate(pending_declare_mining_job_token);
 
-                let declare_mining_job_error = DeclareMiningJobError {
+                let declare_mining_job_error = DeclareMiningJobErrorOwned {
                     request_id: msg.request_id,
                     error_code: ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS
                         .as_bytes()
@@ -401,7 +409,7 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
                         .try_into()
                         .expect("empty array must be valid B0_64K"),
                 };
-                JobDeclaration::DeclareMiningJobError(declare_mining_job_error)
+                JobDeclarationOwned::DeclareMiningJobError(declare_mining_job_error)
             }
         };
 
@@ -416,10 +424,10 @@ impl HandleJobDeclarationMessagesFromClientAsync for JobDeclarator {
     async fn handle_push_solution(
         &mut self,
         client_id: Option<usize>,
-        msg: PushSolution<'_>,
+        msg: PushSolutionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!("Received: {:?}", msg);
 
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =

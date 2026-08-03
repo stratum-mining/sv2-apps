@@ -2,6 +2,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32},
 };
+use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, MiningOwned};
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -14,8 +15,10 @@ use stratum_apps::{
         },
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
         framing_sv2,
-        handlers_sv2::{HandleCommonMessagesFromClientAsync, HandleExtensionsFromClientAsync},
-        parsers_sv2::{AnyMessage, Mining, Tlv, parse_message_frame_with_tlvs},
+        handlers_sv2::{
+            HandleCommonMessagesFromClientOwnedAsync, HandleExtensionsFromClientOwnedAsync,
+        },
+        parsers_sv2::{Tlv, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
@@ -45,8 +48,8 @@ mod extensions_message_handler;
 /// - `downstream_receiver`: receives frames from the downstream.
 #[derive(Clone)]
 pub struct DownstreamIo {
-    channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
-    channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+    channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
+    channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
     downstream_sender: Sender<Sv2Frame>,
     downstream_receiver: Receiver<Sv2Frame>,
 }
@@ -62,9 +65,9 @@ impl DownstreamIo {
 /// Represents a downstream client connected to this node.
 #[derive(Clone)]
 pub struct Downstream {
-    pub group_channel: SharedLock<GroupChannel<'static>>,
-    pub extended_channels: SharedMap<ChannelId, ExtendedChannel<'static>>,
-    pub standard_channels: SharedMap<ChannelId, StandardChannel<'static>>,
+    pub group_channel: SharedLock<GroupChannel>,
+    pub extended_channels: SharedMap<ChannelId, ExtendedChannel>,
+    pub standard_channels: SharedMap<ChannelId, StandardChannel>,
     pub channel_id_factory: Arc<AtomicU32>,
     /// Extensions that have been successfully negotiated with this client
     pub negotiated_extensions: SharedLock<Vec<u16>>,
@@ -134,9 +137,9 @@ impl Downstream {
     pub fn new(
         downstream_id: DownstreamId,
         channel_id_factory: AtomicU32,
-        group_channel: GroupChannel<'static>,
-        channel_manager_sender: Sender<(DownstreamId, Mining<'static>, Option<Vec<Tlv>>)>,
-        channel_manager_receiver: Receiver<(Mining<'static>, Option<Vec<Tlv>>)>,
+        group_channel: GroupChannel,
+        channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
+        channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
         noise_stream: NoiseTcpStream<Message>,
         cancellation_token: CancellationToken,
         task_manager: Arc<TaskManager>,
@@ -308,7 +311,7 @@ impl Downstream {
             }
         };
 
-        let message = AnyMessage::Mining(msg);
+        let message = AnyMessageOwned::Mining(msg);
         let std_frame: Sv2Frame = message.try_into().map_err(PoolError::shutdown)?;
 
         self.downstream_io
@@ -352,8 +355,8 @@ impl Downstream {
                     &negotiated_extensions,
                 )
                 .map_err(|error| PoolError::disconnect(error, self.downstream_id))?;
-                let mining_message = match any_message {
-                    AnyMessage::Mining(msg) => msg,
+                let mining_message = match any_message.into_owned() {
+                    AnyMessageOwned::Mining(msg) => msg,
                     _ => {
                         error!("Expected Mining message but got different type");
                         return Err(PoolError::disconnect(

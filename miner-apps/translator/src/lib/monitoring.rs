@@ -136,7 +136,7 @@ mod tests {
         )
     }
 
-    fn create_extended_channel(channel_id: u32, user_identity: &str) -> ExtendedChannel<'static> {
+    fn create_extended_channel(channel_id: u32, user_identity: &str) -> ExtendedChannel {
         let prefix = ExtranoncePrefix::from_wire(vec![0x01, channel_id as u8]).unwrap();
         ExtendedChannel::new(
             channel_id,

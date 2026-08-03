@@ -5,17 +5,19 @@ use crate::{
 use std::convert::TryInto;
 use stratum_apps::{
     stratum_core::{
-        binary_sv2::Seq064K,
-        extensions_sv2::{RequestExtensions, RequestExtensionsError, RequestExtensionsSuccess},
-        handlers_sv2::HandleExtensionsFromClientAsync,
-        parsers_sv2::{AnyMessage, Tlv},
+        binary_sv2::Seq064KOwned,
+        extensions_sv2::{
+            RequestExtensionsErrorOwned, RequestExtensionsOwned, RequestExtensionsSuccessOwned,
+        },
+        handlers_sv2::HandleExtensionsFromClientOwnedAsync,
+        parsers_sv2::{AnyMessageOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
 use tracing::{error, info};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleExtensionsFromClientAsync for Downstream {
+impl HandleExtensionsFromClientOwnedAsync for Downstream {
     type Error = JDCError<error::Downstream>;
 
     fn get_negotiated_extensions_with_client(
@@ -28,7 +30,7 @@ impl HandleExtensionsFromClientAsync for Downstream {
     async fn handle_request_extensions(
         &mut self,
         _client_id: Option<usize>,
-        msg: RequestExtensions<'_>,
+        msg: RequestExtensionsOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         let requested: Vec<u16> = msg.requested_extensions.clone().into_inner();
@@ -70,17 +72,17 @@ impl HandleExtensionsFromClientAsync for Downstream {
                 self.downstream_id, requested, supported, unsupported, missing_required
             );
 
-            let error = RequestExtensionsError {
+            let error = RequestExtensionsErrorOwned {
                 request_id: msg.request_id,
-                unsupported_extensions: Seq064K::new(unsupported).map_err(|_| {
+                unsupported_extensions: Seq064KOwned::new(unsupported).map_err(|_| {
                     JDCError::shutdown(JDCErrorKind::InvalidUnsupportedExtensionsSequence)
                 })?,
-                required_extensions: Seq064K::new(missing_required.clone()).map_err(|_| {
+                required_extensions: Seq064KOwned::new(missing_required.clone()).map_err(|_| {
                     JDCError::shutdown(JDCErrorKind::InvalidRequiredExtensionsSequence)
                 })?,
             };
 
-            let frame: Sv2Frame = AnyMessage::Extensions(error.into())
+            let frame: Sv2Frame = AnyMessageOwned::Extensions(error.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
@@ -114,14 +116,14 @@ impl HandleExtensionsFromClientAsync for Downstream {
                 .set(supported.clone())
                 .map_err(JDCError::shutdown)?;
 
-            let success = RequestExtensionsSuccess {
+            let success = RequestExtensionsSuccessOwned {
                 request_id: msg.request_id,
-                supported_extensions: Seq064K::new(supported.clone()).map_err(|_| {
+                supported_extensions: Seq064KOwned::new(supported.clone()).map_err(|_| {
                     JDCError::shutdown(JDCErrorKind::InvalidSupportedExtensionsSequence)
                 })?,
             };
 
-            let frame: Sv2Frame = AnyMessage::Extensions(success.into())
+            let frame: Sv2Frame = AnyMessageOwned::Extensions(success.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {

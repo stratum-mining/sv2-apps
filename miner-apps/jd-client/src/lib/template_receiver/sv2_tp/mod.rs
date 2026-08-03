@@ -11,6 +11,7 @@
 //! - Send [`CoinbaseOutputConstraints`] to the template provider
 
 use std::sync::Arc;
+use stratum_apps::stratum_core::parsers_sv2::AnyMessageOwned;
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -20,9 +21,9 @@ use stratum_apps::{
     network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host_port},
     stratum_core::{
         framing_sv2,
-        handlers_sv2::HandleCommonMessagesFromServerAsync,
+        handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         noise_sv2,
-        parsers_sv2::{AnyMessage, TemplateDistribution},
+        parsers_sv2::{TemplateDistribution, TemplateDistributionOwned},
     },
     task_manager::TaskManager,
     utils::{
@@ -50,8 +51,8 @@ mod message_handler;
 /// - `inbound_rx` → receives frames from the template provider
 #[derive(Clone)]
 pub struct Sv2TpIo {
-    channel_manager_sender: Sender<TemplateDistribution<'static>>,
-    channel_manager_receiver: Receiver<TemplateDistribution<'static>>,
+    channel_manager_sender: Sender<TemplateDistributionOwned>,
+    channel_manager_receiver: Receiver<TemplateDistributionOwned>,
     tp_sender: Sender<Sv2Frame>,
     tp_receiver: Receiver<Sv2Frame>,
 }
@@ -134,8 +135,8 @@ impl Sv2Tp {
     pub async fn new(
         tp_address: String,
         public_key: Option<Secp256k1PublicKey>,
-        channel_manager_receiver: Receiver<TemplateDistribution<'static>>,
-        channel_manager_sender: Sender<TemplateDistribution<'static>>,
+        channel_manager_receiver: Receiver<TemplateDistributionOwned>,
+        channel_manager_sender: Sender<TemplateDistributionOwned>,
         cancellation_token: CancellationToken,
         task_manager: Arc<TaskManager>,
     ) -> JDCResult<Sv2Tp, error::TemplateProvider> {
@@ -324,7 +325,7 @@ impl Sv2Tp {
             MessageType::TemplateDistribution => {
                 let message = TemplateDistribution::try_from((message_type, sv2_frame.payload()))
                     .map_err(JDCError::shutdown)?
-                    .into_static();
+                    .into_owned();
                 self.sv2_tp_io
                     .channel_manager_sender
                     .send(message)
@@ -345,7 +346,7 @@ impl Sv2Tp {
     ///
     /// Forwards outbound frames upstream
     pub async fn handle_channel_manager_message(&self) -> JDCResult<(), error::TemplateProvider> {
-        let msg = AnyMessage::TemplateDistribution(
+        let msg = AnyMessageOwned::TemplateDistribution(
             self.sv2_tp_io
                 .channel_manager_receiver
                 .recv()

@@ -2,11 +2,11 @@ use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
+use stratum_apps::stratum_core::binary_sv2::U256Owned;
 
 use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     stratum_core::{
-        binary_sv2::U256,
         bitcoin::{
             CompactTarget, Target, TxMerkleNode,
             block::{Header, Version},
@@ -58,11 +58,11 @@ pub const AGGREGATED_CHANNEL_ID: ChannelId = u32::MAX;
 /// * `Ok(false)` if the share is valid but doesn't meet the target
 /// * `Err(TproxyError)` if validation fails due to missing job or invalid data
 pub fn validate_sv1_share(
-    share: &client_to_server::Submit<'static>,
+    share: &client_to_server::Submit,
     target: Target,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<HexU32Be>,
-    job: Notify<'static>,
+    job: Notify,
 ) -> Result<bool, TproxyErrorKind> {
     let mut full_extranonce = vec![];
     full_extranonce.extend_from_slice(extranonce1.as_slice());
@@ -76,7 +76,7 @@ pub fn validate_sv1_share(
     let mask = version_rolling_mask.unwrap_or(HexU32Be(0x1FFFE000_u32)).0;
     let version = (job.version.0 & !mask) | (share_version & mask);
 
-    let prev_hash: U256<'static> = Vec::<u8>::from(job.prev_hash.clone())
+    let prev_hash: U256Owned = Vec::<u8>::from(job.prev_hash.clone())
         .try_into()
         .map_err(TproxyErrorKind::BinarySv2)?;
 
@@ -242,7 +242,7 @@ pub struct SubmitShareWithChannelId {
     /// The downstream connection ID that submitted this share
     pub downstream_id: DownstreamId,
     /// The actual SV1 share submission data
-    pub share: Submit<'static>,
+    pub share: Submit,
     /// The complete extranonce used for this share
     pub extranonce: Vec<u8>,
     /// The length of the extranonce2 field

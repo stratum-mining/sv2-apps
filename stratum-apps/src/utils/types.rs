@@ -1,4 +1,4 @@
-use stratum_core::{codec_sv2::StandardSv2Frame, parsers_sv2::AnyMessage};
+use stratum_core::{codec_sv2::StandardSv2Frame, parsers_sv2::AnyMessageOwned};
 
 pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
 
@@ -15,7 +15,7 @@ pub type ExtensionType = u16;
 pub type MessageType = u8;
 pub type JdToken = u64;
 
-pub type Message = AnyMessage<'static>;
+pub type Message = AnyMessageOwned;
 pub type Sv2Frame = StandardSv2Frame<Message>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -1,3 +1,6 @@
+use stratum_apps::stratum_core::parsers_sv2::{
+    AnyMessageOwned, CommonMessagesOwned, MiningOwned, TemplateDistributionOwned,
+};
 // This file contains integration tests for the `PoolSv2` module.
 //
 // `PoolSv2` is a module that implements the Pool role in the Stratum V2 protocol.
@@ -8,10 +11,10 @@ use integration_tests_sv2::{
     *,
 };
 use stratum_apps::stratum_core::{
-    binary_sv2::Seq0255,
-    common_messages_sv2::{Protocol, SetupConnection, has_work_selection, *},
+    binary_sv2::Seq0255Owned,
+    common_messages_sv2::{Protocol, has_work_selection, *},
     mining_sv2::*,
-    parsers_sv2::{self, AnyMessage, CommonMessages, Mining, TemplateDistribution},
+    parsers_sv2::{self},
     template_distribution_sv2::*,
 };
 
@@ -148,9 +151,10 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
     assert_tp_message!(&tp_pool_sniffer.next_message_from_upstream(), NewTemplate);
     // Extract header timestamp from SetNewPrevHash message
     let header_timestamp_to_check = match tp_pool_sniffer.next_message_from_upstream() {
-        Some((_, AnyMessage::TemplateDistribution(TemplateDistribution::SetNewPrevHash(msg)))) => {
-            msg.header_timestamp
-        }
+        Some((
+            _,
+            AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::SetNewPrevHash(msg)),
+        )) => msg.header_timestamp,
         _ => panic!("SetNewPrevHash not found!"),
     };
     pool_translator_sniffer
@@ -172,7 +176,7 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
         .await;
     // Extract min_ntime from the second NewExtendedMiningJob message
     let second_job_ntime = match pool_translator_sniffer.next_message_from_upstream() {
-        Some((_, AnyMessage::Mining(Mining::NewExtendedMiningJob(job)))) => {
+        Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(job)))) => {
             job.min_ntime.into_inner()
         }
         _ => panic!("Second NewExtendedMiningJob not found!"),
@@ -302,7 +306,7 @@ async fn pool_does_not_send_jobs_to_jdc() {
     // Verify SetupConnection has work_selection flag set (JDC requires custom work)
     let setup_msg = pool_jdc_sniffer.next_message_from_downstream();
     match setup_msg {
-        Some((_, AnyMessage::Common(CommonMessages::SetupConnection(msg)))) => {
+        Some((_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(msg)))) => {
             assert!(
                 has_work_selection(msg.flags),
                 "JDC should set work_selection flag in SetupConnection"
@@ -394,8 +398,8 @@ async fn pool_reject_setup_connection_with_non_mining_protocol() {
     let setup_connection_replace = ReplaceMessage::new(
         MessageDirection::ToUpstream,
         MESSAGE_TYPE_SETUP_CONNECTION,
-        AnyMessage::Common(parsers_sv2::CommonMessages::SetupConnection(
-            SetupConnection {
+        AnyMessageOwned::Common(parsers_sv2::CommonMessagesOwned::SetupConnection(
+            SetupConnectionOwned {
                 protocol: Protocol::TemplateDistributionProtocol,
                 min_version: 2,
                 max_version: 2,
@@ -439,7 +443,7 @@ async fn pool_reject_setup_connection_with_non_mining_protocol() {
         .await;
     let setup_connection_error = pool_translator_sniffer.next_message_from_upstream();
     let setup_connection_error = match setup_connection_error {
-        Some((_, AnyMessage::Common(CommonMessages::SetupConnectionError(msg)))) => msg,
+        Some((_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(msg)))) => msg,
         msg => panic!("Expected SetupConnectionError message, found: {:?}", msg),
     };
     assert_eq!(
@@ -482,7 +486,7 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
         .await;
 
     let set_custom_mining_job =
-        AnyMessage::Mining(Mining::SetCustomMiningJob(SetCustomMiningJob {
+        AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(SetCustomMiningJobOwned {
             channel_id: 1,
             request_id: 7,
             token: 42_u64.to_le_bytes().try_into().unwrap(),
@@ -495,7 +499,7 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
             coinbase_tx_input_n_sequence: 0,
             coinbase_tx_outputs: Vec::<u8>::new().try_into().unwrap(),
             coinbase_tx_locktime: 0,
-            merkle_path: Seq0255::new(Vec::new()).unwrap(),
+            merkle_path: Seq0255Owned::new(Vec::new()).unwrap(),
         }));
     send_to_pool.send(set_custom_mining_job).await.unwrap();
 
@@ -508,7 +512,9 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
 
     let set_custom_mining_job_error = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(Mining::SetCustomMiningJobError(msg)))) => break msg,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobError(msg)))) => {
+                break msg;
+            }
             _ => continue,
         }
     };
@@ -553,15 +559,15 @@ async fn pool_group_extended_channels() {
 
     for i in 0..NUM_EXTENDED_CHANNELS {
         // send OpenExtendedMiningChannel message to the pool
-        let open_extended_mining_channel = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-            OpenExtendedMiningChannel {
+        let open_extended_mining_channel = AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: i,
                 user_identity: "user_identity".try_into().unwrap(),
                 nominal_hash_rate: 1000.0,
                 max_target: [0xff; 32].into(),
                 min_extranonce_size: 0,
-            },
-        ));
+            }),
+        );
         send_to_pool
             .send(open_extended_mining_channel)
             .await
@@ -576,7 +582,10 @@ async fn pool_group_extended_channels() {
 
         let group_channel_id = loop {
             match sniffer.next_message_from_upstream() {
-                Some((_, AnyMessage::Mining(Mining::OpenExtendedMiningChannelSuccess(msg)))) => {
+                Some((
+                    _,
+                    AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(msg)),
+                )) => {
                     break msg.group_channel_id;
                 }
                 _ => continue,
@@ -621,7 +630,7 @@ async fn pool_group_extended_channels() {
     // assert that the NewExtendedMiningJob message is directed to the correct group channel ID
     let new_extended_mining_job_msg = sniffer.next_message_from_upstream();
     let new_extended_mining_job_msg = match new_extended_mining_job_msg {
-        Some((_, AnyMessage::Mining(Mining::NewExtendedMiningJob(msg)))) => msg,
+        Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(msg)))) => msg,
         msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
 
@@ -665,7 +674,7 @@ async fn pool_group_extended_channels() {
 
     let set_new_prev_hash_msg = sniffer.next_message_from_upstream();
     let set_new_prev_hash_msg = match set_new_prev_hash_msg {
-        Some((_, AnyMessage::Mining(Mining::SetNewPrevHash(msg)))) => msg,
+        Some((_, AnyMessageOwned::Mining(MiningOwned::SetNewPrevHash(msg)))) => msg,
         msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
     };
 
@@ -720,14 +729,14 @@ async fn pool_group_standard_channels() {
     const EXPECTED_GROUP_CHANNEL_ID: u32 = 1;
 
     for i in 0..NUM_STANDARD_CHANNELS {
-        let open_standard_mining_channel = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-            OpenStandardMiningChannel {
+        let open_standard_mining_channel = AnyMessageOwned::Mining(
+            MiningOwned::OpenStandardMiningChannel(OpenStandardMiningChannelOwned {
                 request_id: i,
                 user_identity: "user_identity".try_into().unwrap(),
                 nominal_hash_rate: 1000.0,
                 max_target: vec![0xff; 32].try_into().unwrap(),
-            },
-        ));
+            }),
+        );
 
         send_to_pool
             .send(open_standard_mining_channel)
@@ -743,7 +752,10 @@ async fn pool_group_standard_channels() {
 
         let (channel_id, group_channel_id) = loop {
             match sniffer.next_message_from_upstream() {
-                Some((_, AnyMessage::Mining(Mining::OpenStandardMiningChannelSuccess(msg)))) => {
+                Some((
+                    _,
+                    AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannelSuccess(msg)),
+                )) => {
                     break (msg.channel_id, msg.group_channel_id);
                 }
                 _ => continue,
@@ -790,7 +802,7 @@ async fn pool_group_standard_channels() {
     // assert that the NewExtendedMiningJob message is directed to the correct group channel ID
     let new_extended_mining_job_msg = sniffer.next_message_from_upstream();
     let new_extended_mining_job_msg = match new_extended_mining_job_msg {
-        Some((_, AnyMessage::Mining(Mining::NewExtendedMiningJob(msg)))) => msg,
+        Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(msg)))) => msg,
         msg => panic!("Expected NewMiningJob message, found: {:?}", msg),
     };
 
@@ -846,7 +858,7 @@ async fn pool_group_standard_channels() {
 
     let set_new_prev_hash_msg = sniffer.next_message_from_upstream();
     let set_new_prev_hash_msg = match set_new_prev_hash_msg {
-        Some((_, AnyMessage::Mining(Mining::SetNewPrevHash(msg)))) => msg,
+        Some((_, AnyMessageOwned::Mining(MiningOwned::SetNewPrevHash(msg)))) => msg,
         msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
     };
 
@@ -903,14 +915,14 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
     let mut channel_ids = Vec::new();
 
     for i in 0..NUM_STANDARD_CHANNELS {
-        let open_standard_mining_channel = AnyMessage::Mining(Mining::OpenStandardMiningChannel(
-            OpenStandardMiningChannel {
+        let open_standard_mining_channel = AnyMessageOwned::Mining(
+            MiningOwned::OpenStandardMiningChannel(OpenStandardMiningChannelOwned {
                 request_id: i,
                 user_identity: "user_identity".try_into().unwrap(),
                 nominal_hash_rate: 1000.0,
                 max_target: vec![0xff; 32].try_into().unwrap(),
-            },
-        ));
+            }),
+        );
 
         send_to_pool
             .send(open_standard_mining_channel)
@@ -926,7 +938,10 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
 
         let (channel_id, group_channel_id) = loop {
             match sniffer.next_message_from_upstream() {
-                Some((_, AnyMessage::Mining(Mining::OpenStandardMiningChannelSuccess(msg)))) => {
+                Some((
+                    _,
+                    AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannelSuccess(msg)),
+                )) => {
                     break (msg.channel_id, msg.group_channel_id);
                 }
                 _ => continue,
@@ -971,7 +986,7 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
 
         let new_mining_job_msg = sniffer.next_message_from_upstream();
         let channel_id = match new_mining_job_msg {
-            Some((_, AnyMessage::Mining(Mining::NewMiningJob(msg)))) => msg.channel_id,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::NewMiningJob(msg)))) => msg.channel_id,
             msg => panic!("Expected NewMiningJob message, found: {:?}", msg),
         };
 
@@ -998,7 +1013,7 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
 
         let new_mining_job_msg = sniffer.next_message_from_upstream();
         let channel_id = match new_mining_job_msg {
-            Some((_, AnyMessage::Mining(Mining::NewMiningJob(msg)))) => msg.channel_id,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::NewMiningJob(msg)))) => msg.channel_id,
             msg => panic!("Expected NewMiningJob message, found: {:?}", msg),
         };
 
@@ -1018,7 +1033,7 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
 
         let set_new_prev_hash_msg = sniffer.next_message_from_upstream();
         let channel_id = match set_new_prev_hash_msg {
-            Some((_, AnyMessage::Mining(Mining::SetNewPrevHash(msg)))) => msg.channel_id,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetNewPrevHash(msg)))) => msg.channel_id,
             msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
         };
 
@@ -1063,15 +1078,15 @@ async fn pool_require_standard_jobs_set_rejects_open_extended_mining_channel() {
         )
         .await;
 
-    let open_extended_mining_channel = AnyMessage::Mining(Mining::OpenExtendedMiningChannel(
-        OpenExtendedMiningChannel {
+    let open_extended_mining_channel = AnyMessageOwned::Mining(
+        MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
             request_id: 100u32,
             user_identity: "user_identity".try_into().unwrap(),
             nominal_hash_rate: 1000.0,
             max_target: vec![0xff; 32].try_into().unwrap(),
             min_extranonce_size: 8,
-        },
-    ));
+        }),
+    );
     send_to_pool
         .send(open_extended_mining_channel)
         .await
@@ -1086,7 +1101,9 @@ async fn pool_require_standard_jobs_set_rejects_open_extended_mining_channel() {
 
     let error = loop {
         match sniffer.next_message_from_upstream() {
-            Some((_, AnyMessage::Mining(Mining::OpenMiningChannelError(msg)))) => break msg,
+            Some((_, AnyMessageOwned::Mining(MiningOwned::OpenMiningChannelError(msg)))) => {
+                break msg;
+            }
             _ => continue,
         }
     };

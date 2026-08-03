@@ -4,17 +4,19 @@ use crate::{
 };
 use stratum_apps::{
     stratum_core::{
-        binary_sv2::Seq064K,
-        extensions_sv2::{RequestExtensions, RequestExtensionsError, RequestExtensionsSuccess},
-        handlers_sv2::HandleExtensionsFromServerAsync,
-        parsers_sv2::{AnyMessage, Tlv},
+        binary_sv2::Seq064KOwned,
+        extensions_sv2::{
+            RequestExtensionsErrorOwned, RequestExtensionsOwned, RequestExtensionsSuccessOwned,
+        },
+        handlers_sv2::HandleExtensionsFromServerOwnedAsync,
+        parsers_sv2::{AnyMessageOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
 use tracing::{error, info};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl HandleExtensionsFromServerAsync for ChannelManager {
+impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
     type Error = TproxyError<error::ChannelManager>;
 
     fn get_negotiated_extensions_with_server(
@@ -29,7 +31,7 @@ impl HandleExtensionsFromServerAsync for ChannelManager {
     async fn handle_request_extensions_success(
         &mut self,
         _server_id: Option<usize>,
-        msg: RequestExtensionsSuccess<'_>,
+        msg: RequestExtensionsSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         let supported: Vec<u16> = msg.supported_extensions.into_inner();
@@ -67,7 +69,7 @@ impl HandleExtensionsFromServerAsync for ChannelManager {
     async fn handle_request_extensions_error(
         &mut self,
         _server_id: Option<usize>,
-        msg: RequestExtensionsError<'_>,
+        msg: RequestExtensionsErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         let unsupported: Vec<u16> = msg.unsupported_extensions.into_inner();
@@ -128,15 +130,14 @@ impl HandleExtensionsFromServerAsync for ChannelManager {
                 can_support
             );
 
-            let new_require_extensions = RequestExtensions {
+            let new_require_extensions = RequestExtensionsOwned {
                 request_id: msg.request_id + 1,
-                requested_extensions: Seq064K::new(can_support).unwrap(),
+                requested_extensions: Seq064KOwned::new(can_support).unwrap(),
             };
 
-            let sv2_frame: Sv2Frame =
-                AnyMessage::Extensions(new_require_extensions.into_static().into())
-                    .try_into()
-                    .map_err(TproxyError::shutdown)?;
+            let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(new_require_extensions.into())
+                .try_into()
+                .map_err(TproxyError::shutdown)?;
 
             self.channel_manager_io
                 .upstream_sender

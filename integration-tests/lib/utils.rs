@@ -20,14 +20,7 @@ use stratum_apps::{
         framing_sv2::framing::{Frame, Sv2Frame},
         noise_sv2::{Initiator, Responder},
         parsers_sv2::{
-            AnyMessage, CommonMessages, IsSv2Message,
-            JobDeclaration::{
-                AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob,
-                DeclareMiningJobError, DeclareMiningJobSuccess, ProvideMissingTransactions,
-                ProvideMissingTransactionsSuccess, PushSolution,
-            },
-            TemplateDistribution,
-            TemplateDistribution::CoinbaseOutputConstraints,
+            AnyMessage, AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, IsSv2Message,
             Tlv, message_type_to_name, parse_message_frame_with_tlvs,
         },
     },
@@ -84,16 +77,20 @@ pub async fn create_downstream(
         Responder::from_authority_kp(&pub_key, &prv_key, std::time::Duration::from_secs(10000))
             .unwrap();
 
-    Connection::new::<AnyMessage<'static>>(stream, HandshakeRole::Responder(responder))
-        .await
-        .ok()
+    if let Ok((receiver_from_client, sender_to_client)) =
+        Connection::new::<AnyMessageOwned>(stream, HandshakeRole::Responder(responder)).await
+    {
+        Some((receiver_from_client, sender_to_client))
+    } else {
+        None
+    }
 }
 
 pub async fn create_upstream(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<MessageFrame>, Sender<MessageFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
-    Connection::new::<AnyMessage<'static>>(stream, HandshakeRole::Initiator(initiator))
+    Connection::new::<AnyMessageOwned>(stream, HandshakeRole::Initiator(initiator))
         .await
         .ok()
 }
@@ -111,20 +108,17 @@ pub async fn recv_from_down_send_to_up(
         let (msg_type, msg, tlv_fields) = message_from_frame_with_tlvs(&mut frame, &extensions);
 
         // Track extension negotiation
-        if let AnyMessage::Extensions(ref ext_msg) = msg {
-            use stratum_apps::stratum_core::parsers_sv2::{Extensions, ExtensionsNegotiation};
-            if let Extensions::ExtensionsNegotiation(
-                ExtensionsNegotiation::RequestExtensionsSuccess(success),
-            ) = ext_msg
-            {
-                let mut exts = negotiated_extensions.lock().unwrap();
-                *exts = success.supported_extensions.clone().into_inner();
-                tracing::info!(
-                    "🔍 Sniffer {} | Tracked negotiated extensions: {:?}",
-                    identifier,
-                    *exts
-                );
-            }
+        if let AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
+            ExtensionsNegotiationOwned::RequestExtensionsSuccess(success),
+        )) = &msg
+        {
+            let mut exts = negotiated_extensions.lock().unwrap();
+            *exts = success.supported_extensions.clone().into_inner();
+            tracing::info!(
+                "🔍 Sniffer {} | Tracked negotiated extensions: {:?}",
+                identifier,
+                *exts
+            );
         }
 
         let action = action.iter().find(|action| {
@@ -143,7 +137,7 @@ pub async fn recv_from_down_send_to_up(
                     continue;
                 }
                 InterceptAction::ReplaceMessage(intercept_message) => {
-                    let intercept_frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+                    let intercept_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                         Sv2Frame::from_message(
                             intercept_message.replacement_message.clone(),
                             intercept_message.replacement_message.message_type(),
@@ -197,20 +191,17 @@ pub async fn recv_from_up_send_to_down(
         let (msg_type, msg, tlv_fields) = message_from_frame_with_tlvs(&mut frame, &extensions);
 
         // Track extension negotiation
-        if let AnyMessage::Extensions(ref ext_msg) = msg {
-            use stratum_apps::stratum_core::parsers_sv2::{Extensions, ExtensionsNegotiation};
-            if let Extensions::ExtensionsNegotiation(
-                ExtensionsNegotiation::RequestExtensionsSuccess(success),
-            ) = ext_msg
-            {
-                let mut exts = negotiated_extensions.lock().unwrap();
-                *exts = success.supported_extensions.clone().into_inner();
-                tracing::info!(
-                    "🔍 Sniffer {} | Tracked negotiated extensions: {:?}",
-                    identifier,
-                    *exts
-                );
-            }
+        if let AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
+            ExtensionsNegotiationOwned::RequestExtensionsSuccess(success),
+        )) = &msg
+        {
+            let mut exts = negotiated_extensions.lock().unwrap();
+            *exts = success.supported_extensions.clone().into_inner();
+            tracing::info!(
+                "🔍 Sniffer {} | Tracked negotiated extensions: {:?}",
+                identifier,
+                *exts
+            );
         }
 
         let action = action.iter().find(|action| {
@@ -230,7 +221,7 @@ pub async fn recv_from_up_send_to_down(
                     continue;
                 }
                 InterceptAction::ReplaceMessage(intercept_message) => {
-                    let intercept_frame = StandardEitherFrame::<AnyMessage<'_>>::Sv2(
+                    let intercept_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
                         Sv2Frame::from_message(
                             intercept_message.replacement_message.clone(),
                             intercept_message.replacement_message.message_type(),
@@ -271,7 +262,7 @@ pub async fn recv_from_up_send_to_down(
     Err(SnifferError::UpstreamClosed)
 }
 
-pub fn message_from_frame(frame: &mut MessageFrame) -> (MsgType, AnyMessage<'static>) {
+pub fn message_from_frame(frame: &mut MessageFrame) -> (MsgType, AnyMessageOwned) {
     let (msg_type, msg, _) = message_from_frame_with_tlvs(frame, &[]);
     (msg_type, msg)
 }
@@ -279,7 +270,7 @@ pub fn message_from_frame(frame: &mut MessageFrame) -> (MsgType, AnyMessage<'sta
 pub fn message_from_frame_with_tlvs(
     frame: &mut MessageFrame,
     negotiated_extensions: &[u16],
-) -> (MsgType, AnyMessage<'static>, Option<Vec<Tlv>>) {
+) -> (MsgType, AnyMessageOwned, Option<Vec<Tlv>>) {
     match frame {
         Frame::Sv2(frame) => {
             if let Some(header) = frame.get_header() {
@@ -289,7 +280,7 @@ pub fn message_from_frame_with_tlvs(
                 if !negotiated_extensions.is_empty() {
                     match parse_message_frame_with_tlvs(header, payload, negotiated_extensions) {
                         Ok((message, tlv_fields)) => {
-                            let message = into_static(message);
+                            let message = into_owned(message);
                             return (header.msg_type(), message, tlv_fields);
                         }
                         Err(e) => {
@@ -306,7 +297,7 @@ pub fn message_from_frame_with_tlvs(
                     (header, payload.as_mut_slice()).try_into();
                 match message {
                     Ok(message) => {
-                        let message = into_static(message);
+                        let message = into_owned(message);
                         (header.msg_type(), message, None)
                     }
                     _ => {
@@ -326,77 +317,8 @@ pub fn message_from_frame_with_tlvs(
     }
 }
 
-pub fn into_static(m: AnyMessage<'_>) -> AnyMessage<'static> {
-    match m {
-        AnyMessage::Mining(m) => AnyMessage::Mining(m.into_static()),
-        AnyMessage::Common(m) => match m {
-            CommonMessages::ChannelEndpointChanged(m) => {
-                AnyMessage::Common(CommonMessages::ChannelEndpointChanged(m.into_static()))
-            }
-            CommonMessages::SetupConnection(m) => {
-                AnyMessage::Common(CommonMessages::SetupConnection(m.into_static()))
-            }
-            CommonMessages::SetupConnectionError(m) => {
-                AnyMessage::Common(CommonMessages::SetupConnectionError(m.into_static()))
-            }
-            CommonMessages::SetupConnectionSuccess(m) => {
-                AnyMessage::Common(CommonMessages::SetupConnectionSuccess(m.into_static()))
-            }
-            CommonMessages::Reconnect(m) => {
-                AnyMessage::Common(CommonMessages::Reconnect(m.into_static()))
-            }
-        },
-        AnyMessage::JobDeclaration(m) => match m {
-            AllocateMiningJobToken(m) => {
-                AnyMessage::JobDeclaration(AllocateMiningJobToken(m.into_static()))
-            }
-            AllocateMiningJobTokenSuccess(m) => {
-                AnyMessage::JobDeclaration(AllocateMiningJobTokenSuccess(m.into_static()))
-            }
-            DeclareMiningJob(m) => AnyMessage::JobDeclaration(DeclareMiningJob(m.into_static())),
-            DeclareMiningJobError(m) => {
-                AnyMessage::JobDeclaration(DeclareMiningJobError(m.into_static()))
-            }
-            DeclareMiningJobSuccess(m) => {
-                AnyMessage::JobDeclaration(DeclareMiningJobSuccess(m.into_static()))
-            }
-            ProvideMissingTransactions(m) => {
-                AnyMessage::JobDeclaration(ProvideMissingTransactions(m.into_static()))
-            }
-            ProvideMissingTransactionsSuccess(m) => {
-                AnyMessage::JobDeclaration(ProvideMissingTransactionsSuccess(m.into_static()))
-            }
-            PushSolution(m) => AnyMessage::JobDeclaration(PushSolution(m.into_static())),
-        },
-        AnyMessage::TemplateDistribution(m) => match m {
-            CoinbaseOutputConstraints(m) => {
-                AnyMessage::TemplateDistribution(CoinbaseOutputConstraints(m.into_static()))
-            }
-            TemplateDistribution::NewTemplate(m) => {
-                AnyMessage::TemplateDistribution(TemplateDistribution::NewTemplate(m.into_static()))
-            }
-            TemplateDistribution::RequestTransactionData(m) => AnyMessage::TemplateDistribution(
-                TemplateDistribution::RequestTransactionData(m.into_static()),
-            ),
-            TemplateDistribution::RequestTransactionDataError(m) => {
-                AnyMessage::TemplateDistribution(TemplateDistribution::RequestTransactionDataError(
-                    m.into_static(),
-                ))
-            }
-            TemplateDistribution::RequestTransactionDataSuccess(m) => {
-                AnyMessage::TemplateDistribution(
-                    TemplateDistribution::RequestTransactionDataSuccess(m.into_static()),
-                )
-            }
-            TemplateDistribution::SetNewPrevHash(m) => AnyMessage::TemplateDistribution(
-                TemplateDistribution::SetNewPrevHash(m.into_static()),
-            ),
-            TemplateDistribution::SubmitSolution(m) => AnyMessage::TemplateDistribution(
-                TemplateDistribution::SubmitSolution(m.into_static()),
-            ),
-        },
-        AnyMessage::Extensions(extensions) => AnyMessage::Extensions(extensions.into_static()),
-    }
+pub fn into_owned(m: AnyMessage<'_>) -> AnyMessageOwned {
+    m.into_owned()
 }
 
 pub mod http {

@@ -1,3 +1,6 @@
+use stratum_apps::stratum_core::parsers_sv2::{
+    AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, MiningOwned,
+};
 // Integration test for translator extension negotiation with extension 0x0002
 // (EXTENSION_TYPE_WORKER_HASHRATE_TRACKING) and user_identity TLV validation.
 //
@@ -9,11 +12,10 @@
 
 use integration_tests_sv2::{interceptor::MessageDirection, template_provider::DifficultyLevel, *};
 use stratum_apps::stratum_core::{
-    binary_sv2::Seq064K,
+    binary_sv2::Seq064KOwned,
     common_messages_sv2::*,
     extensions_sv2::{EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY},
     mining_sv2::*,
-    parsers_sv2::{AnyMessage, Extensions, ExtensionsNegotiation, Mining},
 };
 use tracing::info;
 
@@ -78,8 +80,8 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     let request_extensions_msg = match pool_translator_sniffer.next_message_from_downstream() {
         Some((
             _,
-            AnyMessage::Extensions(Extensions::ExtensionsNegotiation(
-                ExtensionsNegotiation::RequestExtensions(msg),
+            AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
+                ExtensionsNegotiationOwned::RequestExtensions(msg),
             )),
         )) => msg,
         _ => panic!(
@@ -89,7 +91,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     };
     assert_eq!(
         request_extensions_msg.requested_extensions,
-        Seq064K::new(supported_extensions.clone()).unwrap()
+        Seq064KOwned::new(supported_extensions.clone()).unwrap()
     );
 
     // Verify RequestExtensionsSuccess acknowledges the extension
@@ -97,13 +99,13 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     match request_extensions_success_msg {
         Some((
             _,
-            AnyMessage::Extensions(Extensions::ExtensionsNegotiation(
-                ExtensionsNegotiation::RequestExtensionsSuccess(msg),
+            AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
+                ExtensionsNegotiationOwned::RequestExtensionsSuccess(msg),
             )),
         )) => {
             assert_eq!(
                 msg.supported_extensions,
-                Seq064K::new(supported_extensions).unwrap()
+                Seq064KOwned::new(supported_extensions).unwrap()
             );
         }
         _ => panic!("Expected RequestExtensionsSuccess message"),
@@ -119,7 +121,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     // Extract and verify user_identity from OpenExtendedMiningChannel
     let open_channel_msg = pool_translator_sniffer.next_message_from_downstream();
     match open_channel_msg {
-        Some((_, AnyMessage::Mining(Mining::OpenExtendedMiningChannel(msg)))) => {
+        Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(msg)))) => {
             let user_identity = msg.user_identity.as_utf8_or_hex();
             assert_eq!(user_identity, "user_identity.miner1".to_string());
         }
@@ -152,7 +154,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
     // Verify SubmitSharesExtended contains TLV with user_identity
     let submit_shares_msg = pool_translator_sniffer.next_message_from_downstream_with_tlvs();
     match submit_shares_msg {
-        Some((_, AnyMessage::Mining(Mining::SubmitSharesExtended(msg)), tlv_fields)) => {
+        Some((_, AnyMessageOwned::Mining(MiningOwned::SubmitSharesExtended(msg)), tlv_fields)) => {
             info!(
                 "SubmitSharesExtended received - channel_id: {}, sequence_number: {}, job_id: {}",
                 msg.channel_id, msg.sequence_number, msg.job_id
