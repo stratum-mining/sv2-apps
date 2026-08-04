@@ -5,6 +5,8 @@
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
 //! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
 //!   intentionally mismatched.
+//! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without
+//!   tearing down the IPC connection.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -32,7 +34,10 @@ use stratum_apps::{
             absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
             transaction::Version as TxVersion,
         },
-        job_declaration_sv2::ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        job_declaration_sv2::{
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        },
     },
 };
 
@@ -98,6 +103,10 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         .expect("JDP readiness channel dropped unexpectedly");
 
     // Execute all JDP paths against the same live runtime to keep this test fully end-to-end.
+    // The malformed-coinbase path runs first on purpose: every scenario after it doubles as
+    // proof that rejecting it did not tear down the IPC connection.
+    assert_jdp_invalid_coinbase_input_scenario(&incoming_sender).await;
+
     let missing_wtxid = Wtxid::from_byte_array([0x42; 32]);
     assert_jdp_missing_transactions_scenario(&incoming_sender, coinbase_tx.clone(), missing_wtxid)
         .await;
@@ -180,6 +189,32 @@ async fn assert_jdp_stale_chain_tip_scenario(
     }
 }
 
+/// A coinbase that does not carry exactly one input must be rejected before block assembly.
+///
+/// A zero-input coinbase re-serializes into bytes Bitcoin Core's deserializer reads as a SegWit
+/// marker, so letting it reach `checkBlock` yields a capnp remote exception, which the handler
+/// answers with `internal-error` and follows by cancelling the whole IPC connection.
+async fn assert_jdp_invalid_coinbase_input_scenario(incoming_sender: &Sender<JdRequest>) {
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        build_zero_input_coinbase_tx(),
+        vec![],
+        vec![],
+        "jdp/invalid-coinbase-tx-input",
+    )
+    .await;
+
+    match response {
+        JdResponse::Error { error_code, .. } => {
+            assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+                "expected invalid-coinbase-tx-input for a zero-input declared coinbase"
+            );
+        }
+        response => panic!("expected Error(invalid-coinbase-tx-input), got: {response:?}"),
+    }
+}
+
 async fn send_declare_mining_job_and_recv_response(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
@@ -224,6 +259,18 @@ fn coinbase_script_sig_for_height(height: u32) -> ScriptBuf {
     script.push(encoded_height.len() as u8);
     script.extend_from_slice(&encoded_height);
     ScriptBuf::from_bytes(script)
+}
+
+fn build_zero_input_coinbase_tx() -> Transaction {
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    }
 }
 
 fn build_valid_coinbase_tx(next_height: u32) -> Transaction {

@@ -14,8 +14,10 @@ use stratum_core::{
         hashes::Hash,
     },
     job_declaration_sv2::{
-        ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
-        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, PushSolutionOwned,
+        ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        PushSolutionOwned,
     },
 };
 use tokio::sync::oneshot;
@@ -24,7 +26,8 @@ use tracing::{debug, error, info, warn};
 impl BitcoinCoreSv2JDP {
     /// Validates a declared mining job by checking transaction availability and block structure.
     ///
-    /// Adds missing transactions to the mempool mirror, verifies all transactions are available,
+    /// Rejects a coinbase that does not carry exactly one input, adds missing transactions to the
+    /// mempool mirror, verifies all transactions are available,
     /// assembles a test block, and uses Bitcoin Core's `checkBlock` to validate the block
     /// structure. Returns success with current template parameters or an error if validation
     /// fails.
@@ -45,7 +48,7 @@ impl BitcoinCoreSv2JDP {
         );
         debug!(
             "Declared coinbase scriptSig: {:?}",
-            coinbase_tx.input[0].script_sig
+            coinbase_tx.input.first().map(|input| &input.script_sig)
         );
 
         let declared_bip34_height = coinbase_tx
@@ -85,6 +88,24 @@ impl BitcoinCoreSv2JDP {
             let initial_bip34_height = mempool_mirror
                 .get_current_bip34_height()
                 .expect("current_bip34_height must be set");
+
+            // A coinbase must carry exactly one input. Reject anything else before assembling
+            // the block: a zero-input coinbase re-serializes into bytes Bitcoin Core's
+            // deserializer reads as a SegWit marker ("Superfluous witness record"), which comes
+            // back as a capnp remote exception and tears down the whole IPC connection.
+            if coinbase_tx.input.len() != 1 {
+                warn!(
+                    "Rejecting DeclareMiningJob: declared coinbase has {} inputs, expected exactly 1",
+                    coinbase_tx.input.len()
+                );
+                // deliberately ignore potential errors
+                // we don't care if the receiver dropped the channel
+                let _ = response_tx.send(JdResponse::Error {
+                    error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+                    validation_context: initial_validation_context,
+                });
+                return;
+            }
 
             // Now verify that all wtxids from the declared job are available
             let missing_wtxids = mempool_mirror.verify(&wtxid_list);
