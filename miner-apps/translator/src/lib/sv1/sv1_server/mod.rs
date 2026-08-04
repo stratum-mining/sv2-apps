@@ -765,7 +765,7 @@ impl Sv1Server {
                 downstream_id
             );
             return Err(TproxyError::disconnect(
-                TproxyErrorKind::DownstreamNotFound(downstream_id as u32),
+                TproxyErrorKind::DownstreamNotPresent(downstream_id),
                 downstream_id,
             ));
         }
@@ -810,7 +810,7 @@ impl Sv1Server {
                 let downstream_id = self.request_id_to_downstream_id.remove(&m.request_id);
 
                 let Some((_, downstream_id)) = downstream_id else {
-                    return Err(TproxyError::log(TproxyErrorKind::DownstreamNotFound(
+                    return Err(TproxyError::log(TproxyErrorKind::RequestIdNotFound(
                         m.request_id,
                     )));
                 };
