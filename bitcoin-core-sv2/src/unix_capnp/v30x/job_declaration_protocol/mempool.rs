@@ -52,9 +52,10 @@ impl MempoolMirror {
         }
     }
 
-    /// Adds transactions to the mempool mirror.
+    /// Commits transactions into the mempool mirror.
     ///
-    /// Used to add missing transactions from ProvideMissingTransactionsSuccess messages.
+    /// Only call this for transactions Bitcoin Core has already accepted as part of a valid
+    /// block: unvalidated client-supplied transactions must stay staged outside the mirror.
     pub fn add_transactions(&mut self, transactions: Vec<Transaction>) {
         for tx in transactions {
             let wtxid = tx.compute_wtxid();
@@ -62,21 +63,33 @@ impl MempoolMirror {
         }
     }
 
-    /// Retrieves transactions by wtxid.
-    pub fn get_txdata(&self, wtxids: &[Wtxid]) -> Vec<Transaction> {
-        wtxids
-            .iter()
-            .filter_map(|wtxid| self.txdata.get(wtxid).cloned())
-            .collect()
-    }
+    /// Resolves `wtxids` into transactions, preferring `staged` over the mirror's own txdata.
+    ///
+    /// `staged` holds client-supplied transactions that have not been validated yet, so they are
+    /// deliberately kept out of the mirror until the caller commits them via
+    /// [`MempoolMirror::add_transactions`].
+    ///
+    /// Returns `Err` with every wtxid that could not be resolved, preserving `wtxids` order.
+    pub fn resolve_txdata(
+        &self,
+        wtxids: &[Wtxid],
+        staged: &HashMap<Wtxid, Transaction>,
+    ) -> Result<Vec<Transaction>, Vec<Wtxid>> {
+        let mut txdata = Vec::with_capacity(wtxids.len());
+        let mut missing = Vec::new();
 
-    /// Returns wtxids that are not present in the mempool.
-    pub fn verify(&self, wtxids: &[Wtxid]) -> Vec<Wtxid> {
-        wtxids
-            .iter()
-            .filter(|&wtxid| !self.txdata.contains_key(wtxid))
-            .copied()
-            .collect()
+        for wtxid in wtxids {
+            match staged.get(wtxid).or_else(|| self.txdata.get(wtxid)) {
+                Some(tx) => txdata.push(tx.clone()),
+                None => missing.push(*wtxid),
+            }
+        }
+
+        if missing.is_empty() {
+            Ok(txdata)
+        } else {
+            Err(missing)
+        }
     }
 
     /// Returns the current template's prev_hash.

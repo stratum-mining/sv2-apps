@@ -6,6 +6,7 @@ use crate::{
         BitcoinCoreSv2JDP, mempool::decode_bip34_height_from_coinbase_script_sig,
     },
 };
+use std::collections::HashMap;
 use stratum_core::{
     bitcoin::{
         Block, Transaction, TxMerkleNode, Txid, Wtxid,
@@ -26,11 +27,14 @@ use tracing::{debug, error, info, warn};
 impl BitcoinCoreSv2JDP {
     /// Validates a declared mining job by checking transaction availability and block structure.
     ///
-    /// Rejects a coinbase that does not carry exactly one input, adds missing transactions to the
-    /// mempool mirror, verifies all transactions are available,
-    /// assembles a test block, and uses Bitcoin Core's `checkBlock` to validate the block
-    /// structure. Returns success with current template parameters or an error if validation
-    /// fails.
+    /// Stages the client-supplied transactions locally, rejects a coinbase that does not carry
+    /// exactly one input, verifies all declared wtxids resolve against the mempool mirror plus
+    /// that staging area, assembles a test block, and uses Bitcoin Core's `checkBlock` to validate
+    /// the block structure. Staged transactions are only committed to the mempool mirror after
+    /// `checkBlock` succeeds and only if the chain tip did not move while `checkBlock` was in
+    /// flight, so a rejected declaration never grows shared state and stale transactions never
+    /// seed a freshly-cleared mirror. Returns success with current template parameters or an
+    /// error if validation fails.
     pub(crate) async fn handle_declare_mining_job(
         &self,
         version: Version,
@@ -63,11 +67,16 @@ impl BitcoinCoreSv2JDP {
             // stale-tip comparison signal.
             .unwrap_or_else(|| coinbase_tx.lock_time.to_consensus_u32());
 
-        let (initial_validation_context, initial_bip34_height, txdata) = {
-            let mut mempool_mirror = self.mempool_mirror.borrow_mut();
+        // Client-supplied transactions are staged locally and only committed to the process-wide
+        // mempool mirror once Bitcoin Core has validated the assembled block, so rejected
+        // declarations cannot grow shared state.
+        let mut staged_txs: HashMap<Wtxid, Transaction> = missing_txs
+            .into_iter()
+            .map(|tx| (tx.compute_wtxid(), tx))
+            .collect();
 
-            // Add the missing transactions to the mempool mirror
-            mempool_mirror.add_transactions(missing_txs);
+        let (initial_validation_context, initial_bip34_height, txdata) = {
+            let mempool_mirror = self.mempool_mirror.borrow();
 
             let prev_hash = mempool_mirror
                 .get_current_prev_hash()
@@ -107,19 +116,20 @@ impl BitcoinCoreSv2JDP {
                 return;
             }
 
-            // Now verify that all wtxids from the declared job are available
-            let missing_wtxids = mempool_mirror.verify(&wtxid_list);
-            if !missing_wtxids.is_empty() {
-                // deliberately ignore potential errors
-                // we don't care if the receiver dropped the channel
-                let _ = response_tx.send(JdResponse::MissingTransactions {
-                    missing_wtxids,
-                    validation_context: initial_validation_context,
-                });
-                return;
-            }
-
-            let txdata = mempool_mirror.get_txdata(&wtxid_list);
+            // Now verify that all wtxids from the declared job are available, either in the
+            // mirror or among the staged (still unvalidated) transactions
+            let txdata = match mempool_mirror.resolve_txdata(&wtxid_list, &staged_txs) {
+                Ok(txdata) => txdata,
+                Err(missing_wtxids) => {
+                    // deliberately ignore potential errors
+                    // we don't care if the receiver dropped the channel
+                    let _ = response_tx.send(JdResponse::MissingTransactions {
+                        missing_wtxids,
+                        validation_context: initial_validation_context,
+                    });
+                    return;
+                }
+            };
 
             info!(
                 "Using prevhash: {:?}, nbits: {:?}, min_ntime: {}, bip34_height: {} from mempool mirror",
@@ -284,6 +294,32 @@ impl BitcoinCoreSv2JDP {
                 .expect("current_bip34_height must be set");
             (latest_validation_context, latest_bip34_height)
         };
+
+        if valid_job {
+            if latest_validation_context.prev_hash == initial_validation_context.prev_hash {
+                // checkBlock validated the assembled block, so the client-supplied transactions it
+                // contained are now safe to commit to the shared mempool mirror. Staged
+                // transactions that were not declared were never part of that block, so they are
+                // dropped.
+                let validated_txs: Vec<Transaction> = wtxid_list
+                    .iter()
+                    .filter_map(|wtxid| staged_txs.remove(wtxid))
+                    .collect();
+                self.mempool_mirror
+                    .borrow_mut()
+                    .add_transactions(validated_txs);
+            } else {
+                // The chain tip moved while checkBlock was in flight: the template monitor
+                // already cleared the mirror for the new tip, and these transactions were only
+                // validated against the old one. Drop them instead of seeding the new-tip mirror
+                // with stale entries; the client will resend them if still relevant.
+                debug!(
+                    initial_prev_hash = ?initial_validation_context.prev_hash,
+                    latest_prev_hash = ?latest_validation_context.prev_hash,
+                    "Chain tip moved during checkBlock; discarding staged transactions instead of committing them to the mirror"
+                );
+            }
+        }
 
         let response = if valid_job {
             JdResponse::Success {
