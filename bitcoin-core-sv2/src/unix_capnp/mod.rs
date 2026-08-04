@@ -14,7 +14,7 @@ pub mod v31x;
 const MIN_BLOCK_RESERVED_WEIGHT: u64 = 2000;
 
 /// BIP141 weight factor (witness scale factor), used to convert vsize to weight units.
-const WEIGHT_FACTOR: u32 = 4;
+const WEIGHT_FACTOR: u64 = 4;
 
 /// Grace period before stale template data is retired after a chain tip change, in seconds.
 ///
