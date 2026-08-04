@@ -53,7 +53,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         msg: AllocateMiningJobTokenOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
@@ -111,7 +111,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         msg: DeclareMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
@@ -287,7 +287,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         msg: ProvideMissingTransactionsSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
@@ -427,7 +427,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         msg: PushSolutionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =

@@ -56,7 +56,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for Sv2Tp {
         msg: ReconnectOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         Ok(())
     }
 

@@ -54,7 +54,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         msg: AllocateMiningJobTokenSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
         let coinbase_changed = self
@@ -140,7 +140,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         msg: DeclareMiningJobErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", msg);
+        warn!("Received: {}", msg);
 
         let error_code = msg.error_code.as_utf8_or_hex();
         if error_code == ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP {
@@ -179,7 +179,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         msg: DeclareMiningJobSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         let Some(last_declare_job) = self.last_declare_job_store.get_cloned(&msg.request_id) else {
             error!(
@@ -285,7 +285,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         let request_id = msg.request_id;
 
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         let tx_store_entry = self.last_declare_job_store.get_cloned(&request_id);
 

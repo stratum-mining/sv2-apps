@@ -56,7 +56,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         msg: SetupConnectionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         if msg.protocol != Protocol::MiningProtocol {
             info!(

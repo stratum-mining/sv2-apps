@@ -80,7 +80,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: CloseChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received Close Channel: {msg:?}");
+        info!("Received Close Channel: {msg}");
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
         self.with_registered_downstream(downstream_id, |downstream| {
@@ -111,7 +111,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
-        info!("Received OpenStandardMiningChannel: {:?}", msg);
+        info!("Received OpenStandardMiningChannel: {}", msg);
 
         let messages = self.with_registered_downstream(downstream_id, |downstream| {
                 if downstream.requires_custom_work.load(Ordering::SeqCst) {
@@ -347,7 +347,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let user_identity = msg.user_identity.as_utf8_or_hex();
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
-        info!("Received OpenExtendedMiningChannel: {:?}", msg);
+        info!("Received OpenExtendedMiningChannel: {}", msg);
 
         let nominal_hash_rate = msg.nominal_hash_rate;
         let requested_max_target = Target::from_le_bytes(msg.max_target.to_array());
@@ -495,7 +495,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     group_channel_id,
                 }
                 ;
-                info!("Sending OpenExtendedMiningChannel.Success (downstream_id: {downstream_id}): {open_extended_mining_channel_success:?}");
+                info!("Sending OpenExtendedMiningChannel.Success (downstream_id: {downstream_id}): {open_extended_mining_channel_success}");
 
                 messages.push(
                     (
@@ -630,7 +630,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SubmitSharesStandardOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received SubmitSharesStandard: {msg:?}");
+        info!("Received SubmitSharesStandard: {msg}");
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
@@ -869,7 +869,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SubmitSharesExtendedOwned,
         tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received SubmitSharesExtended: {msg:?}");
+        info!("Received SubmitSharesExtended: {msg}");
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
@@ -1137,7 +1137,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: UpdateChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
@@ -1268,7 +1268,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SetCustomMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
