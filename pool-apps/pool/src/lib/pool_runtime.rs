@@ -3,10 +3,7 @@
 //! Provides [`PoolRuntime`], a structured state-machine orchestrating the pool's
 //! initialization, bootstrap stages, background service loops, and graceful teardown.
 
-use std::{
-    sync::{Arc, atomic::Ordering},
-    thread::JoinHandle,
-};
+use std::{sync::Arc, thread::JoinHandle};
 use stratum_apps::stratum_core::parsers_sv2::{MiningOwned, TemplateDistributionOwned};
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -126,7 +123,8 @@ impl<State> PoolRuntime<State> {
     /// Performs a coordinated, graceful shutdown of the runtime.
     ///
     /// Signals cancellation to all active sub-services and background tasks, awaiting
-    /// their clean termination up to a configured graceful timeout.
+    /// their clean termination up to a configured graceful timeout, and finally marks the
+    /// owning [`PoolSv2`] as stopped — callers do not need to do so themselves.
     pub(super) async fn shutdown(mut self) {
         self.pool.cancellation_token.cancel();
 
@@ -170,8 +168,7 @@ impl<State> PoolRuntime<State> {
             }
         }
 
-        self.pool.shutdown_notify.notify_waiters();
-        self.pool.is_alive.store(false, Ordering::Relaxed);
+        self.pool.mark_stopped();
         info!("Pool shutdown complete.");
     }
 }
