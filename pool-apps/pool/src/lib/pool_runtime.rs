@@ -618,13 +618,6 @@ impl PoolRuntime<ChannelManagerReady> {
 
 impl PoolRuntime<Running> {
     pub(super) async fn wait_for_shutdown(&self) {
-        let cancellation_token = self.pool.cancellation_token.clone();
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C received — initiating graceful shutdown...");
-                cancellation_token.cancel();
-            }
-            _ = cancellation_token.cancelled() => {}
-        }
+        self.pool.cancellation_token.cancelled().await;
     }
 }
