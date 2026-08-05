@@ -30,7 +30,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for JobDeclarator {
         msg: SetupConnectionSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         self.mode.activate();
         Ok(())
     }
@@ -41,7 +41,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for JobDeclarator {
         msg: ChannelEndpointChangedOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         Ok(())
     }
 
@@ -51,7 +51,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for JobDeclarator {
         msg: ReconnectOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         Ok(())
     }
 
@@ -61,7 +61,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for JobDeclarator {
         msg: SetupConnectionErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", msg);
+        warn!("Received: {}", msg);
         Err(JDCError::fallback(JDCErrorKind::SetupConnectionError))
     }
 }

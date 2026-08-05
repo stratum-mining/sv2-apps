@@ -261,7 +261,7 @@ impl BitcoinCoreSv2TDP {
                         break;
                     }
                     Ok(incoming_message) = self_clone.incoming_messages.recv() => {
-                        info!("Received: {:?}", incoming_message);
+                        info!("Received: {}", incoming_message);
                         debug!("monitor_incoming_messages() processing message");
 
                         match incoming_message {
@@ -293,7 +293,7 @@ impl BitcoinCoreSv2TDP {
                                 }
                             }
                             _ => {
-                                error!("Received unexpected message: {:?}", incoming_message);
+                                error!("Received unexpected message: {}", incoming_message);
                                 warn!("Ignoring message");
                                 continue;
                             }

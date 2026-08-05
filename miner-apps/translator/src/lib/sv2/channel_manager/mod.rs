@@ -718,7 +718,7 @@ impl ChannelManager {
                 }
             }
             MiningOwned::UpdateChannel(mut m) => {
-                debug!("Received UpdateChannel from SV1Server: {:?}", m);
+                debug!("Received UpdateChannel from SV1Server: {}", m);
 
                 if self.mode.is_aggregated() {
                     // Update the aggregated channel's nominal hashrate so
@@ -763,7 +763,7 @@ impl ChannelManager {
                     })?;
             }
             MiningOwned::CloseChannel(m) => {
-                debug!("Received CloseChannel from Sv1Server: {m:?}");
+                debug!("Received CloseChannel from Sv1Server: {m}");
 
                 // Guard: never remove the aggregated upstream sentinel entry
                 // here. `AGGREGATED_CHANNEL_ID` represents the single shared

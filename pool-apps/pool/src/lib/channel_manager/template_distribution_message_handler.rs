@@ -36,7 +36,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: NewTemplateOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         if msg.future_template {
             self.last_future_template
@@ -189,7 +189,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", msg);
+        warn!("Received: {}", msg);
         Ok(())
     }
 
@@ -199,7 +199,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         Ok(())
     }
 
@@ -209,7 +209,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetNewPrevHashTdp,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         self.last_new_prev_hash
             .set(Some(msg.clone()))

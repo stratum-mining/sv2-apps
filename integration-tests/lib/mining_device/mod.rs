@@ -540,7 +540,7 @@ impl Device {
             m.job_id,
             m.is_future()
         );
-        debug!("NewMiningJob: {:?}", m);
+        debug!("NewMiningJob: {}", m);
         match (m.is_future(), self.prev_hash.as_ref()) {
             (false, Some(p_h)) => {
                 self.miner.with(|miner| miner.new_header(p_h, &m)).unwrap();
@@ -559,7 +559,7 @@ impl Device {
             "Received SetNewPrevHash channel id: {}, job id: {}",
             m.channel_id, m.job_id
         );
-        debug!("SetNewPrevHash: {:?}", m);
+        debug!("SetNewPrevHash: {}", m);
         let jobs: Vec<&NewMiningJobOwned> = self
             .jobs
             .iter()
@@ -583,7 +583,7 @@ impl Device {
 
     fn handle_set_target(&mut self, m: SetTargetOwned) {
         info!("Received SetTarget for channel id: {}", m.channel_id);
-        debug!("SetTarget: {:?}", m);
+        debug!("SetTarget: {}", m);
         self.miner
             .with(|miner| miner.new_target(m.maximum_target.to_owned_bytes()))
             .unwrap();

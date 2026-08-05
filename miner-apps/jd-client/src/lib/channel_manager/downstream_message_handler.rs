@@ -184,7 +184,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: CloseChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
         self.with_registered_downstream(downstream_id, |downstream| {
@@ -238,7 +238,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let mut coinbase_outputs = deserialize_outputs(coinbase_outputs)
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
 
-        info!(downstream_id, "Received: {:?}", msg);
+        info!(downstream_id, "Received: {}", msg);
 
         let build_error = |code: &str| {
             MiningOwned::OpenMiningChannelError(OpenMiningChannelErrorOwned {
@@ -456,7 +456,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
-        info!(downstream_id, "Received: {:?}", msg);
+        info!(downstream_id, "Received: {}", msg);
         let request_id = msg.request_id;
 
         let nominal_hash_rate = msg.nominal_hash_rate;
@@ -719,7 +719,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: UpdateChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
         let channel_id = msg.channel_id;
         let new_nominal_hash_rate = msg.nominal_hash_rate;
         let requested_maximum_target = Target::from_le_bytes(msg.maximum_target.to_array());
@@ -1441,7 +1441,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SetCustomMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", msg);
+        warn!("Received: {}", msg);
         Err(JDCError::log(JDCErrorKind::UnexpectedMessage(
             0,
             MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,

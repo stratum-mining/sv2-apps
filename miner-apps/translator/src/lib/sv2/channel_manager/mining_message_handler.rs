@@ -56,7 +56,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: OpenStandardMiningChannelSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         Err(TproxyError::log(TproxyErrorKind::UnexpectedMessage(
             0,
             MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
@@ -409,7 +409,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: OpenMiningChannelErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         Err(TproxyError::fallback(
             TproxyErrorKind::OpenMiningChannelError,
         ))
@@ -421,7 +421,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: UpdateChannelErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         Ok(())
     }
 
@@ -431,7 +431,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: CloseChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", m);
+        info!("Received: {}", m);
         // are we working in aggregated mode?
         if self.mode.is_aggregated() {
             // even if aggregated channel_id != m.channel_id, we should trigger fallback
@@ -479,7 +479,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SetExtranoncePrefixOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         warn!(
             "⚠️ Cannot process SetExtranoncePrefix since set_extranonce is not supported for majority of sv1 clients. Ignoring."
         );
@@ -492,7 +492,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SubmitSharesSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?} ✅", m);
+        info!("Received: {} ✅", m);
 
         // In aggregated mode, the Pool responds with the upstream channel ID, but the
         // channel is stored under AGGREGATED_CHANNEL_ID in the DashMap.
@@ -517,7 +517,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SubmitSharesErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?} ❌", m);
+        warn!("Received: {} ❌", m);
         let error_code = m.error_code.as_utf8_or_hex();
 
         let key = if self.mode.is_aggregated() {
@@ -540,7 +540,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: NewMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         warn!(
             "⚠️ Cannot process NewMiningJob since Translator Proxy supports only extended mining jobs. Ignoring."
         );
@@ -553,7 +553,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: NewExtendedMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", m);
+        info!("Received: {}", m);
         let m_static = m.clone();
 
         // we update the channel states and keep track of the messages that need to be sent to the
@@ -710,7 +710,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SetNewPrevHashOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", m);
+        info!("Received: {}", m);
         let mut m_static = m.clone();
 
         // we update the channel states and keep track of the messages that need to be sent to the
@@ -891,7 +891,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SetCustomMiningJobSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         warn!(
             "⚠️ Cannot process SetCustomMiningJobSuccess since Translator Proxy does not support custom mining jobs. Ignoring."
         );
@@ -907,7 +907,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SetCustomMiningJobErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", m);
+        warn!("Received: {}", m);
         warn!(
             "⚠️ Cannot process SetCustomMiningJobError since Translator Proxy does not support custom mining jobs. Ignoring."
         );
@@ -923,7 +923,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SetTargetOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", m);
+        info!("Received: {}", m);
 
         let m_static = m.clone();
 
@@ -1028,7 +1028,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         m: SetGroupChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", m);
+        info!("Received: {}", m);
 
         // remove every channel from any group channels that end up empty
         let mut group_channels_to_remove = Vec::new();

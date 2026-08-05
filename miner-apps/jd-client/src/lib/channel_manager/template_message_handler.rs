@@ -43,7 +43,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: NewTemplateOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         self.template_store.insert(msg.template_id, msg.clone());
         if msg.future_template {
@@ -293,7 +293,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {:?}", msg);
+        warn!("Received: {}", msg);
         let error_code = msg.error_code.as_utf8_or_hex();
 
         if matches!(
@@ -461,7 +461,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetNewPrevHashTdpOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {:?}", msg);
+        info!("Received: {}", msg);
 
         let outputs = deserialize_outputs(self.coinbase_outputs.get().map_err(JDCError::shutdown)?)
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
