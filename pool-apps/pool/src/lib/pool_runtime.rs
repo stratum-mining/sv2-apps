@@ -495,52 +495,6 @@ impl PoolRuntime<TemplateProviderReady> {
             }
         };
 
-        // Start monitoring server if configured
-        #[cfg(feature = "monitoring")]
-        if let Some(monitoring_addr) = self.pool.config.monitoring_address() {
-            info!(
-                "Initializing monitoring server on http://{}",
-                monitoring_addr
-            );
-
-            let monitoring_server = match stratum_apps::monitoring::MonitoringServer::new(
-                monitoring_addr,
-                None, // Pool doesn't have channels opened with servers
-                Some(Arc::new(channel_manager.clone())), // channels opened with clients
-                std::time::Duration::from_secs(
-                    self.pool
-                        .config
-                        .monitoring_cache_refresh_secs()
-                        .unwrap_or(15),
-                ),
-            ) {
-                Ok(ms) => ms,
-                Err(err) => {
-                    return Err((
-                        PoolErrorKind::Configuration(format!(
-                            "Failed to initialize monitoring server: {err}"
-                        )),
-                        self,
-                    ));
-                }
-            };
-
-            let cancellation_token_clone = self.pool.cancellation_token.clone();
-            let shutdown_signal = async move {
-                cancellation_token_clone.cancelled().await;
-            };
-
-            self.task_manager.spawn({
-                let cancellation_token = self.pool.cancellation_token.clone();
-                async move {
-                    if let Err(e) = monitoring_server.run(shutdown_signal).await {
-                        error!("Monitoring server error: {}", e);
-                        cancellation_token.cancel();
-                    }
-                }
-            });
-        }
-
         let new_state = ChannelManagerReady {
             io: self.state.io,
             channel_manager,
@@ -560,11 +514,58 @@ impl PoolRuntime<TemplateProviderReady> {
 
 impl PoolRuntime<ChannelManagerReady> {
     /// Activates the background execution loop of the [`ChannelManager`], spawns the
-    /// downstream TCP listening server, and transitions the runtime to [`Running`].
+    /// downstream TCP listening server and the monitoring server, and transitions the
+    /// runtime to [`Running`].
     async fn start_services(
         self,
     ) -> Result<PoolRuntime<Running>, (PoolErrorKind, PoolRuntime<ChannelManagerReady>)> {
         let cancellation_token = self.pool.cancellation_token.clone();
+
+        // Start monitoring server if configured
+        #[cfg(feature = "monitoring")]
+        if let Some(monitoring_addr) = self.pool.config.monitoring_address() {
+            info!(
+                "Initializing monitoring server on http://{}",
+                monitoring_addr
+            );
+
+            let monitoring_server = match stratum_apps::monitoring::MonitoringServer::new(
+                monitoring_addr,
+                None, // Pool doesn't have channels opened with servers
+                Some(Arc::new(self.state.channel_manager.clone())), // channels opened with clients
+                std::time::Duration::from_secs(
+                    self.pool
+                        .config
+                        .monitoring_cache_refresh_secs()
+                        .unwrap_or(15),
+                ),
+            ) {
+                Ok(ms) => ms,
+                Err(err) => {
+                    return Err((
+                        PoolErrorKind::Configuration(format!(
+                            "Failed to initialize monitoring server: {err}"
+                        )),
+                        self,
+                    ));
+                }
+            };
+
+            let cancellation_token_clone = cancellation_token.clone();
+            let shutdown_signal = async move {
+                cancellation_token_clone.cancelled().await;
+            };
+
+            self.task_manager.spawn({
+                let cancellation_token = cancellation_token.clone();
+                async move {
+                    if let Err(e) = monitoring_server.run(shutdown_signal).await {
+                        error!("Monitoring server error: {}", e);
+                        cancellation_token.cancel();
+                    }
+                }
+            });
+        }
 
         match self
             .state
