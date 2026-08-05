@@ -77,7 +77,6 @@ impl SnifferSV1 {
             let downstream_to_sniffer_connection =
                 ConnectionSV1::new(downstream_stream, CancellationToken::new()).await;
             select! {
-                _ = tokio::signal::ctrl_c() => { },
                 _ = Self::recv_from_down_send_to_up_sv1(
                     downstream_to_sniffer_connection.receiver(),
                     sniffer_to_upstream_connection.sender(),
@@ -98,67 +97,54 @@ impl SnifferSV1 {
             panic!("Message cannot be empty");
         }
         let now = std::time::Instant::now();
-        tokio::select!(
-            _ = tokio::signal::ctrl_c() => { },
-            _ = async {
-                loop {
-                    match direction {
-                        MessageDirection::ToUpstream => {
-                            if self.messages_from_downstream.has_message(message).await {
-                                break;
-                            }
-                        }
-                        MessageDirection::ToDownstream => {
-                            if self.messages_from_upstream.has_message(message).await {
-                                break;
-                            }
-                        }
-                    }
-                    if now.elapsed().as_secs() > 60 {
-                        panic!( "Timeout: SV1 message {} not found", message.first().unwrap());
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue;
+        loop {
+            match direction {
+                MessageDirection::ToUpstream => {
+                    if self.messages_from_downstream.has_message(message).await {
+                        break;
                     }
                 }
-            } => {}
-        );
+                MessageDirection::ToDownstream => {
+                    if self.messages_from_upstream.has_message(message).await {
+                        break;
+                    }
+                }
+            }
+            if now.elapsed().as_secs() > 60 {
+                panic!(
+                    "Timeout: SV1 message {} not found",
+                    message.first().unwrap()
+                );
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        }
     }
 
     /// Wait for a mining.notify message with a job_id that is a keepalive job.
     /// Keepalive job IDs contain the '#' delimiter (format: `{original_job_id}#{counter}`).
     pub async fn wait_for_keepalive_notify(&self, direction: MessageDirection) {
         let now = std::time::Instant::now();
-        tokio::select!(
-            _ = tokio::signal::ctrl_c() => { },
-            _ = async {
-                loop {
-                    let has_notify = match direction {
-                        MessageDirection::ToUpstream => {
-                            self.messages_from_downstream
-                                .has_keepalive_notify()
-                                .await
-                        }
-                        MessageDirection::ToDownstream => {
-                            self.messages_from_upstream
-                                .has_keepalive_notify()
-                                .await
-                        }
-                    };
-                    if has_notify {
-                        break;
-                    }
-                    if now.elapsed().as_secs() > 60 {
-                        panic!(
-                            "Timeout: keepalive mining.notify (job_id containing '#') not found"
-                        );
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue;
-                    }
+        loop {
+            let has_notify = match direction {
+                MessageDirection::ToUpstream => {
+                    self.messages_from_downstream.has_keepalive_notify().await
                 }
-            } => {}
-        );
+                MessageDirection::ToDownstream => {
+                    self.messages_from_upstream.has_keepalive_notify().await
+                }
+            };
+            if has_notify {
+                break;
+            }
+            if now.elapsed().as_secs() > 60 {
+                panic!("Timeout: keepalive mining.notify (job_id containing '#') not found");
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        }
     }
 
     /// Waits for a message and executes an assertion closure on it.

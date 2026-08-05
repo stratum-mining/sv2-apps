@@ -78,13 +78,12 @@ pub async fn create_downstream(
         Responder::from_authority_kp(&pub_key, &prv_key, std::time::Duration::from_secs(10000))
             .unwrap();
 
-    if let Ok((receiver_from_client, sender_to_client)) =
-        Connection::new::<AnyMessageOwned>(
-            stream,
-            HandshakeRole::Responder(responder),
-            CancellationToken::new(),
-        )
-        .await
+    if let Ok((receiver_from_client, sender_to_client)) = Connection::new::<AnyMessageOwned>(
+        stream,
+        HandshakeRole::Responder(responder),
+        CancellationToken::new(),
+    )
+    .await
     {
         Some((receiver_from_client, sender_to_client))
     } else {
