@@ -26,5 +26,6 @@ async fn inner_main() {
     init_logging(config.log_dir());
     if let Err(e) = PoolSv2::new(config).start().await {
         tracing::error!("Pool Error'ed out: {e}");
+        std::process::exit(1);
     };
 }
