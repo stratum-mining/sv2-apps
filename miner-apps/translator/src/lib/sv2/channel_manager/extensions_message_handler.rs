@@ -9,7 +9,7 @@ use stratum_apps::{
             RequestExtensionsErrorOwned, RequestExtensionsOwned, RequestExtensionsSuccessOwned,
         },
         handlers_sv2::HandleExtensionsFromServerOwnedAsync,
-        parsers_sv2::{AnyMessageOwned, Tlv},
+        parsers_sv2::{AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
@@ -23,9 +23,9 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
         &self,
         _server_id: Option<usize>,
     ) -> Result<Vec<u16>, Self::Error> {
-        Ok(self
-            .negotiated_extensions
-            .super_safe_lock(|data| data.clone()))
+        self.negotiated_extensions
+            .get()
+            .map_err(TproxyError::shutdown)
     }
 
     async fn handle_request_extensions_success(
@@ -57,9 +57,9 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
         }
 
         // Store the negotiated extensions in the shared channel manager data
-        self.negotiated_extensions.super_safe_lock(|data| {
-            *data = supported;
-        });
+        self.negotiated_extensions
+            .set(supported)
+            .map_err(TproxyError::shutdown)?;
 
         info!("Successfully negotiated extensions");
 
@@ -135,7 +135,10 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
                 requested_extensions: Seq064KOwned::new(can_support).unwrap(),
             };
 
-            let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(new_require_extensions.into())
+            let sv2_frame: Sv2Frame =
+                AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
+                    ExtensionsNegotiationOwned::RequestExtensions(new_require_extensions),
+                ))
                 .try_into()
                 .map_err(TproxyError::shutdown)?;
 

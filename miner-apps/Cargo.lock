@@ -4294,7 +4294,6 @@ dependencies = [
  "async-channel",
  "clap",
  "config",
- "dashmap",
  "hex",
  "hotpath",
  "serde",
