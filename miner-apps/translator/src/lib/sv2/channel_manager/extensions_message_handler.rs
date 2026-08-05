@@ -9,7 +9,7 @@ use stratum_apps::{
             RequestExtensionsErrorOwned, RequestExtensionsOwned, RequestExtensionsSuccessOwned,
         },
         handlers_sv2::HandleExtensionsFromServerOwnedAsync,
-        parsers_sv2::{AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, Tlv},
+        parsers_sv2::{AnyMessageOwned, Tlv},
     },
     utils::types::Sv2Frame,
 };
@@ -135,10 +135,7 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
                 requested_extensions: Seq064KOwned::new(can_support).unwrap(),
             };
 
-            let sv2_frame: Sv2Frame =
-                AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
-                    ExtensionsNegotiationOwned::RequestExtensions(new_require_extensions),
-                ))
+            let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(new_require_extensions.into())
                 .try_into()
                 .map_err(TproxyError::shutdown)?;
 

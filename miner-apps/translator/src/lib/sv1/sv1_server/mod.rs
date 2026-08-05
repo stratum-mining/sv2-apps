@@ -15,9 +15,6 @@
 //! maintaining state for multiple downstream connections and ensuring seamless translation
 //! between SV1 and SV2 protocols.
 
-use stratum_apps::stratum_core::{
-    binary_sv2::Str0255Owned, mining_sv2::CloseChannelOwned, parsers_sv2::MiningOwned,
-};
 mod difficulty_manager;
 pub mod downstream_message_handler;
 
@@ -48,17 +45,14 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::sv1_connection::ConnectionSV1,
     stratum_core::{
-        binary_sv2::Str0255Owned as Str0255,
+        binary_sv2::Str0255Owned,
         bitcoin::Target,
         channels_sv2::{
             Vardiff, VardiffState,
             target::{hash_rate_from_target, hash_rate_to_target},
         },
-        mining_sv2::{
-            CloseChannelOwned as CloseChannel, SetNewPrevHashOwned as SetNewPrevHash,
-            SetTargetOwned as SetTarget,
-        },
-        parsers_sv2::MiningOwned as Mining,
+        mining_sv2::{CloseChannelOwned, SetNewPrevHashOwned, SetTargetOwned},
+        parsers_sv2::MiningOwned,
         stratum_translation::{
             sv1_to_sv2::{
                 build_sv2_open_extended_mining_channel,
@@ -87,16 +81,16 @@ struct Sv1ServerIo {
     sv1_server_to_downstream_sender: SharedMap<DownstreamId, Sender<json_rpc::Message>>,
     downstream_to_sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
     downstream_to_sv1_server_receiver: Receiver<(DownstreamId, json_rpc::Message)>,
-    channel_manager_receiver: Receiver<Mining>,
+    channel_manager_receiver: Receiver<MiningOwned>,
     // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
-    channel_manager_sender: Sender<(Mining, Option<String>)>,
+    channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Sv1ServerIo {
     fn new(
-        channel_manager_receiver: Receiver<Mining>,
-        channel_manager_sender: Sender<(Mining, Option<String>)>,
+        channel_manager_receiver: Receiver<MiningOwned>,
+        channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
     ) -> Self {
         let (downstream_to_sv1_server_sender, downstream_to_sv1_server_receiver) = unbounded();
 
@@ -198,7 +192,7 @@ pub struct Sv1Server {
     pub(crate) vardiff: SharedMap<DownstreamId, VardiffState>,
     /// HashMap to store the SetNewPrevHash for each channel
     /// Used in both aggregated and non-aggregated mode
-    pub(crate) prevhashes: SharedMap<ChannelId, SetNewPrevHash>,
+    pub(crate) prevhashes: SharedMap<ChannelId, SetNewPrevHashOwned>,
     /// Tracks pending target updates that are waiting for SetTarget response from upstream
     pub(crate) pending_target_updates: SharedLock<Vec<PendingTargetUpdate>>,
     /// Valid Sv1 jobs storage, containing only a single shared entry (AGGREGATED_CHANNEL_ID) in
@@ -247,6 +241,7 @@ impl Sv1Server {
                     error_kind = ?e.kind,
                     "{context} requested disconnect; cancelling downstream token"
                 );
+                // Cleanup only ever fails with `Shutdown` (poisoned lock), so honour it.
                 match self.handle_downstream_disconnect(downstream_id).await {
                     Ok(()) => LoopControl::Continue,
                     Err(cleanup_error) => {
@@ -386,8 +381,8 @@ impl Sv1Server {
     /// A new Sv1Server instance ready to accept connections
     pub fn new(
         listener_addr: SocketAddr,
-        channel_manager_receiver: Receiver<Mining>,
-        channel_manager_sender: Sender<(Mining, Option<String>)>,
+        channel_manager_receiver: Receiver<MiningOwned>,
+        channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
         config: TranslatorConfig,
         mode: TproxyMode,
     ) -> Self {
@@ -555,6 +550,8 @@ impl Sv1Server {
                                     fallback_coordinator.clone(),
                                     task_manager.clone(),
                                     move || async move {
+                                        // Cleanup only ever fails with `Shutdown` (poisoned
+                                        // lock), so honour it.
                                         if let Err(e) = sv1_server
                                             .handle_downstream_disconnect(downstream_id)
                                             .await
@@ -1039,11 +1036,12 @@ impl Sv1Server {
                         if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) {
                             error!("Downstream not found for downstream_id: {}", downstream_id);
                             let reason_code =
-                                Str0255::try_from("downstream disconnected".to_string()).unwrap();
+                                Str0255Owned::try_from("downstream disconnected".to_string())
+                                    .unwrap();
                             self.sv1_server_io
                                 .channel_manager_sender
                                 .send((
-                                    Mining::CloseChannel(CloseChannel {
+                                    MiningOwned::CloseChannel(CloseChannelOwned {
                                         channel_id: m.channel_id,
                                         reason_code,
                                     }),
@@ -1279,7 +1277,7 @@ impl Sv1Server {
     /// meaningful SV1 downstream hashrate values.
     async fn handle_set_target_without_vardiff(
         &self,
-        set_target: SetTarget,
+        set_target: SetTargetOwned,
     ) -> TproxyResult<(), error::Sv1Server> {
         let new_target = Target::from_le_bytes(set_target.maximum_target.to_array());
         debug!(
@@ -1381,7 +1379,7 @@ impl Sv1Server {
                     Ok(msg) => msg,
                     Err(e) => {
                         error!(
-                            "Failed to build SetDifficulty for downstream {}: {:?}",
+                            "Failed to build mining.set_difficulty for downstream {}: {:?}",
                             downstream_id, e
                         );
                         return Err(TproxyError::shutdown(e));
@@ -1389,13 +1387,13 @@ impl Sv1Server {
                 };
             if let Err(e) = sender.send(set_difficulty_msg).await {
                 error!(
-                    "Failed to send SetDifficulty to downstream {}: {:?}",
+                    "Failed to send mining.set_difficulty to downstream {}: {:?}",
                     downstream_id, e
                 );
                 return Err(TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender));
             } else {
                 debug!(
-                    "Sent SetDifficulty to downstream {} (vardiff disabled)",
+                    "Sent mining.set_difficulty to downstream {} (vardiff disabled)",
                     downstream_id
                 );
             }

@@ -13,7 +13,7 @@ use stratum_apps::{
     stratum_core::{
         bitcoin::Target,
         channels_sv2::{Vardiff, target::hash_rate_to_target},
-        mining_sv2::SetTargetOwned as SetTarget,
+        mining_sv2::SetTargetOwned,
         stratum_translation::sv2_to_sv1::{
             build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding,
             sv1_advertised_target_from_sv2_target,
@@ -150,7 +150,7 @@ impl Sv1Server {
                                 // Case 1: new_target >= upstream_target, send set_difficulty
                                 // immediately
                                 trace!(
-                                    "✅ Target comparison: new_target ({}) >= upstream_target ({}) for downstream {}, will send set_difficulty immediately",
+                                    "✅ Target comparison: new_target ({}) >= upstream_target ({}) for downstream {}, will send mining.set_difficulty immediately",
                                     new_target, upstream_target, downstream_id
                                 );
                                 immediate_updates.push((
@@ -162,7 +162,7 @@ impl Sv1Server {
                                 // Case 2: new_target < upstream_target, delay set_difficulty until
                                 // SetTarget
                                 trace!(
-                                    "⏳ Target comparison: new_target ({}) < upstream_target ({}) for downstream {}, will delay set_difficulty until SetTarget",
+                                    "⏳ Target comparison: new_target ({}) < upstream_target ({}) for downstream {}, will delay mining.set_difficulty until SetTarget",
                                     new_target, upstream_target, downstream_id
                                 );
                                 self.pending_target_updates
@@ -178,7 +178,7 @@ impl Sv1Server {
                         None => {
                             // No upstream target set yet, send set_difficulty immediately as fallback
                             trace!(
-                                "No upstream target set for downstream {}, will send set_difficulty immediately",
+                                "No upstream target set for downstream {}, will send mining.set_difficulty immediately",
                                 downstream_id
                             );
                             immediate_updates.push((channel_id, Some(downstream_id), new_target));
@@ -226,7 +226,7 @@ impl Sv1Server {
                     Ok(message) => message,
                     Err(e) => {
                         error!(
-                            "Failed to build immediate SetDifficulty for downstream {downstream_id}: {e:?}; skipping"
+                            "Failed to build immediate mining.set_difficulty for downstream {downstream_id}: {e:?}; skipping"
                         );
                         continue;
                     }
@@ -238,14 +238,12 @@ impl Sv1Server {
             {
                 if let Err(e) = sender.send(set_difficulty_msg).await {
                     warn!(
-                        "Failed to send immediate SetDifficulty message to downstream {}: {:?}; skipping (likely disconnected)",
-                        downstream_id, e
+                        "Failed to send immediate mining.set_difficulty message to downstream {downstream_id}: {e:?}; skipping (likely disconnected)"
                     );
                     continue;
                 }
                 trace!(
-                    "Sent immediate SetDifficulty to downstream {} (new_target >= upstream_target)",
-                    downstream_id
+                    "Sent immediate mining.set_difficulty to downstream {downstream_id} (new_target >= upstream_target)",
                 );
             }
         }
@@ -391,7 +389,7 @@ impl Sv1Server {
     /// pending update
     pub(super) async fn handle_set_target_message(
         &self,
-        set_target: SetTarget,
+        set_target: SetTargetOwned,
     ) -> TproxyResult<(), error::Sv1Server> {
         let new_upstream_target = Target::from_le_bytes(set_target.maximum_target.to_array());
         debug!(
@@ -537,7 +535,7 @@ impl Sv1Server {
                     Ok(message) => message,
                     Err(e) => {
                         error!(
-                            "Failed to build SetDifficulty for downstream {}: {e:?}; skipping",
+                            "Failed to build mining.set_difficulty for downstream {}: {e:?}; skipping",
                             update.downstream_id
                         );
                         continue;
@@ -551,7 +549,7 @@ impl Sv1Server {
             {
                 if let Err(e) = sender.send(set_difficulty_msg).await {
                     warn!(
-                        "Failed to send SetDifficulty to downstream {}: {:?}; skipping (likely disconnected)",
+                        "Failed to send mining.set_difficulty to downstream {}: {:?}; skipping (likely disconnected)",
                         update.downstream_id, e
                     );
                     continue;

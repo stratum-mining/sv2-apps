@@ -16,7 +16,7 @@ use stratum_apps::{
         common_messages_sv2::{Protocol, SetupConnectionOwned},
         extensions_sv2::RequestExtensionsOwned,
         handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
-        parsers_sv2::{AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned},
+        parsers_sv2::AnyMessageOwned,
     },
     task_manager::TaskManager,
     utils::{
@@ -381,10 +381,7 @@ impl Upstream {
                 require_extensions
             );
 
-            let sv2_frame: Sv2Frame =
-                AnyMessageOwned::Extensions(ExtensionsOwned::ExtensionsNegotiation(
-                    ExtensionsNegotiationOwned::RequestExtensions(require_extensions),
-                ))
+            let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(require_extensions.into())
                 .try_into()
                 .map_err(TproxyError::shutdown)?;
 

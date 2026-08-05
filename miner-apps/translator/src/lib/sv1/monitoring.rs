@@ -271,15 +271,15 @@ impl Sv1Server {
     }
 
     fn current_downstream_sv1_usernames(&self) -> Vec<(DownstreamId, String)> {
-        let mut worker_names = Vec::new();
+        let mut usernames = Vec::new();
         self.downstreams.for_each(|downstream_id, downstream| {
             if let Ok(worker_name) = downstream
                 .downstream_data
                 .with(|data| data.sv1_username.clone())
             {
-                worker_names.push((downstream_id, worker_name));
+                usernames.push((downstream_id, worker_name));
             }
         });
-        worker_names
+        usernames
     }
 }
