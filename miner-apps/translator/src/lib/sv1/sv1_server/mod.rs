@@ -602,6 +602,9 @@ impl Sv1Server {
                             }
                         }
                     }
+                    // Safe to poll `&mut` on a future that may complete: this loop only
+                    // fails with a shutdown error, which breaks out of the select loop,
+                    // so it is never polled again.
                     res = &mut vardiff_future, if vardiff_enabled => {
                         if let Err(e) = res {
                             if let LoopControl::Break = self.handle_error_action(
@@ -615,6 +618,9 @@ impl Sv1Server {
                             }
                         }
                     }
+                    // Safe to poll `&mut` on a future that may complete: this loop only
+                    // fails with a shutdown error, which breaks out of the select loop,
+                    // so it is never polled again.
                     res = &mut keepalive_future, if keepalive_enabled => {
                         if let Err(e) = res {
                             if let LoopControl::Break = self.handle_error_action(
