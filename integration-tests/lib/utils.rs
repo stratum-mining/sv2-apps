@@ -25,6 +25,7 @@ use stratum_apps::{
         },
     },
 };
+use tokio_util::sync::CancellationToken;
 
 // prevents get_available_port from ever returning the same port twice
 static UNIQUE_PORTS: Lazy<Mutex<HashSet<u16>>> = Lazy::new(|| Mutex::new(HashSet::new()));
@@ -78,7 +79,12 @@ pub async fn create_downstream(
             .unwrap();
 
     if let Ok((receiver_from_client, sender_to_client)) =
-        Connection::new::<AnyMessageOwned>(stream, HandshakeRole::Responder(responder)).await
+        Connection::new::<AnyMessageOwned>(
+            stream,
+            HandshakeRole::Responder(responder),
+            CancellationToken::new(),
+        )
+        .await
     {
         Some((receiver_from_client, sender_to_client))
     } else {
@@ -90,9 +96,13 @@ pub async fn create_upstream(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<MessageFrame>, Sender<MessageFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
-    Connection::new::<AnyMessageOwned>(stream, HandshakeRole::Initiator(initiator))
-        .await
-        .ok()
+    Connection::new::<AnyMessageOwned>(
+        stream,
+        HandshakeRole::Initiator(initiator),
+        CancellationToken::new(),
+    )
+    .await
+    .ok()
 }
 
 pub async fn recv_from_down_send_to_up(
