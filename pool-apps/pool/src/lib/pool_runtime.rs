@@ -11,8 +11,6 @@ use stratum_apps::stratum_core::parsers_sv2::{MiningOwned, TemplateDistributionO
 
 use async_channel::{Receiver, Sender, unbounded};
 
-#[cfg(feature = "monitoring")]
-use stratum_apps::monitoring::MonitoringServer;
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     stratum_core::{
@@ -110,8 +108,6 @@ pub(super) struct PoolRuntime<State> {
     bitcoin_core_sv2: Option<BitcoinCoreSv2Handle>,
     encoded_outputs: Vec<u8>,
     coinbase_outputs: Vec<TxOut>,
-    #[cfg(feature = "monitoring")]
-    monitoring_server: Option<MonitoringServer>,
 }
 
 impl<State> PoolRuntime<State> {
@@ -124,8 +120,6 @@ impl<State> PoolRuntime<State> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             encoded_outputs: self.encoded_outputs,
             coinbase_outputs: self.coinbase_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
         }
     }
 
@@ -194,8 +188,6 @@ impl PoolRuntime<Init> {
 
         Ok(PoolRuntime {
             pool,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: None,
             task_manager: Arc::new(TaskManager::new()),
             state: Init,
             jd: None,
@@ -229,8 +221,6 @@ impl PoolRuntime<Init> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: IoReady { io },
         }
     }
@@ -369,8 +359,6 @@ impl PoolRuntime<IoReady> {
             bitcoin_core_sv2: None,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: new_state,
         })
     }
@@ -481,8 +469,6 @@ impl PoolRuntime<JdsReady> {
             bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: new_state,
         })
     }
@@ -567,8 +553,6 @@ impl PoolRuntime<TemplateProviderReady> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: new_state,
         })
     }
@@ -629,8 +613,6 @@ impl PoolRuntime<ChannelManagerReady> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: Running,
         })
     }
