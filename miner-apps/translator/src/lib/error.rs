@@ -371,6 +371,16 @@ impl From<stratum_apps::stratum_core::sv1_api::error::Error> for TproxyErrorKind
     }
 }
 
+impl From<stratum_apps::stratum_core::sv1_api::error::Error> for TproxyError<Sv1Server> {
+    fn from(_: stratum_apps::stratum_core::sv1_api::error::Error) -> Self {
+        Self {
+            kind: TproxyErrorKind::SV1Error,
+            action: Action::Log,
+            _owner: PhantomData,
+        }
+    }
+}
+
 impl From<stratum_apps::network_helpers::Error> for TproxyErrorKind {
     fn from(value: stratum_apps::network_helpers::Error) -> Self {
         TproxyErrorKind::NetworkHelpersError(value)

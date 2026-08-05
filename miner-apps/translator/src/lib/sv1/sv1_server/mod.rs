@@ -734,7 +734,7 @@ impl Sv1Server {
             }
             Err(e) => {
                 error!("Down: Error handling downstream message: {:?}", e);
-                return Err(TproxyError::disconnect(e, downstream_id));
+                return Err(e);
             }
         }
 
@@ -1002,7 +1002,7 @@ impl Sv1Server {
                                                 "Down: Error handling downstream message: {:?}",
                                                 e
                                             );
-                                            return Err(TproxyError::disconnect(e, downstream_id));
+                                            return Err(e);
                                         }
                                     }
                                 }

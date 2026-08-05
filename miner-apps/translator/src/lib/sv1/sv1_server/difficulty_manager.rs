@@ -319,7 +319,7 @@ impl Sv1Server {
             });
 
             total_hashrate += hashrate;
-            Ok(())
+            Ok::<(), TproxyError<error::Sv1Server>>(())
         })?;
 
         let Some(min_target) = min_target else {
@@ -608,7 +608,7 @@ impl Sv1Server {
                     Some(current) => current.min(target),
                     None => target,
                 });
-                Ok(())
+                Ok::<(), TproxyError<error::Sv1Server>>(())
             })?;
 
             let Some(min_target) = min_target else {

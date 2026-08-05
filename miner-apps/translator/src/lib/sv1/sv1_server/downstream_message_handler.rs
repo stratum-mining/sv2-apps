@@ -6,37 +6,18 @@ use stratum_apps::stratum_core::sv1_api::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    error::TproxyErrorKind,
-    sv1::{Downstream, Sv1Server},
+    error::{self, TproxyError},
+    sv1::Sv1Server,
     utils::{
         AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, sv1_worker_name_from_sv1_username,
         validate_sv1_share,
     },
 };
 
-impl Sv1Server {
-    fn with_registered_downstream_sv1<R, F>(
-        &self,
-        downstream_id: usize,
-        f: F,
-    ) -> Result<R, TproxyErrorKind>
-    where
-        F: FnOnce(&Downstream) -> Result<R, TproxyErrorKind>,
-    {
-        match self
-            .downstreams
-            .with(&downstream_id, |downstream| f(downstream))
-        {
-            Some(result) => result,
-            None => Err(TproxyErrorKind::DownstreamNotPresent(downstream_id)),
-        }
-    }
-}
-
 // Implements `IsServer` for `Sv1Server` to handle the Sv1 messages.
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl IsServer for Sv1Server {
-    type Error = TproxyErrorKind;
+    type Error = TproxyError<error::Sv1Server>;
 
     fn handle_configure(
         &mut self,
@@ -48,7 +29,7 @@ impl IsServer for Sv1Server {
         info!("Received mining.configure from SV1 downstream");
         debug!("Downstream {downstream_id}: mining.configure = {}", request);
 
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| {
@@ -70,7 +51,7 @@ impl IsServer for Sv1Server {
 
                     (Some(params), Some(false))
                 })
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })
     }
 
@@ -117,13 +98,12 @@ impl IsServer for Sv1Server {
 
         let job_id = &request.job_id;
 
-        let Some(channel_id) =
-            self.with_registered_downstream_sv1(downstream_id, |downstream| {
-                downstream
-                    .downstream_data
-                    .with(|data| data.channel_id)
-                    .map_err(Into::into)
-            })?
+        let Some(channel_id) = self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.channel_id)
+                .map_err(TproxyError::shutdown)
+        })?
         else {
             return Ok(false);
         };
@@ -145,7 +125,7 @@ impl IsServer for Sv1Server {
             return Ok(false);
         };
 
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| {
@@ -191,7 +171,7 @@ impl IsServer for Sv1Server {
 
                     Ok(true)
                 })
-                .map_err(TproxyErrorKind::from)?
+                .map_err(TproxyError::shutdown)?
         })
     }
 
@@ -203,11 +183,11 @@ impl IsServer for Sv1Server {
     /// Checks if a Downstream role is authorized.
     fn is_authorized(&self, client_id: Option<usize>, name: &str) -> Result<bool, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let is_authorized = self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        let is_authorized = self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.sv1_username == *name)
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })?;
         Ok(is_authorized)
     }
@@ -216,7 +196,7 @@ impl IsServer for Sv1Server {
     fn authorize(&mut self, client_id: Option<usize>, name: &str) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
         let is_authorized = self.is_authorized(client_id, name)?;
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| {
@@ -229,7 +209,7 @@ impl IsServer for Sv1Server {
                         data.sv1_username, data.sv1_worker_name, downstream_id
                     );
                 })
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })?;
         Ok(())
     }
@@ -242,22 +222,22 @@ impl IsServer for Sv1Server {
         _extranonce1: Option<Extranonce>,
     ) -> Result<Extranonce, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.extranonce1.clone())
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })
     }
 
     /// Returns the `Downstream`'s `extranonce1` value.
     fn extranonce1(&self, client_id: Option<usize>) -> Result<Extranonce, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.extranonce1.clone())
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })
     }
 
@@ -269,22 +249,22 @@ impl IsServer for Sv1Server {
         _extra_nonce2_size: Option<usize>,
     ) -> Result<usize, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.extranonce2_len)
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })
     }
 
     /// Returns the `Downstream`'s `extranonce2_size` value.
     fn extranonce2_size(&self, client_id: Option<usize>) -> Result<usize, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.extranonce2_len)
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })
     }
 
@@ -294,11 +274,11 @@ impl IsServer for Sv1Server {
         client_id: Option<usize>,
     ) -> Result<Option<HexU32Be>, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.version_rolling_mask.clone())
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })
     }
 
@@ -309,11 +289,11 @@ impl IsServer for Sv1Server {
         mask: Option<HexU32Be>,
     ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.version_rolling_mask = mask)
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })?;
 
         Ok(())
@@ -326,11 +306,11 @@ impl IsServer for Sv1Server {
         mask: Option<HexU32Be>,
     ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream_sv1(downstream_id, |downstream| {
+        self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| data.version_rolling_min_bit = mask)
-                .map_err(Into::into)
+                .map_err(TproxyError::shutdown)
         })?;
         Ok(())
     }
