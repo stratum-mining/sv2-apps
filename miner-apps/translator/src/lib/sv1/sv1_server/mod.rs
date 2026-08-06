@@ -703,7 +703,8 @@ impl Sv1Server {
 
         let response = self
             .clone()
-            .handle_message(Some(downstream_id), downstream_message);
+            .handle_message(Some(downstream_id), downstream_message)
+            .map_err(|e| e.with_sv1_downstream_context(downstream_id));
 
         match response {
             Ok(Some(response_msg)) => {
@@ -804,7 +805,7 @@ impl Sv1Server {
             job_version,
             message.version_rolling_mask,
         )
-        .map_err(|_| TproxyError::shutdown(TproxyErrorKind::SV1Error))?;
+        .map_err(TproxyError::shutdown)?;
 
         let worker_name = match self.with_registered_downstream(
             message.downstream_id,
@@ -964,8 +965,10 @@ impl Sv1Server {
 
                                 for message in queued_messages {
                                     let is_authorize = is_mining_authorize(&message);
-                                    let response =
-                                        self.clone().handle_message(Some(downstream_id), message);
+                                    let response = self
+                                        .clone()
+                                        .handle_message(Some(downstream_id), message)
+                                        .map_err(|e| e.with_sv1_downstream_context(downstream_id));
                                     match response {
                                         Ok(Some(response_msg)) => {
                                             downstream_sv1_sender.send(response_msg.into()).await
