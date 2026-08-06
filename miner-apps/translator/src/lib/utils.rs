@@ -93,9 +93,7 @@ pub fn validate_sv1_share(
         full_extranonce.as_ref(),
         job.merkle_branch.as_ref(),
     )
-    .ok_or(TproxyErrorKind::InvalidMerkleRoot)?
-    .try_into()
-    .map_err(|_| TproxyErrorKind::InvalidMerkleRoot)?;
+    .ok_or(TproxyErrorKind::InvalidMerkleRoot)?;
 
     // create the header for validation
     let header = Header {
