@@ -568,7 +568,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         self.upstream_channel
             .with(|upstream_channel| {
                 if let Some(upstream_channel) = upstream_channel.as_mut() {
-                    upstream_channel.on_share_rejection(error_code.clone());
+                    upstream_channel.on_share_rejection(&error_code);
                 }
             })
             .map_err(JDCError::shutdown)?;
