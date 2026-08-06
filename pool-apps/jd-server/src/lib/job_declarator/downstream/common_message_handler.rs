@@ -7,13 +7,14 @@ use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
             ERROR_CODE_SETUP_CONNECTION_MISSING_DECLARE_TX_DATA_FLAG,
+            ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccess,
         },
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::{SUPPORTED_PROTOCOL_VERSION, Sv2Frame},
 };
 use tracing::info;
 
@@ -35,8 +36,8 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!(
-            "Received `SetupConnection`: version={}, flags={:b}",
-            msg.min_version, msg.flags
+            "Received `SetupConnection`: min_version={}, max_version={}, flags={:b}",
+            msg.min_version, msg.max_version, msg.flags
         );
 
         let downstream_id = client_id.expect("downstream id should be present");
@@ -63,6 +64,35 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
 
             return Err(JDSError::disconnect(
                 JDSErrorKind::UnsupportedProtocol,
+                downstream_id,
+            ));
+        }
+
+        if SUPPORTED_PROTOCOL_VERSION < msg.min_version
+            || SUPPORTED_PROTOCOL_VERSION > msg.max_version
+        {
+            info!(
+                "Rejecting connection from {downstream_id}: no supported protocol version in requested range [{}, {}] (supported: {SUPPORTED_PROTOCOL_VERSION}).",
+                msg.min_version, msg.max_version
+            );
+            let response = SetupConnectionErrorOwned {
+                flags: 0,
+                error_code: ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH
+                    .to_string()
+                    .try_into()
+                    .map_err(JDSError::shutdown)?,
+            };
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
+                .try_into()
+                .map_err(JDSError::shutdown)?;
+            self.downstream_io
+                .to_downstream_sender
+                .send(frame)
+                .await
+                .map_err(|e| JDSError::disconnect(e, downstream_id))?;
+
+            return Err(JDSError::disconnect(
+                JDSErrorKind::ProtocolVersionMismatch,
                 downstream_id,
             ));
         }
@@ -102,7 +132,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         }
 
         let response = SetupConnectionSuccess {
-            used_version: 2,
+            used_version: SUPPORTED_PROTOCOL_VERSION,
             flags: 0,
         };
         let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
