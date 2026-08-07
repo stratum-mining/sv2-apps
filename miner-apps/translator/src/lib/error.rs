@@ -22,7 +22,8 @@ use stratum_apps::{
         handlers_sv2::HandlerErrorType,
         noise_sv2,
         parsers_sv2::{self, ParserError, TlvError},
-        sv1_api::server_to_client::SetDifficulty,
+        stratum_translation,
+        sv1_api::{self, server_to_client::SetDifficulty},
     },
     utils::types::{
         CanDisconnect, CanFallback, CanShutdown, ChannelId, DownstreamId, ExtensionType,
@@ -100,6 +101,18 @@ where
             _owner: PhantomData,
         }
     }
+
+    /// Attaches a downstream to an error built without connection context, such as the sv1 errors
+    /// `From` produces for the `IsServer::Error` bound. Used on the `handle_message` call sites in
+    /// `Sv1Server`, where a protocol violation should drop that miner instead of only being logged.
+    /// Actions chosen explicitly (fallback, shutdown) are left alone.
+    pub fn with_sv1_downstream_context(mut self, downstream_id: DownstreamId) -> Self {
+        if matches!(&self.kind, TproxyErrorKind::SV1Error(_)) && matches!(self.action, Action::Log)
+        {
+            self.action = Action::Disconnect(downstream_id);
+        }
+        self
+    }
 }
 
 impl<O> TproxyError<O>
@@ -137,7 +150,7 @@ impl<Owner> From<TproxyError<Owner>> for TproxyErrorKind {
 #[derive(Debug)]
 pub enum TproxyErrorKind {
     /// Generic SV1 protocol error
-    SV1Error,
+    SV1Error(sv1_api::error::Error),
     /// Error from the network helpers library
     NetworkHelpersError(stratum_apps::network_helpers::Error),
     /// Error from roles logic parser library
@@ -264,7 +277,7 @@ impl fmt::Display for TproxyErrorKind {
                     "Server requires extensions that we don't support: {extensions:?}"
                 )
             }
-            SV1Error => write!(f, "Sv1 error"),
+            SV1Error(e) => write!(f, "Sv1 error: `{e:?}`"),
             TranslatorCore(e) => write!(f, "Translator core error: {e:?}"),
             NetworkHelpersError(e) => write!(f, "Network helpers error: {e:?}"),
             ParserError(e) => write!(f, "Roles logic parser error: {e:?}"),
@@ -365,9 +378,15 @@ impl From<SetDifficulty> for TproxyErrorKind {
     }
 }
 
-impl From<stratum_apps::stratum_core::sv1_api::error::Error> for TproxyErrorKind {
-    fn from(_: stratum_apps::stratum_core::sv1_api::error::Error) -> Self {
-        TproxyErrorKind::SV1Error
+impl From<sv1_api::error::Error> for TproxyErrorKind {
+    fn from(e: sv1_api::error::Error) -> Self {
+        TproxyErrorKind::SV1Error(e)
+    }
+}
+
+impl From<sv1_api::error::Error> for TproxyError<Sv1Server> {
+    fn from(e: sv1_api::error::Error) -> Self {
+        Self::log(e)
     }
 }
 
@@ -377,12 +396,8 @@ impl From<stratum_apps::network_helpers::Error> for TproxyErrorKind {
     }
 }
 
-impl From<stratum_apps::stratum_core::stratum_translation::error::StratumTranslationError>
-    for TproxyErrorKind
-{
-    fn from(
-        e: stratum_apps::stratum_core::stratum_translation::error::StratumTranslationError,
-    ) -> Self {
+impl From<stratum_translation::error::StratumTranslationError> for TproxyErrorKind {
+    fn from(e: stratum_translation::error::StratumTranslationError) -> Self {
         TproxyErrorKind::TranslatorCore(e)
     }
 }

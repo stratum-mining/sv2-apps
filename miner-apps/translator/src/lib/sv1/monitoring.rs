@@ -31,7 +31,7 @@ fn downstream_to_sv1_client_info(
 ) -> Option<Sv1ClientInfo> {
     downstream
         .downstream_data
-        .safe_lock(|dd| Sv1ClientInfo {
+        .with(|dd| Sv1ClientInfo {
             client_id: downstream.downstream_id,
             channel_id: dd.channel_id,
             connection_ip: dd.connection_ip,
@@ -59,34 +59,37 @@ fn downstream_to_sv1_client_info(
 
 impl Sv1ClientsMonitoring for Sv1Server {
     fn get_sv1_clients(&self) -> Vec<Sv1ClientInfo> {
-        self.downstreams
-            .iter()
-            .filter_map(|downstream| {
-                let miner_telemetry = self.miner_telemetry_for(*downstream.key());
-                let management_ip = self.miner_telemetry_management_ip_for(*downstream.key());
-                let miner_telemetry_status = self.miner_telemetry_status_for(*downstream.key());
-                downstream_to_sv1_client_info(
-                    downstream.value(),
-                    miner_telemetry,
-                    management_ip,
-                    miner_telemetry_status,
-                )
-            })
-            .collect()
+        let mut clients = Vec::new();
+        self.downstreams.for_each(|downstream_id, downstream| {
+            let miner_telemetry = self.miner_telemetry_for(downstream_id);
+            let management_ip = self.miner_telemetry_management_ip_for(downstream_id);
+            let miner_telemetry_status = self.miner_telemetry_status_for(downstream_id);
+            if let Some(client) = downstream_to_sv1_client_info(
+                downstream,
+                miner_telemetry,
+                management_ip,
+                miner_telemetry_status,
+            ) {
+                clients.push(client);
+            }
+        });
+        clients
     }
 
     fn get_sv1_client_by_id(&self, client_id: usize) -> Option<Sv1ClientInfo> {
         let miner_telemetry = self.miner_telemetry_for(client_id);
         let management_ip = self.miner_telemetry_management_ip_for(client_id);
         let miner_telemetry_status = self.miner_telemetry_status_for(client_id);
-        self.downstreams.get(&client_id).and_then(|downstream| {
-            downstream_to_sv1_client_info(
-                downstream.value(),
-                miner_telemetry,
-                management_ip,
-                miner_telemetry_status,
-            )
-        })
+        self.downstreams
+            .with(&client_id, |downstream| {
+                downstream_to_sv1_client_info(
+                    downstream,
+                    miner_telemetry,
+                    management_ip,
+                    miner_telemetry_status,
+                )
+            })
+            .flatten()
     }
 }
 
@@ -268,15 +271,15 @@ impl Sv1Server {
     }
 
     fn current_downstream_sv1_usernames(&self) -> Vec<(DownstreamId, String)> {
-        self.downstreams
-            .iter()
-            .filter_map(|downstream| {
-                downstream
-                    .value()
-                    .downstream_data
-                    .safe_lock(|data| (*downstream.key(), data.sv1_username.clone()))
-                    .ok()
-            })
-            .collect()
+        let mut usernames = Vec::new();
+        self.downstreams.for_each(|downstream_id, downstream| {
+            if let Ok(worker_name) = downstream
+                .downstream_data
+                .with(|data| data.sv1_username.clone())
+            {
+                usernames.push((downstream_id, worker_name));
+            }
+        });
+        usernames
     }
 }

@@ -23,9 +23,9 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
         &self,
         _server_id: Option<usize>,
     ) -> Result<Vec<u16>, Self::Error> {
-        Ok(self
-            .negotiated_extensions
-            .super_safe_lock(|data| data.clone()))
+        self.negotiated_extensions
+            .get()
+            .map_err(TproxyError::shutdown)
     }
 
     async fn handle_request_extensions_success(
@@ -57,9 +57,9 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
         }
 
         // Store the negotiated extensions in the shared channel manager data
-        self.negotiated_extensions.super_safe_lock(|data| {
-            *data = supported;
-        });
+        self.negotiated_extensions
+            .set(supported)
+            .map_err(TproxyError::shutdown)?;
 
         info!("Successfully negotiated extensions");
 

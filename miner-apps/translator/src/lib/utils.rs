@@ -2,11 +2,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
-use stratum_apps::stratum_core::binary_sv2::U256Owned;
-
 use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     stratum_core::{
+        binary_sv2::U256Owned,
         bitcoin::{
             CompactTarget, Target, TxMerkleNode,
             block::{Header, Version},

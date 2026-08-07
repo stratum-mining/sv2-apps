@@ -18,53 +18,53 @@ impl ServerMonitoring for ChannelManager {
             TproxyMode::Aggregated => {
                 // In Aggregated mode: one shared channel to the server
                 // stored under AGGREGATED_CHANNEL_ID
-                if let Some(aggregated_extended_channel) =
-                    self.extended_channels.get(&AGGREGATED_CHANNEL_ID)
-                {
-                    let channel_id = aggregated_extended_channel.get_channel_id();
-                    let target = *aggregated_extended_channel.get_target();
-                    let extranonce_prefix =
-                        aggregated_extended_channel.get_extranonce_prefix().to_vec();
-                    let user_identity = aggregated_extended_channel.get_user_identity().to_string();
-                    let full_extranonce_size =
-                        aggregated_extended_channel.get_full_extranonce_size();
-                    let rollable_extranonce_size =
-                        aggregated_extended_channel.get_rollable_extranonce_size();
-                    let version_rolling = aggregated_extended_channel.is_version_rolling();
-                    let nominal_hashrate = aggregated_extended_channel.get_nominal_hashrate();
-                    let share_accounting = aggregated_extended_channel.get_share_accounting();
-                    let shares_rejected_by_reason = share_accounting
-                        .get_rejected_shares()
-                        .map(|(reason, count)| (reason.to_string(), count))
-                        .collect();
-                    let shares_rejected = share_accounting.get_rejected_shares_count();
+                self.extended_channels.with(
+                    &AGGREGATED_CHANNEL_ID,
+                    |aggregated_extended_channel| {
+                        let channel_id = aggregated_extended_channel.get_channel_id();
+                        let target = *aggregated_extended_channel.get_target();
+                        let extranonce_prefix =
+                            aggregated_extended_channel.get_extranonce_prefix().to_vec();
+                        let user_identity =
+                            aggregated_extended_channel.get_user_identity().to_string();
+                        let full_extranonce_size =
+                            aggregated_extended_channel.get_full_extranonce_size();
+                        let rollable_extranonce_size =
+                            aggregated_extended_channel.get_rollable_extranonce_size();
+                        let version_rolling = aggregated_extended_channel.is_version_rolling();
+                        let nominal_hashrate = aggregated_extended_channel.get_nominal_hashrate();
+                        let share_accounting = aggregated_extended_channel.get_share_accounting();
+                        let shares_rejected_by_reason = share_accounting
+                            .get_rejected_shares()
+                            .map(|(reason, count)| (reason.to_string(), count))
+                            .collect();
+                        let shares_rejected = share_accounting.get_rejected_shares_count();
 
-                    extended_channels.push(ServerExtendedChannelInfo {
-                        channel_id,
-                        user_identity,
-                        nominal_hashrate: report_hashrate.then_some(nominal_hashrate),
-                        target_hex: hex::encode(target.to_be_bytes()),
-                        extranonce_prefix_hex: hex::encode(extranonce_prefix),
-                        full_extranonce_size,
-                        rollable_extranonce_size,
-                        version_rolling,
-                        shares_acknowledged: share_accounting.get_acknowledged_shares(),
-                        shares_submitted: share_accounting.get_validated_shares(),
-                        shares_rejected,
-                        shares_rejected_by_reason,
-                        acknowledged_work_sum: share_accounting.get_acknowledged_work_sum(),
-                        validated_work_sum: share_accounting.get_validated_work_sum(),
-                        best_diff: share_accounting.get_best_diff(),
-                        blocks_found: share_accounting.get_blocks_found(),
-                    });
-                }
+                        extended_channels.push(ServerExtendedChannelInfo {
+                            channel_id,
+                            user_identity,
+                            nominal_hashrate: report_hashrate.then_some(nominal_hashrate),
+                            target_hex: hex::encode(target.to_be_bytes()),
+                            extranonce_prefix_hex: hex::encode(extranonce_prefix),
+                            full_extranonce_size,
+                            rollable_extranonce_size,
+                            version_rolling,
+                            shares_acknowledged: share_accounting.get_acknowledged_shares(),
+                            shares_submitted: share_accounting.get_validated_shares(),
+                            shares_rejected,
+                            shares_rejected_by_reason,
+                            acknowledged_work_sum: share_accounting.get_acknowledged_work_sum(),
+                            validated_work_sum: share_accounting.get_validated_work_sum(),
+                            best_diff: share_accounting.get_best_diff(),
+                            blocks_found: share_accounting.get_blocks_found(),
+                        });
+                    },
+                );
             }
             TproxyMode::NonAggregated => {
                 // In NonAggregated mode: each downstream Sv1 miner has its own upstream Sv2
                 // channel to the server
-                for channel in self.extended_channels.iter() {
-                    let extended_channel = channel.value();
-
+                self.extended_channels.for_each(|_, extended_channel| {
                     let channel_id = extended_channel.get_channel_id();
                     let target = extended_channel.get_target();
                     let extranonce_prefix = extended_channel.get_extranonce_prefix();
@@ -98,7 +98,7 @@ impl ServerMonitoring for ChannelManager {
                         best_diff: share_accounting.get_best_diff(),
                         blocks_found: share_accounting.get_blocks_found(),
                     });
-                }
+                });
             }
         }
 
@@ -163,14 +163,16 @@ mod tests {
 
         manager
             .extended_channels
-            .get_mut(&AGGREGATED_CHANNEL_ID)
-            .unwrap()
-            .on_share_acknowledgement(2, 10);
+            .with_mut(&AGGREGATED_CHANNEL_ID, |channel| {
+                channel.on_share_acknowledgement(2, 10);
+            })
+            .unwrap();
         manager
             .extended_channels
-            .get_mut(&7)
-            .unwrap()
-            .on_share_acknowledgement(5, 25);
+            .with_mut(&7, |channel| {
+                channel.on_share_acknowledgement(5, 25);
+            })
+            .unwrap();
 
         let server = manager.get_server();
         let aggregated = server.extended_channels.first().unwrap();

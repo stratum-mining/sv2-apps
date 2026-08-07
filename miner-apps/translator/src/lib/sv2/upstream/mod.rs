@@ -1,7 +1,3 @@
-use stratum_apps::stratum_core::{
-    binary_sv2::Seq064KOwned, common_messages_sv2::SetupConnectionOwned,
-    extensions_sv2::RequestExtensionsOwned, parsers_sv2::AnyMessageOwned,
-};
 pub mod common_message_handler;
 
 use crate::{
@@ -16,7 +12,11 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
-        common_messages_sv2::Protocol, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        binary_sv2::Seq064KOwned,
+        common_messages_sv2::{Protocol, SetupConnectionOwned},
+        extensions_sv2::RequestExtensionsOwned,
+        handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        parsers_sv2::AnyMessageOwned,
     },
     task_manager::TaskManager,
     utils::{

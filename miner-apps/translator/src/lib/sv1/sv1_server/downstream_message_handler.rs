@@ -6,7 +6,7 @@ use stratum_apps::stratum_core::sv1_api::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    error::TproxyErrorKind,
+    error::{self, TproxyError},
     sv1::Sv1Server,
     utils::{
         AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, sv1_worker_name_from_sv1_username,
@@ -17,7 +17,7 @@ use crate::{
 // Implements `IsServer` for `Sv1Server` to handle the Sv1 messages.
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl IsServer for Sv1Server {
-    type Error = TproxyErrorKind;
+    type Error = TproxyError<error::Sv1Server>;
 
     fn handle_configure(
         &mut self,
@@ -29,28 +29,29 @@ impl IsServer for Sv1Server {
         info!("Received mining.configure from SV1 downstream");
         debug!("Downstream {downstream_id}: mining.configure = {}", request);
 
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    data.version_rolling_mask = request
+                        .version_rolling_mask()
+                        .map(|mask| HexU32Be(mask & VERSION_ROLLING_MASK));
 
-        downstream.downstream_data.super_safe_lock(|data| {
-            data.version_rolling_mask = request
-                .version_rolling_mask()
-                .map(|mask| HexU32Be(mask & VERSION_ROLLING_MASK));
+                    data.version_rolling_min_bit = request.version_rolling_min_bit_count();
 
-            data.version_rolling_min_bit = request.version_rolling_min_bit_count();
+                    debug!(
+                        "Negotiated version_rolling_mask: {:?}",
+                        data.version_rolling_mask
+                    );
 
-            debug!(
-                "Negotiated version_rolling_mask: {:?}",
-                data.version_rolling_mask
-            );
+                    let params = server_to_client::VersionRollingParams::new(
+                        data.version_rolling_mask.clone().unwrap_or(HexU32Be(0)),
+                        data.version_rolling_min_bit.clone().unwrap_or(HexU32Be(0)),
+                    );
 
-            let params = server_to_client::VersionRollingParams::new(
-                data.version_rolling_mask.clone().unwrap_or(HexU32Be(0)),
-                data.version_rolling_min_bit.clone().unwrap_or(HexU32Be(0)),
-            );
-
-            Ok((Some(params), Some(false)))
+                    (Some(params), Some(false))
+                })
+                .map_err(TproxyError::shutdown)
         })
     }
 
@@ -95,15 +96,14 @@ impl IsServer for Sv1Server {
     ) -> Result<bool, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-
         let job_id = &request.job_id;
 
-        let Some(channel_id) = downstream
-            .downstream_data
-            .super_safe_lock(|data| data.channel_id)
+        let Some(channel_id) = self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.channel_id)
+                .map_err(TproxyError::shutdown)
+        })?
         else {
             return Ok(false);
         };
@@ -118,55 +118,60 @@ impl IsServer for Sv1Server {
 
         let job = self
             .valid_sv1_jobs
-            .get(&channel_id)
-            .and_then(|jobs| find_job(jobs.as_ref()));
+            .with(&channel_id, |jobs| find_job(jobs.as_ref()))
+            .flatten();
 
         let Some(job) = job else {
             return Ok(false);
         };
 
-        downstream.downstream_data.super_safe_lock(|data| {
-            let channel_id = match data.channel_id {
-                Some(id) => id,
-                None => {
-                    error!(
-                        "Cannot submit share: channel_id is None \
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    let channel_id = match data.channel_id {
+                        Some(id) => id,
+                        None => {
+                            error!(
+                                "Cannot submit share: channel_id is None \
                          (waiting for OpenExtendedMiningChannelSuccess)"
+                            );
+                            return Ok(false);
+                        }
+                    };
+
+                    info!(
+                        "Received mining.submit from SV1 downstream for channel id: {}",
+                        channel_id
                     );
-                    return Ok(false);
-                }
-            };
 
-            info!(
-                "Received mining.submit from SV1 downstream for channel id: {}",
-                channel_id
-            );
+                    let is_valid = validate_sv1_share(
+                        request,
+                        data.target,
+                        data.extranonce1.clone().into(),
+                        data.version_rolling_mask.clone(),
+                        job.clone(),
+                    )
+                    .unwrap_or(false);
 
-            let is_valid = validate_sv1_share(
-                request,
-                data.target,
-                data.extranonce1.clone().into(),
-                data.version_rolling_mask.clone(),
-                job.clone(),
-            )
-            .unwrap_or(false);
+                    if !is_valid {
+                        error!("Invalid share for channel id: {}", channel_id);
+                        return Ok(false);
+                    }
 
-            if !is_valid {
-                error!("Invalid share for channel id: {}", channel_id);
-                return Ok(false);
-            }
+                    data.pending_share = Some(SubmitShareWithChannelId {
+                        channel_id,
+                        downstream_id,
+                        share: request.clone(),
+                        extranonce: data.extranonce1.clone().into(),
+                        extranonce2_len: data.extranonce2_len,
+                        version_rolling_mask: data.version_rolling_mask.clone(),
+                        job_version: data.last_job_version_field,
+                    });
 
-            data.pending_share = Some(SubmitShareWithChannelId {
-                channel_id,
-                downstream_id,
-                share: request.clone(),
-                extranonce: data.extranonce1.clone().into(),
-                extranonce2_len: data.extranonce2_len,
-                version_rolling_mask: data.version_rolling_mask.clone(),
-                job_version: data.last_job_version_field,
-            });
-
-            Ok(true)
+                    Ok(true)
+                })
+                .map_err(TproxyError::shutdown)?
         })
     }
 
@@ -178,33 +183,34 @@ impl IsServer for Sv1Server {
     /// Checks if a Downstream role is authorized.
     fn is_authorized(&self, client_id: Option<usize>, name: &str) -> Result<bool, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        let is_authorized = downstream
-            .downstream_data
-            .super_safe_lock(|data| data.sv1_username == *name);
+        let is_authorized = self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.sv1_username == *name)
+                .map_err(TproxyError::shutdown)
+        })?;
         Ok(is_authorized)
     }
 
     /// Authorizes a Downstream role.
     fn authorize(&mut self, client_id: Option<usize>, name: &str) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-
         let is_authorized = self.is_authorized(client_id, name)?;
-        downstream.downstream_data.super_safe_lock(|data| {
-            if !is_authorized {
-                data.sv1_username = name.to_string();
-            }
-            data.sv1_worker_name = sv1_worker_name_from_sv1_username(name).to_string();
-            debug!(
-                "Down: Set sv1_username '{}' and sv1_worker_name '{}' for downstream {}",
-                data.sv1_username, data.sv1_worker_name, downstream_id
-            );
-        });
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    if !is_authorized {
+                        data.sv1_username = name.to_string();
+                    }
+                    data.sv1_worker_name = sv1_worker_name_from_sv1_username(name).to_string();
+                    debug!(
+                        "Down: Set sv1_username '{}' and sv1_worker_name '{}' for downstream {}",
+                        data.sv1_username, data.sv1_worker_name, downstream_id
+                    );
+                })
+                .map_err(TproxyError::shutdown)
+        })?;
         Ok(())
     }
 
@@ -216,23 +222,23 @@ impl IsServer for Sv1Server {
         _extranonce1: Option<Extranonce>,
     ) -> Result<Extranonce, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| Ok(data.extranonce1.clone()))
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.extranonce1.clone())
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Returns the `Downstream`'s `extranonce1` value.
     fn extranonce1(&self, client_id: Option<usize>) -> Result<Extranonce, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| Ok(data.extranonce1.clone()))
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.extranonce1.clone())
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Sets the `extranonce2_size` field sent in the SV1 `mining.notify` message to the value
@@ -243,23 +249,23 @@ impl IsServer for Sv1Server {
         _extra_nonce2_size: Option<usize>,
     ) -> Result<usize, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| Ok(data.extranonce2_len))
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.extranonce2_len)
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Returns the `Downstream`'s `extranonce2_size` value.
     fn extranonce2_size(&self, client_id: Option<usize>) -> Result<usize, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| Ok(data.extranonce2_len))
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.extranonce2_len)
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Returns the version rolling mask.
@@ -268,12 +274,12 @@ impl IsServer for Sv1Server {
         client_id: Option<usize>,
     ) -> Result<Option<HexU32Be>, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| Ok(data.version_rolling_mask.clone()))
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.version_rolling_mask.clone())
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Sets the version rolling mask.
@@ -283,13 +289,12 @@ impl IsServer for Sv1Server {
         mask: Option<HexU32Be>,
     ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| data.version_rolling_mask = mask);
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.version_rolling_mask = mask)
+                .map_err(TproxyError::shutdown)
+        })?;
 
         Ok(())
     }
@@ -301,12 +306,12 @@ impl IsServer for Sv1Server {
         mask: Option<HexU32Be>,
     ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        let Some(downstream) = self.downstreams.get(&downstream_id) else {
-            return Err(TproxyErrorKind::DownstreamNotPresent(downstream_id));
-        };
-        downstream
-            .downstream_data
-            .super_safe_lock(|data| data.version_rolling_min_bit = mask);
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.version_rolling_min_bit = mask)
+                .map_err(TproxyError::shutdown)
+        })?;
         Ok(())
     }
 
