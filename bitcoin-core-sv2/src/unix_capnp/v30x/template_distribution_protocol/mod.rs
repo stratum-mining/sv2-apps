@@ -527,8 +527,8 @@ impl BitcoinCoreSv2TDP {
                 e
             })?;
 
-        let coinbase_weight = (coinbase_output_constraints.coinbase_output_max_additional_size
-            * WEIGHT_FACTOR) as u64;
+        let coinbase_weight =
+            coinbase_output_constraints.coinbase_output_max_additional_size as u64 * WEIGHT_FACTOR;
         let block_reserved_weight = coinbase_weight.max(MIN_BLOCK_RESERVED_WEIGHT); // 2000 is the minimum block reserved weight
         debug!("Setting block_reserved_weight: {block_reserved_weight}");
         template_ipc_client_request_options.set_block_reserved_weight(block_reserved_weight);
