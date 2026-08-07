@@ -566,38 +566,11 @@ impl ChannelManager {
         // todo: let start downstream accept channel manager as `Arc`, instead of clone
         let this = Arc::new(self);
 
-        // Wait for initial template and prevhash before accepting connections
         let fallback_token = fallback_coordinator.token();
-        loop {
-            let has_required_data = this
-                .last_future_template
-                .with(|template| template.is_some())
-                .map_err(JDCError::shutdown)?
-                && this
-                    .last_new_prev_hash
-                    .with(|prev_hash| prev_hash.is_some())
-                    .map_err(JDCError::shutdown)?;
 
-            if has_required_data {
-                info!("Required template data received, ready to accept connections");
-                break;
-            }
-
-            warn!("Waiting for initial template and prevhash from Template Provider...");
-            warn!("Is the Bitcoin node undergoing IBD?");
-            select! {
-                _ = cancellation_token.cancelled() => {
-                    info!("Channel Manager: received shutdown while waiting for templates");
-                    return Ok(());
-                }
-                _ = fallback_token.cancelled() => {
-                    info!("Channel Manager: received fallback while waiting for templates");
-                    return Ok(());
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
-            }
-        }
-
+        // Bind before spawning, so that a bind failure is a startup failure the caller can
+        // propagate. Everything after this point (waiting for the first template, then accepting)
+        // runs in a background task, so bootstrap is never held hostage by the Template Provider.
         info!("Starting downstream server at {listening_address}");
         let server = TcpListener::bind(listening_address).await.map_err(|e| {
             error!(error = ?e, "Failed to bind downstream server at {listening_address}");
@@ -609,6 +582,45 @@ impl ChannelManager {
         // for this accept loop to stop before attempting to re-bind the same port.
         let fallback_handler = fallback_coordinator.register();
         task_manager.spawn(async move {
+            // Wait for initial template and prevhash before accepting connections
+            let ready = loop {
+                let has_required_data = match (
+                    this.last_future_template.with(|template| template.is_some()),
+                    this.last_new_prev_hash.with(|prev_hash| prev_hash.is_some()),
+                ) {
+                    (Ok(has_template), Ok(has_prev_hash)) => has_template && has_prev_hash,
+                    _ => {
+                        error!("Channel Manager: shared state poisoned while waiting for templates");
+                        cancellation_token.cancel();
+                        break false;
+                    }
+                };
+
+                if has_required_data {
+                    info!("Required template data received, ready to accept connections");
+                    break true;
+                }
+
+                warn!("Waiting for initial template and prevhash from Template Provider...");
+                warn!("Is the Bitcoin node undergoing IBD?");
+                select! {
+                    _ = cancellation_token.cancelled() => {
+                        info!("Channel Manager: received shutdown while waiting for templates");
+                        break false;
+                    }
+                    _ = fallback_token.cancelled() => {
+                        info!("Channel Manager: received fallback while waiting for templates");
+                        break false;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                }
+            };
+
+            if !ready {
+                fallback_handler.done();
+                return;
+            }
+
             loop {
                 select! {
                     _ = cancellation_token.cancelled() => {
@@ -705,6 +717,9 @@ impl ChannelManager {
                 }
             }
             info!("Downstream server: Unified loop break");
+            // Release the port before signalling the fallback coordinator, so a subsequent
+            // fallback can re-bind the same listening address.
+            drop(server);
             fallback_handler.done();
         });
         Ok(())
@@ -721,18 +736,8 @@ impl ChannelManager {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
         coinbase_outputs: Vec<TxOut>,
-    ) {
-        if let Err(e) = self.coinbase_output_constraints(coinbase_outputs).await {
-            error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
-            if let Action::Shutdown = e.action {
-                warn!(
-                    error_kind = ?e.kind,
-                    "CoinbaseOutputConstraints requested shutdown; cancelling global token"
-                );
-                cancellation_token.cancel();
-            }
-            return;
-        }
+    ) -> JDCResult<(), error::ChannelManager> {
+        self.coinbase_output_constraints(coinbase_outputs).await?;
 
         task_manager.spawn(async move {
             // we just spawned a new task that's relevant to fallback coordination
@@ -830,6 +835,8 @@ impl ChannelManager {
             // signal fallback coordinator that this task has completed its cleanup
             fallback_handler.done();
         });
+
+        Ok(())
     }
 
     // Removes a downstream entry from the Channel Manager’s state.
