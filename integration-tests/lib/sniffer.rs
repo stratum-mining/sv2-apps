@@ -3,8 +3,8 @@ use crate::{
     message_aggregator::MessagesAggregator,
     types::MsgType,
     utils::{
-        create_downstream, create_upstream, recv_from_down_send_to_up, recv_from_up_send_to_down,
-        wait_for_client,
+        CONNECT_RETRY_INTERVAL, POLL_INTERVAL, create_downstream, create_upstream,
+        recv_from_down_send_to_up, recv_from_up_send_to_down, wait_for_client,
     },
 };
 use std::{
@@ -96,11 +96,12 @@ impl<'a> Sniffer<'a> {
                     Ok(stream) => break stream,
                     Err(_) => {
                         tracing::warn!(
-                            "Sniffer {}: unable to connect to upstream {}, retrying after 1 second",
+                            "Sniffer {}: unable to connect to upstream {}, retrying in {:?}",
                             identifier,
-                            upstream_address
+                            upstream_address,
+                            CONNECT_RETRY_INTERVAL
                         );
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
                     }
                 }
             })
@@ -193,8 +194,7 @@ impl<'a> Sniffer<'a> {
                 );
             }
 
-            // sleep to reduce async lock contention
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 
@@ -257,8 +257,7 @@ impl<'a> Sniffer<'a> {
                 );
             }
 
-            // sleep to reduce async lock contention
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 

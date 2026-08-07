@@ -9,7 +9,6 @@ use pool_sv2::PoolSv2;
 use std::{
     convert::TryFrom,
     net::{Ipv4Addr, SocketAddr},
-    time::Duration,
 };
 use stratum_apps::{
     bitcoin_core_sv2::runtime_api::BitcoinCoreVersion,
@@ -20,7 +19,7 @@ use stratum_apps::{
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use translator_sv2::TranslatorSv2;
-use utils::get_available_address;
+use utils::{ROLE_READY_BUDGET, get_available_address};
 
 pub mod interceptor;
 pub mod message_aggregator;
@@ -172,7 +171,7 @@ pub async fn start_pool(
     tokio::spawn(async move {
         _ = pool_clone.start().await;
     });
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(ROLE_READY_BUDGET).await;
     (pool, listening_address, monitoring_address)
 }
 
@@ -360,7 +359,7 @@ pub async fn start_pool_with_jds(
     tokio::spawn(async move {
         _ = pool_clone.start().await;
     });
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(ROLE_READY_BUDGET).await;
     (pool, pool_address, jds_address, monitoring_address)
 }
 

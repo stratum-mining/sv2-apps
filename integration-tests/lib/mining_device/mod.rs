@@ -120,10 +120,10 @@ pub async fn connect(
                 Ok(socket) => break socket,
                 Err(e) => {
                     error!(
-                        "Failed to connect to Upstream role at {}, retrying in 5s: {}",
+                        "Failed to connect to Upstream role at {}, retrying: {}",
                         address, e
                     );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(crate::utils::CONNECT_RETRY_INTERVAL).await;
                 }
             },
             Err(_) => {

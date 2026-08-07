@@ -67,10 +67,8 @@ impl MockDownstream {
             match TcpStream::connect(upstream_address).await {
                 Ok(stream) => break stream,
                 Err(_) => {
-                    tracing::warn!(
-                        "MockDownstream: unable to connect to upstream, retrying after 1 second"
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tracing::warn!("MockDownstream: unable to connect to upstream, retrying");
+                    tokio::time::sleep(crate::utils::CONNECT_RETRY_INTERVAL).await;
                 }
             }
         })
