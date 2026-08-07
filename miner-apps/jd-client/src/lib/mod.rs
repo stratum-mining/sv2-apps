@@ -109,7 +109,7 @@ impl JobDeclaratorClient {
     }
 
     pub async fn shutdown(&self) {
-        if !self.is_alive.load(Ordering::Relaxed) {
+        if !self.is_alive.load(Ordering::Acquire) {
             return;
         }
         // The Notified future is guaranteed to receive wakeups from notify_waiters()
