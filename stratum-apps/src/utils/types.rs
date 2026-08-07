@@ -2,6 +2,9 @@ use stratum_core::{codec_sv2::StandardSv2Frame, parsers_sv2::AnyMessageOwned};
 
 pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
 
+/// The SV2 protocol version supported by the apps in this workspace.
+pub const SUPPORTED_PROTOCOL_VERSION: u16 = 2;
+
 pub type TemplateId = u64;
 pub type UpstreamJobId = u32;
 pub type JobId = u32;
