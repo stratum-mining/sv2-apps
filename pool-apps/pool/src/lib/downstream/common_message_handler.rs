@@ -6,13 +6,14 @@ use std::{convert::TryInto, sync::atomic::Ordering};
 use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
+            ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
         },
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::{SUPPORTED_PROTOCOL_VERSION, Sv2Frame},
 };
 use tracing::info;
 
@@ -36,8 +37,8 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!(
-            "Received `SetupConnection`: version={}, flags={:b}",
-            msg.min_version, msg.flags
+            "Received `SetupConnection`: min_version={}, max_version={}, flags={:b}",
+            msg.min_version, msg.max_version, msg.flags
         );
 
         let downstream_id = client_id.expect("downstream id should be present");
@@ -70,6 +71,37 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             ));
         }
 
+        if SUPPORTED_PROTOCOL_VERSION < msg.min_version
+            || SUPPORTED_PROTOCOL_VERSION > msg.max_version
+        {
+            info!(
+                "Rejecting connection from {downstream_id}: no supported protocol version in requested range [{}, {}] (supported: {SUPPORTED_PROTOCOL_VERSION}).",
+                msg.min_version, msg.max_version
+            );
+            let response = SetupConnectionErrorOwned {
+                flags: 0,
+                error_code: ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH
+                    .to_string()
+                    .try_into()
+                    .expect("error code must be valid string"),
+            };
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
+                .try_into()
+                .map_err(PoolError::shutdown)?;
+            self.downstream_io
+                .downstream_sender
+                .send(frame)
+                .await
+                .map_err(|_| {
+                    PoolError::disconnect(PoolErrorKind::ChannelErrorSender, downstream_id)
+                })?;
+
+            return Err(PoolError::disconnect(
+                PoolErrorKind::SetupConnectionError,
+                downstream_id,
+            ));
+        }
+
         self.requires_custom_work
             .store(has_work_selection(msg.flags), Ordering::SeqCst);
         self.requires_standard_jobs
@@ -89,7 +121,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             response_flags |= 0x02; // REQUIRES_EXTENDED_CHANNELS
         }
         let response = SetupConnectionSuccess {
-            used_version: 2,
+            used_version: SUPPORTED_PROTOCOL_VERSION,
             flags: response_flags,
         };
         let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
