@@ -512,7 +512,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
         // if None, the channel may be closed/missing, so we ignore this accounting update
         self.extended_channels.with_mut(&key, |ch| {
-            ch.on_share_rejection(error_code);
+            ch.on_share_rejection(&error_code);
         });
 
         Ok(())
