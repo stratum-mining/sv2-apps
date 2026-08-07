@@ -2,6 +2,7 @@ use corepc_node::{Conf, ConnectParams, Node, types::GetBlockchainInfo};
 use std::{
     env,
     fs::create_dir_all,
+    net::SocketAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
 };
@@ -11,7 +12,9 @@ use stratum_apps::{
 };
 use tracing::warn;
 
-use crate::utils::{fs_utils, http, tarball};
+use crate::utils::{
+    PROCESS_READY_TIMEOUT, fs_utils, http, tarball, wait_for_listener, wait_for_unix_socket,
+};
 
 const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
@@ -252,17 +255,25 @@ impl BitcoinCore {
             }
         };
 
-        // Wait for Bitcoin Core to fully start and create IPC socket
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
         let is_signet = conf.network == "signet";
         let data_dir = conf.staticdir.clone().expect("staticdir should be set");
 
-        BitcoinCore {
+        let core = BitcoinCore {
             bitcoind,
             data_dir,
             is_signet,
-        }
+        };
+
+        // Wait for Bitcoin Core to create the IPC socket that sv2-tp connects to. Polling the
+        // socket path is the direct readiness signal, so this returns as soon as Core is actually
+        // up instead of always paying a fixed sleep.
+        wait_for_unix_socket(
+            &core.ipc_socket_path(),
+            PROCESS_READY_TIMEOUT,
+            "Bitcoin Core IPC socket",
+        );
+
+        core
     }
 
     /// Mine `n` blocks.
@@ -348,6 +359,41 @@ impl BitcoinCore {
     }
 }
 
+/// Set to keep each node's datadir after the test finishes, for post-mortem inspection of
+/// `debug.log`, chainstate and wallet.
+///
+/// Retained datadirs are not cleaned up by anything else, and a full suite run creates one per
+/// node — roughly 1.5 GB — so this is opt-in rather than the default. Left on, successive runs
+/// accumulate until the filesystem fills, which on a tmpfs-backed `/tmp` means RAM and on a CI
+/// runner means a disk with only a few GB spare.
+const KEEP_DATADIR_ENV: &str = "SV2_KEEP_TEST_DATADIR";
+
+impl Drop for BitcoinCore {
+    fn drop(&mut self) {
+        if env::var_os(KEEP_DATADIR_ENV).is_some() {
+            warn!(
+                "{KEEP_DATADIR_ENV} set, keeping test datadir {}",
+                self.data_dir.display()
+            );
+            return;
+        }
+
+        // The node must be stopped before its files are removed. `Drop` for this struct runs
+        // *before* its fields are dropped, so `bitcoind` is still live here; `Node::drop` would
+        // otherwise try a graceful RPC shutdown against a datadir that no longer exists.
+        let _ = self.bitcoind.stop();
+
+        match std::fs::remove_dir_all(&self.data_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(
+                "failed to remove test datadir {}: {e}",
+                self.data_dir.display()
+            ),
+        }
+    }
+}
+
 /// Represents a template provider using Bitcoin Core with IPC and standalone sv2-tp.
 ///
 /// This implementation launches two separate processes:
@@ -427,8 +473,13 @@ impl TemplateProvider {
             .spawn()
             .expect("Failed to start sv2-tp process");
 
-        // Wait for sv2-tp to start and connect to Bitcoin Core
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        // Wait for sv2-tp to start and accept connections on its Sv2 port. A successful connect is
+        // the direct readiness signal, so this returns as soon as sv2-tp is actually serving.
+        wait_for_listener(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            PROCESS_READY_TIMEOUT,
+            "sv2-tp",
+        );
 
         TemplateProvider {
             bitcoin_core,
