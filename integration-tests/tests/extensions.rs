@@ -14,7 +14,10 @@ use integration_tests_sv2::{interceptor::MessageDirection, template_provider::Di
 use stratum_apps::stratum_core::{
     binary_sv2::Seq064KOwned,
     common_messages_sv2::*,
-    extensions_sv2::{EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY},
+    extensions_sv2::{
+        EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
+        extensions_negotiation::MESSAGE_TYPE_REQUEST_EXTENSIONS,
+    },
     mining_sv2::*,
 };
 use tracing::info;
@@ -73,6 +76,15 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
         .wait_for_message_type_and_clean_queue(
             MessageDirection::ToDownstream,
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    // RequestExtensions is sent *after* SetupConnectionSuccess, so wait for it rather than
+    // assuming it has already been queued by the time the success message lands.
+    pool_translator_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_REQUEST_EXTENSIONS,
         )
         .await;
 

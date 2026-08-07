@@ -1218,6 +1218,16 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
             .expect("Failed to capture prevhash before chain tip update")
     };
 
+    // Drop the mining.notify messages captured above. The assertion below matches the most recent
+    // mining.notify, and the SV1 translation of the new prevhash reaches each miner asynchronously
+    // after the SV2 SetNewPrevHash — so without clearing, the stale pre-update notify is what gets
+    // matched and the prevhash appears unchanged.
+    for sv1_sniffer in sv1_sniffers.iter() {
+        sv1_sniffer
+            .clean_queue(MessageDirection::ToDownstream)
+            .await;
+    }
+
     // now let's force a chain tip update, so we trigger a NewExtendedMiningJob + SetNewPrevHash
     // message pair
     tp.generate_blocks(1);

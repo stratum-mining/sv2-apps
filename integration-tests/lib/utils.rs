@@ -9,8 +9,9 @@ use once_cell::sync::Lazy;
 use std::{
     collections::HashSet,
     convert::TryInto,
-    net::{SocketAddr, TcpListener},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
@@ -29,6 +30,123 @@ use tokio_util::sync::CancellationToken;
 
 // prevents get_available_port from ever returning the same port twice
 static UNIQUE_PORTS: Lazy<Mutex<HashSet<u16>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// How often readiness gates and message-wait loops re-check their condition.
+///
+/// Chosen as the knee of the cost/benefit curve: the suite performs ~600 waits, so residual dead
+/// time is roughly `600 * POLL_INTERVAL`. Dropping from the previous 1s to 50ms recovers ~9.5
+/// minutes; going further to 10ms would recover only ~9s more while raising the wakeup rate 5x.
+/// Each poll is one uncontended mutex acquisition (or one loopback connect), so 20 polls/sec is
+/// negligible. [`crate::sniffer::Sniffer::assert_message_not_present`] already polls the same
+/// structures at 100ms.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Retry cadence for the *unbounded* connect loops that wait for a peer to come up.
+///
+/// Deliberately much slower than [`POLL_INTERVAL`]. Those loops have no timeout, so when a peer
+/// never appears — which several tests arrange on purpose — they spin for the whole test. Every
+/// test runs on a bare `#[tokio::test]`, i.e. a single-threaded runtime, so a 20 Hz connect loop
+/// competes with the test's own work on the one thread it has. The message-wait loops are safe at
+/// [`POLL_INTERVAL`] because they exit as soon as their message lands.
+pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Ceiling for readiness gates on spawned child processes (Bitcoin Core, sv2-tp).
+///
+/// This is never paid on the happy path — only when something is genuinely wrong — so it is set
+/// far above the observed startup time rather than tuned tightly. It stays well under nextest's
+/// `terminate-after` (120s) so the gate's own panic fires before nextest kills the test, which
+/// keeps the failure message legible.
+pub const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Budget for the best-effort wait on an in-process role's listening socket.
+///
+/// Deliberately equal to the fixed sleep this replaced, so no code path is ever slower than it was
+/// before: a healthy role unblocks in milliseconds, and one that never listens costs exactly what
+/// the old `sleep(1s)` cost. See [`wait_until_listening`] for why this cannot be an assertion.
+pub const ROLE_READY_BUDGET: Duration = Duration::from_secs(1);
+
+/// Blocks until a Unix socket at `path` accepts a connection, polling every [`POLL_INTERVAL`].
+///
+/// Deliberately connects rather than checking `Path::exists`: Bitcoin Core creates the socket file
+/// before it is able to serve on it, and the window between the two is wide enough that merely
+/// stat-ing the path lets tests proceed against a node that then refuses their IPC traffic. A
+/// successful connect proves the listener is bound and accepting.
+///
+/// Panics with `what` in the message if `timeout` elapses first.
+pub fn wait_for_unix_socket(path: &std::path::Path, timeout: Duration, what: &str) {
+    let start = std::time::Instant::now();
+    loop {
+        if path.exists() && std::os::unix::net::UnixStream::connect(path).is_ok() {
+            tracing::debug!(
+                target: "readiness",
+                "ready: {what} after {:?}",
+                start.elapsed()
+            );
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "timeout after {timeout:?} waiting for {what} to accept connections on {}",
+                path.display()
+            );
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Blocks until a TCP connection to `addr` succeeds, polling every [`POLL_INTERVAL`].
+///
+/// Used from synchronous contexts; see [`wait_for_listener_async`] for the async equivalent.
+///
+/// Panics with `what` in the message if `timeout` elapses first.
+pub fn wait_for_listener(addr: SocketAddr, timeout: Duration, what: &str) {
+    let start = std::time::Instant::now();
+    loop {
+        if TcpStream::connect_timeout(&addr, POLL_INTERVAL).is_ok() {
+            tracing::debug!(
+                target: "readiness",
+                "ready: {what} after {:?}",
+                start.elapsed()
+            );
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("timeout after {timeout:?} waiting for {what} to listen on {addr}");
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Waits up to `budget` for a TCP connection to `addr` to succeed, polling every
+/// [`POLL_INTERVAL`]. Returns whether the listener came up.
+///
+/// Unlike the process gates above this deliberately does **not** assert, because a role's
+/// listening socket is not a universally valid readiness signal. `PoolRuntime::bootstrap` runs
+/// `bootstrap_template_provider()` before `start_services()`, so the pool only starts listening
+/// once its template-distribution handshake completes — and tests that intercept that handshake
+/// prevent it from ever listening, by design. Giving up quietly keeps those tests behaving as they
+/// did while still letting healthy roles unblock in milliseconds.
+pub async fn wait_until_listening(addr: SocketAddr, budget: Duration, what: &str) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            tracing::debug!(
+                target: "readiness",
+                "ready: {what} after {:?}",
+                start.elapsed()
+            );
+            return true;
+        }
+        if start.elapsed() > budget {
+            tracing::debug!(
+                target: "readiness",
+                "{what} not listening on {addr} within {budget:?}, continuing anyway"
+            );
+            return false;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
 
 pub fn get_available_address() -> SocketAddr {
     let port = get_available_port();
