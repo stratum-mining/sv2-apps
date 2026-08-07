@@ -13,7 +13,7 @@ use stratum_apps::{
 use tracing::warn;
 
 use crate::utils::{
-    PROCESS_READY_TIMEOUT, fs_utils, http, tarball, wait_for_listener, wait_for_unix_socket,
+    PROCESS_READY_TIMEOUT, fs_utils, http, tarball, wait_for_listener, wait_for_path,
 };
 
 const VERSION_SV2_TP: &str = "1.1.0";
@@ -118,6 +118,16 @@ impl BitcoinCore {
 
         let staticdir = format!(".bitcoin-{port}");
         conf.staticdir = Some(data_dir.join(staticdir.clone()));
+
+        // Remove any datadir left from an earlier test that drew the same port. Ports come from
+        // the OS, so reuse is rare but possible, and `BitcoinCore`'s cleanup does not run if a
+        // previous run was killed. Without this a stale `node.sock` can satisfy the readiness
+        // check below while belonging to a node that is long gone.
+        if let Err(e) = std::fs::remove_dir_all(conf.staticdir.as_ref().unwrap())
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("failed to clear stale datadir for port {port}: {e}");
+        }
 
         let max_tip_age_arg = format!("-maxtipage={SIGNET_FIXTURE_MAX_TIP_AGE_SECS}");
         match difficulty_level {
@@ -264,10 +274,20 @@ impl BitcoinCore {
             is_signet,
         };
 
-        // Wait for Bitcoin Core to create the IPC socket that sv2-tp connects to. Polling the
-        // socket path is the direct readiness signal, so this returns as soon as Core is actually
-        // up instead of always paying a fixed sleep.
-        wait_for_unix_socket(
+        // Wait for Bitcoin Core to create the IPC socket that sv2-tp connects to.
+        //
+        // This waits for the socket to *appear* and deliberately does not connect to it. Core's
+        // libmultiprocess layer sets TCP_NODELAY on every accepted connection; probing with a
+        // connect that is immediately dropped makes that setsockopt run against a socket which is
+        // already gone, which returns EINVAL on macOS and kills Core's IPC listener with an
+        // "Uncaught exception in daemonized task". sv2-tp can then never connect. A capnp RPC
+        // endpoint ascribes meaning to a bare connection, so it must not be used as a liveness
+        // probe.
+        //
+        // Waiting on the path alone is sound here because any datadir left over from an earlier
+        // test using this port is removed above, so the socket that appears can only be the one
+        // this node just created.
+        wait_for_path(
             &core.ipc_socket_path(),
             PROCESS_READY_TIMEOUT,
             "Bitcoin Core IPC socket",

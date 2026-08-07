@@ -65,33 +65,36 @@ pub const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// the old `sleep(1s)` cost. See [`wait_until_listening`] for why this cannot be an assertion.
 pub const ROLE_READY_BUDGET: Duration = Duration::from_secs(1);
 
-/// Blocks until a Unix socket at `path` accepts a connection, polling every [`POLL_INTERVAL`].
+/// Blocks until `path` exists, polling every [`POLL_INTERVAL`].
 ///
-/// Deliberately connects rather than checking `Path::exists`: Bitcoin Core creates the socket file
-/// before it is able to serve on it, and the window between the two is wide enough that merely
-/// stat-ing the path lets tests proceed against a node that then refuses their IPC traffic. A
-/// successful connect proves the listener is bound and accepting.
+/// Deliberately stats the path rather than connecting to it. This gates on Bitcoin Core's IPC
+/// socket, and a capnp RPC endpoint ascribes meaning to a bare connection: Core's libmultiprocess
+/// layer sets TCP_NODELAY on each accepted connection, so a probe that connects and immediately
+/// drops makes that setsockopt run against a socket that is already gone. On macOS that returns
+/// EINVAL and takes down Core's IPC listener with an "Uncaught exception in daemonized task",
+/// after which sv2-tp can never connect. Linux tolerates the same call, so this only reproduces
+/// on macOS.
+///
+/// Stat-ing is sound provided callers remove any datadir left over from an earlier test on the
+/// same port, so the socket that appears can only belong to the node just started.
 ///
 /// Panics with `what` in the message if `timeout` elapses first.
-pub fn wait_for_unix_socket(path: &std::path::Path, timeout: Duration, what: &str) {
+pub fn wait_for_path(path: &std::path::Path, timeout: Duration, what: &str) {
     let start = std::time::Instant::now();
-    loop {
-        if path.exists() && std::os::unix::net::UnixStream::connect(path).is_ok() {
-            tracing::debug!(
-                target: "readiness",
-                "ready: {what} after {:?}",
-                start.elapsed()
-            );
-            return;
-        }
+    while !path.exists() {
         if start.elapsed() > timeout {
             panic!(
-                "timeout after {timeout:?} waiting for {what} to accept connections on {}",
+                "timeout after {timeout:?} waiting for {what} (path {} never appeared)",
                 path.display()
             );
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+    tracing::debug!(
+        target: "readiness",
+        "ready: {what} after {:?}",
+        start.elapsed()
+    );
 }
 
 /// Blocks until a TCP connection to `addr` succeeds, polling every [`POLL_INTERVAL`].
