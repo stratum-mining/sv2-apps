@@ -555,6 +555,9 @@ pub fn start_mining_device_sv2(
     nominal_hashrate_multiplier: Option<f32>,
     single_submit: bool,
 ) {
+    // ponytail: pin to 1 thread so concurrent test processes don't
+    // oversubscribe the CI runner's CPUs and flake share-rate assertions.
+    crate::mining_device::set_cores(1);
     tokio::spawn(async move {
         crate::mining_device::connect(
             upstream.to_string(),
