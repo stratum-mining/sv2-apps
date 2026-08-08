@@ -7,9 +7,10 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use once_cell::sync::Lazy;
 use std::{
-    collections::HashSet,
     convert::TryInto,
+    fs, io,
     net::{SocketAddr, TcpListener, TcpStream},
+    os::fd::AsRawFd,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -28,8 +29,36 @@ use stratum_apps::{
 };
 use tokio_util::sync::CancellationToken;
 
-// prevents get_available_port from ever returning the same port twice
-static UNIQUE_PORTS: Lazy<Mutex<HashSet<u16>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// Advisory per-port lockfiles held for the process lifetime so no two concurrent
+/// test processes can claim the same port. The kernel releases flock on exit (even
+/// after `kill -9`), so stale lockfiles are harmless.
+static HELD_LOCKS: Lazy<Mutex<Vec<std::fs::File>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+fn lockfile_for(port: u16) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("sv2-it-ports")
+        .join(format!("{port}.lock"))
+}
+
+fn try_lock_port(port: u16) -> io::Result<std::fs::File> {
+    let path = lockfile_for(port);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    // Non-blocking exclusive lock: EAGAIN → another process holds this port.
+    // SAFETY: fd is valid, flock is async-signal-safe on both Linux and macOS.
+    let fd = file.as_raw_fd();
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
 
 /// How often readiness gates and message-wait loops re-check their condition.
 ///
@@ -151,23 +180,34 @@ pub async fn wait_until_listening(addr: SocketAddr, budget: Duration, what: &str
     }
 }
 
+/// Allocate a loopback address whose port is exclusively reserved across
+/// concurrent test processes.
+///
+/// Probes with `bind(0)` then holds a per-port `flock` lockfile in
+/// `$TMPDIR/sv2-it-ports/` for the process lifetime — no TOCTOU window
+/// between probe and bind.  Lockfiles are released by the kernel on exit.
 pub fn get_available_address() -> SocketAddr {
-    let port = get_available_port();
-    SocketAddr::from(([127, 0, 0, 1], port))
+    SocketAddr::from(([127, 0, 0, 1], get_available_port()))
 }
 
 fn get_available_port() -> u16 {
-    let mut unique_ports = UNIQUE_PORTS.lock().unwrap();
-
     loop {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        if !unique_ports.contains(&port) {
-            unique_ports.insert(port);
-            return port;
+        let probe = TcpListener::bind("127.0.0.1:0")
+            .expect("bind(0) for port probe");
+        let port = probe.local_addr().expect("probe local_addr").port();
+        match try_lock_port(port) {
+            Ok(lock_handle) => {
+                HELD_LOCKS.lock().expect("ports lock").push(lock_handle);
+                drop(probe);
+                return port;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                drop(probe);
+            }
+            Err(e) => {
+                drop(probe);
+                panic!("failed to lock port {port}: {e}");
+            }
         }
     }
 }
