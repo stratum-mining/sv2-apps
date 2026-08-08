@@ -205,9 +205,8 @@ impl BitcoinCore {
                         &bin_dir.join(".locks").join("high_diff_chain.lock"),
                         || {
                             if !high_diff_chain_dir.exists() {
-                                let local_tarball = current_dir
-                                    .join("resources")
-                                    .join("high_diff_chain.tar.gz");
+                                let local_tarball =
+                                    current_dir.join("resources").join("high_diff_chain.tar.gz");
                                 let tarball_bytes = if local_tarball.exists() {
                                     warn!("Using local high_diff_chain.tar.gz");
                                     tarball::read_from_file(local_tarball.to_str().unwrap())
@@ -245,47 +244,47 @@ impl BitcoinCore {
                     .join(format!("bitcoin-{bitcoin_core_version}.lock")),
                 || {
                     if !bitcoin_node_bin.exists() {
-            let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
-                Ok(path) => tarball::read_from_file(&path),
-                Err(_) => {
-                    warn!(
-                        "Downloading Bitcoin Core {} for the testing session. This could take a while...",
-                        bitcoin_core_version
-                    );
-                    let download_endpoint = env::var("BITCOIN_CORE_DOWNLOAD_ENDPOINT")
+                        let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
+                            Ok(path) => tarball::read_from_file(&path),
+                            Err(_) => {
+                                warn!(
+                                    "Downloading Bitcoin Core {} for the testing session. This could take a while...",
+                                    bitcoin_core_version
+                                );
+                                let download_endpoint = env::var("BITCOIN_CORE_DOWNLOAD_ENDPOINT")
                         .unwrap_or_else(|_| {
                             format!(
                                 "https://bitcoincore.org/bin/bitcoin-core-{bitcoin_core_version}"
                             )
                         });
-                    let url = format!("{download_endpoint}/{bitcoin_filename}");
-                    http::make_get_request(&url, 5)
-                }
-            };
+                                let url = format!("{download_endpoint}/{bitcoin_filename}");
+                                http::make_get_request(&url, 5)
+                            }
+                        };
 
-            if let Some(parent) = bitcoin_home.parent() {
-                create_dir_all(parent).unwrap();
-            }
+                        if let Some(parent) = bitcoin_home.parent() {
+                            create_dir_all(parent).unwrap();
+                        }
 
-            tarball::unpack(&tarball_bytes, &bin_dir);
+                        tarball::unpack(&tarball_bytes, &bin_dir);
 
-            assert!(
-                bitcoin_node_bin.exists(),
-                "Bitcoin Core node binary not found after unpack in {}",
-                bitcoin_home.display()
-            );
+                        assert!(
+                            bitcoin_node_bin.exists(),
+                            "Bitcoin Core node binary not found after unpack in {}",
+                            bitcoin_home.display()
+                        );
 
-            // Sign the binaries on macOS
-            if os == "macos" {
-                for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
-                    std::process::Command::new("codesign")
-                        .arg("--sign")
-                        .arg("-")
-                        .arg(bin)
-                        .output()
-                        .expect("Failed to sign Bitcoin Core binary");
-                }
-            }
+                        // Sign the binaries on macOS
+                        if os == "macos" {
+                            for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
+                                std::process::Command::new("codesign")
+                                    .arg("--sign")
+                                    .arg("-")
+                                    .arg(bin)
+                                    .output()
+                                    .expect("Failed to sign Bitcoin Core binary");
+                            }
+                        }
                     } // inner re-check: bin still missing?
                 }, // closure
             ); // with_exclusive_lock
@@ -499,34 +498,39 @@ impl TemplateProvider {
                     .join(format!("sv2-tp-{VERSION_SV2_TP}.lock")),
                 || {
                     if !sv2_tp_bin.exists() {
-            let tarball_bytes = match env::var("SV2TP_TARBALL_FILE") {
-                Ok(path) => tarball::read_from_file(&path),
-                Err(_) => {
-                    warn!("Downloading sv2-tp for the testing session. This could take a while...");
-                    let download_endpoint =
-                        env::var("SV2TP_DOWNLOAD_ENDPOINT").unwrap_or_else(|_| {
-                            "https://github.com/stratum-mining/sv2-tp/releases/download".to_owned()
-                        });
-                    let url = format!("{download_endpoint}/v{VERSION_SV2_TP}/{sv2_tp_filename}");
-                    http::make_get_request(&url, 5)
-                }
-            };
+                        let tarball_bytes = match env::var("SV2TP_TARBALL_FILE") {
+                            Ok(path) => tarball::read_from_file(&path),
+                            Err(_) => {
+                                warn!(
+                                    "Downloading sv2-tp for the testing session. This could take a while..."
+                                );
+                                let download_endpoint = env::var("SV2TP_DOWNLOAD_ENDPOINT")
+                                    .unwrap_or_else(|_| {
+                                        "https://github.com/stratum-mining/sv2-tp/releases/download"
+                                            .to_owned()
+                                    });
+                                let url = format!(
+                                    "{download_endpoint}/v{VERSION_SV2_TP}/{sv2_tp_filename}"
+                                );
+                                http::make_get_request(&url, 5)
+                            }
+                        };
 
-            if let Some(parent) = sv2_tp_home.parent() {
-                create_dir_all(parent).unwrap();
-            }
+                        if let Some(parent) = sv2_tp_home.parent() {
+                            create_dir_all(parent).unwrap();
+                        }
 
-            tarball::unpack(&tarball_bytes, &bin_dir);
+                        tarball::unpack(&tarball_bytes, &bin_dir);
 
-            // Sign the binary on macOS
-            if os == "macos" {
-                std::process::Command::new("codesign")
-                    .arg("--sign")
-                    .arg("-")
-                    .arg(&sv2_tp_bin)
-                    .output()
-                    .expect("Failed to sign sv2-tp binary");
-            }
+                        // Sign the binary on macOS
+                        if os == "macos" {
+                            std::process::Command::new("codesign")
+                                .arg("--sign")
+                                .arg("-")
+                                .arg(&sv2_tp_bin)
+                                .output()
+                                .expect("Failed to sign sv2-tp binary");
+                        }
                     } // inner re-check: bin still missing?
                 }, // closure
             ); // with_exclusive_lock

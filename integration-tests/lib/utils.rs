@@ -192,8 +192,7 @@ pub fn get_available_address() -> SocketAddr {
 
 fn get_available_port() -> u16 {
     loop {
-        let probe = TcpListener::bind("127.0.0.1:0")
-            .expect("bind(0) for port probe");
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind(0) for port probe");
         let port = probe.local_addr().expect("probe local_addr").port();
         match try_lock_port(port) {
             Ok(lock_handle) => {
