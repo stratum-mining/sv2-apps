@@ -599,8 +599,9 @@ pub mod tarball {
     pub fn unpack(tarball_bytes: &[u8], destination: &Path) {
         use std::{io::Write as IoWrite, process::Command};
 
-        // Write tarball bytes to a temp file
-        let temp_tarball = destination.join("temp.tar.gz");
+        // Use pid-unique temp name so concurrent test processes can't share it.
+        let pid = std::process::id();
+        let temp_tarball = destination.join(format!("temp-{pid}.tar.gz"));
         let mut temp_file = File::create(&temp_tarball).unwrap();
         temp_file.write_all(tarball_bytes).unwrap();
         drop(temp_file);

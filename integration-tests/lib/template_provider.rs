@@ -15,6 +15,40 @@ use tracing::warn;
 use crate::utils::{
     PROCESS_READY_TIMEOUT, fs_utils, http, tarball, wait_for_listener, wait_for_path,
 };
+use std::os::fd::AsRawFd;
+
+/// Acquire a blocking exclusive flock on `lock_path`, run `f`, then release.
+///
+/// Used to serialize download+unpack of shared artifacts (bitcoin-core,
+/// sv2-tp, high_diff_chain) across concurrently executing nextest processes.
+/// The lock is held only for the window where the artifact is missing; every
+/// process re-checks `exists()` inside the guard so only the first one
+/// actually downloads.
+fn with_exclusive_lock(lock_path: &std::path::Path, f: impl FnOnce()) {
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .expect("open lockfile for artifact download");
+    let fd = file.as_raw_fd();
+    loop {
+        // SAFETY: fd is valid, flock is async-signal-safe on Linux and macOS.
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+            break;
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            panic!("flock on artifact lockfile: {e}");
+        }
+    }
+    f();
+    // lock released when file is dropped
+}
 
 const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
@@ -163,22 +197,30 @@ impl BitcoinCore {
                 let signet_datadir = data_dir.join(staticdir.clone()).join("signet");
                 create_dir_all(signet_datadir.clone()).expect("Failed to create signet directory");
 
-                // Download and cache high difficulty chain if not exists
+                // Download and cache high difficulty chain if not exists.
+                // Guarded with a flock so concurrent test processes don't race
+                // on the unpack.
                 if !high_diff_chain_dir.exists() {
-                    let local_tarball =
-                        current_dir.join("resources").join("high_diff_chain.tar.gz");
-                    let tarball_bytes = if local_tarball.exists() {
-                        warn!("Using local high_diff_chain.tar.gz");
-                        tarball::read_from_file(local_tarball.to_str().unwrap())
-                    } else {
-                        warn!("Downloading high_diff_chain for the testing session...");
-                        //this is pinning to the commit right before the current one, where I added
-                        //the tar.gz file with the chain data.
-                        let url = "https://raw.githubusercontent.com/stratum-mining/sv2-apps/eb41b790626fb51ce55e74be8fa0b4f07d4029bf/integration-tests/resources/high_diff_chain.tar.gz";
-                        http::make_get_request(url, 5)
-                    };
+                    with_exclusive_lock(
+                        &bin_dir.join(".locks").join("high_diff_chain.lock"),
+                        || {
+                            if !high_diff_chain_dir.exists() {
+                                let local_tarball = current_dir
+                                    .join("resources")
+                                    .join("high_diff_chain.tar.gz");
+                                let tarball_bytes = if local_tarball.exists() {
+                                    warn!("Using local high_diff_chain.tar.gz");
+                                    tarball::read_from_file(local_tarball.to_str().unwrap())
+                                } else {
+                                    warn!("Downloading high_diff_chain for the testing session...");
+                                    let url = "https://raw.githubusercontent.com/stratum-mining/sv2-apps/eb41b790626fb51ce55e74be8fa0b4f07d4029bf/integration-tests/resources/high_diff_chain.tar.gz";
+                                    http::make_get_request(url, 5)
+                                };
 
-                    tarball::unpack(&tarball_bytes, &bin_dir);
+                                tarball::unpack(&tarball_bytes, &bin_dir);
+                            }
+                        },
+                    );
                 }
 
                 // Copy high difficulty signet data into signet datadir
@@ -197,6 +239,12 @@ impl BitcoinCore {
         let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
 
         if !bitcoin_node_bin.exists() {
+            with_exclusive_lock(
+                &bin_dir
+                    .join(".locks")
+                    .join(format!("bitcoin-{bitcoin_core_version}.lock")),
+                || {
+                    if !bitcoin_node_bin.exists() {
             let tarball_bytes = match env::var("BITCOIN_CORE_TARBALL_FILE") {
                 Ok(path) => tarball::read_from_file(&path),
                 Err(_) => {
@@ -238,7 +286,10 @@ impl BitcoinCore {
                         .expect("Failed to sign Bitcoin Core binary");
                 }
             }
-        }
+                    } // inner re-check: bin still missing?
+                }, // closure
+            ); // with_exclusive_lock
+        } // outer exists() guard
 
         // Add IPC and basic args
         conf.args.extend(vec![
@@ -442,6 +493,12 @@ impl TemplateProvider {
         let sv2_tp_bin = sv2_tp_home.join("bin").join("sv2-tp");
 
         if !sv2_tp_bin.exists() {
+            with_exclusive_lock(
+                &bin_dir
+                    .join(".locks")
+                    .join(format!("sv2-tp-{VERSION_SV2_TP}.lock")),
+                || {
+                    if !sv2_tp_bin.exists() {
             let tarball_bytes = match env::var("SV2TP_TARBALL_FILE") {
                 Ok(path) => tarball::read_from_file(&path),
                 Err(_) => {
@@ -470,7 +527,10 @@ impl TemplateProvider {
                     .output()
                     .expect("Failed to sign sv2-tp binary");
             }
-        }
+                    } // inner re-check: bin still missing?
+                }, // closure
+            ); // with_exclusive_lock
+        } // outer exists() guard
 
         // Launch sv2-tp process
         let datadir = bitcoin_core.data_dir();
