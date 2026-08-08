@@ -5,8 +5,14 @@
 # and that's a reliable indication that we shouldn't merge this PR
 retries = { backoff = "fixed", count = 3, delay = "2s" }
 
-# only run one test at a time, which allows a human-friendly experience for inspecting logs
-test-threads = 1
+# Number of test processes to run concurrently.
+#
+# "num-cpus" matches the runner (4 vCPU on ubuntu-latest, 3 vCPU on
+# macos-latest — both free-tier public repos per GitHub docs).
+#
+# For sequential human-readable logs (one test at a time), override locally:
+#     NEXTEST_TEST_THREADS=1 cargo nextest run ...
+test-threads = "num-cpus"
 
 # label as slow if a test runs for more than 60s
 # kill it after 120s
