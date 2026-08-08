@@ -48,6 +48,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-nextest@0.9.100
 
+# Failure triage: re-run a single test with captured logs shown live:
+      #   RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml \
+      #     -E 'test(<name>)' --no-capture
       - name: Integration Tests
         run: |
-         RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml --nocapture
+          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml
