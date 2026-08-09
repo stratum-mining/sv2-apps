@@ -172,7 +172,7 @@ impl TranslatorSv2 {
         {
             error!("Failed to initialize any upstream connection: {e:?}");
             self.shutdown_notify.notify_waiters();
-            self.is_alive.store(false, Ordering::Relaxed);
+            self.is_alive.store(false, Ordering::Release);
             return;
         }
 
@@ -330,7 +330,7 @@ impl TranslatorSv2 {
             }
         }
         self.shutdown_notify.notify_waiters();
-        self.is_alive.store(false, Ordering::Relaxed);
+        self.is_alive.store(false, Ordering::Release);
         info!("TranslatorSv2 shutdown complete.");
     }
 
@@ -413,7 +413,7 @@ impl TranslatorSv2 {
     }
 
     pub async fn shutdown(&self) {
-        if !self.is_alive.load(Ordering::Relaxed) {
+        if !self.is_alive.load(Ordering::Acquire) {
             return;
         }
         // The Notified future is guaranteed to receive wakeups from notify_waiters()

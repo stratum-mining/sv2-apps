@@ -54,7 +54,13 @@ impl PoolSv2 {
     /// If any error occurs during bootstrapping, `start` receives the partially initialized
     /// runtime, gracefully shuts it down, and then returns the error.
     pub async fn start(&self) -> Result<(), PoolErrorKind> {
-        let runtime = PoolRuntime::<Init>::new(self.clone())?;
+        let runtime = match PoolRuntime::<Init>::new(self.clone()) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                self.mark_stopped();
+                return Err(err);
+            }
+        };
 
         let runtime = match runtime.bootstrap().await {
             Ok(runtime) => runtime,
@@ -71,8 +77,18 @@ impl PoolSv2 {
         Ok(())
     }
 
+    /// Marks the pool as stopped and releases anyone blocked on [`PoolSv2::shutdown`].
+    ///
+    /// Called by [`PoolRuntime::shutdown`] once teardown completes, and directly by
+    /// [`PoolSv2::start`] on the failure path where no runtime exists to tear down.
+    fn mark_stopped(&self) {
+        self.is_alive.store(false, Ordering::Release);
+        self.cancellation_token.cancel();
+        self.shutdown_notify.notify_waiters();
+    }
+
     pub async fn shutdown(&self) {
-        if !self.is_alive.load(Ordering::Relaxed) {
+        if !self.is_alive.load(Ordering::Acquire) {
             return;
         }
         // The Notified future is guaranteed to receive wakeups from notify_waiters()

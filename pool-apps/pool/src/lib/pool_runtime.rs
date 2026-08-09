@@ -3,16 +3,11 @@
 //! Provides [`PoolRuntime`], a structured state-machine orchestrating the pool's
 //! initialization, bootstrap stages, background service loops, and graceful teardown.
 
-use std::{
-    sync::{Arc, atomic::Ordering},
-    thread::JoinHandle,
-};
+use std::{sync::Arc, thread::JoinHandle};
 use stratum_apps::stratum_core::parsers_sv2::{MiningOwned, TemplateDistributionOwned};
 
 use async_channel::{Receiver, Sender, unbounded};
 
-#[cfg(feature = "monitoring")]
-use stratum_apps::monitoring::MonitoringServer;
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     stratum_core::{
@@ -110,8 +105,6 @@ pub(super) struct PoolRuntime<State> {
     bitcoin_core_sv2: Option<BitcoinCoreSv2Handle>,
     encoded_outputs: Vec<u8>,
     coinbase_outputs: Vec<TxOut>,
-    #[cfg(feature = "monitoring")]
-    monitoring_server: Option<MonitoringServer>,
 }
 
 impl<State> PoolRuntime<State> {
@@ -124,15 +117,14 @@ impl<State> PoolRuntime<State> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             encoded_outputs: self.encoded_outputs,
             coinbase_outputs: self.coinbase_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
         }
     }
 
     /// Performs a coordinated, graceful shutdown of the runtime.
     ///
     /// Signals cancellation to all active sub-services and background tasks, awaiting
-    /// their clean termination up to a configured graceful timeout.
+    /// their clean termination up to a configured graceful timeout, and finally marks the
+    /// owning [`PoolSv2`] as stopped — callers do not need to do so themselves.
     pub(super) async fn shutdown(mut self) {
         self.pool.cancellation_token.cancel();
 
@@ -176,8 +168,7 @@ impl<State> PoolRuntime<State> {
             }
         }
 
-        self.pool.shutdown_notify.notify_waiters();
-        self.pool.is_alive.store(false, Ordering::Relaxed);
+        self.pool.mark_stopped();
         info!("Pool shutdown complete.");
     }
 }
@@ -194,8 +185,6 @@ impl PoolRuntime<Init> {
 
         Ok(PoolRuntime {
             pool,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: None,
             task_manager: Arc::new(TaskManager::new()),
             state: Init,
             jd: None,
@@ -229,8 +218,6 @@ impl PoolRuntime<Init> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: IoReady { io },
         }
     }
@@ -369,8 +356,6 @@ impl PoolRuntime<IoReady> {
             bitcoin_core_sv2: None,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: new_state,
         })
     }
@@ -481,8 +466,6 @@ impl PoolRuntime<JdsReady> {
             bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: new_state,
         })
     }
@@ -509,6 +492,32 @@ impl PoolRuntime<TemplateProviderReady> {
             }
         };
 
+        let new_state = ChannelManagerReady {
+            io: self.state.io,
+            channel_manager,
+        };
+
+        Ok(PoolRuntime {
+            pool: self.pool,
+            task_manager: self.task_manager,
+            jd: self.jd,
+            bitcoin_core_sv2: self.bitcoin_core_sv2,
+            coinbase_outputs: self.coinbase_outputs,
+            encoded_outputs: self.encoded_outputs,
+            state: new_state,
+        })
+    }
+}
+
+impl PoolRuntime<ChannelManagerReady> {
+    /// Activates the background execution loop of the [`ChannelManager`], spawns the
+    /// downstream TCP listening server and the monitoring server, and transitions the
+    /// runtime to [`Running`].
+    async fn start_services(
+        self,
+    ) -> Result<PoolRuntime<Running>, (PoolErrorKind, PoolRuntime<ChannelManagerReady>)> {
+        let cancellation_token = self.pool.cancellation_token.clone();
+
         // Start monitoring server if configured
         #[cfg(feature = "monitoring")]
         if let Some(monitoring_addr) = self.pool.config.monitoring_address() {
@@ -520,7 +529,7 @@ impl PoolRuntime<TemplateProviderReady> {
             let monitoring_server = match stratum_apps::monitoring::MonitoringServer::new(
                 monitoring_addr,
                 None, // Pool doesn't have channels opened with servers
-                Some(Arc::new(channel_manager.clone())), // channels opened with clients
+                Some(Arc::new(self.state.channel_manager.clone())), // channels opened with clients
                 std::time::Duration::from_secs(
                     self.pool
                         .config
@@ -539,13 +548,13 @@ impl PoolRuntime<TemplateProviderReady> {
                 }
             };
 
-            let cancellation_token_clone = self.pool.cancellation_token.clone();
+            let cancellation_token_clone = cancellation_token.clone();
             let shutdown_signal = async move {
                 cancellation_token_clone.cancelled().await;
             };
 
             self.task_manager.spawn({
-                let cancellation_token = self.pool.cancellation_token.clone();
+                let cancellation_token = cancellation_token.clone();
                 async move {
                     if let Err(e) = monitoring_server.run(shutdown_signal).await {
                         error!("Monitoring server error: {}", e);
@@ -554,33 +563,6 @@ impl PoolRuntime<TemplateProviderReady> {
                 }
             });
         }
-
-        let new_state = ChannelManagerReady {
-            io: self.state.io,
-            channel_manager,
-        };
-
-        Ok(PoolRuntime {
-            pool: self.pool,
-            task_manager: self.task_manager,
-            jd: self.jd,
-            bitcoin_core_sv2: self.bitcoin_core_sv2,
-            coinbase_outputs: self.coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
-            state: new_state,
-        })
-    }
-}
-
-impl PoolRuntime<ChannelManagerReady> {
-    /// Activates the background execution loop of the [`ChannelManager`], spawns the
-    /// downstream TCP listening server, and transitions the runtime to [`Running`].
-    async fn start_services(
-        self,
-    ) -> Result<PoolRuntime<Running>, (PoolErrorKind, PoolRuntime<ChannelManagerReady>)> {
-        let cancellation_token = self.pool.cancellation_token.clone();
 
         match self
             .state
@@ -629,8 +611,6 @@ impl PoolRuntime<ChannelManagerReady> {
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             coinbase_outputs: self.coinbase_outputs,
             encoded_outputs: self.encoded_outputs,
-            #[cfg(feature = "monitoring")]
-            monitoring_server: self.monitoring_server,
             state: Running,
         })
     }

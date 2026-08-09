@@ -270,34 +270,9 @@ impl ChannelManager {
         // todo: let start_downstream_server accept Arc, instead of clone.
         let this = Arc::new(self);
 
-        // Wait for initial template and prevhash before accepting connections
-        loop {
-            let has_required_data = this
-                .last_future_template
-                .with(|template| template.is_some())
-                .map_err(PoolError::shutdown)?
-                && this
-                    .last_new_prev_hash
-                    .with(|prevhash| prevhash.is_some())
-                    .map_err(PoolError::shutdown)?;
-
-            if has_required_data {
-                info!("Required template data received, ready to accept connections");
-                break;
-            }
-
-            warn!("Waiting for initial template and prevhash from Template Provider...");
-            warn!("Is the Bitcoin node undergoing IBD?");
-            select! {
-                biased;
-                _ = cancellation_token.cancelled() => {
-                    info!("Channel Manager: received shutdown while waiting for templates");
-                    return Ok(());
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
-            }
-        }
-
+        // Bind before spawning, so that a bind failure is a startup failure the caller can
+        // propagate. Everything after this point (waiting for the first template, then accepting)
+        // runs in a background task, so bootstrap is never held hostage by the Template Provider.
         info!("Starting downstream server at {listening_address}");
         let server = TcpListener::bind(listening_address)
             .await
@@ -310,6 +285,41 @@ impl ChannelManager {
         let task_manager_clone = task_manager.clone();
         let cancellation_token_clone = cancellation_token.clone();
         task_manager.spawn(async move {
+            // Wait for initial template and prevhash before accepting connections
+            let ready = loop {
+                let has_required_data = match (
+                    this.last_future_template.with(|template| template.is_some()),
+                    this.last_new_prev_hash.with(|prevhash| prevhash.is_some()),
+                ) {
+                    (Ok(has_template), Ok(has_prev_hash)) => has_template && has_prev_hash,
+                    _ => {
+                        error!("Channel Manager: shared state poisoned while waiting for templates");
+                        cancellation_token_clone.cancel();
+                        break false;
+                    }
+                };
+
+                if has_required_data {
+                    info!("Required template data received, ready to accept connections");
+                    break true;
+                }
+
+                warn!("Waiting for initial template and prevhash from Template Provider...");
+                warn!("Is the Bitcoin node undergoing IBD?");
+                select! {
+                    biased;
+                    _ = cancellation_token_clone.cancelled() => {
+                        info!("Channel Manager: received shutdown while waiting for templates");
+                        break false;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                }
+            };
+
+            if !ready {
+                return;
+            }
+
             loop {
                 select! {
                     biased;
