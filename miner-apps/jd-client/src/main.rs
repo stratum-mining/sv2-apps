@@ -25,7 +25,19 @@ async fn inner_main() {
     });
 
     init_logging(jdc_config.log_file());
-    if JobDeclaratorClient::new(jdc_config).start().await.is_err() {
+
+    let jdc = JobDeclaratorClient::new(jdc_config);
+    tokio::spawn({
+        let jdc = jdc.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::info!("Ctrl+C received — initiating graceful shutdown...");
+                jdc.shutdown().await;
+            }
+        }
+    });
+
+    if jdc.start().await.is_err() {
         std::process::exit(1);
     }
 }

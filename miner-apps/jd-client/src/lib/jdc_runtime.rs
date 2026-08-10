@@ -877,10 +877,6 @@ impl JdcRuntime<Running> {
                 warn!("Upstream/Job Declarator connection dropped — attempting reconnection...");
                 RuntimeEvent::Fallback
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C received — initiating graceful shutdown...");
-                RuntimeEvent::Shutdown
-            }
         }
     }
 

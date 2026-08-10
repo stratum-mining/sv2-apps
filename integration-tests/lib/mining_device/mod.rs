@@ -37,6 +37,7 @@ use stratum_apps::{
     sync::SharedLock,
 };
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 // Fast SHA256d midstate hasher
@@ -134,9 +135,13 @@ pub async fn connect(
     info!("Pool tcp connection established at {}", address);
     let address = socket.peer_addr().unwrap();
     let initiator = Initiator::new(pub_key.map(|e| e.0));
-    let (receiver, sender) = Connection::new(socket, HandshakeRole::Initiator(initiator))
-        .await
-        .unwrap();
+    let (receiver, sender) = Connection::new(
+        socket,
+        HandshakeRole::Initiator(initiator),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     info!("Pool noise connection established at {}", address);
     Device::start(
         receiver,

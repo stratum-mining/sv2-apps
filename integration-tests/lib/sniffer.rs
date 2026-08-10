@@ -107,7 +107,6 @@ impl<'a> Sniffer<'a> {
             .await
             .expect("Failed to create upstream");
             select! {
-                _ = tokio::signal::ctrl_c() => { },
                 _ = recv_from_down_send_to_up(downstream_receiver, upstream_sender, messages_from_downstream, action.clone(), &identifier, negotiated_extensions.clone()) => { },
                 _ = recv_from_up_send_to_down(upstream_receiver, downstream_sender, messages_from_upstream, action, &identifier, negotiated_extensions.clone()) => { },
             };

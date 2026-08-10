@@ -39,6 +39,11 @@ pub use stratum_core;
 #[cfg(feature = "bitcoin-core-sv2")]
 pub use bitcoin_core_sv2;
 
+/// Re-export `tokio_util`, for the [`tokio_util::sync::CancellationToken`] required by the
+/// networking helpers
+#[cfg(feature = "tokio-util")]
+pub use tokio_util;
+
 /// High-level networking utilities for SV2 connections
 ///
 /// Provides connection management, encrypted streams, and protocol handling.

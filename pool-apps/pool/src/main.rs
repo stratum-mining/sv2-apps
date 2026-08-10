@@ -24,7 +24,19 @@ async fn inner_main() {
         std::process::exit(1);
     });
     init_logging(config.log_dir());
-    if let Err(e) = PoolSv2::new(config).start().await {
+
+    let pool = PoolSv2::new(config);
+    tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::info!("Ctrl+C received — initiating graceful shutdown...");
+                pool.shutdown().await;
+            }
+        }
+    });
+
+    if let Err(e) = pool.start().await {
         tracing::error!("Pool Error'ed out: {e}");
         std::process::exit(1);
     };

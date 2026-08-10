@@ -75,10 +75,12 @@ stratum-apps = { version = "0.4.0", features = ["pool"] }
 ```
 
 ```rust
-use stratum_apps::{network_helpers, config_helpers};
+use stratum_apps::{network_helpers, config_helpers, tokio_util::sync::CancellationToken};
 
 // Use networking
-let connection = network_helpers::Connection::new(stream, HandshakeRole::Responder).await?;
+let cancellation_token = CancellationToken::new();
+let connection =
+    network_helpers::Connection::new(stream, HandshakeRole::Responder, cancellation_token).await?;
 
 // Use configuration
 let config: PoolConfig = config_helpers::parse_config("pool.toml")?;
