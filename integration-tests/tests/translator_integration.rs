@@ -1132,6 +1132,10 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Vardiff may enqueue an UpdateChannel before the share on loaded CI runners.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 
@@ -1182,6 +1186,10 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Vardiff may enqueue an UpdateChannel before the share on loaded CI runners.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 
@@ -1303,6 +1311,10 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Vardiff may enqueue an UpdateChannel before the share on loaded CI runners.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 
