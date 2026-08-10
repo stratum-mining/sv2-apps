@@ -565,6 +565,7 @@ async fn tproxy_api_endpoints_with_miner() {
     let global: GlobalInfo = tproxy_mon
         .poll_until(routes::GLOBAL, METRIC_POLL_TIMEOUT, |r: &GlobalInfo| {
             r.sv1_clients.as_ref().is_some_and(|c| c.total_clients >= 1)
+                && r.server.as_ref().is_some_and(|s| s.extended_channels >= 1)
         })
         .await;
     let server_summary = global
@@ -703,6 +704,7 @@ async fn jdc_api_endpoints_with_miner() {
     let global: GlobalInfo = jdc_mon
         .poll_until(routes::GLOBAL, METRIC_POLL_TIMEOUT, |r: &GlobalInfo| {
             r.sv2_clients.as_ref().is_some_and(|c| c.total_clients >= 1)
+                && r.server.as_ref().is_some_and(|s| s.extended_channels >= 1)
         })
         .await;
     let server_summary = global

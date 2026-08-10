@@ -1257,15 +1257,26 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
         EXPECTED_GROUP_CHANNEL_ID
     );
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
-        .await;
-    let set_new_prev_hash = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(msg)))) => msg,
-        msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
+    let set_new_prev_hash = loop {
+        sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
+            )
+            .await;
+        match sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(msg)))) => {
+                break msg;
+            }
+            // A chain-tip update may enqueue multiple group-channel jobs before SetNewPrevHash.
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
+                assert_eq!(msg.channel_id, EXPECTED_GROUP_CHANNEL_ID);
+            }
+            msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
+        }
     };
     assert_eq!(set_new_prev_hash.channel_id, EXPECTED_GROUP_CHANNEL_ID);
 
