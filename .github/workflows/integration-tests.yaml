@@ -8,6 +8,9 @@ on:
 
 name: Integration Tests
 
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
 jobs:
   ci:
     runs-on: ${{ matrix.os }}
@@ -26,6 +29,12 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
+          workspaces: integration-tests -> ../target
 
       - name: Install capnp dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
