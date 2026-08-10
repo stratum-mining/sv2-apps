@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -12,11 +13,48 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use crate::utils::{http, tarball};
+use crate::utils::{http, tarball, with_exclusive_lock};
 
 use super::error::MinerdError;
 
 const VERSION_MINERD: &str = "2.5.1";
+const HASHRATE_MEASUREMENT_TIMEOUT: Duration = Duration::from_secs(15);
+const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn kill_and_reap_process(child: &mut TokioChild, what: &str) -> bool {
+    match child.try_wait() {
+        Ok(Some(_)) => return true,
+        Ok(None) => {}
+        Err(e) => {
+            error!("Failed to inspect {what} process before shutdown: {e}");
+            return false;
+        }
+    }
+
+    if let Err(e) = child.start_kill() {
+        error!("Failed to kill {what} process: {e}");
+        return false;
+    }
+
+    let deadline = Instant::now() + PROCESS_EXIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(PROCESS_EXIT_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                error!("Timed out waiting for {what} process to exit");
+                return false;
+            }
+            Err(e) => {
+                error!("Failed to reap {what} process: {e}");
+                return false;
+            }
+        }
+    }
+}
 
 fn get_minerd_filename(os: &str, arch: &str) -> Result<String, MinerdError> {
     match (os, arch) {
@@ -70,25 +108,33 @@ impl MinerdProcess {
         let arch = std::env::consts::ARCH;
         let download_filename = get_minerd_filename(os, arch)?;
 
-        if !minerd_dir.exists() {
-            fs::create_dir_all(minerd_dir.clone()).expect("failed to create minerd directory");
-            let download_endpoint = format!(
-                "https://github.com/stratum-mining/cpuminer/releases/download/v{VERSION_MINERD}/"
-            );
-            let url = format!("{download_endpoint}{download_filename}");
-            let tarball_bytes = http::make_get_request(&url, 5);
-            tarball::unpack(&tarball_bytes, &minerd_dir);
-        }
-
         let minerd_binary = minerd_dir.join("minerd");
+        if !minerd_binary.exists() {
+            with_exclusive_lock(
+                &minerd_dir
+                    .join(".locks")
+                    .join(format!("minerd-{VERSION_MINERD}.lock")),
+                || {
+                    if !minerd_binary.exists() {
+                        fs::create_dir_all(&minerd_dir).expect("failed to create minerd directory");
+                        let download_endpoint = format!(
+                            "https://github.com/stratum-mining/cpuminer/releases/download/v{VERSION_MINERD}/"
+                        );
+                        let url = format!("{download_endpoint}{download_filename}");
+                        let tarball_bytes = http::make_get_request(&url, 5);
+                        tarball::unpack(&tarball_bytes, &minerd_dir);
 
-        if os == "macos" {
-            std::process::Command::new("codesign")
-                .arg("--sign")
-                .arg("-")
-                .arg(&minerd_binary)
-                .output()
-                .expect("failed to sign minerd binary");
+                        if os == "macos" {
+                            std::process::Command::new("codesign")
+                                .arg("--sign")
+                                .arg("-")
+                                .arg(&minerd_binary)
+                                .output()
+                                .expect("failed to sign minerd binary");
+                        }
+                    }
+                },
+            );
         }
 
         // Bind to local address for the proxy
@@ -412,53 +458,57 @@ impl MinerdProcess {
             MinerdError::ProcessSpawn(std::io::Error::other("Failed to get stderr"))
         })?;
 
-        // Give minerd some time to run and produce hashrate output
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        // Kill the benchmark process
-        if let Err(e) = child.kill().await {
-            error!("Failed to kill benchmark process: {}", e);
-        }
-
-        // Read and parse the output from stderr
         let mut reader = BufReader::new(stderr);
         let mut line = String::new();
-        let mut hashrate_hashes_per_sec = None;
-
-        // Read output lines to find hashrate information
         let mut all_output = Vec::new();
-        while let Ok(bytes_read) = reader.read_line(&mut line).await {
-            if bytes_read == 0 {
-                break;
+        let measurement = tokio::time::timeout(HASHRATE_MEASUREMENT_TIMEOUT, async {
+            loop {
+                line.clear();
+                let bytes_read = reader.read_line(&mut line).await?;
+                if bytes_read == 0 {
+                    return Err(MinerdError::HashrateParseError);
+                }
+
+                let line_trimmed = line.trim();
+                all_output.push(line_trimmed.to_string());
+                debug!("Benchmark output: {line_trimmed}");
+
+                // minerd writes both per-thread and total measurements to stderr. Either is a
+                // valid readiness signal; waiting for one avoids a fixed timing assumption under
+                // concurrent CPU load.
+                if let Some(hashrate_khash) = parse_hashrate_from_benchmark_line(line_trimmed) {
+                    info!("Detected benchmark hashrate: {hashrate_khash} khash/s");
+                    return Ok(hashrate_khash * 1000.0);
+                }
             }
+        })
+        .await;
 
-            let line_trimmed = line.trim();
-            all_output.push(line_trimmed.to_string());
-            debug!("Benchmark output: {}", line_trimmed);
-
-            // Parse hashrate from lines like:
-            // "[2025-08-29 20:10:39] thread 0: 2097152 hashes, 1441 khash/s"
-            // "[2025-08-29 20:10:39] Total: 1441 khash/s"
-            if let Some(hashrate_khash) = parse_hashrate_from_benchmark_line(line_trimmed) {
-                info!("Detected benchmark hashrate: {} khash/s", hashrate_khash);
-                // Convert khash/s to hashes/s (multiply by 1000)
-                hashrate_hashes_per_sec = Some(hashrate_khash * 1000.0);
-                // We can break after finding the first hashrate measurement
-                break;
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(e) = child.kill().await {
+                    error!("Failed to kill and reap benchmark process: {e}");
+                }
             }
-
-            line.clear();
+            Err(e) => error!("Failed to inspect benchmark process during cleanup: {e}"),
         }
 
-        // If we couldn't parse hashrate, log all output for debugging
-        if hashrate_hashes_per_sec.is_none() {
+        let result = match measurement {
+            Ok(result) => result,
+            Err(_) => Err(MinerdError::HashrateMeasurementTimeout(
+                HASHRATE_MEASUREMENT_TIMEOUT,
+            )),
+        };
+
+        if result.is_err() {
             error!("Failed to parse hashrate from minerd benchmark output. Full output:");
             for (i, line) in all_output.iter().enumerate() {
                 error!("  Line {}: {}", i + 1, line);
             }
         }
 
-        hashrate_hashes_per_sec.ok_or(MinerdError::HashrateParseError)
+        result
     }
 }
 
@@ -467,18 +517,17 @@ impl Drop for MinerdProcess {
         // Trigger cancellation to signal all tasks to stop
         self.cancellation_token.cancel();
 
-        match self.process.lock() {
-            Ok(mut process_guard) => {
-                if let Some(mut process) = process_guard.take() {
-                    if let Err(e) = process.start_kill() {
-                        error!("Error killing minerd process on drop: {}", e);
-                    } else {
-                        info!("minerd process killed on drop");
-                    }
-                }
-            }
+        let process = match self.process.lock() {
+            Ok(mut process_guard) => process_guard.take(),
             Err(_) => {
                 error!("Mutex poisoned in Drop implementation, cannot kill process cleanly");
+                None
+            }
+        };
+
+        if let Some(mut process) = process {
+            if kill_and_reap_process(&mut process, "minerd") {
+                info!("minerd process killed and reaped on drop");
             }
         }
     }

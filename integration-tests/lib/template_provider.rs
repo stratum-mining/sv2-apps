@@ -14,41 +14,8 @@ use tracing::warn;
 
 use crate::utils::{
     PROCESS_READY_TIMEOUT, fs_utils, http, tarball, wait_for_listener, wait_for_path,
+    with_exclusive_lock,
 };
-use std::os::fd::AsRawFd;
-
-/// Acquire a blocking exclusive flock on `lock_path`, run `f`, then release.
-///
-/// Used to serialize download+unpack of shared artifacts (bitcoin-core,
-/// sv2-tp, high_diff_chain) across concurrently executing nextest processes.
-/// The lock is held only for the window where the artifact is missing; every
-/// process re-checks `exists()` inside the guard so only the first one
-/// actually downloads.
-fn with_exclusive_lock(lock_path: &std::path::Path, f: impl FnOnce()) {
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .expect("open lockfile for artifact download");
-    let fd = file.as_raw_fd();
-    loop {
-        // SAFETY: fd is valid, flock is async-signal-safe on Linux and macOS.
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
-            break;
-        }
-        let e = std::io::Error::last_os_error();
-        if e.kind() != std::io::ErrorKind::Interrupted {
-            panic!("flock on artifact lockfile: {e}");
-        }
-    }
-    f();
-    // lock released when file is dropped
-}
 
 const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";

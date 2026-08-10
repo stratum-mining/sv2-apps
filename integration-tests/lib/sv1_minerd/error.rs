@@ -19,6 +19,8 @@ pub enum MinerdError {
     InvalidConfiguration(String),
     /// Failed to parse hashrate from minerd benchmark output
     HashrateParseError,
+    /// Timed out before minerd produced a benchmark hashrate
+    HashrateMeasurementTimeout(std::time::Duration),
     /// Mutex was poisoned
     MutexPoisoned,
     /// OS or Architecture not supported
@@ -37,6 +39,12 @@ impl fmt::Display for MinerdError {
             MinerdError::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {msg}"),
             MinerdError::HashrateParseError => {
                 write!(f, "Failed to parse hashrate from minerd benchmark output")
+            }
+            MinerdError::HashrateMeasurementTimeout(timeout) => {
+                write!(
+                    f,
+                    "Timed out after {timeout:?} waiting for minerd benchmark output"
+                )
             }
             MinerdError::MutexPoisoned => write!(f, "Mutex was poisoned"),
             MinerdError::OsArchNotSupported(msg) => {
@@ -57,6 +65,7 @@ impl std::error::Error for MinerdError {
             | MinerdError::ProcessNotRunning
             | MinerdError::InvalidConfiguration(_)
             | MinerdError::HashrateParseError
+            | MinerdError::HashrateMeasurementTimeout(_)
             | MinerdError::MutexPoisoned => None,
             MinerdError::OsArchNotSupported(_) => None,
         }

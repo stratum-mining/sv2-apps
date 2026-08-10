@@ -11,6 +11,7 @@ use std::{
     fs, io,
     net::{SocketAddr, TcpListener, TcpStream},
     os::fd::AsRawFd,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -58,6 +59,42 @@ fn try_lock_port(port: u16) -> io::Result<std::fs::File> {
         return Err(io::Error::last_os_error());
     }
     Ok(file)
+}
+
+/// Acquires a blocking exclusive file lock, runs `f`, and releases the lock.
+///
+/// This serializes initialization of artifacts shared by concurrent nextest processes. Callers
+/// must check whether their artifact exists again inside `f`: another process may have created it
+/// while this process was waiting for the lock.
+pub fn with_exclusive_lock(lock_path: &Path, f: impl FnOnce()) {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|e| {
+            panic!(
+                "failed to create lockfile directory {}: {e}",
+                parent.display()
+            )
+        });
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .unwrap_or_else(|e| panic!("failed to open lockfile {}: {e}", lock_path.display()));
+    let fd = file.as_raw_fd();
+    loop {
+        // SAFETY: `fd` remains valid for the lifetime of `file`; `flock` is available on every
+        // platform supported by the integration-test harness (Linux and macOS).
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+            break;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            panic!("failed to lock {}: {e}", lock_path.display());
+        }
+    }
+    f();
 }
 
 /// How often readiness gates and message-wait loops re-check their condition.
@@ -184,8 +221,9 @@ pub async fn wait_until_listening(addr: SocketAddr, budget: Duration, what: &str
 /// concurrent test processes.
 ///
 /// Probes with `bind(0)` then holds a per-port `flock` lockfile in
-/// `$TMPDIR/sv2-it-ports/` for the process lifetime — no TOCTOU window
-/// between probe and bind.  Lockfiles are released by the kernel on exit.
+/// `$TMPDIR/sv2-it-ports/` for the process lifetime. Every integration-test process follows this
+/// protocol, so another test cannot claim the port after the probe is dropped and before its role
+/// binds. Lockfiles are released by the kernel on exit.
 pub fn get_available_address() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], get_available_port()))
 }
