@@ -3,10 +3,7 @@ use stratum_apps::stratum_core::{mining_sv2::UpdateChannelOwned, parsers_sv2::Mi
 
 use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::{
-        Sv1Server,
-        sv1_server::{PendingTargetUpdate, SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING},
-    },
+    sv1::{Sv1Server, sv1_server::SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING},
 };
 
 use stratum_apps::{
@@ -33,6 +30,13 @@ enum AggregatedSnapshot {
     NoOpenChannels,
     /// Open channels exist, but no exact target could be computed for any of them.
     NoValidTargets,
+}
+
+/// A pending target update ready to be applied to a downstream.
+#[derive(Debug, Clone)]
+struct PendingTargetUpdate {
+    downstream_id: DownstreamId,
+    new_target: Target,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -169,14 +173,7 @@ impl Sv1Server {
                                     "⏳ Target comparison: new_target ({}) < upstream_target ({}) for downstream {}, will delay mining.set_difficulty until SetTarget",
                                     new_target, upstream_target, downstream_id
                                 );
-                                self.pending_target_updates
-                                    .with(|data| {
-                                        data.push(PendingTargetUpdate {
-                                            downstream_id,
-                                            new_target,
-                                        })
-                                    })
-                                    .map_err(TproxyError::shutdown)?;
+                                self.pending_target_updates.insert(downstream_id, new_target);
                             }
                         }
                         None => {
@@ -463,7 +460,7 @@ impl Sv1Server {
 
         // Process ALL pending difficulty updates that can now be sent downstream
         let applicable_updates =
-            self.get_pending_difficulty_updates(new_upstream_target, None, channel_id)?;
+            self.get_pending_difficulty_updates(new_upstream_target, None, channel_id);
 
         self.send_pending_set_difficulty_messages_to_downstream(applicable_updates)
             .await
@@ -510,7 +507,7 @@ impl Sv1Server {
             new_upstream_target,
             Some(downstream_id),
             channel_id,
-        )?;
+        );
 
         self.send_pending_set_difficulty_messages_to_downstream(applicable_updates)
             .await
@@ -519,42 +516,43 @@ impl Sv1Server {
     /// Gets pending updates that can now be applied based on the new upstream target.
     /// If downstream_id is provided, only returns updates for that specific downstream.
     /// Logs a warning if the upstream target is higher than any requested target.
-    #[allow(clippy::result_large_err)]
     fn get_pending_difficulty_updates(
         &self,
         new_upstream_target: Target,
         downstream_id: Option<DownstreamId>,
         channel_id: ChannelId,
-    ) -> TproxyResult<Vec<PendingTargetUpdate>, error::Sv1Server> {
+    ) -> Vec<PendingTargetUpdate> {
         let mut applicable_updates = Vec::new();
 
-        self.pending_target_updates.with(|data| {
-            data.retain(|pending_update| {
+        self.pending_target_updates
+            .retain(|pending_downstream_id, pending_target| {
                 // Check if we should process this update
                 let should_process = match downstream_id {
-                    Some(downstream_id) => pending_update.downstream_id == downstream_id,
+                    Some(downstream_id) => *pending_downstream_id == downstream_id,
                     None => true, // Process all in aggregated mode
                 };
 
                 if !should_process {
-                    return true; // keep in pending list (not relevant for this SetTarget)
+                    return true; // keep pending (not relevant for this SetTarget)
                 }
 
-                if pending_update.new_target >= new_upstream_target {
+                if *pending_target >= new_upstream_target {
                     // Target is acceptable, can apply immediately
-                    applicable_updates.push(pending_update.clone());
-                    false // remove from pending list
+                    applicable_updates.push(PendingTargetUpdate {
+                        downstream_id: *pending_downstream_id,
+                        new_target: *pending_target,
+                    });
+                    false // remove from pending map
                 } else {
                     // WARNING: Upstream gave us a target higher than what we requested
                     error!(
                         "❌ Protocol issue: SetTarget response has target ({}) which is higher than requested target ({}) in UpdateChannel for channel {}. Ignoring this pending update for downstream {}.",
-                        new_upstream_target, pending_update.new_target, channel_id, pending_update.downstream_id
+                        new_upstream_target, pending_target, channel_id, pending_downstream_id
                     );
-                    false // remove from pending list (don't keep invalid requests)
+                    false // remove from pending map (don't keep invalid requests)
                 }
             });
-        }).map_err(TproxyError::shutdown)?;
-        Ok(applicable_updates)
+        applicable_updates
     }
 
     /// Sends set_difficulty messages for all applicable pending updates.
@@ -562,17 +560,20 @@ impl Sv1Server {
         &self,
         difficulty_updates: Vec<PendingTargetUpdate>,
     ) -> TproxyResult<(), error::Sv1Server> {
-        for update in difficulty_updates {
+        for PendingTargetUpdate {
+            downstream_id,
+            new_target,
+        } in difficulty_updates
+        {
             let set_difficulty_msg =
                 match build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding(
-                    update.new_target,
+                    new_target,
                     SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
                 ) {
                     Ok(message) => message,
                     Err(e) => {
                         error!(
-                            "Failed to build mining.set_difficulty for downstream {}: {e:?}; skipping",
-                            update.downstream_id
+                            "Failed to build mining.set_difficulty for downstream {downstream_id}: {e:?}; skipping"
                         );
                         continue;
                     }
@@ -581,16 +582,16 @@ impl Sv1Server {
             if let Some(sender) = self
                 .sv1_server_io
                 .sv1_server_to_downstream_sender
-                .get_cloned(&update.downstream_id)
+                .get_cloned(&downstream_id)
             {
                 if let Err(e) = sender.send(set_difficulty_msg).await {
                     warn!(
                         "Failed to send mining.set_difficulty to downstream {}: {:?}; skipping (likely disconnected)",
-                        update.downstream_id, e
+                        downstream_id, e
                     );
                     continue;
                 }
-                trace!("Sent SetDifficulty to downstream {}", update.downstream_id);
+                trace!("Sent SetDifficulty to downstream {}", downstream_id);
             }
         }
         Ok(())
