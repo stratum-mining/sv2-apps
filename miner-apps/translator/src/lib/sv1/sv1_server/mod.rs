@@ -1738,7 +1738,10 @@ mod tests {
     use crate::config::{DownstreamDifficultyConfig, TranslatorConfig, Upstream};
     use async_channel::unbounded;
     use std::str::FromStr;
-    use stratum_apps::{key_utils::Secp256k1PublicKey, stratum_core::mining_sv2::SetTargetOwned};
+    use stratum_apps::{
+        key_utils::Secp256k1PublicKey,
+        stratum_core::mining_sv2::{OpenExtendedMiningChannelSuccessOwned, SetTargetOwned},
+    };
 
     fn create_test_config() -> TranslatorConfig {
         let pubkey_str = "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan";
@@ -1895,6 +1898,45 @@ mod tests {
             error.kind,
             TproxyErrorKind::DownstreamNotPresent(7)
         ));
+        assert!(server.request_id_to_downstream_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn late_open_success_closes_channel_for_disconnected_downstream() {
+        let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        let target = hash_rate_to_target(200.0, 5.0).unwrap();
+        server.request_id_to_downstream_id.insert(42, 7);
+        channel_manager_to_server_sender
+            .send(MiningOwned::OpenExtendedMiningChannelSuccess(
+                OpenExtendedMiningChannelSuccessOwned {
+                    request_id: 42,
+                    channel_id: 9,
+                    target: target.to_le_bytes().into(),
+                    extranonce_size: 4,
+                    extranonce_prefix: vec![0; 4].try_into().unwrap(),
+                    group_channel_id: 0,
+                },
+            ))
+            .await
+            .unwrap();
+
+        server.handle_upstream_message(target).await.unwrap();
+
+        let (message, _) = server_to_channel_manager_receiver
+            .try_recv()
+            .expect("the orphaned channel should be closed");
+        assert!(matches!(message, MiningOwned::CloseChannel(close) if close.channel_id == 9));
         assert!(server.request_id_to_downstream_id.is_empty());
     }
 
