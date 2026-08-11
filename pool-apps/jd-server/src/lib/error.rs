@@ -117,6 +117,7 @@ pub enum JDSErrorKind {
     PendingDeclareMiningJobNotFound(RequestId),
     UnsupportedProtocol,
     UnsupportedConnectionFlags,
+    ProtocolVersionMismatch,
     OneshotRecv(tokio::sync::oneshot::error::RecvError),
     InvalidConfig(String),
     PoisonLock,

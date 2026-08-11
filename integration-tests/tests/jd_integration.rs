@@ -262,6 +262,124 @@ async fn jds_reject_setup_connection_without_declare_tx_data_flag() {
     shutdown_all!(pool);
 }
 
+// This test verifies that JDS rejects SetupConnection requesting only protocol version 3,
+// since JDS only supports version 2, responding with a SetupConnectionError carrying the
+// protocol-version-mismatch error code.
+#[tokio::test]
+async fn jds_reject_setup_connection_with_unsupported_version() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jds", jds_addr, false, vec![], None);
+    let _mock_downstream = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes(SetupConnectionOwned {
+            protocol: Protocol::JobDeclarationProtocol,
+            min_version: 3,
+            max_version: 3,
+            flags: 0,
+            endpoint_host: "0.0.0.0".try_into().unwrap(),
+            endpoint_port: 0,
+            vendor: "integration-test".try_into().unwrap(),
+            hardware_version: "".try_into().unwrap(),
+            firmware: "".try_into().unwrap(),
+            device_id: "".try_into().unwrap(),
+        }),
+    )
+    .start()
+    .await;
+
+    sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+        )
+        .await;
+
+    let setup_connection_error = sniffer.next_message_from_upstream();
+    let setup_connection_error = match setup_connection_error {
+        Some((
+            _,
+            AnyMessageOwned::Common(parsers_sv2::CommonMessagesOwned::SetupConnectionError(msg)),
+        )) => msg,
+        msg => panic!("Expected SetupConnectionError message, found: {:?}", msg),
+    };
+    assert_eq!(
+        setup_connection_error.error_code.as_utf8_or_hex(),
+        ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
+        "SetupConnectionError message error code should be protocol-version-mismatch"
+    );
+
+    shutdown_all!(pool);
+}
+
+// This test verifies that JDC rejects a downstream SetupConnection requesting only protocol
+// version 3, since JDC only supports version 2 on its downstream interface, responding with a
+// SetupConnectionError carrying the protocol-version-mismatch error code.
+#[tokio::test]
+async fn jdc_reject_downstream_setup_connection_with_unsupported_version() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (jdc, jdc_addr, _) = start_jdc(
+        &[(pool_addr, jds_addr)],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jdc", jdc_addr, false, vec![], None);
+    let _mock_downstream = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes(SetupConnectionOwned {
+            protocol: Protocol::MiningProtocol,
+            min_version: 3,
+            max_version: 3,
+            flags: 0,
+            endpoint_host: "0.0.0.0".try_into().unwrap(),
+            endpoint_port: 0,
+            vendor: "integration-test".try_into().unwrap(),
+            hardware_version: "".try_into().unwrap(),
+            firmware: "".try_into().unwrap(),
+            device_id: "".try_into().unwrap(),
+        }),
+    )
+    .start()
+    .await;
+
+    sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+        )
+        .await;
+
+    let setup_connection_error = sniffer.next_message_from_upstream();
+    let setup_connection_error = match setup_connection_error {
+        Some((
+            _,
+            AnyMessageOwned::Common(parsers_sv2::CommonMessagesOwned::SetupConnectionError(msg)),
+        )) => msg,
+        msg => panic!("Expected SetupConnectionError message, found: {:?}", msg),
+    };
+    assert_eq!(
+        setup_connection_error.error_code.as_utf8_or_hex(),
+        ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
+        "SetupConnectionError message error code should be protocol-version-mismatch"
+    );
+
+    shutdown_all!(jdc, pool);
+}
+
 #[tokio::test]
 async fn jdc_coinbase_only_mode_rejected_by_jds() {
     start_tracing();

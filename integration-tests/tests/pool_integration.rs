@@ -454,6 +454,56 @@ async fn pool_reject_setup_connection_with_non_mining_protocol() {
     shutdown_all!(translator, pool);
 }
 
+// The test runs a pool and a mock downstream that sends a SetupConnection message requesting
+// only protocol version 3. Since the pool only supports version 2, this test asserts that the
+// pool responds with a SetupConnectionError carrying the protocol-version-mismatch error code.
+#[tokio::test]
+async fn pool_reject_setup_connection_with_unsupported_version() {
+    start_tracing();
+    let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("0", pool_addr, false, vec![], None);
+    let _mock_downstream = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes(SetupConnectionOwned {
+            protocol: Protocol::MiningProtocol,
+            min_version: 3,
+            max_version: 3,
+            flags: 0,
+            endpoint_host: "0.0.0.0".try_into().unwrap(),
+            endpoint_port: 0,
+            vendor: "integration-test".try_into().unwrap(),
+            hardware_version: "".try_into().unwrap(),
+            firmware: "".try_into().unwrap(),
+            device_id: "".try_into().unwrap(),
+        }),
+    )
+    .start()
+    .await;
+
+    sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+        )
+        .await;
+
+    let setup_connection_error = sniffer.next_message_from_upstream();
+    let setup_connection_error = match setup_connection_error {
+        Some((_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(msg)))) => msg,
+        msg => panic!("Expected SetupConnectionError message, found: {:?}", msg),
+    };
+    assert_eq!(
+        setup_connection_error.error_code.as_utf8_or_hex(),
+        ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
+        "SetupConnectionError message error code should be protocol-version-mismatch"
+    );
+    shutdown_all!(pool);
+}
+
 // This test verifies that pool rejects SetCustomMiningJob when it is started without embedded JDS
 // (`start_pool` with no `[jds]` config).
 #[tokio::test]

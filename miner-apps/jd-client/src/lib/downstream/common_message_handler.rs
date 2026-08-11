@@ -8,6 +8,7 @@ use stratum_apps::monitoring::client::Sv2ClientKind;
 use stratum_apps::{
     stratum_core::{
         common_messages_sv2::{
+            ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccess, has_requires_std_job, has_work_selection,
@@ -15,7 +16,7 @@ use stratum_apps::{
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::{SUPPORTED_PROTOCOL_VERSION, Sv2Frame},
 };
 use tracing::{error, info};
 
@@ -39,16 +40,22 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
     //    - If the client requests another protocol, the connection is rejected with a
     //      [`SetupConnectionError`] (`unsupported-protocol`).
     //
-    // 2. Feature flag validation
+    // 2. Protocol version validation
+    //    - The supported version (2) must fall within the client's requested
+    //      `[min_version, max_version]` range.
+    //    - Otherwise, the connection is rejected with a [`SetupConnectionError`]
+    //      (`protocol-version-mismatch`).
+    //
+    // 3. Feature flag validation
     //    - Work selection (`work_selection`) is not allowed.
     //    - If requested, the connection is rejected with a [`SetupConnectionError`]
     //      (`unsupported-feature-flags`).
     //
-    // 3. Standard job requirement
+    // 4. Standard job requirement
     //    - If the downstream sets the `requires_standard_job` flag, it is recorded in
     //      [`Downstream::require_std_job`].
     //
-    // 4. Successful setup
+    // 5. Successful setup
     //    - If all validations pass, a [`SetupConnectionSuccess`] message is
     async fn handle_setup_connection(
         &mut self,
@@ -65,6 +72,36 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let response = SetupConnectionErrorOwned {
                 flags: 0,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
+                    .to_string()
+                    .try_into()
+                    .map_err(JDCError::shutdown)?,
+            };
+            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
+                .try_into()
+                .map_err(JDCError::shutdown)?;
+            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+                error!(
+                    "Failed to send SetupConnectionError to downstream {}: {e}",
+                    self.downstream_id
+                );
+            }
+
+            return Err(JDCError::disconnect(
+                JDCErrorKind::SetupConnectionError,
+                self.downstream_id,
+            ));
+        }
+
+        if SUPPORTED_PROTOCOL_VERSION < msg.min_version
+            || SUPPORTED_PROTOCOL_VERSION > msg.max_version
+        {
+            info!(
+                "Rejecting connection: no supported protocol version in requested range [{}, {}] (supported: {SUPPORTED_PROTOCOL_VERSION}).",
+                msg.min_version, msg.max_version
+            );
+            let response = SetupConnectionErrorOwned {
+                flags: 0,
+                error_code: ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH
                     .to_string()
                     .try_into()
                     .map_err(JDCError::shutdown)?,
@@ -127,7 +164,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         }
 
         let response = SetupConnectionSuccess {
-            used_version: 2,
+            used_version: SUPPORTED_PROTOCOL_VERSION,
             flags: 0, // !REQUIRES_FIXED_VERSION, !REQUIRES_EXTENDED_CHANNELS
         };
         let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
