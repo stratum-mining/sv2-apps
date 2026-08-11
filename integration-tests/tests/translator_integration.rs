@@ -851,11 +851,19 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
         )
         .await;
 
-    let share_channel_id = match sniffer.next_message_from_downstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)))) => {
-            msg.channel_id
+    let share_channel_id = loop {
+        match sniffer.next_message_from_downstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
+            )) => break msg.channel_id,
+            // Opening an aggregated downstream or vardiff may enqueue an UpdateChannel before the
+            // share.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
+            msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         }
-        msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
     };
 
     assert_eq!(
@@ -886,11 +894,16 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
             MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
         )
         .await;
-    let new_extended_mining_job = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)))) => {
-            msg
+    let new_extended_mining_job = loop {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => break msg,
+            // Every aggregate UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
         }
-        msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
 
     // here we're actually asserting pool behavior, not tProxy
@@ -910,6 +923,11 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Opening an aggregated downstream or vardiff may enqueue an UpdateChannel before the
+            // share.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 
@@ -932,11 +950,16 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
             MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
         )
         .await;
-    let new_extended_mining_job = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)))) => {
-            msg
+    let new_extended_mining_job = loop {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => break msg,
+            // Every aggregate UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
         }
-        msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
 
     // again, asserting pool behavior, not tProxy
@@ -950,9 +973,15 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
             MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
         )
         .await;
-    let set_new_prev_hash = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(msg)))) => msg,
-        msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
+    let set_new_prev_hash = loop {
+        match sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(msg)))) => {
+                break msg;
+            }
+            // Every aggregate UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
+        }
     };
 
     // again, asserting pool behavior, not tProxy
@@ -972,6 +1001,11 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Opening an aggregated downstream or vardiff may enqueue an UpdateChannel before the
+            // share.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 

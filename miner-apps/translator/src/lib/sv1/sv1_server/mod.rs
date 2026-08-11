@@ -1045,6 +1045,16 @@ impl Sv1Server {
                                 )
                             })?;
                         }
+
+                        // Opening a downstream changes the aggregate just like disconnecting one.
+                        // Refresh it now so the newly active hashrate is not left out until the
+                        // next vardiff update.
+                        if self.mode.is_aggregated()
+                            && self.config.downstream_difficulty_config.enable_vardiff
+                        {
+                            self.send_update_channel_on_downstream_state_change()
+                                .await?;
+                        }
                     }
                     Err(e) => {
                         if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) {
@@ -1781,6 +1791,40 @@ mod tests {
         Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode)
     }
 
+    fn register_test_downstream(
+        server: &Sv1Server,
+        downstream_id: DownstreamId,
+        channel_id: Option<ChannelId>,
+        hashrate: Hashrate,
+    ) {
+        let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
+        let (_miner_sender, miner_receiver) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let target = hash_rate_to_target(hashrate as f64, 5.0).unwrap();
+        let downstream = Downstream::new(
+            downstream_id,
+            downstream_sv1_sender,
+            miner_receiver,
+            server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
+            sv1_server_receiver,
+            target,
+            Some(hashrate),
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| data.channel_id = channel_id)
+            .unwrap();
+        server.downstreams.insert(downstream_id, downstream);
+        if let Some(channel_id) = channel_id {
+            server
+                .channel_id_to_downstream_id
+                .insert(channel_id, downstream_id);
+        }
+    }
+
     #[test]
     fn test_sv1_server_creation() {
         let server = create_test_sv1_server();
@@ -1938,6 +1982,117 @@ mod tests {
             .expect("the orphaned channel should be closed");
         assert!(matches!(message, MiningOwned::CloseChannel(close) if close.channel_id == 9));
         assert!(server.request_id_to_downstream_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aggregated_state_change_ignores_unopened_downstreams() {
+        let (channel_manager_sender, channel_manager_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            upstream_receiver,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 1, Some(1), 100.0);
+        register_test_downstream(&server, 2, None, 100.0);
+
+        server
+            .send_update_channel_on_downstream_state_change()
+            .await
+            .unwrap();
+
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        let MiningOwned::UpdateChannel(update) = message else {
+            panic!("expected UpdateChannel");
+        };
+        assert_eq!(update.nominal_hash_rate, 100.0);
+    }
+
+    #[tokio::test]
+    async fn aggregated_vardiff_update_ignores_unopened_downstreams() {
+        let (channel_manager_sender, channel_manager_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            upstream_receiver,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 1, Some(1), 100.0);
+        register_test_downstream(&server, 2, None, 100.0);
+        let target = hash_rate_to_target(100.0, 5.0).unwrap();
+
+        server
+            .send_aggregated_update_channel(vec![(1, 1, target, 100.0)])
+            .await
+            .unwrap();
+
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        let MiningOwned::UpdateChannel(update) = message else {
+            panic!("expected UpdateChannel");
+        };
+        assert_eq!(update.nominal_hash_rate, 100.0);
+    }
+
+    #[tokio::test]
+    async fn aggregated_channel_open_refreshes_hashrate() {
+        let (channel_manager_sender, channel_manager_receiver) = unbounded();
+        let (upstream_sender, upstream_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            upstream_receiver,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 1, Some(1), 100.0);
+        register_test_downstream(&server, 2, None, 100.0);
+
+        server
+            .send_update_channel_on_downstream_state_change()
+            .await
+            .unwrap();
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        let MiningOwned::UpdateChannel(update) = message else {
+            panic!("expected UpdateChannel");
+        };
+        assert_eq!(update.nominal_hash_rate, 100.0);
+
+        let target = hash_rate_to_target(100.0, 5.0).unwrap();
+        server.request_id_to_downstream_id.insert(42, 2);
+        upstream_sender
+            .send(MiningOwned::OpenExtendedMiningChannelSuccess(
+                OpenExtendedMiningChannelSuccessOwned {
+                    request_id: 42,
+                    channel_id: 2,
+                    target: target.to_le_bytes().into(),
+                    extranonce_size: 4,
+                    extranonce_prefix: vec![0; 4].try_into().unwrap(),
+                    group_channel_id: 0,
+                },
+            ))
+            .await
+            .unwrap();
+
+        server.handle_upstream_message(target).await.unwrap();
+
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        let MiningOwned::UpdateChannel(update) = message else {
+            panic!("expected UpdateChannel");
+        };
+        assert_eq!(update.nominal_hash_rate, 200.0);
     }
 
     #[test]

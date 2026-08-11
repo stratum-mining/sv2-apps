@@ -24,11 +24,15 @@ use stratum_apps::{
 use tracing::{debug, error, info, trace, warn};
 
 enum AggregatedSnapshot {
+    /// Aggregate hashrate and minimum target of all downstreams with an open channel.
     Active {
         total_hashrate: Hashrate,
         min_target: Target,
     },
-    NoDownstreams,
+    /// No downstream has an open channel yet.
+    NoOpenChannels,
+    /// Open channels exist, but no exact target could be computed for any of them.
+    NoValidTargets,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -274,7 +278,7 @@ impl Sv1Server {
         }
     }
 
-    async fn send_aggregated_update_channel(
+    pub(super) async fn send_aggregated_update_channel(
         &self,
         all_updates: Vec<(DownstreamId, ChannelId, Target, Hashrate)>,
     ) -> TproxyResult<(), error::Sv1Server> {
@@ -283,48 +287,17 @@ impl Sv1Server {
             return Ok(());
         };
 
-        if self.downstreams.is_empty() {
-            return Ok(());
-        }
-
-        let mut min_target: Option<Target> = None;
-        let mut total_hashrate: Hashrate = 0.0;
-        let shares_per_minute = self.shares_per_minute as f64;
-
-        self.downstreams.try_for_each(|downstream_id, downstream| {
-            let hashrate = downstream.downstream_data.with(|d| {
-                d.pending_hashrate
-                    .unwrap_or_else(|| d.hashrate.expect("vardiff implies hashrate"))
-            }).map_err(TproxyError::shutdown)?;
-
-            // UpdateChannel is upstream-facing, so rebuild the exact target from
-            // hashrate instead of reusing the rounded SV1 advertised target.
-            // A failure is specific to this downstream's hashrate, so exclude it
-            // from the aggregate instead of shutting down the whole proxy.
-            let target = match hash_rate_to_target(hashrate as f64, shares_per_minute) {
-                Ok(target) => target,
-                Err(e) => {
-                    error!(
-                        "Failed to calculate exact target for downstream {downstream_id} hashrate {hashrate}: {e:?}; excluding from aggregated UpdateChannel"
-                    );
-                    return Ok(());
-                }
-            };
-
-            min_target = Some(match min_target {
-                Some(current) => current.min(target),
-                None => target,
-            });
-
-            total_hashrate += hashrate;
-            Ok::<(), TproxyError<error::Sv1Server>>(())
-        })?;
-
-        let Some(min_target) = min_target else {
-            warn!("Skipping aggregated UpdateChannel: no exact downstream target is available");
-            return Ok(());
+        let (total_hashrate, min_target) = match self.aggregated_downstream_snapshot()? {
+            AggregatedSnapshot::Active {
+                total_hashrate,
+                min_target,
+            } => (total_hashrate, min_target),
+            AggregatedSnapshot::NoOpenChannels => return Ok(()),
+            AggregatedSnapshot::NoValidTargets => {
+                warn!("Skipping aggregated UpdateChannel: no exact downstream target is available");
+                return Ok(());
+            }
         };
-        let downstream_count = self.downstreams.len();
 
         let update_channel = UpdateChannelOwned {
             channel_id: *channel_id,
@@ -333,11 +306,10 @@ impl Sv1Server {
         };
 
         debug!(
-            "Sending aggregated UpdateChannel: channel_id={}, total_hashrate={}, min_target={}, downstreams={}, vardiff_updates={}",
+            "Sending aggregated UpdateChannel: channel_id={}, total_hashrate={}, min_target={}, vardiff_updates={}",
             channel_id,
             total_hashrate,
             min_target,
-            downstream_count,
             all_updates.len()
         );
 
@@ -380,6 +352,70 @@ impl Sv1Server {
                 })?;
         }
         Ok(())
+    }
+
+    /// Returns aggregate difficulty state for downstreams with an opened mining channel.
+    #[allow(clippy::result_large_err)]
+    fn aggregated_downstream_snapshot(&self) -> TproxyResult<AggregatedSnapshot, error::Sv1Server> {
+        let mut total_hashrate: Hashrate = 0.0;
+        let mut min_target: Option<Target> = None;
+        let mut has_open_downstream = false;
+        let shares_per_minute = self.shares_per_minute as f64;
+
+        self.downstreams.try_for_each(|downstream_id, downstream| {
+            let hashrate = downstream
+                .downstream_data
+                .with(|data| {
+                    data.channel_id.map(|_| {
+                        data.pending_hashrate.unwrap_or_else(|| {
+                            data.hashrate
+                                .expect("vardiff implies downstream must have a hashrate")
+                        })
+                    })
+                })
+                .map_err(TproxyError::shutdown)?;
+
+            let Some(hashrate) = hashrate else {
+                trace!(
+                    "Excluding downstream {downstream_id} from aggregated UpdateChannel: channel is not open"
+                );
+                return Ok(());
+            };
+            has_open_downstream = true;
+
+            // UpdateChannel is upstream-facing, so rebuild the exact target from
+            // hashrate instead of reusing the rounded SV1 advertised target.
+            // A failure is specific to this downstream's hashrate, so exclude it
+            // from the aggregate instead of shutting down the whole proxy.
+            let target = match hash_rate_to_target(hashrate as f64, shares_per_minute) {
+                Ok(target) => target,
+                Err(e) => {
+                    error!(
+                        "Failed to calculate exact target for downstream {downstream_id} hashrate {hashrate}: {e:?}; excluding from aggregated UpdateChannel"
+                    );
+                    return Ok(());
+                }
+            };
+
+            total_hashrate += hashrate;
+            min_target = Some(match min_target {
+                Some(current) => current.min(target),
+                None => target,
+            });
+            Ok::<(), TproxyError<error::Sv1Server>>(())
+        })?;
+
+        if !has_open_downstream {
+            return Ok(AggregatedSnapshot::NoOpenChannels);
+        }
+
+        Ok(match min_target {
+            Some(min_target) => AggregatedSnapshot::Active {
+                total_hashrate,
+                min_target,
+            },
+            None => AggregatedSnapshot::NoValidTargets,
+        })
     }
 
     /// Handles SetTarget messages from the ChannelManager.
@@ -560,9 +596,8 @@ impl Sv1Server {
         Ok(())
     }
 
-    /// Sends an UpdateChannel message for aggregated mode when downstream state changes
-    /// (e.g., disconnect). Calculates total hashrate and minimum target among all remaining
-    /// downstreams.
+    /// Sends an UpdateChannel message for aggregated mode when a downstream channel opens or
+    /// closes. Calculates total hashrate and minimum target among all active downstreams.
     pub async fn send_update_channel_on_downstream_state_change(
         &self,
     ) -> TproxyResult<(), error::Sv1Server> {
@@ -570,59 +605,7 @@ impl Sv1Server {
             return Ok(());
         }
 
-        let is_empty = self.downstreams.is_empty();
-
-        let snapshot = if is_empty {
-            AggregatedSnapshot::NoDownstreams
-        } else {
-            let mut total_hashrate: Hashrate = 0.0;
-            let mut min_target: Option<Target> = None;
-            let shares_per_minute = self.shares_per_minute as f64;
-
-            self.downstreams.try_for_each(|downstream_id, downstream| {
-                let hashrate = downstream.downstream_data.with(|d| {
-                    d.pending_hashrate.unwrap_or_else(|| {
-                        d.hashrate
-                            .expect("vardiff implies downstream must have a hashrate")
-                    })
-                }).map_err(TproxyError::shutdown)?;
-
-                // UpdateChannel is upstream-facing, so rebuild the exact target from
-                // hashrate instead of reusing the rounded SV1 advertised target.
-                // A failure is specific to this downstream's hashrate, so exclude it
-                // from the aggregate instead of shutting down the whole proxy.
-                let target = match hash_rate_to_target(hashrate as f64, shares_per_minute) {
-                    Ok(target) => target,
-                    Err(e) => {
-                        error!(
-                            "Failed to calculate exact target for downstream {downstream_id} hashrate {hashrate}: {e:?}; excluding from aggregated UpdateChannel"
-                        );
-                        return Ok(());
-                    }
-                };
-
-                total_hashrate += hashrate;
-                min_target = Some(match min_target {
-                    Some(current) => current.min(target),
-                    None => target,
-                });
-                Ok::<(), TproxyError<error::Sv1Server>>(())
-            })?;
-
-            let Some(min_target) = min_target else {
-                warn!(
-                    "Skipping aggregated UpdateChannel after downstream state change: no exact downstream target is available"
-                );
-                return Ok(());
-            };
-
-            AggregatedSnapshot::Active {
-                total_hashrate,
-                min_target,
-            }
-        };
-
-        let update = match snapshot {
+        let update = match self.aggregated_downstream_snapshot()? {
             AggregatedSnapshot::Active {
                 total_hashrate,
                 min_target,
@@ -632,11 +615,18 @@ impl Sv1Server {
                 maximum_target: min_target.to_le_bytes().into(),
             },
 
-            AggregatedSnapshot::NoDownstreams => UpdateChannelOwned {
+            // Connected-but-unopened miners deliberately count as zero hashrate upstream.
+            AggregatedSnapshot::NoOpenChannels => UpdateChannelOwned {
                 channel_id: 0,
                 nominal_hash_rate: 0.0,
                 maximum_target: [0xFF; 32].into(),
             },
+            AggregatedSnapshot::NoValidTargets => {
+                warn!(
+                    "Skipping aggregated UpdateChannel after downstream state change: no exact downstream target is available"
+                );
+                return Ok(());
+            }
         };
 
         self.sv1_server_io
