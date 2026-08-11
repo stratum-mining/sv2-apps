@@ -96,10 +96,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
                 ExtensionsNegotiationOwned::RequestExtensions(msg),
             )),
         )) => msg,
-        _ => panic!(
-            "received unexpected message: {:?}",
-            pool_translator_sniffer.next_message_from_downstream()
-        ),
+        msg => panic!("received unexpected message: {msg:?}"),
     };
     assert_eq!(
         request_extensions_msg.requested_extensions,
@@ -137,10 +134,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
             let user_identity = msg.user_identity.as_utf8_or_hex();
             assert_eq!(user_identity, "user_identity.miner1".to_string());
         }
-        _ => panic!(
-            "received unexpected message: {:?}",
-            pool_translator_sniffer.next_message_from_downstream()
-        ),
+        msg => panic!("received unexpected message: {msg:?}"),
     }
 
     pool_translator_sniffer

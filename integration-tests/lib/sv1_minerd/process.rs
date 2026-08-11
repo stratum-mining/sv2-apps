@@ -1,7 +1,6 @@
 use std::{
-    fs,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -87,6 +86,8 @@ pub struct MinerdProcess {
     process: Arc<Mutex<Option<TokioChild>>>,
     /// Address where the wrapper listens for minerd connections
     local_address: SocketAddr,
+    /// Listener retained until the proxy starts so the port is continuously reserved
+    proxy_listener: Option<TcpListener>,
     /// Address of the upstream mining server
     upstream_address: SocketAddr,
     /// Whether to kill the process after the first mining.submit
@@ -116,22 +117,41 @@ impl MinerdProcess {
                     .join(format!("minerd-{VERSION_MINERD}.lock")),
                 || {
                     if !minerd_binary.exists() {
-                        fs::create_dir_all(&minerd_dir).expect("failed to create minerd directory");
                         let download_endpoint = format!(
                             "https://github.com/stratum-mining/cpuminer/releases/download/v{VERSION_MINERD}/"
                         );
                         let url = format!("{download_endpoint}{download_filename}");
                         let tarball_bytes = http::make_get_request(&url, 5);
-                        tarball::unpack(&tarball_bytes, &minerd_dir);
-
-                        if os == "macos" {
-                            std::process::Command::new("codesign")
-                                .arg("--sign")
-                                .arg("-")
-                                .arg(&minerd_binary)
-                                .output()
-                                .expect("failed to sign minerd binary");
-                        }
+                        tarball::unpack_path_atomically(
+                            &tarball_bytes,
+                            &minerd_dir,
+                            Path::new("minerd"),
+                            |staged_binary| {
+                                if os == "macos" {
+                                    let signature_is_valid = std::process::Command::new("codesign")
+                                        .arg("--verify")
+                                        .arg(staged_binary)
+                                        .output()
+                                        .expect("failed to verify minerd binary signature")
+                                        .status
+                                        .success();
+                                    if !signature_is_valid {
+                                        let output = std::process::Command::new("codesign")
+                                            .arg("--force")
+                                            .arg("--sign")
+                                            .arg("-")
+                                            .arg(staged_binary)
+                                            .output()
+                                            .expect("failed to sign minerd binary");
+                                        assert!(
+                                            output.status.success(),
+                                            "failed to sign minerd binary: {}",
+                                            String::from_utf8_lossy(&output.stderr)
+                                        );
+                                    }
+                                }
+                            },
+                        );
                     }
                 },
             );
@@ -148,6 +168,7 @@ impl MinerdProcess {
             minerd_binary,
             process: Arc::new(Mutex::new(None)),
             local_address,
+            proxy_listener: Some(listener),
             upstream_address,
             single_submit,
             cancellation_token: CancellationToken::new(),
@@ -218,9 +239,12 @@ impl MinerdProcess {
 
     /// Starts the TCP proxy to intercept communications between minerd and the upstream server
     pub async fn start_tcp_proxy(&mut self) -> Result<(), MinerdError> {
-        let listener = TcpListener::bind(self.local_address)
-            .await
-            .map_err(MinerdError::ProxySetup)?;
+        let listener = self.proxy_listener.take().ok_or_else(|| {
+            MinerdError::ProxySetup(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "minerd TCP proxy has already started",
+            ))
+        })?;
         let upstream_address = self.upstream_address;
         let single_submit = self.single_submit;
         let process = Arc::clone(&self.process);
@@ -599,6 +623,18 @@ mod tests {
         let hashrate = minerd_process.measure_hashrate().await.unwrap();
         println!("Hashrate: {} hashes/s", hashrate);
         assert!(hashrate > 0.0);
+    }
+
+    #[tokio::test]
+    async fn proxy_port_remains_reserved_until_proxy_starts() {
+        let minerd_process = MinerdProcess::new(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), false)
+            .await
+            .unwrap();
+        let local_address = minerd_process.local_address();
+
+        assert!(TcpListener::bind(local_address).await.is_err());
+        drop(minerd_process);
+        assert!(TcpListener::bind(local_address).await.is_ok());
     }
 
     #[test]

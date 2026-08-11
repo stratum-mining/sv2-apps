@@ -19,7 +19,7 @@ use stratum_apps::{
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use translator_sv2::TranslatorSv2;
-use utils::{ROLE_READY_BUDGET, get_available_address};
+use utils::{ROLE_STARTUP_DELAY, get_available_address};
 
 pub mod interceptor;
 pub mod message_aggregator;
@@ -171,7 +171,7 @@ pub async fn start_pool(
     tokio::spawn(async move {
         _ = pool_clone.start().await;
     });
-    tokio::time::sleep(ROLE_READY_BUDGET).await;
+    tokio::time::sleep(ROLE_STARTUP_DELAY).await;
     (pool, listening_address, monitoring_address)
 }
 
@@ -359,7 +359,7 @@ pub async fn start_pool_with_jds(
     tokio::spawn(async move {
         _ = pool_clone.start().await;
     });
-    tokio::time::sleep(ROLE_READY_BUDGET).await;
+    tokio::time::sleep(ROLE_STARTUP_DELAY).await;
     (pool, pool_address, jds_address, monitoring_address)
 }
 

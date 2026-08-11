@@ -32,6 +32,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: "false"
+          # Hash every Cargo workspace without registering the shared target more than once.
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           workspaces: integration-tests -> ../target
       - name: Test stratum-apps workspace
         run: cargo test --manifest-path=stratum-apps/Cargo.toml --all-features

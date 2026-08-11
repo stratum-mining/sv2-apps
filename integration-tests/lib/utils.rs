@@ -99,21 +99,18 @@ pub fn with_exclusive_lock(lock_path: &Path, f: impl FnOnce()) {
 
 /// How often readiness gates and message-wait loops re-check their condition.
 ///
-/// Chosen as the knee of the cost/benefit curve: the suite performs ~600 waits, so residual dead
-/// time is roughly `600 * POLL_INTERVAL`. Dropping from the previous 1s to 50ms recovers ~9.5
-/// minutes; going further to 10ms would recover only ~9s more while raising the wakeup rate 5x.
-/// Each poll is one uncontended mutex acquisition (or one loopback connect), so 20 polls/sec is
-/// negligible. [`crate::sniffer::Sniffer::assert_message_not_present`] already polls the same
-/// structures at 100ms.
+/// At 200ms each waiter checks five times per second. This materially reduces residual latency
+/// across the suite's hundreds of waits compared with the previous one-second cadence, without
+/// making every single-threaded test runtime wake twenty or more times per second.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Retry cadence for the *unbounded* connect loops that wait for a peer to come up.
 ///
 /// Deliberately much slower than [`POLL_INTERVAL`]. Those loops have no timeout, so when a peer
 /// never appears — which several tests arrange on purpose — they spin for the whole test. Every
-/// test runs on a bare `#[tokio::test]`, i.e. a single-threaded runtime, so a 20 Hz connect loop
-/// competes with the test's own work on the one thread it has. The message-wait loops are safe at
-/// [`POLL_INTERVAL`] because they exit as soon as their message lands.
+/// test runs on a bare `#[tokio::test]`, i.e. a single-threaded runtime, so even a 5 Hz connect
+/// loop competes with the test's own work on the one thread it has. The message-wait loops are safe
+/// at [`POLL_INTERVAL`] because they exit as soon as their message lands.
 pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Ceiling for readiness gates on spawned child processes (Bitcoin Core, sv2-tp).
@@ -124,12 +121,13 @@ pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// keeps the failure message legible.
 pub const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Budget for the best-effort wait on an in-process role's listening socket.
+/// Fixed startup grace period for in-process pool roles.
 ///
-/// Deliberately equal to the fixed sleep this replaced, so no code path is ever slower than it was
-/// before: a healthy role unblocks in milliseconds, and one that never listens costs exactly what
-/// the old `sleep(1s)` cost. See [`wait_until_listening`] for why this cannot be an assertion.
-pub const ROLE_READY_BUDGET: Duration = Duration::from_secs(1);
+/// A TCP readiness probe is unsafe here because the pool treats every accepted connection as a
+/// protocol session. Probing created phantom downstreams and hung tests that intentionally
+/// intercept setup, so startup retains the original one-second delay until the role exposes an
+/// internal readiness signal.
+pub const ROLE_STARTUP_DELAY: Duration = Duration::from_secs(1);
 
 /// Blocks until `path` exists, polling every [`POLL_INTERVAL`].
 ///
@@ -165,7 +163,7 @@ pub fn wait_for_path(path: &std::path::Path, timeout: Duration, what: &str) {
 
 /// Blocks until a TCP connection to `addr` succeeds, polling every [`POLL_INTERVAL`].
 ///
-/// Used from synchronous contexts; see [`wait_for_listener_async`] for the async equivalent.
+/// Used from synchronous process-startup contexts.
 ///
 /// Panics with `what` in the message if `timeout` elapses first.
 pub fn wait_for_listener(addr: SocketAddr, timeout: Duration, what: &str) {
@@ -183,37 +181,6 @@ pub fn wait_for_listener(addr: SocketAddr, timeout: Duration, what: &str) {
             panic!("timeout after {timeout:?} waiting for {what} to listen on {addr}");
         }
         std::thread::sleep(POLL_INTERVAL);
-    }
-}
-
-/// Waits up to `budget` for a TCP connection to `addr` to succeed, polling every
-/// [`POLL_INTERVAL`]. Returns whether the listener came up.
-///
-/// Unlike the process gates above this deliberately does **not** assert, because a role's
-/// listening socket is not a universally valid readiness signal. `PoolRuntime::bootstrap` runs
-/// `bootstrap_template_provider()` before `start_services()`, so the pool only starts listening
-/// once its template-distribution handshake completes — and tests that intercept that handshake
-/// prevent it from ever listening, by design. Giving up quietly keeps those tests behaving as they
-/// did while still letting healthy roles unblock in milliseconds.
-pub async fn wait_until_listening(addr: SocketAddr, budget: Duration, what: &str) -> bool {
-    let start = std::time::Instant::now();
-    loop {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            tracing::debug!(
-                target: "readiness",
-                "ready: {what} after {:?}",
-                start.elapsed()
-            );
-            return true;
-        }
-        if start.elapsed() > budget {
-            tracing::debug!(
-                target: "readiness",
-                "{what} not listening on {addr} within {budget:?}, continuing anyway"
-            );
-            return false;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -618,10 +585,21 @@ pub mod http {
 
 pub mod tarball {
     use std::{
-        fs::File,
+        fs::{self, File},
         io::{BufReader, Read},
-        path::Path,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
     };
+
+    static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct StagingDirectory(PathBuf);
+
+    impl Drop for StagingDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
 
     pub fn read_from_file(path: &str) -> Vec<u8> {
         let file = File::open(path).unwrap_or_else(|_| {
@@ -660,6 +638,119 @@ pub mod tarball {
 
         // Clean up temp tarball
         std::fs::remove_file(&temp_tarball).ok();
+    }
+
+    /// Extracts `relative_path` into a private staging directory, prepares it, then atomically
+    /// publishes it beneath `destination`.
+    ///
+    /// The staging directory is created on the same filesystem as the final path, so a successful
+    /// rename makes the complete file or directory visible in one operation. Callers must serialize
+    /// publication and check that the final path is still absent while holding that lock.
+    pub fn unpack_path_atomically(
+        tarball_bytes: &[u8],
+        destination: &Path,
+        relative_path: &Path,
+        prepare: impl FnOnce(&Path),
+    ) {
+        assert!(
+            !relative_path.is_absolute(),
+            "published tarball path must be relative"
+        );
+        fs::create_dir_all(destination).unwrap_or_else(|e| {
+            panic!(
+                "failed to create artifact directory {}: {e}",
+                destination.display()
+            )
+        });
+
+        let artifact_name = relative_path
+            .file_name()
+            .expect("published tarball path must have a file name")
+            .to_string_lossy();
+        let staging = loop {
+            let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let path = destination.join(format!(
+                ".{artifact_name}.staging-{}-{id}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => break StagingDirectory(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("failed to create staging directory {}: {e}", path.display()),
+            }
+        };
+
+        unpack(tarball_bytes, &staging.0);
+        let staged_path = staging.0.join(relative_path);
+        assert!(
+            staged_path.exists(),
+            "artifact {} not found after unpack in {}",
+            relative_path.display(),
+            staging.0.display()
+        );
+        prepare(&staged_path);
+
+        let final_path = destination.join(relative_path);
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!(
+                    "failed to create artifact parent directory {}: {e}",
+                    parent.display()
+                )
+            });
+        }
+        fs::rename(&staged_path, &final_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to publish artifact {} to {}: {e}",
+                staged_path.display(),
+                final_path.display()
+            )
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::process::Command;
+
+        #[test]
+        fn atomic_unpack_publishes_only_after_preparation() {
+            let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let root = StagingDirectory(std::env::temp_dir().join(format!(
+                "sv2-atomic-unpack-test-{}-{id}",
+                std::process::id()
+            )));
+            let source = root.0.join("source");
+            let artifact = source.join("artifact");
+            fs::create_dir_all(&artifact).unwrap();
+            fs::write(artifact.join("payload"), b"complete").unwrap();
+
+            let archive = root.0.join("artifact.tar.gz");
+            let status = Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&source)
+                .arg("artifact")
+                .status()
+                .expect("failed to create test tarball");
+            assert!(status.success(), "failed to create test tarball");
+
+            let destination = root.0.join("destination");
+            let final_path = destination.join("artifact");
+            unpack_path_atomically(
+                &fs::read(&archive).unwrap(),
+                &destination,
+                Path::new("artifact"),
+                |staged_path| {
+                    assert!(!final_path.exists());
+                    fs::write(staged_path.join("prepared"), b"yes").unwrap();
+                },
+            );
+
+            assert_eq!(fs::read(final_path.join("payload")).unwrap(), b"complete");
+            assert_eq!(fs::read(final_path.join("prepared")).unwrap(), b"yes");
+        }
     }
 }
 

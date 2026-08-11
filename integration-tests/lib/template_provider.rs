@@ -3,7 +3,7 @@ use std::{
     env,
     fs::create_dir_all,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 use stratum_apps::{
@@ -183,7 +183,12 @@ impl BitcoinCore {
                                     http::make_get_request(url, 5)
                                 };
 
-                                tarball::unpack(&tarball_bytes, &bin_dir);
+                                tarball::unpack_path_atomically(
+                                    &tarball_bytes,
+                                    &bin_dir,
+                                    Path::new("high_diff_chain"),
+                                    |_| {},
+                                );
                             }
                         },
                     );
@@ -200,9 +205,9 @@ impl BitcoinCore {
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
         let bitcoin_filename = get_bitcoin_core_filename(os, arch, bitcoin_core_version);
-        let bitcoin_home = bin_dir.join(format!("bitcoin-{bitcoin_core_version}"));
+        let bitcoin_dirname = format!("bitcoin-{bitcoin_core_version}");
+        let bitcoin_home = bin_dir.join(&bitcoin_dirname);
         let bitcoin_node_bin = bitcoin_home.join("libexec").join("bitcoin-node");
-        let bitcoin_cli_bin = bitcoin_home.join("bin").join("bitcoin-cli");
 
         if !bitcoin_node_bin.exists() {
             with_exclusive_lock(
@@ -229,29 +234,54 @@ impl BitcoinCore {
                             }
                         };
 
-                        if let Some(parent) = bitcoin_home.parent() {
-                            create_dir_all(parent).unwrap();
-                        }
+                        tarball::unpack_path_atomically(
+                            &tarball_bytes,
+                            &bin_dir,
+                            Path::new(&bitcoin_dirname),
+                            |staged_home| {
+                                let staged_node_bin =
+                                    staged_home.join("libexec").join("bitcoin-node");
+                                let staged_cli_bin = staged_home.join("bin").join("bitcoin-cli");
+                                assert!(
+                                    staged_node_bin.exists(),
+                                    "Bitcoin Core node binary not found after unpack in {}",
+                                    staged_home.display()
+                                );
 
-                        tarball::unpack(&tarball_bytes, &bin_dir);
+                                // Preserve valid upstream signatures; otherwise sign before
+                                // publication so readers only see ready binaries.
+                                if os == "macos" {
+                                    for bin in [&staged_node_bin, &staged_cli_bin] {
+                                        let signature_is_valid = std::process::Command::new(
+                                            "codesign",
+                                        )
+                                        .arg("--verify")
+                                        .arg(bin)
+                                        .output()
+                                        .expect("Failed to verify Bitcoin Core binary signature")
+                                        .status
+                                        .success();
+                                        if signature_is_valid {
+                                            continue;
+                                        }
 
-                        assert!(
-                            bitcoin_node_bin.exists(),
-                            "Bitcoin Core node binary not found after unpack in {}",
-                            bitcoin_home.display()
+                                        let output = std::process::Command::new("codesign")
+                                            .arg("--force")
+                                            .arg("--sign")
+                                            .arg("-")
+                                            .arg(bin)
+                                            .output()
+                                            .expect("Failed to sign Bitcoin Core binary");
+                                        assert!(
+                                            output.status.success(),
+                                            "Failed to sign Bitcoin Core binary {}: {}",
+                                            bin.display(),
+                                            String::from_utf8_lossy(&output.stderr)
+                                        );
+                                    }
+                                }
+                            },
                         );
-
-                        // Sign the binaries on macOS
-                        if os == "macos" {
-                            for bin in &[&bitcoin_node_bin, &bitcoin_cli_bin] {
-                                std::process::Command::new("codesign")
-                                    .arg("--sign")
-                                    .arg("-")
-                                    .arg(bin)
-                                    .output()
-                                    .expect("Failed to sign Bitcoin Core binary");
-                            }
-                        }
                     } // inner re-check: bin still missing?
                 }, // closure
             ); // with_exclusive_lock
@@ -455,7 +485,8 @@ impl TemplateProvider {
         let os = env::consts::OS;
         let arch = env::consts::ARCH;
         let sv2_tp_filename = get_sv2_tp_filename(os, arch);
-        let sv2_tp_home = bin_dir.join(format!("sv2-tp-{VERSION_SV2_TP}"));
+        let sv2_tp_dirname = format!("sv2-tp-{VERSION_SV2_TP}");
+        let sv2_tp_home = bin_dir.join(&sv2_tp_dirname);
         let sv2_tp_bin = sv2_tp_home.join("bin").join("sv2-tp");
 
         if !sv2_tp_bin.exists() {
@@ -483,21 +514,45 @@ impl TemplateProvider {
                             }
                         };
 
-                        if let Some(parent) = sv2_tp_home.parent() {
-                            create_dir_all(parent).unwrap();
-                        }
+                        tarball::unpack_path_atomically(
+                            &tarball_bytes,
+                            &bin_dir,
+                            Path::new(&sv2_tp_dirname),
+                            |staged_home| {
+                                let staged_binary = staged_home.join("bin").join("sv2-tp");
+                                assert!(
+                                    staged_binary.exists(),
+                                    "sv2-tp binary not found after unpack in {}",
+                                    staged_home.display()
+                                );
 
-                        tarball::unpack(&tarball_bytes, &bin_dir);
-
-                        // Sign the binary on macOS
-                        if os == "macos" {
-                            std::process::Command::new("codesign")
-                                .arg("--sign")
-                                .arg("-")
-                                .arg(&sv2_tp_bin)
-                                .output()
-                                .expect("Failed to sign sv2-tp binary");
-                        }
+                                // Preserve a valid upstream signature; otherwise sign before
+                                // publication so readers only see a ready binary.
+                                if os == "macos" {
+                                    let signature_is_valid = std::process::Command::new("codesign")
+                                        .arg("--verify")
+                                        .arg(&staged_binary)
+                                        .output()
+                                        .expect("Failed to verify sv2-tp binary signature")
+                                        .status
+                                        .success();
+                                    if !signature_is_valid {
+                                        let output = std::process::Command::new("codesign")
+                                            .arg("--force")
+                                            .arg("--sign")
+                                            .arg("-")
+                                            .arg(&staged_binary)
+                                            .output()
+                                            .expect("Failed to sign sv2-tp binary");
+                                        assert!(
+                                            output.status.success(),
+                                            "Failed to sign sv2-tp binary: {}",
+                                            String::from_utf8_lossy(&output.stderr)
+                                        );
+                                    }
+                                }
+                            },
+                        );
                     } // inner re-check: bin still missing?
                 }, // closure
             ); // with_exclusive_lock

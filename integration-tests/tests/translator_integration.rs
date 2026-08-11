@@ -1155,17 +1155,24 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
     // that's actually directed to the group channel ID, and not each individual channel
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-    let new_extended_mining_job = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)))) => {
-            msg
+    let new_extended_mining_job = loop {
+        sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+            )
+            .await;
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
+                break msg;
+            }
+            // Every vardiff UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
         }
-        msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
     assert_eq!(
         new_extended_mining_job.channel_id,
@@ -1240,17 +1247,24 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
     // message pair
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-    let new_extended_mining_job = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)))) => {
-            msg
+    let new_extended_mining_job = loop {
+        sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+            )
+            .await;
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
+                break msg;
+            }
+            // Every vardiff UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
         }
-        msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
     assert_eq!(
         new_extended_mining_job.channel_id,
@@ -1275,6 +1289,8 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
             )) => {
                 assert_eq!(msg.channel_id, EXPECTED_GROUP_CHANNEL_ID);
             }
+            // Every vardiff UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
             msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
         }
     };
