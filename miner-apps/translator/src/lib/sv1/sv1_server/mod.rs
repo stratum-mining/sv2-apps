@@ -865,6 +865,17 @@ impl Sv1Server {
         self.request_id_to_downstream_id
             .insert(request_id, downstream_id);
 
+        self.forward_pending_open_channel_request(request_id, downstream_id)
+            .await
+    }
+
+    /// Forwards an open request that has already been registered, removing its mapping if the
+    /// request cannot be sent.
+    async fn forward_pending_open_channel_request(
+        &self,
+        request_id: RequestId,
+        downstream_id: DownstreamId,
+    ) -> TproxyResult<(), error::Sv1Server> {
         if let Err(e) = self
             .open_extended_mining_channel(request_id, downstream_id)
             .await
@@ -1146,7 +1157,10 @@ impl Sv1Server {
                 "Downstream {} disconnected before channel could be opened, skipping",
                 downstream_id
             );
-            return Ok(());
+            return Err(TproxyError::disconnect(
+                TproxyErrorKind::DownstreamNotPresent(downstream_id),
+                downstream_id,
+            ));
         }
 
         let hashrate = config.min_individual_miner_hashrate as f64;
@@ -1173,24 +1187,23 @@ impl Sv1Server {
             format!("{user_identity}.miner{miner_id}")
         };
 
-        if let Ok(open_channel_msg) = build_sv2_open_extended_mining_channel(
+        let open_channel_msg = build_sv2_open_extended_mining_channel(
             request_id,
             user_identity.clone(),
             hashrate as Hashrate,
             max_target,
             min_extranonce_size,
-        ) {
-            self.sv1_server_io
-                .channel_manager_sender
-                .send((
-                    MiningOwned::OpenExtendedMiningChannel(open_channel_msg),
-                    None,
-                ))
-                .await
-                .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
-        } else {
-            error!("Failed to build OpenExtendedMiningChannel message");
-        }
+        )
+        .map_err(TproxyError::shutdown)?;
+
+        self.sv1_server_io
+            .channel_manager_sender
+            .send((
+                MiningOwned::OpenExtendedMiningChannel(open_channel_msg),
+                None,
+            ))
+            .await
+            .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
 
         Ok(())
     }
@@ -1856,6 +1869,33 @@ mod tests {
 
         // Test should not panic and should handle the message
         _ = server.handle_set_target_without_vardiff(set_target).await;
+    }
+
+    #[tokio::test]
+    async fn missing_downstream_requests_disconnect() {
+        let server = create_test_sv1_server();
+
+        let error = server.handle_open_channel_request(7).await.unwrap_err();
+
+        assert!(matches!(error.action, Action::Disconnect(7)));
+    }
+
+    #[tokio::test]
+    async fn downstream_removed_before_open_forwarding_clears_pending_request() {
+        let server = create_test_sv1_server();
+        server.request_id_to_downstream_id.insert(42, 7);
+
+        let error = server
+            .forward_pending_open_channel_request(42, 7)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::DownstreamNotPresent(7)
+        ));
+        assert!(server.request_id_to_downstream_id.is_empty());
     }
 
     #[test]
