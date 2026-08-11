@@ -166,13 +166,16 @@ impl MonitoringApi {
 
     /// Poll `path` until the response deserialises into `T` and `predicate` returns true.
     ///
-    /// Retries every 500 ms until `timeout`. Non-2xx responses and
+    /// Retries every [`crate::utils::POLL_INTERVAL`] until `timeout`. Non-2xx responses and
     /// deserialisation failures are tolerated (the endpoint may not be ready
     /// yet — for example a `/api/v1/clients/{id}` route returns 404 until the
     /// snapshot cache first populates). On timeout, the panic message includes
     /// the path, target type, last status, and last body so CI failures are
     /// debuggable without re-running with extra logging.
-    pub async fn poll_until<T, F>(&self, path: &'static str, timeout: Duration, predicate: F) -> T
+    ///
+    /// `path` is a plain `&str` so callers can poll dynamic routes such as
+    /// `/api/v1/clients/{id}/channels`, whose state settles after the client itself appears.
+    pub async fn poll_until<T, F>(&self, path: &str, timeout: Duration, predicate: F) -> T
     where
         T: serde::de::DeserializeOwned,
         F: Fn(&T) -> bool,
@@ -205,7 +208,7 @@ impl MonitoringApi {
                     last_body,
                 );
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(crate::utils::POLL_INTERVAL).await;
         }
     }
 

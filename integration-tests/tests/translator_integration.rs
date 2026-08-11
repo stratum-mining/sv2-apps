@@ -1132,6 +1132,10 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Vardiff may enqueue an UpdateChannel before the share on loaded CI runners.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 
@@ -1151,17 +1155,24 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
     // that's actually directed to the group channel ID, and not each individual channel
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-    let new_extended_mining_job = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)))) => {
-            msg
+    let new_extended_mining_job = loop {
+        sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+            )
+            .await;
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
+                break msg;
+            }
+            // Every vardiff UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
         }
-        msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
     assert_eq!(
         new_extended_mining_job.channel_id,
@@ -1182,6 +1193,10 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Vardiff may enqueue an UpdateChannel before the share on loaded CI runners.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 
@@ -1218,36 +1233,66 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
             .expect("Failed to capture prevhash before chain tip update")
     };
 
+    // Drop the mining.notify messages captured above. The assertion below matches the most recent
+    // mining.notify, and the SV1 translation of the new prevhash reaches each miner asynchronously
+    // after the SV2 SetNewPrevHash — so without clearing, the stale pre-update notify is what gets
+    // matched and the prevhash appears unchanged.
+    for sv1_sniffer in sv1_sniffers.iter() {
+        sv1_sniffer
+            .clean_queue(MessageDirection::ToDownstream)
+            .await;
+    }
+
     // now let's force a chain tip update, so we trigger a NewExtendedMiningJob + SetNewPrevHash
     // message pair
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-    let new_extended_mining_job = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)))) => {
-            msg
+    let new_extended_mining_job = loop {
+        sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+            )
+            .await;
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
+                break msg;
+            }
+            // Every vardiff UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
         }
-        msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
     };
     assert_eq!(
         new_extended_mining_job.channel_id,
         EXPECTED_GROUP_CHANNEL_ID
     );
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
-        .await;
-    let set_new_prev_hash = match sniffer.next_message_from_upstream() {
-        Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(msg)))) => msg,
-        msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
+    let set_new_prev_hash = loop {
+        sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
+            )
+            .await;
+        match sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(msg)))) => {
+                break msg;
+            }
+            // A chain-tip update may enqueue multiple group-channel jobs before SetNewPrevHash.
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => {
+                assert_eq!(msg.channel_id, EXPECTED_GROUP_CHANNEL_ID);
+            }
+            // Every vardiff UpdateChannel is answered with SetTarget on this queue.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(_)))) => continue,
+            msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
+        }
     };
     assert_eq!(set_new_prev_hash.channel_id, EXPECTED_GROUP_CHANNEL_ID);
 
@@ -1293,6 +1338,10 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
             )) => msg,
+            // Vardiff may enqueue an UpdateChannel before the share on loaded CI runners.
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::UpdateChannel(_)))) => {
+                continue;
+            }
             msg => panic!("Expected SubmitSharesExtended message, found: {:?}", msg),
         };
 

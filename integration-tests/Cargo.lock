@@ -2678,6 +2678,7 @@ dependencies = [
  "half",
  "hex",
  "jd_client_sv2",
+ "libc",
  "minreq",
  "num-format",
  "num_cpus",

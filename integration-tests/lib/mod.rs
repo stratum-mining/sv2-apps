@@ -9,7 +9,6 @@ use pool_sv2::PoolSv2;
 use std::{
     convert::TryFrom,
     net::{Ipv4Addr, SocketAddr},
-    time::Duration,
 };
 use stratum_apps::{
     bitcoin_core_sv2::runtime_api::BitcoinCoreVersion,
@@ -20,7 +19,7 @@ use stratum_apps::{
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use translator_sv2::TranslatorSv2;
-use utils::get_available_address;
+use utils::{ROLE_STARTUP_DELAY, get_available_address};
 
 pub mod interceptor;
 pub mod message_aggregator;
@@ -172,7 +171,7 @@ pub async fn start_pool(
     tokio::spawn(async move {
         _ = pool_clone.start().await;
     });
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(ROLE_STARTUP_DELAY).await;
     (pool, listening_address, monitoring_address)
 }
 
@@ -360,7 +359,7 @@ pub async fn start_pool_with_jds(
     tokio::spawn(async move {
         _ = pool_clone.start().await;
     });
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(ROLE_STARTUP_DELAY).await;
     (pool, pool_address, jds_address, monitoring_address)
 }
 
@@ -556,6 +555,9 @@ pub fn start_mining_device_sv2(
     nominal_hashrate_multiplier: Option<f32>,
     single_submit: bool,
 ) {
+    // Pin to one thread so concurrent test processes do not oversubscribe the CI runner's CPUs
+    // and make share-rate assertions flaky.
+    crate::mining_device::set_cores(1);
     tokio::spawn(async move {
         crate::mining_device::connect(
             upstream.to_string(),

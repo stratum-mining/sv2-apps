@@ -449,9 +449,14 @@ async fn pool_api_endpoints_with_miner() {
     let client: Sv2ClientResponse = pool_mon.fetch_typed(&routes::client_by_id(client_id)).await;
     assert_eq!(client.client_id, client_id);
 
-    // /api/v1/clients/{id}/channels — at least one channel.
+    // /api/v1/clients/{id}/channels — at least one channel. The channel opens after the client
+    // itself is registered, so poll for it rather than reading once.
     let channels: Sv2ClientChannelsResponse = pool_mon
-        .fetch_typed(&routes::client_channels(client_id))
+        .poll_until(
+            &routes::client_channels(client_id),
+            METRIC_POLL_TIMEOUT,
+            |r: &Sv2ClientChannelsResponse| r.total_standard + r.total_extended >= 1,
+        )
         .await;
     assert_eq!(channels.client_id, client_id);
     assert!(
@@ -560,6 +565,7 @@ async fn tproxy_api_endpoints_with_miner() {
     let global: GlobalInfo = tproxy_mon
         .poll_until(routes::GLOBAL, METRIC_POLL_TIMEOUT, |r: &GlobalInfo| {
             r.sv1_clients.as_ref().is_some_and(|c| c.total_clients >= 1)
+                && r.server.as_ref().is_some_and(|s| s.extended_channels >= 1)
         })
         .await;
     let server_summary = global
@@ -698,6 +704,7 @@ async fn jdc_api_endpoints_with_miner() {
     let global: GlobalInfo = jdc_mon
         .poll_until(routes::GLOBAL, METRIC_POLL_TIMEOUT, |r: &GlobalInfo| {
             r.sv2_clients.as_ref().is_some_and(|c| c.total_clients >= 1)
+                && r.server.as_ref().is_some_and(|s| s.extended_channels >= 1)
         })
         .await;
     let server_summary = global
@@ -759,9 +766,14 @@ async fn jdc_api_endpoints_with_miner() {
     let client: Sv2ClientResponse = jdc_mon.fetch_typed(&routes::client_by_id(client_id)).await;
     assert_eq!(client.client_id, client_id);
 
-    // /api/v1/clients/{id}/channels — tProxy opens an extended channel via JDC.
+    // /api/v1/clients/{id}/channels — tProxy opens an extended channel via JDC. That channel
+    // opens after the client is registered, so poll for it rather than reading once.
     let channels: Sv2ClientChannelsResponse = jdc_mon
-        .fetch_typed(&routes::client_channels(client_id))
+        .poll_until(
+            &routes::client_channels(client_id),
+            METRIC_POLL_TIMEOUT,
+            |r: &Sv2ClientChannelsResponse| r.total_extended >= 1,
+        )
         .await;
     assert_eq!(channels.client_id, client_id);
     assert!(

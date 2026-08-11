@@ -7,10 +7,13 @@ use crate::{
 use async_channel::{Receiver, Sender};
 use once_cell::sync::Lazy;
 use std::{
-    collections::HashSet,
     convert::TryInto,
-    net::{SocketAddr, TcpListener},
+    fs, io,
+    net::{SocketAddr, TcpListener, TcpStream},
+    os::fd::AsRawFd,
+    path::Path,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
@@ -27,26 +30,188 @@ use stratum_apps::{
 };
 use tokio_util::sync::CancellationToken;
 
-// prevents get_available_port from ever returning the same port twice
-static UNIQUE_PORTS: Lazy<Mutex<HashSet<u16>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// Advisory per-port lockfiles held for the process lifetime so no two concurrent
+/// test processes can claim the same port. The kernel releases flock on exit (even
+/// after `kill -9`), so stale lockfiles are harmless.
+static HELD_LOCKS: Lazy<Mutex<Vec<std::fs::File>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+fn lockfile_for(port: u16) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("sv2-it-ports")
+        .join(format!("{port}.lock"))
+}
+
+fn try_lock_port(port: u16) -> io::Result<std::fs::File> {
+    let path = lockfile_for(port);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    // Non-blocking exclusive lock: EAGAIN → another process holds this port.
+    // SAFETY: fd is valid, flock is async-signal-safe on both Linux and macOS.
+    let fd = file.as_raw_fd();
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// Acquires a blocking exclusive file lock, runs `f`, and releases the lock.
+///
+/// This serializes initialization of artifacts shared by concurrent nextest processes. Callers
+/// must check whether their artifact exists again inside `f`: another process may have created it
+/// while this process was waiting for the lock.
+pub fn with_exclusive_lock(lock_path: &Path, f: impl FnOnce()) {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|e| {
+            panic!(
+                "failed to create lockfile directory {}: {e}",
+                parent.display()
+            )
+        });
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .unwrap_or_else(|e| panic!("failed to open lockfile {}: {e}", lock_path.display()));
+    let fd = file.as_raw_fd();
+    loop {
+        // SAFETY: `fd` remains valid for the lifetime of `file`; `flock` is available on every
+        // platform supported by the integration-test harness (Linux and macOS).
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+            break;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            panic!("failed to lock {}: {e}", lock_path.display());
+        }
+    }
+    f();
+}
+
+/// How often readiness gates and message-wait loops re-check their condition.
+///
+/// At 200ms each waiter checks five times per second. This materially reduces residual latency
+/// across the suite's hundreds of waits compared with the previous one-second cadence, without
+/// making every single-threaded test runtime wake twenty or more times per second.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Retry cadence for the *unbounded* connect loops that wait for a peer to come up.
+///
+/// Deliberately much slower than [`POLL_INTERVAL`]. Those loops have no timeout, so when a peer
+/// never appears — which several tests arrange on purpose — they spin for the whole test. Every
+/// test runs on a bare `#[tokio::test]`, i.e. a single-threaded runtime, so even a 5 Hz connect
+/// loop competes with the test's own work on the one thread it has. The message-wait loops are safe
+/// at [`POLL_INTERVAL`] because they exit as soon as their message lands.
+pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Ceiling for readiness gates on spawned child processes (Bitcoin Core, sv2-tp).
+///
+/// This is never paid on the happy path — only when something is genuinely wrong — so it is set
+/// far above the observed startup time rather than tuned tightly. It stays well under nextest's
+/// `terminate-after` (120s) so the gate's own panic fires before nextest kills the test, which
+/// keeps the failure message legible.
+pub const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fixed startup grace period for in-process pool roles.
+///
+/// A TCP readiness probe is unsafe here because the pool treats every accepted connection as a
+/// protocol session. Probing created phantom downstreams and hung tests that intentionally
+/// intercept setup, so startup retains the original one-second delay until the role exposes an
+/// internal readiness signal.
+pub const ROLE_STARTUP_DELAY: Duration = Duration::from_secs(1);
+
+/// Blocks until `path` exists, polling every [`POLL_INTERVAL`].
+///
+/// Deliberately stats the path rather than connecting to it. This gates on Bitcoin Core's IPC
+/// socket, and a capnp RPC endpoint ascribes meaning to a bare connection: Core's libmultiprocess
+/// layer sets TCP_NODELAY on each accepted connection, so a probe that connects and immediately
+/// drops makes that setsockopt run against a socket that is already gone. On macOS that returns
+/// EINVAL and takes down Core's IPC listener with an "Uncaught exception in daemonized task",
+/// after which sv2-tp can never connect. Linux tolerates the same call, so this only reproduces
+/// on macOS.
+///
+/// Stat-ing is sound provided callers remove any datadir left over from an earlier test on the
+/// same port, so the socket that appears can only belong to the node just started.
+///
+/// Panics with `what` in the message if `timeout` elapses first.
+pub fn wait_for_path(path: &std::path::Path, timeout: Duration, what: &str) {
+    let start = std::time::Instant::now();
+    while !path.exists() {
+        if start.elapsed() > timeout {
+            panic!(
+                "timeout after {timeout:?} waiting for {what} (path {} never appeared)",
+                path.display()
+            );
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    tracing::debug!(
+        target: "readiness",
+        "ready: {what} after {:?}",
+        start.elapsed()
+    );
+}
+
+/// Blocks until a TCP connection to `addr` succeeds, polling every [`POLL_INTERVAL`].
+///
+/// Used from synchronous process-startup contexts.
+///
+/// Panics with `what` in the message if `timeout` elapses first.
+pub fn wait_for_listener(addr: SocketAddr, timeout: Duration, what: &str) {
+    let start = std::time::Instant::now();
+    loop {
+        if TcpStream::connect_timeout(&addr, POLL_INTERVAL).is_ok() {
+            tracing::debug!(
+                target: "readiness",
+                "ready: {what} after {:?}",
+                start.elapsed()
+            );
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("timeout after {timeout:?} waiting for {what} to listen on {addr}");
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Allocate a loopback address whose port is exclusively reserved across
+/// concurrent test processes.
+///
+/// Probes with `bind(0)` then holds a per-port `flock` lockfile in
+/// `$TMPDIR/sv2-it-ports/` for the process lifetime. Every integration-test process follows this
+/// protocol, so another test cannot claim the port after the probe is dropped and before its role
+/// binds. Lockfiles are released by the kernel on exit.
 pub fn get_available_address() -> SocketAddr {
-    let port = get_available_port();
-    SocketAddr::from(([127, 0, 0, 1], port))
+    SocketAddr::from(([127, 0, 0, 1], get_available_port()))
 }
 
 fn get_available_port() -> u16 {
-    let mut unique_ports = UNIQUE_PORTS.lock().unwrap();
-
     loop {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        if !unique_ports.contains(&port) {
-            unique_ports.insert(port);
-            return port;
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind(0) for port probe");
+        let port = probe.local_addr().expect("probe local_addr").port();
+        match try_lock_port(port) {
+            Ok(lock_handle) => {
+                HELD_LOCKS.lock().expect("ports lock").push(lock_handle);
+                drop(probe);
+                return port;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                drop(probe);
+            }
+            Err(e) => {
+                drop(probe);
+                panic!("failed to lock port {port}: {e}");
+            }
         }
     }
 }
@@ -420,10 +585,21 @@ pub mod http {
 
 pub mod tarball {
     use std::{
-        fs::File,
+        fs::{self, File},
         io::{BufReader, Read},
-        path::Path,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
     };
+
+    static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct StagingDirectory(PathBuf);
+
+    impl Drop for StagingDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
 
     pub fn read_from_file(path: &str) -> Vec<u8> {
         let file = File::open(path).unwrap_or_else(|_| {
@@ -438,8 +614,9 @@ pub mod tarball {
     pub fn unpack(tarball_bytes: &[u8], destination: &Path) {
         use std::{io::Write as IoWrite, process::Command};
 
-        // Write tarball bytes to a temp file
-        let temp_tarball = destination.join("temp.tar.gz");
+        // Use pid-unique temp name so concurrent test processes can't share it.
+        let pid = std::process::id();
+        let temp_tarball = destination.join(format!("temp-{pid}.tar.gz"));
         let mut temp_file = File::create(&temp_tarball).unwrap();
         temp_file.write_all(tarball_bytes).unwrap();
         drop(temp_file);
@@ -461,6 +638,119 @@ pub mod tarball {
 
         // Clean up temp tarball
         std::fs::remove_file(&temp_tarball).ok();
+    }
+
+    /// Extracts `relative_path` into a private staging directory, prepares it, then atomically
+    /// publishes it beneath `destination`.
+    ///
+    /// The staging directory is created on the same filesystem as the final path, so a successful
+    /// rename makes the complete file or directory visible in one operation. Callers must serialize
+    /// publication and check that the final path is still absent while holding that lock.
+    pub fn unpack_path_atomically(
+        tarball_bytes: &[u8],
+        destination: &Path,
+        relative_path: &Path,
+        prepare: impl FnOnce(&Path),
+    ) {
+        assert!(
+            !relative_path.is_absolute(),
+            "published tarball path must be relative"
+        );
+        fs::create_dir_all(destination).unwrap_or_else(|e| {
+            panic!(
+                "failed to create artifact directory {}: {e}",
+                destination.display()
+            )
+        });
+
+        let artifact_name = relative_path
+            .file_name()
+            .expect("published tarball path must have a file name")
+            .to_string_lossy();
+        let staging = loop {
+            let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let path = destination.join(format!(
+                ".{artifact_name}.staging-{}-{id}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => break StagingDirectory(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("failed to create staging directory {}: {e}", path.display()),
+            }
+        };
+
+        unpack(tarball_bytes, &staging.0);
+        let staged_path = staging.0.join(relative_path);
+        assert!(
+            staged_path.exists(),
+            "artifact {} not found after unpack in {}",
+            relative_path.display(),
+            staging.0.display()
+        );
+        prepare(&staged_path);
+
+        let final_path = destination.join(relative_path);
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!(
+                    "failed to create artifact parent directory {}: {e}",
+                    parent.display()
+                )
+            });
+        }
+        fs::rename(&staged_path, &final_path).unwrap_or_else(|e| {
+            panic!(
+                "failed to publish artifact {} to {}: {e}",
+                staged_path.display(),
+                final_path.display()
+            )
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::process::Command;
+
+        #[test]
+        fn atomic_unpack_publishes_only_after_preparation() {
+            let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let root = StagingDirectory(std::env::temp_dir().join(format!(
+                "sv2-atomic-unpack-test-{}-{id}",
+                std::process::id()
+            )));
+            let source = root.0.join("source");
+            let artifact = source.join("artifact");
+            fs::create_dir_all(&artifact).unwrap();
+            fs::write(artifact.join("payload"), b"complete").unwrap();
+
+            let archive = root.0.join("artifact.tar.gz");
+            let status = Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&source)
+                .arg("artifact")
+                .status()
+                .expect("failed to create test tarball");
+            assert!(status.success(), "failed to create test tarball");
+
+            let destination = root.0.join("destination");
+            let final_path = destination.join("artifact");
+            unpack_path_atomically(
+                &fs::read(&archive).unwrap(),
+                &destination,
+                Path::new("artifact"),
+                |staged_path| {
+                    assert!(!final_path.exists());
+                    fs::write(staged_path.join("prepared"), b"yes").unwrap();
+                },
+            );
+
+            assert_eq!(fs::read(final_path.join("payload")).unwrap(), b"complete");
+            assert_eq!(fs::read(final_path.join("prepared")).unwrap(), b"yes");
+        }
     }
 }
 

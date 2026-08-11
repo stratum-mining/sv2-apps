@@ -60,10 +60,8 @@ impl SnifferSV1 {
                 match TcpStream::connect(upstream_address).await {
                     Ok(s) => break s,
                     Err(_) => {
-                        tracing::warn!(
-                            "SnifferSV1: unable to connect to upstream, retrying after 1 second"
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tracing::warn!("SnifferSV1: unable to connect to upstream, retrying");
+                        tokio::time::sleep(crate::utils::CONNECT_RETRY_INTERVAL).await;
                         continue;
                     }
                 }
@@ -91,6 +89,18 @@ impl SnifferSV1 {
         });
     }
 
+    /// Clears all messages from the specified direction's queue.
+    ///
+    /// Use before triggering an event whose effect is asserted with [`SnifferSV1::wait_and_assert`]
+    /// when a message of the same type is already queued: the wait matches the most recent
+    /// matching message, which would otherwise be the stale pre-event one.
+    pub async fn clean_queue(&self, direction: MessageDirection) {
+        match direction {
+            MessageDirection::ToUpstream => self.messages_from_downstream.clear().await,
+            MessageDirection::ToDownstream => self.messages_from_upstream.clear().await,
+        }
+    }
+
     /// Wait for a specific message to be received from the downstream role.
     pub async fn wait_for_message(&self, message: &[&str], direction: MessageDirection) {
         if message.is_empty() {
@@ -116,7 +126,7 @@ impl SnifferSV1 {
                     message.first().unwrap()
                 );
             } else {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(crate::utils::POLL_INTERVAL).await;
                 continue;
             }
         }
@@ -141,7 +151,7 @@ impl SnifferSV1 {
             if now.elapsed().as_secs() > 60 {
                 panic!("Timeout: keepalive mining.notify (job_id containing '#') not found");
             } else {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(crate::utils::POLL_INTERVAL).await;
                 continue;
             }
         }
@@ -156,32 +166,49 @@ impl SnifferSV1 {
     ) where
         F: FnMut(sv1_api::Message),
     {
-        let f = filter.inner();
-        self.wait_for_message(&[&f], direction).await;
-
         let aggregator = match direction {
             MessageDirection::ToUpstream => &self.messages_from_downstream,
             MessageDirection::ToDownstream => &self.messages_from_upstream,
         };
 
-        let message = match filter {
-            SV1MessageFilter::WithMessageName(method_name) => aggregator
-                .get_last_matching(|msg| match msg {
-                    sv1_api::Message::StandardRequest(req) => req.method == method_name,
-                    sv1_api::Message::Notification(notif) => notif.method == method_name,
-                    _ => false,
-                })
-                .await
-                .expect("Message disappeared after wait_for_message"),
-            SV1MessageFilter::WithMessageId(method_id) => aggregator
-                .get_last_matching(|msg| match msg {
-                    sv1_api::Message::StandardRequest(req) => req.id == method_id,
-                    sv1_api::Message::OkResponse(req) => req.id == method_id,
-                    sv1_api::Message::ErrorResponse(req) => req.id == method_id,
-                    _ => false,
-                })
-                .await
-                .expect("Message disappeared after wait_for_message"),
+        // Poll on exactly the predicate this function fetches with, rather than waiting on
+        // `wait_for_message`'s looser matcher and then re-querying. That matcher also accepts an
+        // `OkResponse` whose serialized form merely *contains* the filter string, so it can report
+        // a match that the strict predicates below cannot find — a window the previous 1s poll
+        // interval happened to step over rather than avoid.
+        let now = std::time::Instant::now();
+        let message = loop {
+            let found = match &filter {
+                SV1MessageFilter::WithMessageName(method_name) => {
+                    aggregator
+                        .get_last_matching(|msg| match msg {
+                            sv1_api::Message::StandardRequest(req) => req.method == *method_name,
+                            sv1_api::Message::Notification(notif) => notif.method == *method_name,
+                            _ => false,
+                        })
+                        .await
+                }
+                SV1MessageFilter::WithMessageId(method_id) => {
+                    aggregator
+                        .get_last_matching(|msg| match msg {
+                            sv1_api::Message::StandardRequest(req) => req.id == *method_id,
+                            sv1_api::Message::OkResponse(req) => req.id == *method_id,
+                            sv1_api::Message::ErrorResponse(req) => req.id == *method_id,
+                            _ => false,
+                        })
+                        .await
+                }
+            };
+
+            if let Some(message) = found {
+                break message;
+            }
+
+            if now.elapsed().as_secs() > 60 {
+                panic!("Timeout: SV1 message matching {filter:?} not found");
+            }
+
+            tokio::time::sleep(crate::utils::POLL_INTERVAL).await;
         };
         assertion(message);
     }
@@ -222,18 +249,10 @@ impl SnifferSV1 {
 ///
 /// For `WithMessageName` you can pass method name like `mining.subscribe`, And for `WithMessageId`
 /// you can pass the id of the message you are interested in filtering.
+#[derive(Debug)]
 pub enum SV1MessageFilter {
     WithMessageName(&'static str),
     WithMessageId(u64),
-}
-
-impl SV1MessageFilter {
-    fn inner(&self) -> String {
-        match self {
-            SV1MessageFilter::WithMessageName(mn) => mn.to_string(),
-            SV1MessageFilter::WithMessageId(mi) => mi.to_string(),
-        }
-    }
 }
 
 /// Represents a SV1 message manager.
@@ -249,6 +268,10 @@ impl MessagesAggregatorSV1 {
         Self {
             messages: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    async fn clear(&self) {
+        self.messages.lock().await.clear();
     }
 
     async fn add_message(&self, message: sv1_api::Message) {

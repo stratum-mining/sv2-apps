@@ -14,7 +14,10 @@ use integration_tests_sv2::{interceptor::MessageDirection, template_provider::Di
 use stratum_apps::stratum_core::{
     binary_sv2::Seq064KOwned,
     common_messages_sv2::*,
-    extensions_sv2::{EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY},
+    extensions_sv2::{
+        EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY,
+        extensions_negotiation::MESSAGE_TYPE_REQUEST_EXTENSIONS,
+    },
     mining_sv2::*,
 };
 use tracing::info;
@@ -76,6 +79,15 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
         )
         .await;
 
+    // RequestExtensions is sent *after* SetupConnectionSuccess, so wait for it rather than
+    // assuming it has already been queued by the time the success message lands.
+    pool_translator_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_REQUEST_EXTENSIONS,
+        )
+        .await;
+
     // Verify RequestExtensions includes extension 0x0002
     let request_extensions_msg = match pool_translator_sniffer.next_message_from_downstream() {
         Some((
@@ -84,10 +96,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
                 ExtensionsNegotiationOwned::RequestExtensions(msg),
             )),
         )) => msg,
-        _ => panic!(
-            "received unexpected message: {:?}",
-            pool_translator_sniffer.next_message_from_downstream()
-        ),
+        msg => panic!("received unexpected message: {msg:?}"),
     };
     assert_eq!(
         request_extensions_msg.requested_extensions,
@@ -125,10 +134,7 @@ async fn test_extension_negotiation_with_tlv_in_submit_shares() {
             let user_identity = msg.user_identity.as_utf8_or_hex();
             assert_eq!(user_identity, "user_identity.miner1".to_string());
         }
-        _ => panic!(
-            "received unexpected message: {:?}",
-            pool_translator_sniffer.next_message_from_downstream()
-        ),
+        msg => panic!("received unexpected message: {msg:?}"),
     }
 
     pool_translator_sniffer
