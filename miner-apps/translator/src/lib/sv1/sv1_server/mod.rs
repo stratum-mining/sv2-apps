@@ -2185,6 +2185,86 @@ mod tests {
         assert!(server.pending_target_updates.contains_key(&8));
     }
 
+    #[tokio::test]
+    async fn immediate_vardiff_update_clears_stale_pending_target() {
+        use stratum_apps::stratum_core::channels_sv2::Vardiff;
+
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+
+        let upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| data.set_upstream_target(upstream_target, 7))
+                    .unwrap()
+            })
+            .unwrap();
+
+        // Parked update from an earlier tick that wanted a harder target.
+        let stale_pending = hash_rate_to_target(200.0, 5.0).unwrap();
+        server.pending_target_updates.insert(7, stale_pending);
+
+        // Drive vardiff to a deterministic downward adjustment: one share in the
+        // last two minutes against 5 shares/minute expected collapses the hashrate
+        // estimate, so the new (easier) target takes the immediate path.
+        let mut vardiff_state = VardiffState::new().unwrap();
+        let two_minutes_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 120;
+        vardiff_state.set_timestamp_of_last_update(two_minutes_ago);
+        vardiff_state.set_shares_since_last_update(1);
+        server.vardiff.insert(7, vardiff_state);
+
+        // The UpdateChannel send fails in this harness (no channel manager task);
+        // the pending-map bookkeeping we assert on happens before that.
+        let _ = server.handle_vardiff_updates().await;
+
+        assert!(
+            !server.pending_target_updates.contains_key(&7),
+            "immediate update must clear the superseded pending target"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_set_target_keeps_pending_update_until_satisfied() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+
+        // The downstream wants a harder (lower) target than the upstream currently has.
+        let pending_target = hash_rate_to_target(200.0, 5.0).unwrap();
+        let stale_upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        server.pending_target_updates.insert(7, pending_target);
+
+        // A SetTarget that does not satisfy the pending update (e.g. the reply to an
+        // older UpdateChannel) must leave it pending instead of dropping it.
+        server
+            .handle_set_target_message(SetTargetOwned {
+                channel_id: 9,
+                maximum_target: stale_upstream_target.to_le_bytes().into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            server.pending_target_updates.get_cloned(&7),
+            Some(pending_target)
+        );
+
+        // The satisfying SetTarget applies the pending update and clears it.
+        server
+            .handle_set_target_message(SetTargetOwned {
+                channel_id: 9,
+                maximum_target: pending_target.to_le_bytes().into(),
+            })
+            .await
+            .unwrap();
+        assert!(server.pending_target_updates.is_empty());
+    }
+
     #[test]
     fn test_sv1_server_counters() {
         let server = create_test_sv1_server();

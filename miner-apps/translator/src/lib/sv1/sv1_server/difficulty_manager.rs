@@ -67,7 +67,7 @@ impl Sv1Server {
     ///    - If new_target < upstream_target: wait for SetTarget response before sending
     ///      set_difficulty
     /// 4. Handle aggregated vs non-aggregated modes for UpdateChannel messages
-    async fn handle_vardiff_updates(&self) -> TproxyResult<(), error::Sv1Server> {
+    pub(super) async fn handle_vardiff_updates(&self) -> TproxyResult<(), error::Sv1Server> {
         let mut immediate_updates = Vec::new();
         let mut all_updates = Vec::new(); // All updates will generate UpdateChannel messages
 
@@ -166,6 +166,10 @@ impl Sv1Server {
                                     Some(downstream_id),
                                     new_target,
                                 ));
+                                // This update supersedes any parked pending target; drop
+                                // it so a later SetTarget cannot resurrect an obsolete
+                                // difficulty.
+                                self.pending_target_updates.remove(&downstream_id);
                             } else {
                                 // Case 2: new_target < upstream_target, delay set_difficulty until
                                 // SetTarget
@@ -183,6 +187,9 @@ impl Sv1Server {
                                 downstream_id
                             );
                             immediate_updates.push((channel_id, Some(downstream_id), new_target));
+                            // Same as above: the immediate update supersedes any parked
+                            // pending target.
+                            self.pending_target_updates.remove(&downstream_id);
                         }
                     }
                 }
@@ -515,7 +522,9 @@ impl Sv1Server {
 
     /// Gets pending updates that can now be applied based on the new upstream target.
     /// If downstream_id is provided, only returns updates for that specific downstream.
-    /// Logs a warning if the upstream target is higher than any requested target.
+    /// Updates not yet satisfied by the new upstream target stay pending: the SetTarget
+    /// may answer an older UpdateChannel, with the reply to the latest request still in
+    /// flight, so dropping them would lose the newest difficulty for the downstream.
     fn get_pending_difficulty_updates(
         &self,
         new_upstream_target: Target,
@@ -544,12 +553,11 @@ impl Sv1Server {
                     });
                     false // remove from pending map
                 } else {
-                    // WARNING: Upstream gave us a target higher than what we requested
-                    error!(
-                        "❌ Protocol issue: SetTarget response has target ({}) which is higher than requested target ({}) in UpdateChannel for channel {}. Ignoring this pending update for downstream {}.",
-                        new_upstream_target, pending_target, channel_id, pending_downstream_id
+                    warn!(
+                        "SetTarget target ({}) on channel {} does not yet satisfy pending target ({}) for downstream {}; keeping update pending",
+                        new_upstream_target, channel_id, pending_target, pending_downstream_id
                     );
-                    false // remove from pending map (don't keep invalid requests)
+                    true // keep pending until a satisfying SetTarget arrives
                 }
             });
         applicable_updates
