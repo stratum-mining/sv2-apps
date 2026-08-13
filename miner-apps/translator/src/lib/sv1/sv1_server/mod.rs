@@ -66,7 +66,7 @@ use stratum_apps::{
         },
         sv1_api::{IsServer, json_rpc, server_to_client, utils::HexU32Be},
     },
-    sync::{SharedLock, SharedMap},
+    sync::SharedMap,
     task_manager::TaskManager,
     utils::types::{ChannelId, DownstreamId, Hashrate, RequestId, SharesPerMinute},
 };
@@ -193,8 +193,9 @@ pub struct Sv1Server {
     /// HashMap to store the SetNewPrevHash for each channel
     /// Used in both aggregated and non-aggregated mode
     pub(crate) prevhashes: SharedMap<ChannelId, SetNewPrevHashOwned>,
-    /// Tracks pending target updates that are waiting for SetTarget response from upstream
-    pub(crate) pending_target_updates: SharedLock<Vec<PendingTargetUpdate>>,
+    /// Tracks the latest target update per downstream that is waiting for a SetTarget response
+    /// from upstream.
+    pub(crate) pending_target_updates: SharedMap<DownstreamId, Target>,
     /// Valid Sv1 jobs storage, containing only a single shared entry (AGGREGATED_CHANNEL_ID) in
     /// case of channels aggregation (aggregated mode)
     pub(crate) valid_sv1_jobs: SharedMap<ChannelId, Vec<server_to_client::Notify>>,
@@ -337,9 +338,7 @@ impl Sv1Server {
         self.miner_telemetry.clear();
         self.channel_id_to_downstream_id.clear();
         self.request_id_to_downstream_id.clear();
-        self.pending_target_updates
-            .with(|updates| updates.clear())
-            .ok();
+        self.pending_target_updates.clear();
         self.sv1_server_io.close();
     }
 
@@ -405,7 +404,7 @@ impl Sv1Server {
             channel_id_to_downstream_id: SharedMap::new(),
             vardiff: SharedMap::new(),
             prevhashes: SharedMap::new(),
-            pending_target_updates: SharedLock::new(Vec::new()),
+            pending_target_updates: SharedMap::new(),
             valid_sv1_jobs: SharedMap::new(),
             mode,
             user_identity: Arc::new(OnceLock::new()),
@@ -1234,8 +1233,9 @@ impl Sv1Server {
         downstream_id: DownstreamId,
     ) -> TproxyResult<(), error::Sv1Server> {
         if self.config.downstream_difficulty_config.enable_vardiff {
-            // Only remove from vardiff map if vardiff is enabled
+            // Pending target updates are vardiff state too and must not outlive the miner.
             self.vardiff.remove(&downstream_id);
+            self.pending_target_updates.remove(&downstream_id);
         }
         #[cfg(feature = "monitoring")]
         self.miner_telemetry.remove_downstream(downstream_id);
@@ -1416,7 +1416,10 @@ impl Sv1Server {
                     "Failed to send mining.set_difficulty to downstream {}: {:?}",
                     downstream_id, e
                 );
-                return Err(TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender));
+                return Err(TproxyError::disconnect(
+                    TproxyErrorKind::ChannelErrorSender,
+                    downstream_id,
+                ));
             } else {
                 debug!(
                     "Sent mining.set_difficulty to downstream {} (vardiff disabled)",
@@ -1517,7 +1520,10 @@ impl Sv1Server {
                     "Failed to send SetDifficulty to downstream {}: {:?}",
                     downstream_id, e
                 );
-                return Err(TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender));
+                return Err(TproxyError::disconnect(
+                    TproxyErrorKind::ChannelErrorSender,
+                    downstream_id,
+                ));
             } else {
                 debug!(
                     "Sent SetDifficulty to downstream {} for channel {} (vardiff disabled)",
@@ -1736,12 +1742,6 @@ impl Sv1Server {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PendingTargetUpdate {
-    pub downstream_id: DownstreamId,
-    pub new_target: Target,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1796,10 +1796,15 @@ mod tests {
         downstream_id: DownstreamId,
         channel_id: Option<ChannelId>,
         hashrate: Hashrate,
+        close_server_channel: bool,
     ) {
         let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
         let (_miner_sender, miner_receiver) = unbounded();
-        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver) = unbounded();
+        if close_server_channel {
+            sv1_server_receiver.close();
+        }
+
         let target = hash_rate_to_target(hashrate as f64, 5.0).unwrap();
         let downstream = Downstream::new(
             downstream_id,
@@ -1817,12 +1822,17 @@ mod tests {
             .downstream_data
             .with(|data| data.channel_id = channel_id)
             .unwrap();
+
         server.downstreams.insert(downstream_id, downstream);
         if let Some(channel_id) = channel_id {
             server
                 .channel_id_to_downstream_id
                 .insert(channel_id, downstream_id);
         }
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(downstream_id, sv1_server_sender);
     }
 
     #[test]
@@ -1998,8 +2008,8 @@ mod tests {
             config,
             mode,
         );
-        register_test_downstream(&server, 1, Some(1), 100.0);
-        register_test_downstream(&server, 2, None, 100.0);
+        register_test_downstream(&server, 1, Some(1), 100.0, false);
+        register_test_downstream(&server, 2, None, 100.0, false);
 
         server
             .send_update_channel_on_downstream_state_change()
@@ -2027,8 +2037,8 @@ mod tests {
             config,
             mode,
         );
-        register_test_downstream(&server, 1, Some(1), 100.0);
-        register_test_downstream(&server, 2, None, 100.0);
+        register_test_downstream(&server, 1, Some(1), 100.0, false);
+        register_test_downstream(&server, 2, None, 100.0, false);
         let target = hash_rate_to_target(100.0, 5.0).unwrap();
 
         server
@@ -2057,8 +2067,8 @@ mod tests {
             config,
             mode,
         );
-        register_test_downstream(&server, 1, Some(1), 100.0);
-        register_test_downstream(&server, 2, None, 100.0);
+        register_test_downstream(&server, 1, Some(1), 100.0, false);
+        register_test_downstream(&server, 2, None, 100.0, false);
 
         server
             .send_update_channel_on_downstream_state_change()
@@ -2093,6 +2103,166 @@ mod tests {
             panic!("expected UpdateChannel");
         };
         assert_eq!(update.nominal_hash_rate, 200.0);
+    }
+
+    #[tokio::test]
+    async fn closed_downstream_does_not_shutdown_on_aggregated_set_target() {
+        let mut config = create_test_config();
+        config.downstream_difficulty_config.enable_vardiff = false;
+
+        let (cm_sender, _cm_receiver) = unbounded();
+        let (_downstream_sender, cm_receiver) = unbounded();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let tproxy_mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode);
+        register_test_downstream(&server, 7, Some(9), 100.0, true);
+
+        let target = hash_rate_to_target(200.0, 5.0).unwrap();
+        let error = server
+            .handle_set_target_without_vardiff(SetTargetOwned {
+                channel_id: AGGREGATED_CHANNEL_ID,
+                maximum_target: target.to_le_bytes().into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(error.kind, TproxyErrorKind::ChannelErrorSender));
+    }
+
+    #[tokio::test]
+    async fn closed_downstream_does_not_shutdown_on_non_aggregated_set_target() {
+        let mut config = create_test_config();
+        config.downstream_difficulty_config.enable_vardiff = false;
+        config.aggregate_channels = false;
+
+        let (cm_sender, _cm_receiver) = unbounded();
+        let (_downstream_sender, cm_receiver) = unbounded();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let tproxy_mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode);
+        register_test_downstream(&server, 7, Some(9), 100.0, true);
+
+        let target = hash_rate_to_target(200.0, 5.0).unwrap();
+        let error = server
+            .handle_set_target_without_vardiff(SetTargetOwned {
+                channel_id: 9,
+                maximum_target: target.to_le_bytes().into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(error.kind, TproxyErrorKind::ChannelErrorSender));
+    }
+
+    #[test]
+    fn pending_vardiff_target_keeps_only_latest_per_downstream() {
+        let server = create_test_sv1_server();
+        let first_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        let latest_target = hash_rate_to_target(200.0, 5.0).unwrap();
+
+        server.pending_target_updates.insert(7, first_target);
+        server.pending_target_updates.insert(7, latest_target);
+
+        assert_eq!(server.pending_target_updates.len(), 1);
+        assert_eq!(
+            server.pending_target_updates.get_cloned(&7),
+            Some(latest_target)
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_pending_vardiff_target() {
+        let server = create_test_sv1_server();
+        let target = hash_rate_to_target(100.0, 5.0).unwrap();
+        server.pending_target_updates.insert(7, target);
+        server.pending_target_updates.insert(8, target);
+
+        server.handle_downstream_disconnect(7).await.unwrap();
+
+        assert_eq!(server.pending_target_updates.len(), 1);
+        assert!(server.pending_target_updates.contains_key(&8));
+    }
+
+    #[tokio::test]
+    async fn immediate_vardiff_update_clears_stale_pending_target() {
+        use stratum_apps::stratum_core::channels_sv2::Vardiff;
+
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+
+        let upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| data.set_upstream_target(upstream_target, 7))
+                    .unwrap()
+            })
+            .unwrap();
+
+        // Parked update from an earlier tick that wanted a harder target.
+        let stale_pending = hash_rate_to_target(200.0, 5.0).unwrap();
+        server.pending_target_updates.insert(7, stale_pending);
+
+        // Drive vardiff to a deterministic downward adjustment: one share in the
+        // last two minutes against 5 shares/minute expected collapses the hashrate
+        // estimate, so the new (easier) target takes the immediate path.
+        let mut vardiff_state = VardiffState::new().unwrap();
+        let two_minutes_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 120;
+        vardiff_state.set_timestamp_of_last_update(two_minutes_ago);
+        vardiff_state.set_shares_since_last_update(1);
+        server.vardiff.insert(7, vardiff_state);
+
+        // The UpdateChannel send fails in this harness (no channel manager task);
+        // the pending-map bookkeeping we assert on happens before that.
+        let _ = server.handle_vardiff_updates().await;
+
+        assert!(
+            !server.pending_target_updates.contains_key(&7),
+            "immediate update must clear the superseded pending target"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_set_target_keeps_pending_update_until_satisfied() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+
+        // The downstream wants a harder (lower) target than the upstream currently has.
+        let pending_target = hash_rate_to_target(200.0, 5.0).unwrap();
+        let stale_upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        server.pending_target_updates.insert(7, pending_target);
+
+        // A SetTarget that does not satisfy the pending update (e.g. the reply to an
+        // older UpdateChannel) must leave it pending instead of dropping it.
+        server
+            .handle_set_target_message(SetTargetOwned {
+                channel_id: 9,
+                maximum_target: stale_upstream_target.to_le_bytes().into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            server.pending_target_updates.get_cloned(&7),
+            Some(pending_target)
+        );
+
+        // The satisfying SetTarget applies the pending update and clears it.
+        server
+            .handle_set_target_message(SetTargetOwned {
+                channel_id: 9,
+                maximum_target: pending_target.to_le_bytes().into(),
+            })
+            .await
+            .unwrap();
+        assert!(server.pending_target_updates.is_empty());
     }
 
     #[test]
