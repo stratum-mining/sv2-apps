@@ -68,15 +68,36 @@ impl TaskManager {
             column = location.column(),
         );
 
-        // `JoinSet::spawn` schedules the future on the current runtime, as the prior
-        // `tokio::spawn` did, and retains an abort handle internally. The lock is held
-        // for the insert and the drain below and never across an `.await`, so `spawn`
-        // stays synchronous.
-        let mut tasks = self.tasks.lock().unwrap();
-        tasks.spawn(fut.instrument(span));
+        // Collect abnormal exits under the lock and report them after releasing it.
+        // Reporting while holding the lock would put subscriber work on the contended
+        // path, and would deadlock if a subscriber ever spawned through this manager,
+        // because the lock is not reentrant. `Vec::new` does not allocate, so the
+        // common case of no failures costs nothing.
+        let mut abnormal_exits = Vec::new();
 
-        // Release entries for tasks that have already completed.
-        while tasks.try_join_next().is_some() {}
+        {
+            // `JoinSet::spawn` schedules the future on the current runtime, as the prior
+            // `tokio::spawn` did, and retains an abort handle internally. The lock is
+            // held for the insert and the drain and never across an `.await`, so `spawn`
+            // stays synchronous.
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.spawn(fut.instrument(span));
+
+            // Release entries for tasks that have already completed. A task that
+            // panicked would otherwise fail silently here. Cancellations are expected
+            // during shutdown, so they stay quiet.
+            while let Some(joined) = tasks.try_join_next() {
+                if let Err(join_error) = joined {
+                    if !join_error.is_cancelled() {
+                        abnormal_exits.push(join_error);
+                    }
+                }
+            }
+        }
+
+        for join_error in abnormal_exits {
+            tracing::warn!(error = %join_error, "managed task terminated abnormally");
+        }
     }
 
     /// Waits for all managed tasks to complete.
@@ -94,7 +115,14 @@ impl TaskManager {
             std::mem::take(&mut *tasks)
         };
 
-        while owned.join_next().await.is_some() {}
+        // The lock is already released here, so reporting inline is safe.
+        while let Some(joined) = owned.join_next().await {
+            if let Err(join_error) = joined {
+                if !join_error.is_cancelled() {
+                    tracing::warn!(error = %join_error, "managed task terminated abnormally");
+                }
+            }
+        }
     }
 
     /// Aborts all managed tasks.
