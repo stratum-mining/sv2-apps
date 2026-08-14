@@ -30,7 +30,10 @@ use stratum_apps::stratum_core::{
 use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     stratum_core::{
-        bitcoin::hashes::sha256d,
+        bitcoin::{
+            Target,
+            hashes::{Hash as _, sha256d},
+        },
         channels_sv2::client::{self, extended::ExtendedChannel},
         common_messages_sv2::{Protocol, SetupConnectionOwned},
         mining_sv2::SubmitSharesExtendedOwned,
@@ -390,18 +393,21 @@ const CACHED_SHARES_CAPACITY: usize = 100;
 #[derive(Clone, Debug)]
 pub struct SharesOrderedByDiff {
     pub share: SubmitSharesExtendedOwned,
-    share_hash: sha256d::Hash,
+    share_target: Target,
 }
 
 impl SharesOrderedByDiff {
     pub fn new(share: SubmitSharesExtendedOwned, share_hash: sha256d::Hash) -> Self {
-        Self { share, share_hash }
+        Self {
+            share,
+            share_target: Target::from_le_bytes(share_hash.to_byte_array()),
+        }
     }
 }
 
 impl Ord for SharesOrderedByDiff {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.share_hash.cmp(&other.share_hash)
+        self.share_target.cmp(&other.share_target)
     }
 }
 
@@ -413,7 +419,7 @@ impl PartialOrd for SharesOrderedByDiff {
 
 impl PartialEq for SharesOrderedByDiff {
     fn eq(&self, other: &Self) -> bool {
-        self.share_hash == other.share_hash
+        self.share_target == other.share_target
     }
 }
 
@@ -422,12 +428,12 @@ impl Eq for SharesOrderedByDiff {}
 /// Inserts a share into the cache, evicting the worst entry when
 /// [`CACHED_SHARES_CAPACITY`] is reached.
 ///
-/// The cache retains the best shares (lowest `share_hash`), since lower
-/// hashes indicate higher-quality shares that are more likely to remain
+/// The cache retains the best shares (lowest proof-of-work value), since lower
+/// values indicate higher-quality shares that are more likely to remain
 /// valid if relayed later.
 ///
 /// Internally implemented with a `BinaryHeap`, where the root represents
-/// the current worst share (highest hash) and is replaced when a better
+/// the current worst share (highest value) and is replaced when a better
 /// share arrives.
 pub(crate) fn add_share_to_cache(
     heap: &mut BinaryHeap<SharesOrderedByDiff>,
@@ -437,8 +443,8 @@ pub(crate) fn add_share_to_cache(
 
     if len < CACHED_SHARES_CAPACITY {
         debug!(
-            "Caching share (hash={:?}); cache size {}/{}",
-            entry.share_hash,
+            "Caching share (hash={:x}); cache size {}/{}",
+            entry.share_target,
             len + 1,
             CACHED_SHARES_CAPACITY
         );
@@ -446,19 +452,64 @@ pub(crate) fn add_share_to_cache(
         return;
     }
 
-    if let Some(worst) = heap.peek() {
-        if entry.share_hash < worst.share_hash {
-            debug!(
-                "Replacing worst cached share: old_hash={:?}, new_hash={:?}",
-                worst.share_hash, entry.share_hash
-            );
-            heap.pop();
-            heap.push(entry);
-        } else {
-            debug!(
-                "Discarding share (hash={:?}); worse than cached worst={:?}",
-                entry.share_hash, worst.share_hash
-            );
+    let Some(worst_target) = heap.peek().map(|worst| worst.share_target) else {
+        return;
+    };
+
+    if entry.share_target < worst_target {
+        debug!(
+            "Replacing worst cached share: old_hash={:x}, new_hash={:x}",
+            worst_target, entry.share_target
+        );
+        heap.pop();
+        heap.push(entry);
+    } else {
+        debug!(
+            "Discarding share (hash={:x}); worse than cached worst={:x}",
+            entry.share_target, worst_target
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::stratum_core::binary_sv2::B032Owned;
+
+    fn share_with_hash(raw_hash: [u8; 32]) -> SharesOrderedByDiff {
+        let share = SubmitSharesExtendedOwned {
+            channel_id: 0,
+            sequence_number: 0,
+            job_id: 0,
+            nonce: 0,
+            ntime: 0,
+            version: 0,
+            extranonce: B032Owned::try_from([0u8; 32]).expect("valid extranonce"),
+        };
+        SharesOrderedByDiff::new(share, sha256d::Hash::from_byte_array(raw_hash))
+    }
+
+    #[test]
+    fn test_cache_keeps_best_proof_of_work_share() {
+        // A share hash is little-endian, so byte 0 is the least significant. `poor` is a
+        // huge integer that compares small byte-wise, `best` a tiny one that compares
+        // large, so raw-byte ordering ranks them the wrong way round.
+        let mut poor = [0u8; 32];
+        poor[31] = 100;
+        let mut best = [0u8; 32];
+        best[0] = 0xff;
+
+        let mut heap = BinaryHeap::new();
+        for _ in 0..CACHED_SHARES_CAPACITY {
+            add_share_to_cache(&mut heap, share_with_hash(poor));
         }
+        add_share_to_cache(&mut heap, share_with_hash(best));
+
+        assert_eq!(heap.len(), CACHED_SHARES_CAPACITY);
+        assert!(
+            heap.iter()
+                .any(|cached| cached.share_target == Target::from_le_bytes(best)),
+            "the best share was evicted in favour of worse ones"
+        );
     }
 }
