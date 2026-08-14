@@ -21,7 +21,11 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::{TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
-        framing_sv2, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        common_messages_sv2::{
+            MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        },
+        framing_sv2,
+        handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         parsers_sv2::AnyMessageOwned,
     },
     task_manager::TaskManager,
@@ -251,6 +255,17 @@ impl Upstream {
         })?;
 
         info!(ext_type = ?header.ext_type(), msg_type = ?header.msg_type(), "Dispatching inbound handshake message");
+
+        if !matches!(
+            header.msg_type(),
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
+        ) {
+            return Err(JDCError::fallback(JDCErrorKind::UnexpectedMessage(
+                header.ext_type(),
+                header.msg_type(),
+            )));
+        }
+
         self.handle_common_message_frame_from_server(None, header, incoming.payload())
             .await?;
 
