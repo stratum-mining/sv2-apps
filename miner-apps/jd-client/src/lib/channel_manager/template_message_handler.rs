@@ -368,8 +368,16 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
         let tx_list: Vec<Transaction> = transactions_data
             .iter_bytes()
-            .map(|raw_tx| consensus::deserialize(raw_tx).expect("invalid tx"))
-            .collect();
+            .map(consensus::deserialize)
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                error!(
+                    error = ?e,
+                    template_id = msg.template_id,
+                    "Template provider sent a malformed transaction"
+                );
+                JDCError::shutdown(e)
+            })?;
 
         let wtxids_as_u256: Vec<U256Owned> = tx_list
             .iter()
