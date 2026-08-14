@@ -313,7 +313,7 @@ impl Downstream {
             .await
             .map_err(|error| JDCError::disconnect(error, self.downstream_id))?;
         let header = frame.get_header().expect("frame header must be present");
-        if header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
+        if header.ext_type() == 0 && header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
             self.handle_common_message_frame_from_client(None, header, frame.payload())
                 .await?;
             return Ok(());

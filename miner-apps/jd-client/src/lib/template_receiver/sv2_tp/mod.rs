@@ -403,10 +403,12 @@ impl Sv2Tp {
             msg_type = ?header.msg_type(),
             "Received upstream handshake response");
 
-        if !matches!(
-            header.msg_type(),
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
-        ) {
+        if header.ext_type() != 0
+            || !matches!(
+                header.msg_type(),
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
+            )
+        {
             return Err(JDCError::shutdown(JDCErrorKind::UnexpectedMessage(
                 header.ext_type(),
                 header.msg_type(),
@@ -419,3 +421,4 @@ impl Sv2Tp {
         Ok(())
     }
 }
+
