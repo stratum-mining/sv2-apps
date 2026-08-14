@@ -8,7 +8,11 @@ use stratum_apps::{
     key_utils::Secp256k1PublicKey,
     network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host_port},
     stratum_core::{
-        framing_sv2, handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
+        common_messages_sv2::{
+            MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        },
+        framing_sv2,
+        handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         parsers_sv2::TemplateDistribution,
     },
     task_manager::TaskManager,
@@ -355,6 +359,16 @@ impl Sv2Tp {
             msg_type = ?header.msg_type(),
             "Received upstream handshake response"
         );
+
+        if !matches!(
+            header.msg_type(),
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
+        ) {
+            return Err(PoolError::shutdown(PoolErrorKind::UnexpectedMessage(
+                header.ext_type(),
+                header.msg_type(),
+            )));
+        }
 
         self.handle_common_message_frame_from_server(None, header, incoming.payload())
             .await?;
