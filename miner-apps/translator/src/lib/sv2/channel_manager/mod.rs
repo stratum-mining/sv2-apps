@@ -26,7 +26,11 @@ use stratum_apps::{
         handlers_sv2::{
             HandleExtensionsFromServerOwnedAsync, HandleMiningMessagesFromServerOwnedAsync,
         },
-        mining_sv2::{OpenExtendedMiningChannelSuccessOwned, OpenMiningChannelErrorOwned},
+        mining_sv2::{
+            ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
+            ERROR_CODE_OPEN_MINING_CHANNEL_UNSUPPORTED_MIN_EXTRANONCE_SIZE,
+            OpenExtendedMiningChannelSuccessOwned, OpenMiningChannelErrorOwned,
+        },
         parsers_sv2::{AnyMessageOwned, MiningOwned, TlvField, TlvList},
     },
     sync::{SharedLock, SharedMap},
@@ -68,9 +72,6 @@ pub(crate) const AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES: u8 =
 /// If upstream grants exactly what was requested, no allocator is built
 /// and share rewriting is a no-op.
 pub(crate) const NON_AGGREGATED_TPROXY_MAX_CHANNELS: u32 = 1;
-
-const ERROR_CODE_CHANNEL_CAPACITY_EXHAUSTED: &str = "channel-capacity-exhausted";
-const ERROR_CODE_INVALID_EXTRANONCE_SIZE: &str = "invalid-extranonce-size";
 
 #[derive(Clone, Debug)]
 struct ChannelManagerIo {
@@ -910,15 +911,34 @@ impl ChannelManager {
         };
         if let Ok(new_extranonce_prefix) = allocation {
             if rollable_extranonce_size == min_extranonce_size {
-                // Find max channel ID, excluding AGGREGATED_CHANNEL_ID
-                // (u32::MAX) which would cause overflow when adding 1
+                // Prefer monotonically increasing downstream IDs while space remains. Once the
+                // highest usable ID is reached, scan from 1 for a gap left by a disconnected
+                // downstream. AGGREGATED_CHANNEL_ID is reserved for aggregate upstream messages
+                // and must never be assigned to an individual downstream.
                 let mut channel_id = 0;
                 self.extended_channels.for_each(|extended_channel_id, _| {
                     if extended_channel_id != AGGREGATED_CHANNEL_ID {
                         channel_id = channel_id.max(extended_channel_id);
                     }
                 });
-                let next_channel_id = channel_id + 1;
+                let next_channel_id = channel_id
+                    .checked_add(1)
+                    .filter(|channel_id| *channel_id != AGGREGATED_CHANNEL_ID)
+                    .or_else(|| {
+                        (1..AGGREGATED_CHANNEL_ID)
+                            .find(|channel_id| !self.extended_channels.contains_key(channel_id))
+                    });
+                let Some(next_channel_id) = next_channel_id else {
+                    // The prefix holds its allocator slot until dropped. Release it before the
+                    // asynchronous rejection path so a failed request does not consume capacity.
+                    drop(new_extranonce_prefix);
+                    return self
+                        .reject_downstream_channel_request(
+                            request_id,
+                            ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
+                        )
+                        .await;
+                };
                 let success_extranonce_prefix: Vec<u8> = new_extranonce_prefix.as_bytes().to_vec();
                 let new_downstream_extended_channel = ExtendedChannel::new(
                     next_channel_id,
@@ -1021,12 +1041,15 @@ impl ChannelManager {
             }
         }
         if rollable_extranonce_size != min_extranonce_size {
-            self.reject_downstream_channel_request(request_id, ERROR_CODE_INVALID_EXTRANONCE_SIZE)
-                .await
+            self.reject_downstream_channel_request(
+                request_id,
+                ERROR_CODE_OPEN_MINING_CHANNEL_UNSUPPORTED_MIN_EXTRANONCE_SIZE,
+            )
+            .await
         } else {
             self.reject_downstream_channel_request(
                 request_id,
-                ERROR_CODE_CHANNEL_CAPACITY_EXHAUSTED,
+                ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
             )
             .await
         }
@@ -1299,10 +1322,50 @@ mod tests {
         assert_eq!(error.request_id, 7);
         assert_eq!(
             error.error_code.as_utf8_or_hex(),
-            ERROR_CODE_CHANNEL_CAPACITY_EXHAUSTED
+            ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED
         );
         assert!(sv1_server_receiver.try_recv().is_err());
 
         drop(occupied_prefix);
+    }
+
+    #[tokio::test]
+    async fn aggregated_channel_id_allocation_does_not_use_reserved_id() {
+        let (manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        manager.extended_channels.insert(
+            AGGREGATED_CHANNEL_ID - 1,
+            ExtendedChannel::new(
+                AGGREGATED_CHANNEL_ID - 1,
+                "last-channel".to_string(),
+                ExtranoncePrefix::from_wire(vec![0xaa; 6]).unwrap(),
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                6,
+            ),
+        );
+
+        manager
+            .handle_downstream_channel_request_in_aggregated_mode(
+                7,
+                "new-miner".to_string(),
+                1.0,
+                6,
+            )
+            .await
+            .unwrap();
+
+        let success = match sv1_server_receiver.try_recv().unwrap() {
+            MiningOwned::OpenExtendedMiningChannelSuccess(success) => success,
+            other => panic!("expected open success, got {other:?}"),
+        };
+        assert_ne!(success.channel_id, AGGREGATED_CHANNEL_ID);
+        assert_eq!(success.channel_id, 1);
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&AGGREGATED_CHANNEL_ID, |channel| channel.get_channel_id()),
+            Some(42)
+        );
     }
 }
