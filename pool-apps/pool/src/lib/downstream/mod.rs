@@ -277,7 +277,7 @@ impl Downstream {
         };
         // The first ever message received on a new downstream connection
         // should always be a setup connection message.
-        if header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
+        if header.ext_type() == 0 && header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
             self.handle_common_message_frame_from_client(
                 Some(self.downstream_id),
                 header,

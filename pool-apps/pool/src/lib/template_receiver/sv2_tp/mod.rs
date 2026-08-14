@@ -360,10 +360,12 @@ impl Sv2Tp {
             "Received upstream handshake response"
         );
 
-        if !matches!(
-            header.msg_type(),
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
-        ) {
+        if header.ext_type() != 0
+            || !matches!(
+                header.msg_type(),
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
+            )
+        {
             return Err(PoolError::shutdown(PoolErrorKind::UnexpectedMessage(
                 header.ext_type(),
                 header.msg_type(),
