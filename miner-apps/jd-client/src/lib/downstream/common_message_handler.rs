@@ -41,8 +41,8 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
     //      [`SetupConnectionError`] (`unsupported-protocol`).
     //
     // 2. Protocol version validation
-    //    - The supported version (2) must fall within the client's requested
-    //      `[min_version, max_version]` range.
+    //    - The supported version (2) must fall within the client's requested `[min_version,
+    //      max_version]` range.
     //    - Otherwise, the connection is rejected with a [`SetupConnectionError`]
     //      (`protocol-version-mismatch`).
     //
