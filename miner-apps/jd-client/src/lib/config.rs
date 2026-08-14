@@ -241,13 +241,16 @@ pub enum ConfigJDCMode {
 }
 
 impl std::str::FromStr for ConfigJDCMode {
-    type Err = ();
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
+            "FULLTEMPLATE" => Ok(ConfigJDCMode::FullTemplate),
             "COINBASEONLY" => Ok(ConfigJDCMode::CoinbaseOnly),
             "SOLOMINING" => Ok(ConfigJDCMode::SoloMining),
-            _ => Ok(ConfigJDCMode::FullTemplate),
+            _ => Err(format!(
+                "unknown JDC mode `{s}`, expected FullTemplate, CoinbaseOnly, SoloMining"
+            )),
         }
     }
 }
@@ -257,7 +260,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let s: String = String::deserialize(deserializer)?;
-    Ok(ConfigJDCMode::from_str(&s).unwrap_or_default())
+    ConfigJDCMode::from_str(&s).map_err(serde::de::Error::custom)
 }
 
 /// Represents pool specific encryption keys.
@@ -344,6 +347,15 @@ mod tests {
     use super::*;
 
     const TEST_PUBKEY: &str = "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan";
+
+    #[test]
+    fn config_jdc_mode_from_str_rejects_unknown_strings() {
+        let r = ConfigJDCMode::from_str("InvalidMode");
+        assert!(
+            r.is_err(),
+            "expected Err for unknown ConfigJDCMode string, got Ok({r:?})"
+        );
+    }
 
     #[test]
     fn test_upstream_user_identity_toml_present() {
