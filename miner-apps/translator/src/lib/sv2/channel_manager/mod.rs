@@ -1019,7 +1019,7 @@ impl ChannelManager {
                     }
 
                     last_active_job.map(|mut job| {
-                        job.channel_id = AGGREGATED_CHANNEL_ID;
+                        job.channel_id = next_channel_id;
                         job
                     })
                 };
@@ -1074,10 +1074,12 @@ mod tests {
     use super::*;
     use async_channel::unbounded;
     use stratum_apps::stratum_core::{
+        binary_sv2::{Seq0255Owned, Sv2OptionOwned},
         bitcoin::Target,
         channels_sv2::extranonce_manager::ExtranoncePrefix,
         mining_sv2::{
-            OpenExtendedMiningChannelOwned, SubmitSharesExtendedOwned, UpdateChannelOwned,
+            NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned, SetNewPrevHashOwned,
+            SubmitSharesExtendedOwned, UpdateChannelOwned,
         },
     };
 
@@ -1367,5 +1369,65 @@ mod tests {
                 .with(&AGGREGATED_CHANNEL_ID, |channel| channel.get_channel_id()),
             Some(42)
         );
+    }
+
+    #[tokio::test]
+    async fn late_aggregated_join_targets_initial_job_to_new_channel_only() {
+        let (manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
+
+        manager
+            .extended_channels
+            .with_mut(&AGGREGATED_CHANNEL_ID, |aggregated_channel| {
+                aggregated_channel
+                    .on_new_extended_mining_job(NewExtendedMiningJobOwned {
+                        channel_id: 42,
+                        job_id: 1,
+                        min_ntime: Sv2OptionOwned::new(None),
+                        version: 0x20000000,
+                        version_rolling_allowed: true,
+                        merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                        coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08")
+                            .unwrap()
+                            .try_into()
+                            .unwrap(),
+                        coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000")
+                            .unwrap()
+                            .try_into()
+                            .unwrap(),
+                    })
+                    .unwrap();
+                aggregated_channel
+                    .on_set_new_prev_hash(SetNewPrevHashOwned {
+                        channel_id: 42,
+                        job_id: 1,
+                        prev_hash: vec![0; 32].try_into().unwrap(),
+                        min_ntime: 0,
+                        nbits: 0x207fffff,
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        manager
+            .handle_downstream_channel_request_in_aggregated_mode(
+                7,
+                "new-miner".to_string(),
+                1.0,
+                6,
+            )
+            .await
+            .unwrap();
+
+        let success = match sv1_server_receiver.try_recv().unwrap() {
+            MiningOwned::OpenExtendedMiningChannelSuccess(success) => success,
+            other => panic!("expected open success, got {other:?}"),
+        };
+        let job = match sv1_server_receiver.try_recv().unwrap() {
+            MiningOwned::NewExtendedMiningJob(job) => job,
+            other => panic!("expected initial job, got {other:?}"),
+        };
+
+        assert_eq!(job.channel_id, success.channel_id);
+        assert_ne!(job.channel_id, AGGREGATED_CHANNEL_ID);
     }
 }
