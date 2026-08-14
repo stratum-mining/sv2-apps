@@ -481,3 +481,44 @@ impl Upstream {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::stratum_core::{
+        common_messages_sv2::ChannelEndpointChangedOwned, parsers_sv2::CommonMessagesOwned,
+    };
+
+    #[tokio::test]
+    async fn setup_connection_rejects_non_setup_response() {
+        let (channel_manager_sender, _cm_rx) = unbounded();
+        let (_cm_tx, channel_manager_receiver) = unbounded();
+        let (upstream_sender, _upstream_outbound_receiver) = unbounded();
+        let (upstream_inbound_sender, upstream_receiver) = unbounded();
+
+        let mut upstream = Upstream {
+            upstream_io: UpstreamIo {
+                channel_manager_sender,
+                channel_manager_receiver,
+                upstream_sender,
+                upstream_receiver,
+            },
+            required_extensions: vec![],
+            address: "127.0.0.1:1234".parse().expect("valid socket address"),
+        };
+
+        let response: Sv2Frame = Message::Common(CommonMessagesOwned::ChannelEndpointChanged(
+            ChannelEndpointChangedOwned { channel_id: 0 },
+        ))
+        .try_into()
+        .expect("Failed to serialize ChannelEndpointChanged frame");
+        upstream_inbound_sender
+            .send(response)
+            .await
+            .expect("Failed to inject ChannelEndpointChanged response");
+
+        assert!(
+            upstream.setup_connection(2, 2).await.is_err(),
+            "a non-SetupConnection response must not establish the upstream session"
+        );
+    }
+}

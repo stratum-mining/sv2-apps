@@ -402,3 +402,47 @@ impl JobDeclarator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConfigJDCMode;
+    use stratum_apps::stratum_core::{
+        common_messages_sv2::ChannelEndpointChangedOwned, parsers_sv2::CommonMessagesOwned,
+    };
+
+    #[tokio::test]
+    async fn setup_connection_rejects_channel_endpoint_changed_response() {
+        let (channel_manager_sender, _jd_to_cm_receiver) = unbounded();
+        let (_cm_to_jd_sender, channel_manager_receiver) = unbounded();
+        let (jds_sender, _jds_outbound_receiver) = unbounded();
+        let (jds_inbound_sender, jds_receiver) = unbounded();
+
+        let mut jd = JobDeclarator {
+            job_declarator_io: JobDeclaratorIo {
+                channel_manager_sender,
+                channel_manager_receiver,
+                jds_sender,
+                jds_receiver,
+            },
+            socket_address: "127.0.0.1:1234".parse().expect("valid socket address"),
+            mode: JDMode::new(ConfigJDCMode::FullTemplate),
+        };
+
+        let response: Message = Message::Common(CommonMessagesOwned::ChannelEndpointChanged(
+            ChannelEndpointChangedOwned { channel_id: 0 },
+        ));
+        let frame: Sv2Frame = response
+            .try_into()
+            .expect("Failed to serialize ChannelEndpointChanged frame");
+        jds_inbound_sender
+            .send(frame)
+            .await
+            .expect("Failed to inject ChannelEndpointChanged response");
+
+        assert!(
+            jd.setup_connection().await.is_err(),
+            "setup_connection must reject responses other than SetupConnectionSuccess"
+        );
+        assert!(jd.mode.is_solo_mining());
+    }
+}
