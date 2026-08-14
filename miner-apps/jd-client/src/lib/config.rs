@@ -241,13 +241,16 @@ pub enum ConfigJDCMode {
 }
 
 impl std::str::FromStr for ConfigJDCMode {
-    type Err = ();
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
+            "FULLTEMPLATE" => Ok(ConfigJDCMode::FullTemplate),
             "COINBASEONLY" => Ok(ConfigJDCMode::CoinbaseOnly),
             "SOLOMINING" => Ok(ConfigJDCMode::SoloMining),
-            _ => Ok(ConfigJDCMode::FullTemplate),
+            _ => Err(format!(
+                "unknown JDC mode `{s}`, expected FullTemplate, CoinbaseOnly, SoloMining"
+            )),
         }
     }
 }
@@ -257,7 +260,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let s: String = String::deserialize(deserializer)?;
-    Ok(ConfigJDCMode::from_str(&s).unwrap_or_default())
+    ConfigJDCMode::from_str(&s).map_err(serde::de::Error::custom)
 }
 
 /// Represents pool specific encryption keys.
