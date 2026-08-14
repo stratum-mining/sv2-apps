@@ -403,8 +403,6 @@ impl Sv2Tp {
             msg_type = ?header.msg_type(),
             "Received upstream handshake response");
 
-        // The only valid responses to `SetupConnection` are `SetupConnectionSuccess` and
-        // `SetupConnectionError`.
         if !matches!(
             header.msg_type(),
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR

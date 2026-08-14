@@ -13,7 +13,10 @@ use stratum_apps::{
     network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
         binary_sv2::Seq064KOwned,
-        common_messages_sv2::{Protocol, SetupConnectionOwned},
+        common_messages_sv2::{
+            MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol,
+            SetupConnectionOwned,
+        },
         extensions_sv2::RequestExtensionsOwned,
         handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         parsers_sv2::AnyMessageOwned,
@@ -361,6 +364,16 @@ impl Upstream {
             error!("Expected handshake frame but no header found.");
             TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(0, 0))
         })?;
+
+        if !matches!(
+            header.msg_type(),
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
+        ) {
+            return Err(TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(
+                header.ext_type(),
+                header.msg_type(),
+            )));
+        }
 
         let payload = incoming.payload();
 

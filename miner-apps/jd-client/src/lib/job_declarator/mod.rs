@@ -311,8 +311,6 @@ impl JobDeclarator {
             msg_type = ?header.msg_type(),
             "Processing handshake response.");
 
-        // The only valid responses to `SetupConnection` are `SetupConnectionSuccess` and
-        // `SetupConnectionError`.
         if !matches!(
             header.msg_type(),
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
@@ -401,4 +399,3 @@ impl JobDeclarator {
         Ok(())
     }
 }
-
