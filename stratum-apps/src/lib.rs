@@ -58,10 +58,6 @@ pub mod network_helpers;
 #[cfg(feature = "config")]
 pub mod config_helpers;
 
-/// Custom Mutex
-///
-/// A wrapper around std::sync::Mutex
-pub mod custom_mutex;
 /// Key utilities for cryptographic operations
 ///
 /// Provides Secp256k1 key management, serialization/deserialization, and signature services.
