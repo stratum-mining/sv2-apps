@@ -1081,6 +1081,24 @@ impl Sv1Server {
                 }
             }
 
+            MiningOwned::OpenMiningChannelError(m) => {
+                warn!(
+                    request_id = m.request_id,
+                    error_code = %m.error_code.as_utf8_or_hex(),
+                    "Channel manager rejected downstream channel request"
+                );
+                let downstream_id = self.request_id_to_downstream_id.remove(&m.request_id);
+                let Some((_, downstream_id)) = downstream_id else {
+                    return Err(TproxyError::log(TproxyErrorKind::RequestIdNotFound(
+                        m.request_id,
+                    )));
+                };
+                return Err(TproxyError::disconnect(
+                    TproxyErrorKind::OpenMiningChannelError,
+                    downstream_id,
+                ));
+            }
+
             MiningOwned::NewExtendedMiningJob(m) => {
                 debug!(
                     "Received NewExtendedMiningJob for channel id: {}",
@@ -1750,7 +1768,9 @@ mod tests {
     use std::str::FromStr;
     use stratum_apps::{
         key_utils::Secp256k1PublicKey,
-        stratum_core::mining_sv2::{OpenExtendedMiningChannelSuccessOwned, SetTargetOwned},
+        stratum_core::mining_sv2::{
+            OpenExtendedMiningChannelSuccessOwned, OpenMiningChannelErrorOwned, SetTargetOwned,
+        },
     };
 
     fn create_test_config() -> TranslatorConfig {
@@ -1953,6 +1973,59 @@ mod tests {
             TproxyErrorKind::DownstreamNotPresent(7)
         ));
         assert!(server.request_id_to_downstream_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_open_request_disconnects_pending_downstream() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 7, None, 100.0, false);
+        server.request_id_to_downstream_id.insert(42, 7);
+        channel_manager_to_server_sender
+            .send(MiningOwned::OpenMiningChannelError(
+                OpenMiningChannelErrorOwned {
+                    request_id: 42,
+                    error_code: "channel-capacity-exhausted".try_into().unwrap(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let error = server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(server.request_id_to_downstream_id.is_empty());
+
+        let cancellation_token = CancellationToken::new();
+        let fallback_token = CancellationToken::new();
+        let control = server
+            .handle_error_action(
+                "rejected open request",
+                &error,
+                &cancellation_token,
+                &fallback_token,
+            )
+            .await;
+        assert!(matches!(control, LoopControl::Continue));
+        assert!(!server.downstreams.contains_key(&7));
+        assert!(
+            !server
+                .sv1_server_io
+                .sv1_server_to_downstream_sender
+                .contains_key(&7)
+        );
     }
 
     #[tokio::test]

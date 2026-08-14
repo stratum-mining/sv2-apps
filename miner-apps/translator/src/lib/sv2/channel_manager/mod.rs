@@ -26,7 +26,7 @@ use stratum_apps::{
         handlers_sv2::{
             HandleExtensionsFromServerOwnedAsync, HandleMiningMessagesFromServerOwnedAsync,
         },
-        mining_sv2::OpenExtendedMiningChannelSuccessOwned,
+        mining_sv2::{OpenExtendedMiningChannelSuccessOwned, OpenMiningChannelErrorOwned},
         parsers_sv2::{AnyMessageOwned, MiningOwned, TlvField, TlvList},
     },
     sync::{SharedLock, SharedMap},
@@ -68,6 +68,9 @@ pub(crate) const AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES: u8 =
 /// If upstream grants exactly what was requested, no allocator is built
 /// and share rewriting is a no-op.
 pub(crate) const NON_AGGREGATED_TPROXY_MAX_CHANNELS: u32 = 1;
+
+const ERROR_CODE_CHANNEL_CAPACITY_EXHAUSTED: &str = "channel-capacity-exhausted";
+const ERROR_CODE_INVALID_EXTRANONCE_SIZE: &str = "invalid-extranonce-size";
 
 #[derive(Clone, Debug)]
 struct ChannelManagerIo {
@@ -181,6 +184,32 @@ pub struct ChannelManager {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl ChannelManager {
+    async fn reject_downstream_channel_request(
+        &self,
+        request_id: RequestId,
+        error_code: &'static str,
+    ) -> TproxyResult<(), error::ChannelManager> {
+        warn!(
+            request_id,
+            error_code, "Rejecting downstream channel request"
+        );
+        self.channel_manager_io
+            .sv1_server_sender
+            .send(MiningOwned::OpenMiningChannelError(
+                OpenMiningChannelErrorOwned {
+                    request_id,
+                    error_code: error_code
+                        .try_into()
+                        .expect("static channel error code must fit in Str0255"),
+                },
+            ))
+            .await
+            .map_err(|e| {
+                error!("Failed to send open channel error to SV1Server: {e:?}");
+                TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
+            })
+    }
+
     fn expected_payout_distribution(&self) -> &Option<PayoutMode> {
         self.expected_payout_distribution
             .get()
@@ -867,15 +896,19 @@ impl ChannelManager {
         let allocation = self
             .aggregated_extranonce_allocator
             .with(|allocator| {
-                allocator.as_mut().and_then(|a| {
+                allocator.as_mut().map(|a| {
                     let rollable = a.rollable_extranonce_size() as usize;
-                    a.allocate_extended(min_extranonce_size)
-                        .ok()
-                        .map(|prefix| (prefix, rollable))
+                    (a.allocate_extended(min_extranonce_size), rollable)
                 })
             })
             .map_err(TproxyError::shutdown)?;
-        if let Some((new_extranonce_prefix, rollable_extranonce_size)) = allocation {
+        let Some((allocation, rollable_extranonce_size)) = allocation else {
+            error!("Aggregated channel is connected without an extranonce allocator");
+            return Err(TproxyError::shutdown(
+                TproxyErrorKind::OpenMiningChannelError,
+            ));
+        };
+        if let Ok(new_extranonce_prefix) = allocation {
             if rollable_extranonce_size == min_extranonce_size {
                 // Find max channel ID, excluding AGGREGATED_CHANNEL_ID
                 // (u32::MAX) which would cause overflow when adding 1
@@ -984,9 +1017,19 @@ impl ChannelManager {
                             TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
                         })?;
                 }
+                return Ok(());
             }
         }
-        Ok(())
+        if rollable_extranonce_size != min_extranonce_size {
+            self.reject_downstream_channel_request(request_id, ERROR_CODE_INVALID_EXTRANONCE_SIZE)
+                .await
+        } else {
+            self.reject_downstream_channel_request(
+                request_id,
+                ERROR_CODE_CHANNEL_CAPACITY_EXHAUSTED,
+            )
+            .await
+        }
     }
 
     /// Gets the next sequence number for a valid share and increments the counter.
@@ -1007,8 +1050,12 @@ impl ChannelManager {
 mod tests {
     use super::*;
     use async_channel::unbounded;
-    use stratum_apps::stratum_core::mining_sv2::{
-        OpenExtendedMiningChannelOwned, SubmitSharesExtendedOwned, UpdateChannelOwned,
+    use stratum_apps::stratum_core::{
+        bitcoin::Target,
+        channels_sv2::extranonce_manager::ExtranoncePrefix,
+        mining_sv2::{
+            OpenExtendedMiningChannelOwned, SubmitSharesExtendedOwned, UpdateChannelOwned,
+        },
     };
 
     fn create_test_channel_manager() -> ChannelManager {
@@ -1028,6 +1075,55 @@ mod tests {
             #[cfg(feature = "monitoring")]
             true,
         )
+    }
+
+    fn create_connected_aggregated_channel_manager() -> (ChannelManager, Receiver<MiningOwned>) {
+        let (upstream_sender, _upstream_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+
+        let manager = ChannelManager::new(
+            upstream_sender,
+            upstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            vec![],
+            vec![],
+            TproxyMode::Aggregated,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+
+        manager.extended_channels.insert(
+            AGGREGATED_CHANNEL_ID,
+            ExtendedChannel::new(
+                42,
+                "aggregated".to_string(),
+                ExtranoncePrefix::from_wire(vec![0; 4]).unwrap(),
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                8,
+            ),
+        );
+        manager
+            .aggregated_extranonce_allocator
+            .set(Some(
+                ExtranonceAllocator::from_upstream_prefix(
+                    vec![0; 4],
+                    vec![],
+                    12,
+                    AGGREGATED_TPROXY_MAX_CHANNELS,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        manager
+            .aggregated_channel_state
+            .set(AggregatedState::Connected);
+
+        (manager, sv1_server_receiver_for_test)
     }
 
     #[tokio::test]
@@ -1173,5 +1269,40 @@ mod tests {
         let has_pending = manager.pending_downstream_channels.contains_key(&1);
 
         assert!(has_pending);
+    }
+
+    #[tokio::test]
+    async fn aggregated_channel_capacity_exhaustion_rejects_request() {
+        let (manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        let mut allocator =
+            ExtranonceAllocator::from_upstream_prefix(vec![0; 4], vec![0; 1], 12, 1).unwrap();
+        let occupied_prefix = allocator.allocate_extended(6).unwrap();
+        manager
+            .aggregated_extranonce_allocator
+            .set(Some(allocator))
+            .unwrap();
+
+        manager
+            .handle_downstream_channel_request_in_aggregated_mode(
+                7,
+                "rejected-miner".to_string(),
+                1.0,
+                6,
+            )
+            .await
+            .unwrap();
+
+        let error = match sv1_server_receiver.try_recv().unwrap() {
+            MiningOwned::OpenMiningChannelError(error) => error,
+            other => panic!("expected open error, got {other:?}"),
+        };
+        assert_eq!(error.request_id, 7);
+        assert_eq!(
+            error.error_code.as_utf8_or_hex(),
+            ERROR_CODE_CHANNEL_CAPACITY_EXHAUSTED
+        );
+        assert!(sv1_server_receiver.try_recv().is_err());
+
+        drop(occupied_prefix);
     }
 }
