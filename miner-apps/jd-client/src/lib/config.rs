@@ -349,6 +349,15 @@ mod tests {
     const TEST_PUBKEY: &str = "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan";
 
     #[test]
+    fn config_jdc_mode_from_str_rejects_unknown_strings() {
+        let r = ConfigJDCMode::from_str("InvalidMode");
+        assert!(
+            r.is_err(),
+            "expected Err for unknown ConfigJDCMode string, got Ok({r:?})"
+        );
+    }
+
+    #[test]
     fn test_upstream_user_identity_toml_present() {
         let toml = format!(
             r#"
