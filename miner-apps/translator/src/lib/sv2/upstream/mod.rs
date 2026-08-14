@@ -365,10 +365,12 @@ impl Upstream {
             TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(0, 0))
         })?;
 
-        if !matches!(
-            header.msg_type(),
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
-        ) {
+        if header.ext_type() != 0
+            || !matches!(
+                header.msg_type(),
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS | MESSAGE_TYPE_SETUP_CONNECTION_ERROR
+            )
+        {
             return Err(TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(
                 header.ext_type(),
                 header.msg_type(),
