@@ -975,6 +975,15 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         };
                         messages.push((downstream.downstream_id, MiningOwned::SubmitSharesSuccess(success)).into());
                     }
+                    Err(ShareValidationError::SeenSharesBudgetExhausted) => {
+                        // share rate far outran the channel's configured expectation, filling the
+                        // per-tip dedup cache; no error code to report, so close the downstream.
+                        warn!("closing downstream {}: channel {} exhausted its accepted-share dedup budget 🛑", downstream_id, channel_id);
+                        return Err(JDCError::disconnect(
+                            ShareValidationError::SeenSharesBudgetExhausted,
+                            downstream_id,
+                        ));
+                    }
                     Err(err) => {
                         let code = match err {
                             ShareValidationError::Invalid(code) => code,
@@ -1260,6 +1269,15 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         };
                         is_downstream_share_valid = true;
                         messages.push((downstream.downstream_id, MiningOwned::SubmitSharesSuccess(success)).into());
+                    }
+                    Err(ShareValidationError::SeenSharesBudgetExhausted) => {
+                        // share rate far outran the channel's configured expectation, filling the
+                        // per-tip dedup cache; no error code to report, so close the downstream.
+                        warn!("closing downstream {}: channel {} exhausted its accepted-share dedup budget 🛑", downstream_id, channel_id);
+                        return Err(JDCError::disconnect(
+                            ShareValidationError::SeenSharesBudgetExhausted,
+                            downstream_id,
+                        ));
                     }
                     Err(err) => {
                         let code = match err {

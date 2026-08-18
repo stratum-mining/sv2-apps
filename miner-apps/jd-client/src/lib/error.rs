@@ -24,9 +24,12 @@ use stratum_apps::{
         channels_sv2::{
             client::error::ExtendedChannelError as ExtendedChannelClientError,
             extranonce_manager::ExtranonceAllocatorError,
-            server::error::{
-                ExtendedChannelError as ExtendedChannelServerError, GroupChannelError,
-                StandardChannelError,
+            server::{
+                error::{
+                    ExtendedChannelError as ExtendedChannelServerError, GroupChannelError,
+                    StandardChannelError,
+                },
+                share_accounting::ShareValidationError,
             },
         },
         framing_sv2,
@@ -161,6 +164,7 @@ pub enum ChannelSv2Error {
     ExtranonceError(ExtranonceAllocatorError),
     StandardChannelServerSide(StandardChannelError),
     GroupChannelServerSide(GroupChannelError),
+    ShareValidationError(ShareValidationError),
 }
 
 #[derive(Debug)]
@@ -540,6 +544,12 @@ impl From<StandardChannelError> for JDCErrorKind {
 impl From<ExtranonceAllocatorError> for JDCErrorKind {
     fn from(value: ExtranonceAllocatorError) -> Self {
         JDCErrorKind::ChannelSv2(ChannelSv2Error::ExtranonceError(value))
+    }
+}
+
+impl From<ShareValidationError> for JDCErrorKind {
+    fn from(value: ShareValidationError) -> Self {
+        JDCErrorKind::ChannelSv2(ChannelSv2Error::ShareValidationError(value))
     }
 }
 
