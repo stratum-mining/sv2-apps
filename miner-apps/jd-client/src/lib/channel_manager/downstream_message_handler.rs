@@ -17,6 +17,7 @@ use stratum_apps::{
         bitcoin::{Amount, Target, hashes::sha256d},
         channels_sv2::{
             Vardiff, VardiffState, client,
+            extranonce_manager::ExtranonceAllocatorError,
             outputs::deserialize_outputs,
             server::{
                 error::{ExtendedChannelError, StandardChannelError},
@@ -47,6 +48,20 @@ use crate::{
     error::{self, JDCError, JDCErrorKind},
     utils::{add_share_to_cache, create_close_channel_msg},
 };
+
+fn extranonce_allocation_error_code(
+    error: ExtranonceAllocatorError,
+) -> Result<&'static str, ExtranonceAllocatorError> {
+    match error {
+        ExtranonceAllocatorError::CapacityExhausted => {
+            Ok(ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED)
+        }
+        ExtranonceAllocatorError::InvalidRollableSize => {
+            Ok(ERROR_CODE_OPEN_MINING_CHANNEL_MIN_EXTRANONCE_SIZE_TOO_LARGE)
+        }
+        error => Err(error),
+    }
+}
 
 /// `RouteMessageTo` is an abstraction used to route protocol messages
 /// to the appropriate subsystem connected to the JDC.
@@ -291,7 +306,9 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 Ok(prefix) => prefix,
                 Err(e) => {
                     error!(?e, "Failed to get extranonce prefix");
-                    return Err(JDCError::shutdown(e));
+                    let error_code =
+                        extranonce_allocation_error_code(e).map_err(JDCError::shutdown)?;
+                    return Ok(vec![(downstream_id, build_error(error_code)).into()]);
                 }
             };
 
@@ -515,15 +532,9 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     Ok(prefix) => Some(prefix),
                     Err(e) => {
                         error!(?e, "Extranonce prefix error");
-                        messages.push(
-                            (
-                                downstream_id,
-                                build_error(
-                                    ERROR_CODE_OPEN_MINING_CHANNEL_MIN_EXTRANONCE_SIZE_TOO_LARGE,
-                                ),
-                            )
-                                .into(),
-                        );
+                        let error_code =
+                            extranonce_allocation_error_code(e).map_err(JDCError::shutdown)?;
+                        messages.push((downstream_id, build_error(error_code)).into());
                         None
                     }
                 };
@@ -1446,5 +1457,37 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             0,
             MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::stratum_core::channels_sv2::extranonce_manager::ExtranonceAllocator;
+
+    #[test]
+    fn capacity_exhaustion_has_specific_error_code() {
+        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1).unwrap();
+        let _occupied_prefix = allocator.allocate_standard().unwrap();
+
+        let error = allocator.allocate_standard().unwrap_err();
+
+        assert_eq!(
+            extranonce_allocation_error_code(error).unwrap(),
+            ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED
+        );
+    }
+
+    #[test]
+    fn invalid_rollable_size_keeps_specific_error_code() {
+        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1).unwrap();
+        let invalid_size = allocator.rollable_extranonce_size() as usize + 1;
+
+        let error = allocator.allocate_extended(invalid_size).unwrap_err();
+
+        assert_eq!(
+            extranonce_allocation_error_code(error).unwrap(),
+            ERROR_CODE_OPEN_MINING_CHANNEL_MIN_EXTRANONCE_SIZE_TOO_LARGE
+        );
     }
 }
