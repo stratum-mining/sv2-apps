@@ -5,6 +5,9 @@
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
 //! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
 //!   intentionally mismatched.
+//! - `DeclareMiningJob` does not retain client-supplied transactions when validation fails.
+//! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without
+//!   tearing down the IPC connection.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -28,11 +31,14 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, Wtxid,
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, Wtxid,
             absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
             transaction::Version as TxVersion,
         },
-        job_declaration_sv2::ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        job_declaration_sv2::{
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        },
     },
 };
 
@@ -98,11 +104,16 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         .expect("JDP readiness channel dropped unexpectedly");
 
     // Execute all JDP paths against the same live runtime to keep this test fully end-to-end.
+    // The malformed-coinbase path runs first on purpose: every scenario after it doubles as
+    // proof that rejecting it did not tear down the IPC connection.
+    assert_jdp_invalid_coinbase_input_scenario(&incoming_sender).await;
+
     let missing_wtxid = Wtxid::from_byte_array([0x42; 32]);
     assert_jdp_missing_transactions_scenario(&incoming_sender, coinbase_tx.clone(), missing_wtxid)
         .await;
-    assert_jdp_success_scenario(&incoming_sender, coinbase_tx).await;
+    assert_jdp_success_scenario(&incoming_sender, coinbase_tx.clone()).await;
     assert_jdp_stale_chain_tip_scenario(&incoming_sender, next_height).await;
+    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -180,6 +191,76 @@ async fn assert_jdp_stale_chain_tip_scenario(
     }
 }
 
+/// A coinbase that does not carry exactly one input must be rejected before block assembly.
+///
+/// A zero-input coinbase re-serializes into bytes Bitcoin Core's deserializer reads as a SegWit
+/// marker, so letting it reach `checkBlock` yields a capnp remote exception, which the handler
+/// answers with `internal-error` and follows by cancelling the whole IPC connection.
+async fn assert_jdp_invalid_coinbase_input_scenario(incoming_sender: &Sender<JdRequest>) {
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        build_zero_input_coinbase_tx(),
+        vec![],
+        vec![],
+        "jdp/invalid-coinbase-tx-input",
+    )
+    .await;
+
+    match response {
+        JdResponse::Error { error_code, .. } => {
+            assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+                "expected invalid-coinbase-tx-input for a zero-input declared coinbase"
+            );
+        }
+        response => panic!("expected Error(invalid-coinbase-tx-input), got: {response:?}"),
+    }
+}
+
+/// A declaration rejected by `checkBlock` must not leave its client-supplied transactions behind
+/// in the mempool mirror.
+async fn assert_jdp_rejected_declaration_does_not_retain_txs(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let invalid_tx = build_invalid_declared_tx();
+    let invalid_wtxid = invalid_tx.compute_wtxid();
+
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx.clone(),
+        vec![invalid_wtxid],
+        vec![invalid_tx],
+        "jdp/rejected-declaration",
+    )
+    .await;
+
+    assert!(
+        matches!(response, JdResponse::Error { .. }),
+        "expected Error for a declaration carrying an invalid transaction, got: {response:?}"
+    );
+
+    // Same wtxid, this time supplying no transactions: the rejected transaction must not be
+    // served from the mempool mirror.
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx,
+        vec![invalid_wtxid],
+        vec![],
+        "jdp/rejected-declaration-retry",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![invalid_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions (rejected tx must not be retained), got: {response:?}"
+        ),
+    }
+}
+
 async fn send_declare_mining_job_and_recv_response(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
@@ -224,6 +305,38 @@ fn coinbase_script_sig_for_height(height: u32) -> ScriptBuf {
     script.push(encoded_height.len() as u8);
     script.extend_from_slice(&encoded_height);
     ScriptBuf::from_bytes(script)
+}
+
+fn build_zero_input_coinbase_tx() -> Transaction {
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    }
+}
+
+fn build_invalid_declared_tx() -> Transaction {
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            // deliberately not `OutPoint::null()`, which would make Bitcoin Core treat this as a
+            // second coinbase instead of exercising the empty-outputs rejection
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x11; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        // no outputs, so Bitcoin Core's `checkBlock` rejects any block carrying this transaction
+        output: vec![],
+    }
 }
 
 fn build_valid_coinbase_tx(next_height: u32) -> Transaction {
