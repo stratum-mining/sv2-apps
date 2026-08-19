@@ -76,6 +76,14 @@ use tracing::{debug, error, info, trace, warn};
 
 const SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING: f64 = 1.0;
 
+// A miner can pipeline mining.configure, mining.subscribe, mining.extranonce.subscribe,
+// mining.suggest_difficulty, and mining.authorize while its SV2 channel is opening; some BIP 310
+// extensions also permit mining.configure to be repeated. Eight messages leave compatibility
+// headroom for that setup traffic while preventing an unauthenticated downstream from growing this
+// per-connection buffer without bound. The SV1 network reader separately limits each line to 64
+// KiB.
+const MAX_QUEUED_SV1_HANDSHAKE_MESSAGES: usize = 8;
+
 #[derive(Clone)]
 struct Sv1ServerIo {
     sv1_server_to_downstream_sender: SharedMap<DownstreamId, Sender<json_rpc::Message>>,
@@ -685,16 +693,25 @@ impl Sv1Server {
                     downstream_id
                 );
             }
-            debug!("Down: Queuing Sv1 message until channel is established");
             self.with_registered_downstream(downstream_id, |downstream| {
                 downstream
                     .downstream_data
                     .with(|data| {
-                        data.queued_sv1_handshake_messages
-                            .push(downstream_message.clone())
+                        if data.queued_sv1_handshake_messages.len()
+                            >= MAX_QUEUED_SV1_HANDSHAKE_MESSAGES
+                        {
+                            return Err(TproxyError::disconnect(
+                                TproxyErrorKind::Sv1HandshakeMessageQueueFull,
+                                downstream_id,
+                            ));
+                        }
+
+                        data.queued_sv1_handshake_messages.push(downstream_message);
+                        Ok(())
                     })
-                    .map_err(TproxyError::shutdown)
+                    .map_err(TproxyError::shutdown)?
             })?;
+            debug!("Down: Queuing Sv1 message until channel is established");
             return Ok(());
         }
 
@@ -1972,6 +1989,81 @@ mod tests {
         let error = server.handle_open_channel_request(7).await.unwrap_err();
 
         assert!(matches!(error.action, Action::Disconnect(7)));
+    }
+
+    #[tokio::test]
+    async fn pre_channel_sv1_message_queue_disconnects_at_limit() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (_channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        server.set_user_identity("test_user".to_string());
+        let downstream_id = 7;
+        let _downstream_receiver =
+            register_test_downstream(&server, downstream_id, None, 100.0, false);
+        let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
+            id: 1,
+            method: "mining.subscribe".to_string(),
+            params: serde_json::Value::Null,
+        });
+
+        for _ in 0..MAX_QUEUED_SV1_HANDSHAKE_MESSAGES {
+            server
+                .sv1_server_io
+                .downstream_to_sv1_server_sender
+                .send((downstream_id, message.clone()))
+                .await
+                .unwrap();
+            server.handle_downstream_message().await.unwrap();
+        }
+
+        server
+            .sv1_server_io
+            .downstream_to_sv1_server_sender
+            .send((downstream_id, message))
+            .await
+            .unwrap();
+        let error = server.handle_downstream_message().await.unwrap_err();
+
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::Sv1HandshakeMessageQueueFull
+        ));
+        assert_eq!(
+            server
+                .with_registered_downstream(downstream_id, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| data.queued_sv1_handshake_messages.len())
+                        .map_err(TproxyError::shutdown)
+                })
+                .unwrap(),
+            MAX_QUEUED_SV1_HANDSHAKE_MESSAGES
+        );
+
+        let cancellation_token = CancellationToken::new();
+        let fallback_token = CancellationToken::new();
+        assert_eq!(
+            server
+                .handle_error_action(
+                    "pre_channel_sv1_message_queue_disconnects_at_limit",
+                    &error,
+                    &cancellation_token,
+                    &fallback_token,
+                )
+                .await,
+            LoopControl::Continue
+        );
+        assert!(!server.downstreams.contains_key(&downstream_id));
     }
 
     #[tokio::test]

@@ -183,6 +183,8 @@ pub enum TproxyErrorKind {
     ChannelErrorReceiver(async_channel::RecvError),
     /// Channel sender error
     ChannelErrorSender,
+    /// A downstream sent too many SV1 messages while waiting for its SV2 channel to open.
+    Sv1HandshakeMessageQueueFull,
     /// Operation timed out
     Timeout,
     /// Error converting SetDifficulty to Message
@@ -253,6 +255,7 @@ impl fmt::Display for TproxyErrorKind {
             PoisonLock => write!(f, "Poison Lock error"),
             ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
+            Sv1HandshakeMessageQueueFull => write!(f, "SV1 handshake message queue is full"),
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
