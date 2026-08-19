@@ -301,7 +301,7 @@ impl Sv1Server {
                 }
             }
         } else {
-            // Non-aggregated: send to the single downstream that owns this channel_id.
+            // A concrete channel ID targets the single downstream that owns it.
             let downstream_id = match self
                 .channel_id_to_downstream_id
                 .with(&channel_id, |downstream_id| *downstream_id)
@@ -1081,15 +1081,38 @@ impl Sv1Server {
                 }
             }
 
+            MiningOwned::OpenMiningChannelError(m) => {
+                warn!(
+                    request_id = m.request_id,
+                    error_code = %m.error_code.as_utf8_or_hex(),
+                    "Channel manager rejected downstream channel request"
+                );
+                let downstream_id = self.request_id_to_downstream_id.remove(&m.request_id);
+                let Some((_, downstream_id)) = downstream_id else {
+                    return Err(TproxyError::log(TproxyErrorKind::RequestIdNotFound(
+                        m.request_id,
+                    )));
+                };
+                return Err(TproxyError::disconnect(
+                    TproxyErrorKind::OpenMiningChannelError,
+                    downstream_id,
+                ));
+            }
+
             MiningOwned::NewExtendedMiningJob(m) => {
                 debug!(
                     "Received NewExtendedMiningJob for channel id: {}",
                     m.channel_id
                 );
+                let job_channel_id = if self.mode.is_aggregated() {
+                    AGGREGATED_CHANNEL_ID
+                } else {
+                    m.channel_id
+                };
                 // Clone the prevhash immediately so shared map access is not held across .await.
                 if let Some(prevhash) = self
                     .prevhashes
-                    .with(&m.channel_id, |prevhash| prevhash.clone())
+                    .with(&job_channel_id, |prevhash| prevhash.clone())
                 {
                     let clean_jobs = m.job_id == prevhash.job_id;
                     let notify = build_sv1_notify_from_sv2(prevhash, m.clone(), clean_jobs)
@@ -1097,12 +1120,6 @@ impl Sv1Server {
 
                     // Update job storage based on the configured mode
                     let notify_parsed = notify.clone();
-                    let job_channel_id = if self.mode.is_non_aggregated() {
-                        m.channel_id
-                    } else {
-                        AGGREGATED_CHANNEL_ID
-                    };
-
                     self.valid_sv1_jobs
                         .with_mut_or_default(job_channel_id, |channel_jobs| {
                             if clean_jobs {
@@ -1113,7 +1130,10 @@ impl Sv1Server {
 
                     let notify_msg: stratum_apps::stratum_core::sv1_api::json_rpc::Message =
                         notify.into();
-                    self.send_to_channel(job_channel_id, notify_msg).await;
+                    // Normal aggregated jobs carry AGGREGATED_CHANNEL_ID and are broadcast. A
+                    // bootstrap job for a late joiner carries that downstream's channel ID and
+                    // must only be delivered to that miner.
+                    self.send_to_channel(m.channel_id, notify_msg).await;
                 }
             }
 
@@ -1750,7 +1770,14 @@ mod tests {
     use std::str::FromStr;
     use stratum_apps::{
         key_utils::Secp256k1PublicKey,
-        stratum_core::mining_sv2::{OpenExtendedMiningChannelSuccessOwned, SetTargetOwned},
+        stratum_core::{
+            binary_sv2::{Seq0255Owned, Sv2OptionOwned},
+            mining_sv2::{
+                ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
+                NewExtendedMiningJobOwned, OpenExtendedMiningChannelSuccessOwned,
+                OpenMiningChannelErrorOwned, SetNewPrevHashOwned, SetTargetOwned,
+            },
+        },
     };
 
     fn create_test_config() -> TranslatorConfig {
@@ -1956,6 +1983,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_open_request_disconnects_pending_downstream() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 7, None, 100.0, false);
+        server.request_id_to_downstream_id.insert(42, 7);
+        channel_manager_to_server_sender
+            .send(MiningOwned::OpenMiningChannelError(
+                OpenMiningChannelErrorOwned {
+                    request_id: 42,
+                    error_code: ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED
+                        .try_into()
+                        .unwrap(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let error = server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap_err();
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(server.request_id_to_downstream_id.is_empty());
+
+        let cancellation_token = CancellationToken::new();
+        let fallback_token = CancellationToken::new();
+        let control = server
+            .handle_error_action(
+                "rejected open request",
+                &error,
+                &cancellation_token,
+                &fallback_token,
+            )
+            .await;
+        assert!(matches!(control, LoopControl::Continue));
+        assert!(!server.downstreams.contains_key(&7));
+        assert!(
+            !server
+                .sv1_server_io
+                .sv1_server_to_downstream_sender
+                .contains_key(&7)
+        );
+    }
+
+    #[tokio::test]
     async fn late_open_success_closes_channel_for_disconnected_downstream() {
         let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
         let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
@@ -2103,6 +2185,78 @@ mod tests {
             panic!("expected UpdateChannel");
         };
         assert_eq!(update.nominal_hash_rate, 200.0);
+    }
+
+    #[tokio::test]
+    async fn aggregated_targeted_job_is_not_broadcast() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        let (first_downstream_sender, first_downstream_receiver) = unbounded();
+        let (second_downstream_sender, second_downstream_receiver) = unbounded();
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(1, first_downstream_sender);
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(2, second_downstream_sender);
+        server.channel_id_to_downstream_id.insert(7, 1);
+        server.channel_id_to_downstream_id.insert(8, 2);
+
+        channel_manager_to_server_sender
+            .send(MiningOwned::SetNewPrevHash(SetNewPrevHashOwned {
+                channel_id: AGGREGATED_CHANNEL_ID,
+                job_id: 1,
+                prev_hash: vec![0; 32].try_into().unwrap(),
+                min_ntime: 0,
+                nbits: 0x207fffff,
+            }))
+            .await
+            .unwrap();
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        channel_manager_to_server_sender
+            .send(MiningOwned::NewExtendedMiningJob(
+                NewExtendedMiningJobOwned {
+                    channel_id: 7,
+                    job_id: 1,
+                    min_ntime: Sv2OptionOwned::new(None),
+                    version: 0x20000000,
+                    version_rolling_allowed: true,
+                    merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                    coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                    coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                },
+            ))
+            .await
+            .unwrap();
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(first_downstream_receiver.try_recv().is_ok());
+        assert!(second_downstream_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
