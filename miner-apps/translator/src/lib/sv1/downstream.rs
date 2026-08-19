@@ -5,14 +5,7 @@ use crate::{
 use async_channel::{Receiver, Sender};
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
-use std::{
-    future::Future,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
-};
+use std::{future::Future, sync::Arc, time::Instant};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
@@ -63,6 +56,16 @@ impl DownstreamIo {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Sv1HandshakeState {
+    /// The miner has not completed both `mining.subscribe` and `mining.authorize`.
+    Pending,
+    /// Cached setup notifications are being delivered in protocol order.
+    Completing,
+    /// Setup notifications were delivered and normal notification forwarding is enabled.
+    Complete,
+}
+
 #[derive(Debug)]
 pub struct DownstreamData {
     pub channel_id: Option<ChannelId>,
@@ -81,6 +84,7 @@ pub struct DownstreamData {
     pub sv1_worker_name: String,
     pub cached_set_difficulty: Option<json_rpc::Message>,
     pub cached_notify: Option<json_rpc::Message>,
+    pub(super) sv1_handshake_state: Sv1HandshakeState,
     // Next advertised SV1 target, applied when the corresponding
     // mining.set_difficulty is sent with a new mining.notify.
     pub pending_target: Option<Target>,
@@ -120,6 +124,7 @@ impl DownstreamData {
             sv1_worker_name: String::new(),
             cached_set_difficulty: None,
             cached_notify: None,
+            sv1_handshake_state: Sv1HandshakeState::Pending,
             pending_target: None,
             pending_hashrate: None,
             stable_hashrate: false,
@@ -171,8 +176,6 @@ pub struct Downstream {
     pub downstream_id: DownstreamId,
     pub downstream_data: SharedLock<DownstreamData>,
     pub downstream_io: DownstreamIo,
-    // Flag to track if SV1 handshake is complete (subscribe + authorize)
-    pub sv1_handshake_complete: Arc<AtomicBool>,
     /// Per-connection cancellation token (child of the global token).
     /// Cancelled when this downstream's task loop exits, causing
     /// the associated SV1 I/O task to shut down.
@@ -274,7 +277,6 @@ impl Downstream {
             downstream_id,
             downstream_data,
             downstream_io: downstream_channel_io,
-            sv1_handshake_complete: Arc::new(AtomicBool::new(false)),
             downstream_cancellation_token,
         }
     }
@@ -387,102 +389,75 @@ impl Downstream {
         match self.downstream_io.sv1_server_receiver.recv().await {
             Ok(message) => {
                 let downstream_id = self.downstream_id;
-                let handshake_complete = self.sv1_handshake_complete.load(Ordering::SeqCst);
 
-                // Handle messages based on message type and handshake state
                 if let Message::Notification(notification) = &message {
-                    // For notifications (mining.set_difficulty, mining.notify), only send if
-                    // handshake is complete
-                    if handshake_complete {
-                        match notification.method.as_str() {
-                            "mining.set_difficulty" => {
-                                // Cache the Sv1 set_difficulty message to be sent before the next
-                                // notify
-                                debug!(
-                                    "Down: Caching mining.set_difficulty to send before next mining.notify"
-                                );
-                                self.downstream_data
-                                    .with(|d| d.cached_set_difficulty = Some(message))
-                                    .map_err(TproxyError::shutdown)?;
-                                return Ok(());
-                            }
-                            "mining.notify" => {
-                                let (pending_set_difficulty, notify_opt) = self
-                                    .downstream_data
-                                    .with(|d| {
-                                        let cached_set_difficulty = d.cached_set_difficulty.take();
-
-                                        // Prepare the notify message and update state
-                                        let notify_result = server_to_client::Notify::try_from(
+                    match notification.method.as_str() {
+                        "mining.set_difficulty" => {
+                            // Difficulty changes are always paired with the next notify. Keeping
+                            // the handshake state and cache under the same lock prevents handshake
+                            // completion from draining a newly arrived difficulty by itself.
+                            let handshake_state = self
+                                .downstream_data
+                                .with(|data| {
+                                    data.cached_set_difficulty = Some(message);
+                                    data.sv1_handshake_state
+                                })
+                                .map_err(TproxyError::shutdown)?;
+                            debug!(
+                                ?handshake_state,
+                                "Down: Caching mining.set_difficulty to send before next mining.notify"
+                            );
+                            return Ok(());
+                        }
+                        "mining.notify" => {
+                            let messages_to_send = self
+                                .downstream_data
+                                .with(|data| {
+                                    if data.sv1_handshake_state != Sv1HandshakeState::Complete {
+                                        data.cached_notify = Some(message.clone());
+                                        let notify = server_to_client::Notify::try_from(
                                             notification.clone(),
-                                        );
-                                        if let Ok(mut notify) = notify_result {
-                                            if cached_set_difficulty.is_some() {
-                                                notify.clean_jobs = true;
-                                            }
-                                            d.last_job_version_field = Some(notify.version.0);
+                                        )
+                                        .expect("this must be a mining.notify");
+                                        data.last_job_version_field = Some(notify.version.0);
+                                        return None;
+                                    }
 
-                                            // Update target and hashrate if we're sending
-                                            // set_difficulty
-                                            if cached_set_difficulty.is_some() {
-                                                if let Some(new_target) = d.pending_target.take() {
-                                                    d.target = new_target;
-                                                }
-                                                if let Some(new_hashrate) =
-                                                    d.pending_hashrate.take()
-                                                {
-                                                    d.hashrate = Some(new_hashrate);
-                                                }
-                                            }
-                                            // Update last job received time for keepalive tracking
-                                            d.last_job_received_time = Some(Instant::now());
-                                            (cached_set_difficulty, Some(notify))
-                                        } else {
-                                            (cached_set_difficulty, None)
+                                    let cached_set_difficulty = data.cached_set_difficulty.take();
+                                    let mut notify =
+                                        server_to_client::Notify::try_from(notification.clone())
+                                            .expect("this must be a mining.notify");
+                                    if cached_set_difficulty.is_some() {
+                                        notify.clean_jobs = true;
+                                        if let Some(new_target) = data.pending_target.take() {
+                                            data.target = new_target;
                                         }
-                                    })
-                                    .map_err(TproxyError::shutdown)?;
+                                        if let Some(new_hashrate) = data.pending_hashrate.take() {
+                                            data.hashrate = Some(new_hashrate);
+                                        }
+                                    }
+                                    data.last_job_version_field = Some(notify.version.0);
+                                    data.last_job_received_time = Some(Instant::now());
+                                    Some((cached_set_difficulty, Message::from(notify)))
+                                })
+                                .map_err(TproxyError::shutdown)?;
 
-                                if let Some(set_difficulty_msg) = &pending_set_difficulty {
-                                    debug!(
-                                        "Down: Sending pending mining.set_difficulty before mining.notify"
-                                    );
-                                    self.downstream_io
-                                        .downstream_sv1_sender
-                                        .send(set_difficulty_msg.clone())
-                                        .await
-                                        .map_err(|e| {
-                                            error!(
-                                                "Down: Failed to send mining.set_difficulty to downstream: {:?}",
-                                                e
-                                            );
-                                            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
-                                        })?;
-                                }
-
-                                if let Some(notify) = notify_opt {
-                                    debug!("Down: Sending mining.notify");
-                                    self.downstream_io
-                                        .downstream_sv1_sender
-                                        .send(notify.into())
-                                        .await
-                                        .map_err(|e| {
-                                            error!("Down: Failed to send mining.notify to downstream: {:?}", e);
-                                            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
-                                        })?;
-                                }
+                            let Some((pending_set_difficulty, notify)) = messages_to_send else {
+                                debug!("Down: SV1 handshake not complete, caching mining.notify");
                                 return Ok(());
-                            }
-                            _ => {
-                                // Other notifications - forward if handshake complete
+                            };
+
+                            if let Some(set_difficulty) = pending_set_difficulty {
+                                debug!(
+                                    "Down: Sending pending mining.set_difficulty before mining.notify"
+                                );
                                 self.downstream_io
                                     .downstream_sv1_sender
-                                    .send(message.clone())
+                                    .send(set_difficulty)
                                     .await
-                                    .map_err(|e| {
+                                    .map_err(|error| {
                                         error!(
-                                            "Down: Failed to send notification to downstream: {:?}",
-                                            e
+                                            "Down: Failed to send mining.set_difficulty to downstream: {error:?}"
                                         );
                                         TproxyError::disconnect(
                                             TproxyErrorKind::ChannelErrorSender,
@@ -490,41 +465,54 @@ impl Downstream {
                                         )
                                     })?;
                             }
+
+                            debug!("Down: Sending mining.notify");
+                            self.downstream_io
+                                .downstream_sv1_sender
+                                .send(notify)
+                                .await
+                                .map_err(|error| {
+                                    error!(
+                                        "Down: Failed to send mining.notify to downstream: {error:?}"
+                                    );
+                                    TproxyError::disconnect(
+                                        TproxyErrorKind::ChannelErrorSender,
+                                        downstream_id,
+                                    )
+                                })?;
+                            return Ok(());
                         }
-                    } else {
-                        // Handshake not complete - cache mining notifications but skip others
-                        match notification.method.as_str() {
-                            "mining.set_difficulty" => {
-                                debug!(
-                                    "Down: SV1 handshake not complete, caching mining.set_difficulty"
-                                );
-                                self.downstream_data
-                                    .with(|d| d.cached_set_difficulty = Some(message))
-                                    .map_err(TproxyError::shutdown)?;
-                            }
-                            "mining.notify" => {
-                                debug!("Down: SV1 handshake not complete, caching mining.notify");
-                                self.downstream_data
-                                    .with(|d| {
-                                        d.cached_notify = Some(message.clone());
-                                        let notify = server_to_client::Notify::try_from(
-                                            notification.clone(),
-                                        )
-                                        .expect("this must be a mining.notify");
-                                        d.last_job_version_field = Some(notify.version.0);
-                                    })
-                                    .map_err(TproxyError::shutdown)?;
-                            }
-                            _ => {
+                        _ => {
+                            let handshake_complete = self
+                                .downstream_data
+                                .with(|data| {
+                                    data.sv1_handshake_state == Sv1HandshakeState::Complete
+                                })
+                                .map_err(TproxyError::shutdown)?;
+                            if !handshake_complete {
                                 debug!(
                                     "Down: SV1 handshake not complete, skipping other notification"
                                 );
+                                return Ok(());
                             }
+
+                            self.downstream_io
+                                .downstream_sv1_sender
+                                .send(message)
+                                .await
+                                .map_err(|error| {
+                                    error!(
+                                        "Down: Failed to send notification to downstream: {error:?}"
+                                    );
+                                    TproxyError::disconnect(
+                                        TproxyErrorKind::ChannelErrorSender,
+                                        downstream_id,
+                                    )
+                                })?;
                         }
                     }
                 } else {
-                    // Handshake not complete - skip non-notification messages.
-                    debug!("Down: SV1 handshake not complete, skipping non-notification message");
+                    debug!("Down: Skipping non-notification message from SV1 server");
                 }
             }
             Err(e) => {
@@ -578,69 +566,333 @@ impl Downstream {
     pub(super) async fn handle_sv1_handshake_completion(
         &self,
     ) -> TproxyResult<(), error::Downstream> {
-        let (cached_set_difficulty, cached_notify, downstream_id) = self
+        let cached_messages = self
             .downstream_data
-            .with(|d| {
-                self.sv1_handshake_complete
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                (
-                    d.cached_set_difficulty.take(),
-                    d.cached_notify.take(),
-                    self.downstream_id,
-                )
+            .with(|data| {
+                if data.sv1_handshake_state != Sv1HandshakeState::Pending {
+                    return None;
+                }
+                data.sv1_handshake_state = Sv1HandshakeState::Completing;
+                Some((data.cached_set_difficulty.take(), data.cached_notify.take()))
             })
             .map_err(TproxyError::shutdown)?;
+        let Some((cached_set_difficulty, cached_notify)) = cached_messages else {
+            debug!(
+                "Down: Ignoring repeated SV1 handshake completion for downstream {}",
+                self.downstream_id
+            );
+            return Ok(());
+        };
+
         debug!("Down: SV1 handshake completed for downstream");
 
-        // Send cached messages in correct order: set_difficulty first, then notify
-        if let Some(set_difficulty_msg) = cached_set_difficulty {
+        self.send_cached_handshake_messages(cached_set_difficulty, cached_notify)
+            .await?;
+
+        // Notifications can arrive while the initial cached pair is being sent. Keep the state
+        // in `Completing` until every cached notify has been flushed. A difficulty that arrives
+        // without a notify remains cached for the next normal notify instead of being sent bare.
+        loop {
+            let next_messages = self
+                .downstream_data
+                .with(|data| {
+                    let Some(notify) = data.cached_notify.take() else {
+                        data.sv1_handshake_state = Sv1HandshakeState::Complete;
+                        return None;
+                    };
+                    Some((data.cached_set_difficulty.take(), Some(notify)))
+                })
+                .map_err(TproxyError::shutdown)?;
+
+            let Some((set_difficulty, notify)) = next_messages else {
+                break;
+            };
+            self.send_cached_handshake_messages(set_difficulty, notify)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_cached_handshake_messages(
+        &self,
+        set_difficulty: Option<json_rpc::Message>,
+        notify: Option<json_rpc::Message>,
+    ) -> TproxyResult<(), error::Downstream> {
+        let mut did_send_difficulty = false;
+        if let Some(set_difficulty) = set_difficulty {
             debug!("Down: Sending cached mining.set_difficulty after handshake completion");
             self.downstream_io
                 .downstream_sv1_sender
-                .send(set_difficulty_msg)
+                .send(set_difficulty)
                 .await
-                .map_err(|e| {
+                .map_err(|error| {
                     error!(
-                        "Down: Failed to send cached mining.set_difficulty to downstream: {:?}",
-                        e
+                        "Down: Failed to send cached mining.set_difficulty to downstream: {error:?}"
                     );
-                    TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+                    TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, self.downstream_id)
                 })?;
 
-            // Update target and hashrate after sending set_difficulty
             self.downstream_data
-                .with(|d| {
-                    if let Some(new_target) = d.pending_target.take() {
-                        d.target = new_target;
+                .with(|data| {
+                    if let Some(new_target) = data.pending_target.take() {
+                        data.target = new_target;
                     }
-                    if let Some(new_hashrate) = d.pending_hashrate.take() {
-                        d.hashrate = Some(new_hashrate);
+                    if let Some(new_hashrate) = data.pending_hashrate.take() {
+                        data.hashrate = Some(new_hashrate);
                     }
                 })
                 .map_err(TproxyError::shutdown)?;
+            did_send_difficulty = true;
         }
 
-        if let Some(notify_msg) = cached_notify {
+        if let Some(notify_msg) = notify {
             debug!("Down: Sending cached mining.notify after handshake completion");
+            let mut notify_msg = notify_msg;
+            if did_send_difficulty {
+                if let json_rpc::Message::Notification(notification) = &notify_msg {
+                    let mut parsed = server_to_client::Notify::try_from(notification.clone())
+                        .expect("mining.notify is always valid here");
+                    parsed.clean_jobs = true;
+                    notify_msg = parsed.into();
+                }
+            }
             self.downstream_io
                 .downstream_sv1_sender
                 .send(notify_msg)
                 .await
-                .map_err(|e| {
-                    error!(
-                        "Down: Failed to send cached mining.notify to downstream: {:?}",
-                        e
-                    );
-                    TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+                .map_err(|error| {
+                    error!("Down: Failed to send cached mining.notify to downstream: {error:?}");
+                    TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, self.downstream_id)
                 })?;
-            // Update last job received time for keepalive tracking
             self.downstream_data
-                .with(|d| {
-                    d.last_job_received_time = Some(Instant::now());
-                })
+                .with(|data| data.last_job_received_time = Some(Instant::now()))
                 .map_err(TproxyError::shutdown)?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_channel::{bounded, unbounded};
+
+    fn notify(job_id: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": null,
+            "method": "mining.notify",
+            "params": [
+                job_id,
+                "00".repeat(32),
+                "00",
+                "00",
+                [],
+                "20000000",
+                "1d00ffff",
+                "00000001",
+                true
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn set_difficulty() -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": null,
+            "method": "mining.set_difficulty",
+            "params": [1.0]
+        }))
+        .unwrap()
+    }
+
+    fn assert_message_eq(actual: &Message, expected: &Message) {
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_handshake_completion_preserves_cached_difficulty() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let old_target = Target::from_le_bytes([0x11; 32]);
+        let new_target = Target::from_le_bytes([0x22; 32]);
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            old_target,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.sv1_handshake_state = Sv1HandshakeState::Complete;
+                data.cached_set_difficulty = Some(set_difficulty());
+                data.pending_target = Some(new_target);
+            })
+            .unwrap();
+
+        downstream.handle_sv1_handshake_completion().await.unwrap();
+
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.target, old_target);
+                assert_eq!(data.pending_target, Some(new_target));
+                assert!(data.cached_set_difficulty.is_some());
+                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn notify_arriving_during_handshake_completion_is_flushed() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = bounded(1);
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender.clone(),
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        let initial_notify = notify("initial");
+        let concurrent_notify = notify("concurrent");
+        downstream
+            .downstream_data
+            .with(|data| data.cached_notify = Some(initial_notify.clone()))
+            .unwrap();
+
+        // Fill the outbound queue so completion pauses while sending its initial cached notify.
+        downstream_sv1_sender.try_send(set_difficulty()).unwrap();
+        let completing_downstream = downstream.clone();
+        let completion = tokio::spawn(async move {
+            completing_downstream
+                .handle_sv1_handshake_completion()
+                .await
+        });
+        loop {
+            if downstream
+                .downstream_data
+                .with(|data| data.sv1_handshake_state == Sv1HandshakeState::Completing)
+                .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        sv1_server_message_sender
+            .send(concurrent_notify.clone())
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        // Unblock completion and verify it drains the notification that raced with it.
+        downstream_sv1_receiver.recv().await.unwrap();
+        assert_message_eq(
+            &downstream_sv1_receiver.recv().await.unwrap(),
+            &initial_notify,
+        );
+        assert_message_eq(
+            &downstream_sv1_receiver.recv().await.unwrap(),
+            &concurrent_notify,
+        );
+        completion.await.unwrap().unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert!(data.cached_notify.is_none());
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn difficulty_arriving_during_completion_waits_for_next_notify() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = bounded(1);
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender.clone(),
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        let initial_notify = notify("initial");
+        let concurrent_difficulty = set_difficulty();
+        downstream
+            .downstream_data
+            .with(|data| data.cached_notify = Some(initial_notify.clone()))
+            .unwrap();
+
+        downstream_sv1_sender.try_send(set_difficulty()).unwrap();
+        let completing_downstream = downstream.clone();
+        let completion = tokio::spawn(async move {
+            completing_downstream
+                .handle_sv1_handshake_completion()
+                .await
+        });
+        loop {
+            if downstream
+                .downstream_data
+                .with(|data| data.sv1_handshake_state == Sv1HandshakeState::Completing)
+                .unwrap()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        sv1_server_message_sender
+            .send(concurrent_difficulty.clone())
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        downstream_sv1_receiver.recv().await.unwrap();
+        assert_message_eq(
+            &downstream_sv1_receiver.recv().await.unwrap(),
+            &initial_notify,
+        );
+        completion.await.unwrap().unwrap();
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert_message_eq(
+                    data.cached_set_difficulty.as_ref().unwrap(),
+                    &concurrent_difficulty,
+                );
+            })
+            .unwrap();
     }
 }
