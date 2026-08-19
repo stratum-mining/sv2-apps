@@ -15,6 +15,7 @@ use stratum_apps::stratum_core::{
     bitcoin::Target,
     channels_sv2::{
         Vardiff, VardiffState,
+        extranonce_manager::ExtranonceAllocatorError,
         server::{
             error::{ExtendedChannelError, StandardChannelError},
             extended::ExtendedChannel,
@@ -39,6 +40,20 @@ use crate::{
     error::{self, PoolError, PoolErrorKind},
     utils::{PayoutMode, PayoutModeError, create_close_channel_msg},
 };
+
+fn extranonce_allocation_error_code(
+    error: ExtranonceAllocatorError,
+) -> Result<&'static str, ExtranonceAllocatorError> {
+    match error {
+        ExtranonceAllocatorError::CapacityExhausted => {
+            Ok(ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED)
+        }
+        ExtranonceAllocatorError::InvalidRollableSize => {
+            Ok(ERROR_CODE_OPEN_MINING_CHANNEL_MIN_EXTRANONCE_SIZE_TOO_LARGE)
+        }
+        error => Err(error),
+    }
+}
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
@@ -185,11 +200,32 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
 
                 let nominal_hash_rate = msg.nominal_hash_rate;
                 let requested_max_target = Target::from_le_bytes(msg.max_target.to_array());
-                let extranonce_prefix = self
+                let extranonce_prefix = match self
                     .extranonce_allocator
                     .with(|allocator| allocator.allocate_standard())
                     .map_err(PoolError::shutdown)?
-                    .map_err(PoolError::shutdown)?;
+                {
+                    Ok(prefix) => prefix,
+                    Err(e) => {
+                        error!(?e, "Failed to get extranonce prefix");
+                        let error_code =
+                            extranonce_allocation_error_code(e).map_err(PoolError::shutdown)?;
+                        let open_standard_mining_channel_error = OpenMiningChannelErrorOwned {
+                            request_id,
+                            error_code: error_code
+                                .to_string()
+                                .try_into()
+                                .expect("error code must be valid string"),
+                        };
+                        return Ok(vec![(
+                            downstream_id,
+                            MiningOwned::OpenMiningChannelError(
+                                open_standard_mining_channel_error,
+                            ),
+                        )
+                            .into()]);
+                    }
+                };
 
                 let channel_id = downstream.channel_id_factory.fetch_add(1, Ordering::SeqCst);
 
@@ -379,18 +415,22 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     .map_err(PoolError::shutdown)?
                 {
                     Ok(prefix) => prefix,
-                    Err(_) => {
-                        error!("OpenMiningChannelError: min-extranonce-size-too-large");
+                    Err(e) => {
+                        error!(?e, "Failed to get extranonce prefix");
+                        let error_code =
+                            extranonce_allocation_error_code(e).map_err(PoolError::shutdown)?;
                         let open_extended_mining_channel_error = OpenMiningChannelErrorOwned {
                             request_id,
-                            error_code: ERROR_CODE_OPEN_MINING_CHANNEL_MIN_EXTRANONCE_SIZE_TOO_LARGE
+                            error_code: error_code
                                 .to_string()
                                 .try_into()
                                 .expect("error code must be valid string"),
                         };
                         return Ok(vec![(
                             downstream_id,
-                            MiningOwned::OpenMiningChannelError(open_extended_mining_channel_error),
+                            MiningOwned::OpenMiningChannelError(
+                                open_extended_mining_channel_error,
+                            ),
                         )
                             .into()]);
                     }
@@ -1352,5 +1392,37 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             .map_err(|e| PoolError::disconnect(e, downstream_id))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::stratum_core::channels_sv2::extranonce_manager::ExtranonceAllocator;
+
+    #[test]
+    fn capacity_exhaustion_has_specific_error_code() {
+        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1).unwrap();
+        let _occupied_prefix = allocator.allocate_standard().unwrap();
+
+        let error = allocator.allocate_standard().unwrap_err();
+
+        assert_eq!(
+            extranonce_allocation_error_code(error).unwrap(),
+            ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED
+        );
+    }
+
+    #[test]
+    fn invalid_rollable_size_keeps_specific_error_code() {
+        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1).unwrap();
+        let invalid_size = allocator.rollable_extranonce_size() as usize + 1;
+
+        let error = allocator.allocate_extended(invalid_size).unwrap_err();
+
+        assert_eq!(
+            extranonce_allocation_error_code(error).unwrap(),
+            ERROR_CODE_OPEN_MINING_CHANNEL_MIN_EXTRANONCE_SIZE_TOO_LARGE
+        );
     }
 }
