@@ -1416,6 +1416,9 @@ impl Sv1Server {
             Ok::<(), TproxyError<error::Sv1Server>>(())
         })?;
 
+        // Finish the broadcast before reporting a closed sender, otherwise one disconnected miner
+        // prevents healthy miners later in the iteration from receiving the new difficulty.
+        let mut disconnected_downstream = None;
         for (downstream_id, sender) in tasks {
             let set_difficulty_msg =
                 match build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding(
@@ -1436,10 +1439,7 @@ impl Sv1Server {
                     "Failed to send mining.set_difficulty to downstream {}: {:?}",
                     downstream_id, e
                 );
-                return Err(TproxyError::disconnect(
-                    TproxyErrorKind::ChannelErrorSender,
-                    downstream_id,
-                ));
+                disconnected_downstream.get_or_insert(downstream_id);
             } else {
                 debug!(
                     "Sent mining.set_difficulty to downstream {} (vardiff disabled)",
@@ -1447,6 +1447,14 @@ impl Sv1Server {
                 );
             }
         }
+
+        if let Some(downstream_id) = disconnected_downstream {
+            return Err(TproxyError::disconnect(
+                TproxyErrorKind::ChannelErrorSender,
+                downstream_id,
+            ));
+        }
+
         Ok(())
     }
 
@@ -1824,7 +1832,7 @@ mod tests {
         channel_id: Option<ChannelId>,
         hashrate: Hashrate,
         close_server_channel: bool,
-    ) {
+    ) -> Receiver<json_rpc::Message> {
         let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
         let (_miner_sender, miner_receiver) = unbounded();
         let (sv1_server_sender, sv1_server_receiver) = unbounded();
@@ -1838,7 +1846,7 @@ mod tests {
             downstream_sv1_sender,
             miner_receiver,
             server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
-            sv1_server_receiver,
+            sv1_server_receiver.clone(),
             target,
             Some(hashrate),
             #[cfg(feature = "monitoring")]
@@ -1860,6 +1868,8 @@ mod tests {
             .sv1_server_io
             .sv1_server_to_downstream_sender
             .insert(downstream_id, sv1_server_sender);
+
+        sv1_server_receiver
     }
 
     #[test]
@@ -2260,7 +2270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_downstream_does_not_shutdown_on_aggregated_set_target() {
+    async fn closed_downstream_does_not_abort_aggregated_difficulty_broadcast() {
         let mut config = create_test_config();
         config.downstream_difficulty_config.enable_vardiff = false;
 
@@ -2269,7 +2279,30 @@ mod tests {
         let addr = "127.0.0.1:3333".parse().unwrap();
         let tproxy_mode = TproxyMode::from(config.aggregate_channels);
         let server = Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode);
-        register_test_downstream(&server, 7, Some(9), 100.0, true);
+        let receivers = [
+            (
+                7,
+                register_test_downstream(&server, 7, Some(9), 100.0, false),
+            ),
+            (
+                8,
+                register_test_downstream(&server, 8, Some(10), 100.0, false),
+            ),
+        ];
+
+        let mut iteration_order = Vec::new();
+        server
+            .downstreams
+            .for_each(|downstream_id, _| iteration_order.push(downstream_id));
+        assert_eq!(iteration_order.len(), 2);
+        let closed_id = iteration_order[0];
+        let surviving_id = iteration_order[1];
+        receivers
+            .iter()
+            .find(|(downstream_id, _)| *downstream_id == closed_id)
+            .unwrap()
+            .1
+            .close();
 
         let target = hash_rate_to_target(200.0, 5.0).unwrap();
         let error = server
@@ -2280,8 +2313,18 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(error.action, Action::Disconnect(id) if id == closed_id));
         assert!(matches!(error.kind, TproxyErrorKind::ChannelErrorSender));
+        assert!(
+            receivers
+                .iter()
+                .find(|(downstream_id, _)| *downstream_id == surviving_id)
+                .unwrap()
+                .1
+                .try_recv()
+                .is_ok(),
+            "a closed peer aborted the broadcast before the surviving miner received the new difficulty"
+        );
     }
 
     #[tokio::test]
