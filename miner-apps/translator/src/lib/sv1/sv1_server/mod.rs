@@ -21,7 +21,7 @@ pub mod downstream_message_handler;
 use crate::{
     config::TranslatorConfig,
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::downstream::Downstream,
+    sv1::downstream::{Downstream, Sv1HandshakeState},
     utils::{
         AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId, TproxyMode,
         is_mining_authorize,
@@ -1583,7 +1583,7 @@ impl Sv1Server {
                         // 1. Handshake is complete
                         // 2. Enough time has passed since last job
                         let handshake_complete =
-                            downstream.sv1_handshake_complete.load(Ordering::SeqCst);
+                            d.sv1_handshake_state == Sv1HandshakeState::Complete;
 
                         if !handshake_complete {
                             return None;
