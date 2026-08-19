@@ -2340,7 +2340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immediate_vardiff_update_clears_stale_pending_target() {
+    async fn easier_vardiff_target_does_not_wait_for_upstream() {
         use stratum_apps::stratum_core::channels_sv2::Vardiff;
 
         let server = create_test_sv1_server();
@@ -2378,20 +2378,38 @@ mod tests {
         // the pending-map bookkeeping we assert on happens before that.
         let _ = server.handle_vardiff_updates().await;
 
+        let pending_target = server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| data.pending_target)
+                    .unwrap()
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            pending_target > upstream_target,
+            "a larger target is easier and must preserve every upstream-valid share"
+        );
         assert!(
             !server.pending_target_updates.contains_key(&7),
-            "immediate update must clear the superseded pending target"
+            "an easier target must be advertised immediately and clear stale pending state"
         );
     }
 
     #[tokio::test]
-    async fn stale_set_target_keeps_pending_update_until_satisfied() {
+    async fn harder_vardiff_target_waits_until_upstream_accepts_it() {
         let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
 
         // The downstream wants a harder (lower) target than the upstream currently has.
         let pending_target = hash_rate_to_target(200.0, 5.0).unwrap();
         let stale_upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        assert!(
+            pending_target < stale_upstream_target,
+            "a smaller target is harder and would suppress upstream-valid shares"
+        );
         server.pending_target_updates.insert(7, pending_target);
 
         // A SetTarget that does not satisfy the pending update (e.g. the reply to an

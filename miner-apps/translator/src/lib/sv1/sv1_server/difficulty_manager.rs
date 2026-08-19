@@ -62,10 +62,14 @@ impl Sv1Server {
     /// This method implements the core vardiff logic:
     /// 1. For each downstream, calculate if a target update is needed
     /// 2. Always send UpdateChannel to keep upstream informed
-    /// 3. Compare new target with upstream target to decide when to send set_difficulty:
-    ///    - If new_target >= upstream_target: send set_difficulty immediately
-    ///    - If new_target < upstream_target: wait for SetTarget response before sending
-    ///      set_difficulty
+    /// 3. Compare the new target with the upstream target to decide when to send set_difficulty.
+    ///    Bitcoin targets are ordered inversely to difficulty: a larger target is easier.
+    ///    - If `new_target >= upstream_target`, advertise it immediately. This preserves every
+    ///      upstream-valid share; additional easier shares are revalidated against the actual
+    ///      upstream channel target by the channel manager and filtered locally.
+    ///    - If `new_target < upstream_target`, wait for SetTarget. Advertising a harder target
+    ///      early would prevent the miner from submitting shares that the upstream would still
+    ///      accept and reward.
     /// 4. Handle aggregated vs non-aggregated modes for UpdateChannel messages
     pub(super) async fn handle_vardiff_updates(&self) -> TproxyResult<(), error::Sv1Server> {
         let mut immediate_updates = Vec::new();
@@ -155,8 +159,10 @@ impl Sv1Server {
                     match upstream_target {
                         Some(upstream_target) => {
                             if new_target >= upstream_target {
-                                // Case 1: new_target >= upstream_target, send set_difficulty
-                                // immediately
+                                // A larger target is easier. Advertise it immediately so the miner
+                                // continues submitting every upstream-valid share; the channel
+                                // manager filters any additional shares that miss the actual
+                                // upstream target.
                                 trace!(
                                     "✅ Target comparison: new_target ({}) >= upstream_target ({}) for downstream {}, will send mining.set_difficulty immediately",
                                     new_target, upstream_target, downstream_id
@@ -171,8 +177,8 @@ impl Sv1Server {
                                 // difficulty.
                                 self.pending_target_updates.remove(&downstream_id);
                             } else {
-                                // Case 2: new_target < upstream_target, delay set_difficulty until
-                                // SetTarget
+                                // A smaller target is harder. Delay it until SetTarget confirms the
+                                // upstream no longer accepts the shares this target would suppress.
                                 trace!(
                                     "⏳ Target comparison: new_target ({}) < upstream_target ({}) for downstream {}, will delay mining.set_difficulty until SetTarget",
                                     new_target, upstream_target, downstream_id
@@ -545,8 +551,10 @@ impl Sv1Server {
                     return true; // keep pending (not relevant for this SetTarget)
                 }
 
+                // It is safe to advertise the pending target once it is at least as easy as the
+                // new upstream target. The miner will then submit every upstream-valid share;
+                // anything easier is filtered locally by channel-manager validation.
                 if *pending_target >= new_upstream_target {
-                    // Target is acceptable, can apply immediately
                     applicable_updates.push(PendingTargetUpdate {
                         downstream_id: *pending_downstream_id,
                         new_target: *pending_target,
