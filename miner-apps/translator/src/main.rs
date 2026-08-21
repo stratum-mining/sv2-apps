@@ -40,5 +40,7 @@ async fn inner_main() {
         }
     });
 
-    translator.start().await;
+    if translator.start().await.is_err() {
+        std::process::exit(1);
+    };
 }
