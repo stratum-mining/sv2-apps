@@ -110,4 +110,10 @@ impl Sv2ClientsMonitoring for ChannelManager {
             downstream_to_sv2_client_info(downstream)
         })?
     }
+
+    /// Sourced from the process-lifetime accumulator, so the count survives the
+    /// disconnect of the channel that found the block.
+    fn get_blocks_found_total(&self, _clients: &[Sv2ClientInfo]) -> u64 {
+        self.blocks_found_total()
+    }
 }

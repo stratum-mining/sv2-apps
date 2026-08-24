@@ -737,6 +737,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                         coinbase,
                                     )) => {
                                         info!("SubmitSharesStandard: 💰 Block Found!!! 💰{share_hash}");
+                                        self.record_block_found();
                                         // if we have a template id (i.e.: this was not a custom job)
                                         // we can propagate the solution to the TP
                                         if let Some(template_id) = template_id {
@@ -998,6 +999,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                         coinbase,
                                     )) => {
                                         info!("SubmitSharesExtended: 💰 Block Found!!! 💰{share_hash}");
+                                        self.record_block_found();
                                         if let Some(template_id) = template_id {
                                             info!("SubmitSharesExtended: Propagating solution to the Template Provider.");
                                             let solution = SubmitSolutionOwned {

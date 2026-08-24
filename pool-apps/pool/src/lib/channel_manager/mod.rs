@@ -2,7 +2,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicU32, AtomicUsize},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize},
     },
 };
 use stratum_apps::stratum_core::{
@@ -118,6 +118,13 @@ pub struct ChannelManager {
     required_extensions: Vec<u16>,
     /// Embedded Job Declaration engine (present when `[jds]` config is set).
     job_declarator: Option<JobDeclarator>,
+    // Cumulative count of blocks found across the lifetime of this process.
+    //
+    // Per-channel `blocks_found` lives in the channel's `ShareAccounting` and is
+    // discarded when the channel is dropped, so a total derived from live channels
+    // decreases when the finding channel goes away. This accumulator has process
+    // lifetime, making the exposed total monotonic.
+    blocks_found_total: Arc<AtomicU64>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -199,6 +206,7 @@ impl ChannelManager {
             supported_extensions: config.supported_extensions().to_vec(),
             required_extensions: config.required_extensions().to_vec(),
             job_declarator,
+            blocks_found_total: Arc::new(AtomicU64::new(0)),
         };
 
         Ok(channel_manager)
@@ -486,6 +494,17 @@ impl ChannelManager {
     // Given a `downstream_id`, this method:
     // 1. Removes the corresponding Downstream from the `downstream` map.
     // 2. Removes the channels of the corresponding Downstream from `vardiff` map.
+    /// Record that a block was found. Called at the share-validation site that
+    /// recognises a block, so the count survives the channel that produced it.
+    pub(crate) fn record_block_found(&self) {
+        self.blocks_found_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Cumulative blocks found by this process, monotonic for its lifetime.
+    pub fn blocks_found_total(&self) -> u64 {
+        self.blocks_found_total.load(Ordering::Relaxed)
+    }
+
     pub fn remove_downstream(&self, downstream_id: DownstreamId) {
         self.downstreams.remove(&downstream_id);
         self.vardiff
