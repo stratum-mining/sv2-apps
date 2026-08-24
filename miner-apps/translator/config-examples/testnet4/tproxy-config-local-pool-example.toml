@@ -37,6 +37,10 @@ supported_extensions = [
 # Monitoring HTTP server address for exposing channel data (optional)
 monitoring_address = "0.0.0.0:9092"
 monitoring_cache_refresh_secs = 15
+# One Prometheus series per connected SV1 miner (`sv1_client_hashrate`).
+# Off by default: series count scales with miner count. The JSON API at
+# /api/v1/sv1/clients serves per-client state either way.
+# monitoring_sv1_per_client_metrics = true
 
 # LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
 [miner_telemetry]

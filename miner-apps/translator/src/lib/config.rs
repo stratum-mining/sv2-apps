@@ -61,6 +61,13 @@ pub struct TranslatorConfig {
     monitoring_address: Option<SocketAddr>,
     #[serde(default)]
     monitoring_cache_refresh_secs: Option<u64>,
+    /// Emit one Prometheus series per connected SV1 miner (`sv1_client_hashrate`).
+    ///
+    /// Off by default: the series count scales with miner count. The JSON API at
+    /// `/api/v1/sv1/clients` serves per-client state either way; this only adds
+    /// per-miner history to Prometheus.
+    #[serde(default)]
+    monitoring_sv1_per_client_metrics: Option<bool>,
     #[serde(default)]
     miner_telemetry: MinerTelemetryConfig,
 }
@@ -137,8 +144,15 @@ impl TranslatorConfig {
             log_file: None,
             monitoring_address,
             monitoring_cache_refresh_secs,
+            monitoring_sv1_per_client_metrics: None,
             miner_telemetry: MinerTelemetryConfig::default(),
         }
+    }
+
+    /// Whether to emit one Prometheus series per connected SV1 miner. Off unless
+    /// explicitly enabled.
+    pub fn monitoring_sv1_per_client_metrics(&self) -> bool {
+        self.monitoring_sv1_per_client_metrics.unwrap_or(false)
     }
 
     /// Returns the monitoring server bind address (if enabled)
@@ -572,5 +586,45 @@ mod tests {
         assert_eq!(config.upstreams.len(), 2);
         assert_eq!(config.upstreams[0].user_identity, "sri/solo/bc1qprimary");
         assert_eq!(config.upstreams[1].user_identity, "bc1qbackup.worker");
+    }
+
+    #[test]
+    fn sv1_per_client_metrics_defaults_off_and_parses_when_set() {
+        let pubkey = "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan";
+        let config_toml = |extra: &str| {
+            format!(
+                r#"
+                downstream_address = "0.0.0.0"
+                downstream_port = 34255
+                max_supported_version = 2
+                min_supported_version = 2
+                downstream_extranonce2_size = 8
+                aggregate_channels = false
+                {extra}
+
+                [downstream_difficulty_config]
+                min_individual_miner_hashrate = 10000000.0
+                shares_per_minute = 6.0
+                enable_vardiff = false
+                job_keepalive_interval_secs = 60
+
+                [[upstreams]]
+                address = "127.0.0.1"
+                port = 3333
+                authority_pubkey = "{pubkey}"
+                user_identity = "sri/solo/bc1qprimary"
+                "#
+            )
+        };
+
+        let off: TranslatorConfig = toml::from_str(&config_toml("")).unwrap();
+        assert!(
+            !off.monitoring_sv1_per_client_metrics(),
+            "per-client SV1 metrics must be off unless explicitly enabled"
+        );
+
+        let on: TranslatorConfig =
+            toml::from_str(&config_toml("monitoring_sv1_per_client_metrics = true")).unwrap();
+        assert!(on.monitoring_sv1_per_client_metrics());
     }
 }
