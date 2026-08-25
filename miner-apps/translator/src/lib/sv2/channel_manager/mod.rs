@@ -1297,6 +1297,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn job_without_required_version_rolling_triggers_fallback() {
+        let mut manager = create_test_channel_manager();
+        let job = NewExtendedMiningJobOwned {
+            channel_id: 1,
+            job_id: 1,
+            min_ntime: Sv2OptionOwned::new(None),
+            version: 0x20000000,
+            version_rolling_allowed: false,
+            merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+            coinbase_tx_prefix: vec![].try_into().unwrap(),
+            coinbase_tx_suffix: vec![].try_into().unwrap(),
+        };
+
+        let error = manager
+            .handle_new_extended_mining_job(None, job, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::VersionRollingNotAllowed
+        ));
+    }
+
+    #[tokio::test]
     async fn aggregated_channel_capacity_exhaustion_rejects_request() {
         let (manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
         let mut allocator =

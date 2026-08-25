@@ -570,6 +570,20 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", m);
+
+        // tProxy declares version rolling as required in SetupConnection. Most SV1 miners need it
+        // to produce usable shares, so forwarding a job that disables it would make tProxy discard
+        // otherwise valid miner work during local validation. Treat the inconsistent upstream
+        // response as a connection failure before exposing the job to any downstream.
+        if !m.version_rolling_allowed {
+            error!(
+                "Upstream sent a NewExtendedMiningJob with version rolling disabled after accepting it as a required feature"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::VersionRollingNotAllowed,
+            ));
+        }
+
         let m_static = m.clone();
 
         // we update the channel states and keep track of the messages that need to be sent to the

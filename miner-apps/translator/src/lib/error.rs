@@ -227,6 +227,8 @@ pub enum TproxyErrorKind {
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
     FailedToProcessNewExtendedMiningJob,
+    /// Upstream disabled version rolling after accepting it as a required connection feature
+    VersionRollingNotAllowed,
     /// Failed to add channel id to group channel
     FailedToAddChannelIdToGroupChannel(GroupChannelError),
     /// Aggregated channel was closed
@@ -311,6 +313,10 @@ impl fmt::Display for TproxyErrorKind {
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")
             }
+            VersionRollingNotAllowed => write!(
+                f,
+                "Upstream sent a mining job that does not allow required version rolling"
+            ),
             FailedToAddChannelIdToGroupChannel(e) => {
                 write!(f, "Failed to add channel id to group channel: {e:?}")
             }
