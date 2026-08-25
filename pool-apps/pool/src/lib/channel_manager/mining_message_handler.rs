@@ -31,7 +31,7 @@ use stratum_apps::stratum_core::{
     parsers_sv2::{Tlv, TlvField},
     template_distribution_sv2::SubmitSolutionOwned,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use jd_server_sv2::job_declarator::SetCustomMiningJobResponse;
 
@@ -855,6 +855,16 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                             (downstream_id, MiningOwned::SubmitSharesError(error)).into(),
                                         );
                                     }
+                                    Err(ShareValidationError::SeenSharesBudgetExhausted) => {
+                                        // share rate far outran the channel's configured
+                                        // expectation, filling the per-tip dedup cache; no error
+                                        // code to report, so close the channel.
+                                        warn!("closing downstream {}: channel {} exhausted its accepted-share dedup budget 🛑", downstream_id, channel_id);
+                                        return Err(PoolError::disconnect(
+                                            ShareValidationError::SeenSharesBudgetExhausted,
+                                            downstream_id,
+                                        ));
+                                    }
                                     Err(e) => {
                                         return Err(PoolError::disconnect(e, downstream_id));
                                     }
@@ -1126,6 +1136,16 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                         messages.push(
                                             (downstream_id, MiningOwned::SubmitSharesError(error)).into(),
                                         );
+                                    }
+                                    Err(ShareValidationError::SeenSharesBudgetExhausted) => {
+                                        // share rate far outran the channel's configured
+                                        // expectation, filling the per-tip dedup cache; no error
+                                        // code to report, so close the channel.
+                                        warn!("closing downstream {}: channel {} exhausted its accepted-share dedup budget 🛑", downstream_id, channel_id);
+                                        return Err(PoolError::disconnect(
+                                            ShareValidationError::SeenSharesBudgetExhausted,
+                                            downstream_id,
+                                        ));
                                     }
                                     Err(e) => {
                                         return Err(PoolError::disconnect(e, downstream_id));
