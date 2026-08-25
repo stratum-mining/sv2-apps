@@ -239,6 +239,17 @@ pub struct Downstream {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Downstream {
+    /// Stops this miner's connection. Its task cleanup callback removes the associated server and
+    /// channel-manager state.
+    pub(super) fn disconnect(&self) {
+        self.downstream_cancellation_token.cancel();
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_disconnected(&self) -> bool {
+        self.downstream_cancellation_token.is_cancelled()
+    }
+
     fn handle_error_action(
         &self,
         context: &str,
