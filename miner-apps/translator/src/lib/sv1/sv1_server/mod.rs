@@ -1181,6 +1181,9 @@ impl Sv1Server {
             MiningOwned::CloseChannel(m) => {
                 self.disconnect_downstream_for_upstream_close(m.channel_id)?;
             }
+            MiningOwned::SetExtranoncePrefix(m) => {
+                self.disconnect_downstream_for_upstream_extranonce_change(m.channel_id);
+            }
             // Guaranteed unreachable: the channel manager only forwards valid,
             // pre-filtered messages, so no other variants can arrive here.
             _ => unreachable!("Invalid message: should have been filtered earlier"),
@@ -1193,6 +1196,7 @@ impl Sv1Server {
     ///
     /// The channel association is cleared before cancellation so the downstream task's normal
     /// cleanup does not echo a `CloseChannel` back to an upstream that already closed it.
+    #[allow(clippy::result_large_err)]
     fn disconnect_downstream_for_upstream_close(
         &self,
         channel_id: ChannelId,
@@ -1225,6 +1229,37 @@ impl Sv1Server {
         };
 
         result
+    }
+
+    /// Disconnects a miner whose upstream changed its dedicated channel's extranonce prefix.
+    ///
+    /// Unlike an upstream `CloseChannel`, the channel association stays intact so normal
+    /// downstream cleanup sends `CloseChannel` upstream and retires the now-unusable channel.
+    fn disconnect_downstream_for_upstream_extranonce_change(&self, channel_id: ChannelId) {
+        let Some(downstream_id) = self
+            .channel_id_to_downstream_id
+            .with(&channel_id, |downstream_id| *downstream_id)
+        else {
+            warn!(
+                channel_id,
+                "No active SV1 downstream found for changed extranonce prefix"
+            );
+            return;
+        };
+
+        let Some(downstream) = self.downstreams.get_cloned(&downstream_id) else {
+            warn!(
+                downstream_id,
+                channel_id, "SV1 downstream disappeared while processing SetExtranoncePrefix"
+            );
+            return;
+        };
+
+        warn!(
+            downstream_id,
+            channel_id, "Disconnecting SV1 miner because its upstream extranonce prefix changed"
+        );
+        downstream.disconnect();
     }
 
     /// Opens an extended mining channel for a downstream connection.
@@ -1906,7 +1941,8 @@ mod tests {
             mining_sv2::{
                 ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
                 NewExtendedMiningJobOwned, OpenExtendedMiningChannelSuccessOwned,
-                OpenMiningChannelErrorOwned, SetNewPrevHashOwned, SetTargetOwned,
+                OpenMiningChannelErrorOwned, SetExtranoncePrefixOwned, SetNewPrevHashOwned,
+                SetTargetOwned,
             },
         },
     };
@@ -2382,6 +2418,52 @@ mod tests {
                 .with(|data| data.channel_id)
                 .unwrap(),
             None
+        );
+        assert!(server_to_channel_manager_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn extranonce_prefix_change_cancels_miner_and_keeps_channel_for_cleanup() {
+        let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 7, Some(42), 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        channel_manager_to_server_sender
+            .send(MiningOwned::SetExtranoncePrefix(SetExtranoncePrefixOwned {
+                channel_id: 42,
+                extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(downstream.is_disconnected());
+        assert_eq!(
+            server
+                .channel_id_to_downstream_id
+                .with(&42, |downstream_id| *downstream_id),
+            Some(7)
+        );
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.channel_id)
+                .unwrap(),
+            Some(42)
         );
         assert!(server_to_channel_manager_receiver.try_recv().is_err());
     }

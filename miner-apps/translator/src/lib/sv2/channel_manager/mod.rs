@@ -29,7 +29,8 @@ use stratum_apps::{
         mining_sv2::{
             ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
             ERROR_CODE_OPEN_MINING_CHANNEL_UNSUPPORTED_MIN_EXTRANONCE_SIZE,
-            OpenExtendedMiningChannelSuccessOwned, OpenMiningChannelErrorOwned,
+            NewExtendedMiningJobOwned, OpenExtendedMiningChannelSuccessOwned,
+            OpenMiningChannelErrorOwned, SetExtranoncePrefixOwned,
         },
         parsers_sv2::{AnyMessageOwned, MiningOwned, TlvField, TlvList},
     },
@@ -157,6 +158,13 @@ pub struct ChannelManager {
     /// In aggregated mode, the shared upstream channel is stored under AGGREGATED_CHANNEL_ID.
     /// In non-aggregated mode, each downstream has its own channel with its assigned ID.
     pub extended_channels: SharedMap<ChannelId, ExtendedChannel>,
+    /// Last extranonce prefix conveyed to each SV1 downstream, either in its channel-open response
+    /// or in a queued `mining.set_extranonce` notification.
+    ///
+    /// An SV2 job captures the prefix that was current when the job arrived. This map lets tProxy
+    /// announce a different captured prefix immediately before translating that exact job, even
+    /// when an older future job becomes active after a newer `SetExtranoncePrefix`.
+    sv1_advertised_extranonce_prefixes: SharedMap<ChannelId, Vec<u8>>,
     /// Map of active group channels by group channel ID
     pub group_channels: SharedMap<ChannelId, GroupChannel>,
     /// Share sequence number counter for tracking valid shares forwarded upstream.
@@ -185,6 +193,120 @@ pub struct ChannelManager {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl ChannelManager {
+    /// Returns the per-downstream prefixes captured with the active job being forwarded.
+    fn active_job_extranonce_prefixes(
+        &self,
+        message: &NewExtendedMiningJobOwned,
+    ) -> Option<Vec<(ChannelId, Vec<u8>)>> {
+        if message.channel_id == AGGREGATED_CHANNEL_ID {
+            let mut prefixes = Vec::new();
+            let mut invalid_channel = None;
+            self.extended_channels.for_each(|channel_id, channel| {
+                if channel_id == AGGREGATED_CHANNEL_ID {
+                    return;
+                }
+                match channel.get_active_job() {
+                    Some((job, prefix, _)) if job.job_id == message.job_id => {
+                        prefixes.push((channel_id, prefix.clone()));
+                    }
+                    _ => invalid_channel = Some(channel_id),
+                }
+            });
+            if let Some(channel_id) = invalid_channel {
+                error!(
+                    channel_id,
+                    job_id = message.job_id,
+                    "Aggregated downstream does not have the job being forwarded as active"
+                );
+                return None;
+            }
+            return Some(prefixes);
+        }
+
+        self.extended_channels
+            .with(&message.channel_id, |channel| {
+                let Some((job, prefix, _)) = channel.get_active_job() else {
+                    error!(
+                        channel_id = message.channel_id,
+                        job_id = message.job_id,
+                        "Channel has no active job while forwarding work to SV1"
+                    );
+                    return None;
+                };
+                if job.job_id != message.job_id {
+                    error!(
+                        channel_id = message.channel_id,
+                        active_job_id = job.job_id,
+                        forwarded_job_id = message.job_id,
+                        "Channel active job differs from the job being forwarded to SV1"
+                    );
+                    return None;
+                }
+                Some(vec![(message.channel_id, prefix.clone())])
+            })
+            .flatten()
+    }
+
+    /// Queues any prefix transition required by `message` immediately before the job itself.
+    ///
+    /// `channels_sv2` retains the prefix captured by each job. Keeping both messages on the same
+    /// FIFO channel guarantees that every SV1 miner applies `mining.set_extranonce` to the first
+    /// `mining.notify` that actually uses that prefix.
+    async fn forward_job_to_sv1_server(
+        &self,
+        message: NewExtendedMiningJobOwned,
+    ) -> TproxyResult<(), error::ChannelManager> {
+        let job_prefixes = self
+            .active_job_extranonce_prefixes(&message)
+            .ok_or_else(|| {
+                TproxyError::fallback(TproxyErrorKind::FailedToProcessNewExtendedMiningJob)
+            })?;
+        for (channel_id, job_prefix) in job_prefixes {
+            let prefix_changed = self
+                .sv1_advertised_extranonce_prefixes
+                .with(&channel_id, |advertised_prefix| {
+                    advertised_prefix != &job_prefix
+                })
+                .ok_or_else(|| {
+                    error!(
+                        channel_id,
+                        "Missing SV1 extranonce prefix state for active downstream channel"
+                    );
+                    TproxyError::shutdown(TproxyErrorKind::ChannelNotFound)
+                })?;
+            if prefix_changed {
+                self.channel_manager_io
+                    .sv1_server_sender
+                    .send(MiningOwned::SetExtranoncePrefix(SetExtranoncePrefixOwned {
+                        channel_id,
+                        extranonce_prefix: job_prefix
+                            .clone()
+                            .try_into()
+                            .map_err(TproxyError::shutdown)?,
+                    }))
+                    .await
+                    .map_err(|error| {
+                        error!(
+                            channel_id,
+                            "Failed to queue job extranonce prefix for SV1 server: {error:?}"
+                        );
+                        TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
+                    })?;
+                self.sv1_advertised_extranonce_prefixes
+                    .insert(channel_id, job_prefix);
+            }
+        }
+
+        self.channel_manager_io
+            .sv1_server_sender
+            .send(MiningOwned::NewExtendedMiningJob(message))
+            .await
+            .map_err(|error| {
+                error!("Failed to queue NewExtendedMiningJob for SV1 server: {error:?}");
+                TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
+            })
+    }
+
     async fn reject_downstream_channel_request(
         &self,
         request_id: RequestId,
@@ -320,6 +442,7 @@ impl ChannelManager {
             required_extensions,
             pending_downstream_channels: SharedMap::new(),
             extended_channels: SharedMap::new(),
+            sv1_advertised_extranonce_prefixes: SharedMap::new(),
             group_channels: SharedMap::new(),
             share_sequence_counters: SharedMap::new(),
             negotiated_extensions: SharedLock::new(Vec::new()),
@@ -596,12 +719,11 @@ impl ChannelManager {
                     if let (Some(downstream_extranonce_prefix), Some(upstream_prefix_len)) =
                         (downstream_extranonce_prefix, upstream_prefix_len)
                     {
-                        // Skip the upstream prefix and keep only the
-                        // translator-managed local bytes before appending the
-                        // miner-supplied extranonce.
-                        let translator_prefix =
+                        // Strip `upstream_prefix`; the upstream share contains
+                        // `local_prefix | local_index | miner extranonce`.
+                        let local_prefix_and_index =
                             &downstream_extranonce_prefix[upstream_prefix_len..];
-                        let mut new_extranonce = translator_prefix.to_vec();
+                        let mut new_extranonce = local_prefix_and_index.to_vec();
                         new_extranonce.extend_from_slice(m.extranonce.as_ref());
                         m.extranonce = new_extranonce.try_into().map_err(TproxyError::shutdown)?;
                     }
@@ -644,31 +766,19 @@ impl ChannelManager {
                         // counter
                         m.sequence_number = self.next_share_sequence_number(m.channel_id);
 
-                        // Rebuild the share extranonce by stripping the
-                        // upstream-owned leading bytes so that (translator
-                        // prefix + miner extranonce) matches the rollable
-                        // size the upstream expects. The channel's prefix
-                        // carries its own `upstream_prefix_len` (recorded
-                        // at allocation time) when it was minted by a
-                        // local allocator, so no per-channel allocator
-                        // needs to be kept alive on the hot share path.
-                        //
-                        // `None` from `upstream_prefix_len()` means the
-                        // prefix was built from wire bytes — i.e. the
-                        // zero-slack open path where upstream granted
-                        // exactly the rollable size we asked for and no
-                        // rewriting is needed.
-                        let layout = self
-                            .extended_channels
-                            .with(&m.channel_id, |c| {
-                                c.upstream_prefix_len()
-                                    .map(|n| (n as usize, c.get_extranonce_prefix().to_vec()))
-                            })
-                            .flatten();
-                        if let Some((upstream_prefix_len, downstream_extranonce_prefix)) = layout {
-                            let translator_prefix =
-                                &downstream_extranonce_prefix[upstream_prefix_len..];
-                            let mut new_extranonce = translator_prefix.to_vec();
+                        // Rebuild the upstream share extranonce as
+                        // `local_prefix | local_index | miner extranonce`.
+                        // A wire-sourced prefix is entirely `upstream_prefix`,
+                        // so this naturally leaves no local bytes to prepend.
+                        let local_prefix_and_index =
+                            self.extended_channels.with(&m.channel_id, |c| {
+                                c.get_extranonce_prefix()[c.upstream_prefix_len() as usize..]
+                                    .to_vec()
+                            });
+                        if let Some(local_prefix_and_index) =
+                            local_prefix_and_index.filter(|prefix| !prefix.is_empty())
+                        {
+                            let mut new_extranonce = local_prefix_and_index;
                             new_extranonce.extend_from_slice(m.extranonce.as_ref());
                             m.extranonce =
                                 new_extranonce.try_into().map_err(TproxyError::shutdown)?;
@@ -828,6 +938,8 @@ impl ChannelManager {
                         m.channel_id
                     );
                 }
+                self.sv1_advertised_extranonce_prefixes
+                    .remove(&m.channel_id);
 
                 // Remove from any group channels that contain it
                 self.group_channels.for_each_mut(|_, group_channel| {
@@ -958,6 +1070,7 @@ impl ChannelManager {
                         target: target.to_le_bytes().into(),
                         extranonce_size: min_extranonce_size as u16,
                         extranonce_prefix: success_extranonce_prefix
+                            .clone()
                             .try_into()
                             .map_err(TproxyError::shutdown)?,
                         group_channel_id: 0, /* use a dummy value, this
@@ -974,6 +1087,8 @@ impl ChannelManager {
                         error!("Failed to send open channel message to SV1Server: {:?}", e);
                         TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
                     })?;
+                self.sv1_advertised_extranonce_prefixes
+                    .insert(next_channel_id, success_extranonce_prefix);
                 // Initialize the new downstream channel with state from upstream:
                 // chain tip, active job, and any pending future jobs.
                 let active_job_for_sv1_server = || {
@@ -1025,17 +1140,7 @@ impl ChannelManager {
                 };
 
                 if let Some(job) = active_job_for_sv1_server() {
-                    self.channel_manager_io
-                        .sv1_server_sender
-                        .send(MiningOwned::NewExtendedMiningJob(job))
-                        .await
-                        .map_err(|e| {
-                            error!(
-                                "Failed to send active extended mining job to Sv1Server: {:?}",
-                                e
-                            );
-                            TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
-                        })?;
+                    self.forward_job_to_sv1_server(job).await?;
                 }
                 return Ok(());
             }
@@ -1079,7 +1184,8 @@ mod tests {
         channels_sv2::extranonce_manager::ExtranoncePrefix,
         mining_sv2::{
             CloseChannelOwned, NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned,
-            SetNewPrevHashOwned, SubmitSharesExtendedOwned, UpdateChannelOwned,
+            SetExtranoncePrefixOwned, SetNewPrevHashOwned, SubmitSharesExtendedOwned,
+            UpdateChannelOwned,
         },
     };
 
@@ -1369,6 +1475,460 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregated_extranonce_prefix_change_preserves_channel_allocations() {
+        let (mut manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        let (first_prefix, second_prefix) = manager
+            .aggregated_extranonce_allocator
+            .with(|allocator| {
+                let allocator = allocator.as_mut().unwrap();
+                (
+                    allocator.allocate_extended(6).unwrap(),
+                    allocator.allocate_extended(6).unwrap(),
+                )
+            })
+            .unwrap();
+        let first_local_prefix_and_index = first_prefix.as_bytes()[4..].to_vec();
+        let second_local_prefix_and_index = second_prefix.as_bytes()[4..].to_vec();
+        for (channel_id, prefix) in [(7, first_prefix), (8, second_prefix)] {
+            manager.extended_channels.insert(
+                channel_id,
+                ExtendedChannel::new(
+                    channel_id,
+                    "miner".to_string(),
+                    prefix.into(),
+                    Target::from_le_bytes([0xff; 32]),
+                    1.0,
+                    true,
+                    6,
+                ),
+            );
+        }
+        assert_eq!(
+            manager
+                .aggregated_extranonce_allocator
+                .with(|allocator| allocator.as_ref().unwrap().allocated_count())
+                .unwrap(),
+            2
+        );
+        let set_prefix = SetExtranoncePrefixOwned {
+            channel_id: 42,
+            extranonce_prefix: vec![1, 2, 3].try_into().unwrap(),
+        };
+
+        manager
+            .handle_set_extranonce_prefix(None, set_prefix, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&AGGREGATED_CHANNEL_ID, |channel| channel
+                    .get_extranonce_prefix()
+                    .to_vec()),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            manager
+                .aggregated_extranonce_allocator
+                .with(|allocator| allocator.as_ref().unwrap().upstream_prefix().to_vec())
+                .unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&7, |channel| channel.get_extranonce_prefix().to_vec()),
+            Some([vec![1, 2, 3], first_local_prefix_and_index].concat())
+        );
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&8, |channel| channel.get_extranonce_prefix().to_vec()),
+            Some([vec![1, 2, 3], second_local_prefix_and_index].concat())
+        );
+        assert_eq!(
+            manager
+                .aggregated_extranonce_allocator
+                .with(|allocator| allocator.as_ref().unwrap().allocated_count())
+                .unwrap(),
+            2
+        );
+        assert!(sv1_server_receiver.try_recv().is_err());
+        assert_eq!(
+            manager.aggregated_channel_state.get(),
+            AggregatedState::Connected
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregated_extranonce_prefix_change_rejects_oversized_full_extranonce() {
+        let (mut manager, _sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        let set_prefix = SetExtranoncePrefixOwned {
+            channel_id: 42,
+            extranonce_prefix: vec![1; 32].try_into().unwrap(),
+        };
+
+        let error = manager
+            .handle_set_extranonce_prefix(None, set_prefix, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::InvalidExtranonceSize {
+                prefix_len: 32,
+                rollable_size: 8,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_extranonce_prefix_change_updates_affected_channel() {
+        let (upstream_sender, _upstream_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let mut manager = ChannelManager::new(
+            upstream_sender,
+            upstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            vec![],
+            vec![],
+            TproxyMode::NonAggregated,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+        manager.extended_channels.insert(
+            42,
+            ExtendedChannel::new(
+                42,
+                "miner".to_string(),
+                ExtranoncePrefix::from_wire(vec![0; 4]).unwrap(),
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                8,
+            ),
+        );
+        let set_prefix = SetExtranoncePrefixOwned {
+            channel_id: 42,
+            extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+        };
+
+        manager
+            .handle_set_extranonce_prefix(None, set_prefix, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&42, |channel| channel.get_extranonce_prefix().to_vec()),
+            Some(vec![1, 2, 3, 4])
+        );
+        assert!(sv1_server_receiver_for_test.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn aggregated_prefix_change_is_advertised_with_the_first_matching_job() {
+        let (mut manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        manager.set_expected_payout_distribution(None);
+        let mut group = GroupChannel::new(100);
+        group.add_channel_id(42, 12).unwrap();
+        manager.group_channels.insert(100, group);
+
+        let (first_prefix, second_prefix) = manager
+            .aggregated_extranonce_allocator
+            .with(|allocator| {
+                let allocator = allocator.as_mut().unwrap();
+                (
+                    allocator.allocate_extended(6).unwrap(),
+                    allocator.allocate_extended(6).unwrap(),
+                )
+            })
+            .unwrap();
+        for (channel_id, prefix) in [(7, first_prefix), (8, second_prefix)] {
+            let prefix_bytes = prefix.as_bytes().to_vec();
+            manager.extended_channels.insert(
+                channel_id,
+                ExtendedChannel::new(
+                    channel_id,
+                    "miner".to_string(),
+                    prefix.into(),
+                    Target::from_le_bytes([0xff; 32]),
+                    1.0,
+                    true,
+                    6,
+                ),
+            );
+            manager
+                .sv1_advertised_extranonce_prefixes
+                .insert(channel_id, prefix_bytes);
+        }
+
+        // The future job captures the old prefixes before the upstream changes them.
+        manager
+            .handle_new_extended_mining_job(None, test_extended_job(42, 1), None)
+            .await
+            .unwrap();
+        manager
+            .handle_set_extranonce_prefix(
+                None,
+                SetExtranoncePrefixOwned {
+                    channel_id: 42,
+                    extranonce_prefix: vec![1, 2, 3].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(sv1_server_receiver.try_recv().is_err());
+
+        // A new immediate job can arrive while the old future job remains queued. Its new
+        // per-downstream prefixes must be advertised before the broadcast job.
+        let mut new_prefix_job = test_extended_job(42, 2);
+        new_prefix_job.min_ntime = Sv2OptionOwned::new(Some(0));
+        manager
+            .handle_new_extended_mining_job(None, new_prefix_job, None)
+            .await
+            .unwrap();
+
+        let mut updates = vec![
+            sv1_server_receiver.try_recv().unwrap(),
+            sv1_server_receiver.try_recv().unwrap(),
+        ];
+        updates.sort_by_key(|message| match message {
+            MiningOwned::SetExtranoncePrefix(message) => message.channel_id,
+            other => panic!("expected SetExtranoncePrefix, got {other:?}"),
+        });
+        for (message, expected_channel_id) in updates.into_iter().zip([7, 8]) {
+            assert!(matches!(
+                message,
+                MiningOwned::SetExtranoncePrefix(message)
+                    if message.channel_id == expected_channel_id
+                        && message.extranonce_prefix.to_owned_bytes()
+                            == manager.extended_channels.with(&expected_channel_id, |channel|
+                                channel.get_active_job().unwrap().1.clone()).unwrap()
+            ));
+        }
+        assert!(matches!(
+            sv1_server_receiver.try_recv().unwrap(),
+            MiningOwned::NewExtendedMiningJob(job) if job.job_id == 2
+        ));
+        assert!(sv1_server_receiver.try_recv().is_err());
+
+        // If the old future job is subsequently activated, switch each miner back to the old
+        // prefix captured by that job before broadcasting it.
+        manager
+            .handle_set_new_prev_hash(
+                None,
+                SetNewPrevHashOwned {
+                    channel_id: 42,
+                    job_id: 1,
+                    prev_hash: vec![0; 32].try_into().unwrap(),
+                    min_ntime: 0,
+                    nbits: 0x207fffff,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            sv1_server_receiver.try_recv().unwrap(),
+            MiningOwned::SetNewPrevHash(_)
+        ));
+        let mut old_prefix_updates = vec![
+            sv1_server_receiver.try_recv().unwrap(),
+            sv1_server_receiver.try_recv().unwrap(),
+        ];
+        old_prefix_updates.sort_by_key(|message| match message {
+            MiningOwned::SetExtranoncePrefix(message) => message.channel_id,
+            other => panic!("expected SetExtranoncePrefix, got {other:?}"),
+        });
+        for (message, expected_channel_id) in old_prefix_updates.into_iter().zip([7, 8]) {
+            assert!(matches!(
+                message,
+                MiningOwned::SetExtranoncePrefix(message)
+                    if message.channel_id == expected_channel_id
+                        && message.extranonce_prefix.to_owned_bytes()
+                            == manager.extended_channels.with(&expected_channel_id, |channel|
+                                channel.get_active_job().unwrap().1.clone()).unwrap()
+            ));
+        }
+        assert!(matches!(
+            sv1_server_receiver.try_recv().unwrap(),
+            MiningOwned::NewExtendedMiningJob(job) if job.job_id == 1
+        ));
+        assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_prefix_change_is_advertised_with_the_first_matching_job() {
+        let (upstream_sender, _upstream_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let mut manager = ChannelManager::new(
+            upstream_sender,
+            upstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            vec![],
+            vec![],
+            TproxyMode::NonAggregated,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+        manager.set_expected_payout_distribution(None);
+        let old_prefix = vec![0; 4];
+        manager.extended_channels.insert(
+            42,
+            ExtendedChannel::new(
+                42,
+                "miner".to_string(),
+                ExtranoncePrefix::from_wire(old_prefix.clone()).unwrap(),
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                8,
+            ),
+        );
+        manager
+            .sv1_advertised_extranonce_prefixes
+            .insert(42, old_prefix);
+
+        manager
+            .handle_new_extended_mining_job(None, test_extended_job(42, 1), None)
+            .await
+            .unwrap();
+        manager
+            .handle_set_extranonce_prefix(
+                None,
+                SetExtranoncePrefixOwned {
+                    channel_id: 42,
+                    extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(sv1_server_receiver_for_test.try_recv().is_err());
+
+        manager
+            .handle_set_new_prev_hash(
+                None,
+                SetNewPrevHashOwned {
+                    channel_id: 42,
+                    job_id: 1,
+                    prev_hash: vec![0; 32].try_into().unwrap(),
+                    min_ntime: 0,
+                    nbits: 0x207fffff,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            sv1_server_receiver_for_test.try_recv().unwrap(),
+            MiningOwned::SetNewPrevHash(_)
+        ));
+        assert!(matches!(
+            sv1_server_receiver_for_test.try_recv().unwrap(),
+            MiningOwned::NewExtendedMiningJob(job) if job.job_id == 1
+        ));
+
+        let mut new_prefix_job = test_extended_job(42, 2);
+        new_prefix_job.min_ntime = Sv2OptionOwned::new(Some(0));
+        manager
+            .handle_new_extended_mining_job(None, new_prefix_job, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sv1_server_receiver_for_test.try_recv().unwrap(),
+            MiningOwned::SetExtranoncePrefix(message)
+                if message.channel_id == 42
+                    && message.extranonce_prefix.to_owned_bytes() == vec![1, 2, 3, 4]
+        ));
+        assert!(matches!(
+            sv1_server_receiver_for_test.try_recv().unwrap(),
+            MiningOwned::NewExtendedMiningJob(job) if job.job_id == 2
+        ));
+        assert!(sv1_server_receiver_for_test.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_prefix_change_counts_local_prefix_and_index() {
+        let (upstream_sender, _upstream_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver_for_test) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let mut manager = ChannelManager::new(
+            upstream_sender,
+            upstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            vec![],
+            vec![],
+            TproxyMode::NonAggregated,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+        let mut allocator =
+            ExtranonceAllocator::from_upstream_prefix(vec![0; 4], vec![0; 23], 32, 1).unwrap();
+        let allocated_prefix = allocator.allocate_extended(4).unwrap();
+        let original_prefix = allocated_prefix.as_bytes().to_vec();
+        assert_eq!(original_prefix.len(), 28);
+        manager.extended_channels.insert(
+            42,
+            ExtendedChannel::new(
+                42,
+                "miner".to_string(),
+                allocated_prefix.into(),
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                4,
+            ),
+        );
+
+        let error = manager
+            .handle_set_extranonce_prefix(
+                None,
+                SetExtranoncePrefixOwned {
+                    channel_id: 42,
+                    extranonce_prefix: vec![1; 5].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::InvalidExtranonceSize {
+                prefix_len: 29,
+                rollable_size: 4,
+            }
+        ));
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&42, |channel| channel.get_extranonce_prefix().to_vec()),
+            Some(original_prefix)
+        );
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&42, |channel| channel.upstream_prefix_len()),
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
     async fn aggregated_channel_capacity_exhaustion_rejects_request() {
         let (manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
         let mut allocator =
@@ -1501,5 +2061,6 @@ mod tests {
 
         assert_eq!(job.channel_id, success.channel_id);
         assert_ne!(job.channel_id, AGGREGATED_CHANNEL_ID);
+        assert!(sv1_server_receiver.try_recv().is_err());
     }
 }

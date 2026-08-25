@@ -17,7 +17,10 @@ use std::{
 use stratum_apps::{
     stratum_core::{
         binary_sv2,
-        channels_sv2::client::error::GroupChannelError,
+        channels_sv2::{
+            client::error::GroupChannelError,
+            extranonce_manager::{ExtranonceAllocatorError, ExtranoncePrefixError},
+        },
         framing_sv2,
         handlers_sv2::HandlerErrorType,
         noise_sv2,
@@ -233,6 +236,20 @@ pub enum TproxyErrorKind {
     FailedToAddChannelIdToGroupChannel(GroupChannelError),
     /// Aggregated channel was closed
     AggregatedChannelClosed,
+    /// Aggregated channel state is missing its extranonce allocator
+    MissingAggregatedExtranonceAllocator,
+    /// Updated prefix and existing rollable space cannot form a supported extranonce
+    InvalidExtranonceSize {
+        prefix_len: usize,
+        rollable_size: u16,
+    },
+    /// Failed to update the shared allocator with a new upstream prefix
+    AggregatedExtranonceAllocatorUpdateFailed(ExtranonceAllocatorError),
+    /// A channel rejected its updated upstream-owned extranonce prefix bytes
+    UpstreamExtranoncePrefixUpdateFailed {
+        channel_id: ChannelId,
+        error: ExtranoncePrefixError,
+    },
     /// Invalid key
     InvalidKey,
     /// Downstream not found with given downstream_id
@@ -321,6 +338,23 @@ impl fmt::Display for TproxyErrorKind {
                 write!(f, "Failed to add channel id to group channel: {e:?}")
             }
             AggregatedChannelClosed => write!(f, "Aggregated channel was closed"),
+            MissingAggregatedExtranonceAllocator => {
+                write!(f, "Aggregated channel has no extranonce allocator")
+            }
+            InvalidExtranonceSize {
+                prefix_len,
+                rollable_size,
+            } => write!(
+                f,
+                "Extranonce prefix length {prefix_len} plus rollable size {rollable_size} is unsupported"
+            ),
+            AggregatedExtranonceAllocatorUpdateFailed(e) => {
+                write!(f, "Failed to update aggregated extranonce allocator: {e}")
+            }
+            UpstreamExtranoncePrefixUpdateFailed { channel_id, error } => write!(
+                f,
+                "Channel {channel_id} rejected its updated upstream extranonce prefix: {error}"
+            ),
             InvalidKey => write!(f, "Invalid key used during noise handshake"),
             DownstreamNotPresent(downstream_id) => write!(
                 f,
