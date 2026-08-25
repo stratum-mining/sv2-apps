@@ -1074,12 +1074,12 @@ mod tests {
     use super::*;
     use async_channel::unbounded;
     use stratum_apps::stratum_core::{
-        binary_sv2::{Seq0255Owned, Sv2OptionOwned},
+        binary_sv2::{Seq0255Owned, Str0255Owned, Sv2OptionOwned},
         bitcoin::Target,
         channels_sv2::extranonce_manager::ExtranoncePrefix,
         mining_sv2::{
-            NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned, SetNewPrevHashOwned,
-            SubmitSharesExtendedOwned, UpdateChannelOwned,
+            CloseChannelOwned, NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned,
+            SetNewPrevHashOwned, SubmitSharesExtendedOwned, UpdateChannelOwned,
         },
     };
 
@@ -1319,6 +1319,52 @@ mod tests {
         assert!(matches!(
             error.kind,
             TproxyErrorKind::VersionRollingNotAllowed
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_upstream_close_is_forwarded_to_sv1_server() {
+        let (upstream_sender, _upstream_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let mut manager = ChannelManager::new(
+            upstream_sender,
+            upstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            vec![],
+            vec![],
+            TproxyMode::NonAggregated,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+        manager.extended_channels.insert(
+            42,
+            ExtendedChannel::new(
+                42,
+                "miner".to_string(),
+                ExtranoncePrefix::from_wire(vec![0; 4]).unwrap(),
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                8,
+            ),
+        );
+        let close = CloseChannelOwned {
+            channel_id: 42,
+            reason_code: Str0255Owned::try_from("upstream closed channel".to_string()).unwrap(),
+        };
+
+        manager
+            .handle_close_channel(None, close, None)
+            .await
+            .unwrap();
+
+        assert!(!manager.extended_channels.contains_key(&42));
+        assert!(matches!(
+            sv1_server_receiver_for_test.try_recv(),
+            Ok(MiningOwned::CloseChannel(close)) if close.channel_id == 42
         ));
     }
 

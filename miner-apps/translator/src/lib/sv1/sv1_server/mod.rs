@@ -1178,12 +1178,53 @@ impl Sv1Server {
                     self.handle_set_target_without_vardiff(m).await?;
                 }
             }
+            MiningOwned::CloseChannel(m) => {
+                self.disconnect_downstream_for_upstream_close(m.channel_id)?;
+            }
             // Guaranteed unreachable: the channel manager only forwards valid,
             // pre-filtered messages, so no other variants can arrive here.
             _ => unreachable!("Invalid message: should have been filtered earlier"),
         }
 
         Ok(())
+    }
+
+    /// Disconnects the SV1 miner whose dedicated SV2 channel was closed by the upstream.
+    ///
+    /// The channel association is cleared before cancellation so the downstream task's normal
+    /// cleanup does not echo a `CloseChannel` back to an upstream that already closed it.
+    fn disconnect_downstream_for_upstream_close(
+        &self,
+        channel_id: ChannelId,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let Some((_, downstream_id)) = self.channel_id_to_downstream_id.remove(&channel_id) else {
+            warn!(
+                channel_id,
+                "No active SV1 downstream found for upstream-closed channel"
+            );
+            return Ok(());
+        };
+
+        let Some(result) = self.downstreams.with(&downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    if data.channel_id == Some(channel_id) {
+                        data.channel_id = None;
+                    }
+                })
+                .map_err(TproxyError::shutdown)?;
+            downstream.disconnect();
+            Ok(())
+        }) else {
+            warn!(
+                downstream_id,
+                channel_id, "SV1 downstream disappeared while processing upstream CloseChannel"
+            );
+            return Ok(());
+        };
+
+        result
     }
 
     /// Opens an extended mining channel for a downstream connection.
@@ -2302,6 +2343,47 @@ mod tests {
                 .sv1_server_to_downstream_sender
                 .contains_key(&7)
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_close_cancels_the_corresponding_sv1_connection() {
+        let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 7, Some(42), 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        channel_manager_to_server_sender
+            .send(MiningOwned::CloseChannel(CloseChannelOwned {
+                channel_id: 42,
+                reason_code: Str0255Owned::try_from("upstream closed channel".to_string()).unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(downstream.is_disconnected());
+        assert!(!server.channel_id_to_downstream_id.contains_key(&42));
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.channel_id)
+                .unwrap(),
+            None
+        );
+        assert!(server_to_channel_manager_receiver.try_recv().is_err());
     }
 
     #[tokio::test]

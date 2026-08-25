@@ -462,16 +462,19 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         }
 
         let group_channel = self.group_channels.remove(&m.channel_id);
+        let closed_channel_ids;
 
         // we're not in aggregated mode
         // was the message sent to a group channel?
         if let Some((_, group_channel)) = group_channel {
-            for channel_id in group_channel.get_channel_ids() {
+            closed_channel_ids = group_channel.get_channel_ids().copied().collect::<Vec<_>>();
+            for channel_id in &closed_channel_ids {
                 self.extended_channels.remove(channel_id);
             }
         // if the message was not sent to a group channel, and we're not working in
         // aggregated mode,
         } else if self.extended_channels.remove(&m.channel_id).is_some() {
+            closed_channel_ids = vec![m.channel_id];
             // remove the channel from any group channels that contain it
             self.group_channels.for_each_mut(|_, group_channel| {
                 if group_channel.has_channel_id(m.channel_id) {
@@ -484,6 +487,25 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 m.channel_id
             );
             return Err(TproxyError::log(TproxyErrorKind::ChannelNotFound));
+        }
+
+        // SV1 has no channel-level close message. Forward one close per affected extended channel
+        // so Sv1Server can terminate the corresponding TCP connection instead of leaving a miner
+        // submitting shares for a channel that no longer exists upstream.
+        for channel_id in closed_channel_ids {
+            let mut close = m.clone();
+            close.channel_id = channel_id;
+            self.channel_manager_io
+                .sv1_server_sender
+                .send(MiningOwned::CloseChannel(close))
+                .await
+                .map_err(|error| {
+                    error!(
+                        channel_id,
+                        "Failed to forward upstream CloseChannel to SV1 server: {error:?}"
+                    );
+                    TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
+                })?;
         }
 
         Ok(())
