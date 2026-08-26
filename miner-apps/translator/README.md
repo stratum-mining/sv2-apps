@@ -115,6 +115,14 @@ If verification fails, tProxy triggers upstream fallback instead of forwarding t
   - When `true`: Translator manages difficulty adjustments based on share submission rates
   - When `false`: Upstream manages difficulty, translator forwards SetTarget messages to miners
 
+- `job_keepalive_interval_secs`: Idle interval before a miner receives a keepalive
+  `mining.notify`; `0` disables keepalives. Only miners whose own interval has elapsed
+  receive one. In aggregated mode, tProxy generates at most one new shared keepalive
+  per interval. A miner becoming due between advances receives the existing
+  shared job. A late joiner also receives the current shared job without resetting
+  shared history or the keepalive schedule. Normal upstream jobs are forwarded
+  without waiting for keepalive deadlines.
+
 #### **Miner Telemetry**
 Translator Proxy can enrich the monitoring API with telemetry from the ASICs connected to its SV1
 port. This is useful when you want the UI to show each miner's management IP, firmware, hashrate,

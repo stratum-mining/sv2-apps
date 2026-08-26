@@ -212,10 +212,13 @@ pub struct DownstreamDifficultyConfig {
     /// Whether to enable variable difficulty adjustment mechanism.
     /// If false, difficulty will be managed by upstream (useful with JDC).
     pub enable_vardiff: bool,
-    /// Interval in seconds for sending keepalive jobs to downstream miners.
+    /// Minimum idle interval in seconds before sending a miner a keepalive job.
     /// The translator will send periodic mining.notify messages with updated time
     /// to prevent SV1 miners from timing out when the upstream doesn't send new jobs
     /// frequently enough (e.g., due to low Bitcoin mempool activity).
+    /// Only miners whose individual interval has elapsed receive a keepalive. Aggregated
+    /// keepalive generation advances nTime at most once per interval; other overdue miners
+    /// reuse the latest shared keepalive. Normal upstream jobs are not delayed by this interval.
     /// Set to 0 to disable keepalive jobs.
     pub job_keepalive_interval_secs: u16,
 }
