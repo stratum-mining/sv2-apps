@@ -221,6 +221,8 @@ pub enum TproxyErrorKind {
     DownstreamNotFoundWithChannelId(ChannelId),
     /// Channel not found
     ChannelNotFound,
+    /// An upstream identifier is already used by a different live channel scope.
+    ChannelIdAlreadyInUse(ChannelId),
     /// Failed to process SetNewPrevHash message
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
@@ -302,6 +304,9 @@ impl fmt::Display for TproxyErrorKind {
                 write!(f, "Downstream not found with channel id: {channel_id}")
             }
             ChannelNotFound => write!(f, "Channel not found"),
+            ChannelIdAlreadyInUse(channel_id) => {
+                write!(f, "Channel ID is already in use: {channel_id}")
+            }
             FailedToProcessSetNewPrevHash => write!(f, "Failed to process SetNewPrevHash message"),
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")

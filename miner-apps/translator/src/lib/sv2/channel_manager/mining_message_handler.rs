@@ -81,6 +81,38 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             })?
             .1;
 
+        // Upstream IDs must never collide with tProxy's internal broadcast sentinel. The wire
+        // channel and group IDs also share one namespace in every mode.
+        let reserved_or_self_collision = m.channel_id == AGGREGATED_CHANNEL_ID
+            || m.group_channel_id == AGGREGATED_CHANNEL_ID
+            || m.channel_id == m.group_channel_id;
+        // In non-aggregated mode, wire channel IDs are stored directly in the local maps, so also
+        // reject collisions with any live channel or group before state can be overwritten.
+        if reserved_or_self_collision
+            || (!self.mode.is_aggregated()
+                && (self.extended_channels.contains_key(&m.channel_id)
+                    || self.group_channels.contains_key(&m.channel_id)
+                    || self.extended_channels.contains_key(&m.group_channel_id)))
+        {
+            let conflicting_id = if m.channel_id == AGGREGATED_CHANNEL_ID
+                || m.group_channel_id == AGGREGATED_CHANNEL_ID
+            {
+                AGGREGATED_CHANNEL_ID
+            } else if self.extended_channels.contains_key(&m.group_channel_id) {
+                m.group_channel_id
+            } else {
+                m.channel_id
+            };
+            error!(
+                channel_id = m.channel_id,
+                group_channel_id = m.group_channel_id,
+                "Rejecting OpenExtendedMiningChannelSuccess with a colliding channel ID"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::ChannelIdAlreadyInUse(conflicting_id),
+            ));
+        }
+
         let success = {
             info!(
                 "Received: {:?}, user_identity: {}, nominal_hashrate: {}",
@@ -1075,63 +1107,100 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", m);
 
-        // remove every channel from any group channels that end up empty
-        let mut group_channels_to_remove = Vec::new();
-
-        // check every group channel if it contains any of the channels in the new group
-        // channel
-        self.group_channels
-            .for_each_mut(|group_channel_id, group_channel| {
-                let channel_ids_to_remove = m.channel_ids.clone().into_inner();
-                for channel_id in channel_ids_to_remove {
-                    group_channel.remove_channel_id(channel_id);
-                }
-
-                if group_channel.is_empty() {
-                    group_channels_to_remove.push(group_channel_id);
-                }
-            });
-
-        // Now remove the empty group channels
-        for group_channel_id in group_channels_to_remove {
-            self.group_channels.remove(&group_channel_id);
+        if m.group_channel_id == AGGREGATED_CHANNEL_ID {
+            error!(
+                group_channel_id = m.group_channel_id,
+                "Rejecting SetGroupChannel that uses tProxy's reserved broadcast identifier"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::ChannelIdAlreadyInUse(m.group_channel_id),
+            ));
         }
 
         let new_channel_ids = m.channel_ids.clone().into_inner();
-        self.group_channels.with_mut_or_insert_with(
-            m.group_channel_id,
-            || GroupChannel::new(m.group_channel_id),
-            |group_channel| {
-                let current_channel_ids: Vec<u32> =
-                    group_channel.get_channel_ids().copied().collect();
+        let aggregated_channel = if self.mode.is_aggregated() {
+            Some(
+                self.extended_channels
+                    .with(&AGGREGATED_CHANNEL_ID, |channel| {
+                        (channel.get_channel_id(), channel.get_full_extranonce_size())
+                    })
+                    .ok_or_else(|| TproxyError::fallback(TproxyErrorKind::ChannelNotFound))?,
+            )
+        } else {
+            None
+        };
 
-                // Remove channels that are no longer in the new list
-                for channel_id in &current_channel_ids {
-                    if !new_channel_ids.contains(channel_id) {
-                        group_channel.remove_channel_id(*channel_id);
-                    }
-                }
+        // Validate the complete replacement before changing any existing group. In aggregated
+        // mode, SetGroupChannel carries the real upstream channel ID, while the corresponding
+        // local channel state is stored under AGGREGATED_CHANNEL_ID.
+        if let Some((aggregated_channel_id, _)) = aggregated_channel {
+            if m.group_channel_id == aggregated_channel_id {
+                return Err(TproxyError::fallback(
+                    TproxyErrorKind::ChannelIdAlreadyInUse(aggregated_channel_id),
+                ));
+            }
+        } else if self.extended_channels.contains_key(&m.group_channel_id) {
+            error!(
+                group_channel_id = m.group_channel_id,
+                "Rejecting SetGroupChannel that reinterprets an extended channel ID"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::ChannelIdAlreadyInUse(m.group_channel_id),
+            ));
+        }
 
-                // Add all channels from the message (inner HashSet ingores duplicates)
-                for channel_id in new_channel_ids {
-                    let full_extranonce_size = self
-                        .extended_channels
-                        .with(&channel_id, |extended_channel| {
-                            extended_channel.get_full_extranonce_size()
-                        })
-                        .ok_or_else(|| TproxyError::fallback(TproxyErrorKind::ChannelNotFound))?;
-                    group_channel
-                        .add_channel_id(channel_id, full_extranonce_size)
-                        .map_err(|e| {
-                            error!("Failed to add channel id to group channel: {:?}", e);
-                            TproxyError::fallback(
-                                TproxyErrorKind::FailedToAddChannelIdToGroupChannel(e),
-                            )
-                        })?;
+        let mut replacement_group = GroupChannel::new(m.group_channel_id);
+        for channel_id in &new_channel_ids {
+            if *channel_id == AGGREGATED_CHANNEL_ID {
+                return Err(TproxyError::fallback(
+                    TproxyErrorKind::ChannelIdAlreadyInUse(AGGREGATED_CHANNEL_ID),
+                ));
+            }
+
+            let full_extranonce_size = match aggregated_channel {
+                Some((aggregated_channel_id, full_extranonce_size))
+                    if *channel_id == aggregated_channel_id =>
+                {
+                    full_extranonce_size
                 }
-                Ok::<(), Self::Error>(())
-            },
-        )?;
+                Some(_) => {
+                    return Err(TproxyError::fallback(TproxyErrorKind::ChannelNotFound));
+                }
+                None => self
+                    .extended_channels
+                    .with(channel_id, |channel| channel.get_full_extranonce_size())
+                    .ok_or_else(|| TproxyError::fallback(TproxyErrorKind::ChannelNotFound))?,
+            };
+            replacement_group
+                .add_channel_id(*channel_id, full_extranonce_size)
+                .map_err(|error| {
+                    error!("Failed to add channel id to group channel: {error:?}");
+                    TproxyError::fallback(TproxyErrorKind::FailedToAddChannelIdToGroupChannel(
+                        error,
+                    ))
+                })?;
+        }
+
+        // Validation above makes this mutation phase infallible. Move the listed channels out of
+        // their previous groups, remove the old definition of the target group, then install the
+        // validated replacement.
+        let mut groups_to_remove = Vec::new();
+        self.group_channels.for_each_mut(|group_id, group| {
+            for channel_id in &new_channel_ids {
+                group.remove_channel_id(*channel_id);
+            }
+            if group.is_empty() {
+                groups_to_remove.push(group_id);
+            }
+        });
+        for group_id in groups_to_remove {
+            self.group_channels.remove(&group_id);
+        }
+        self.group_channels.remove(&m.group_channel_id);
+        if !new_channel_ids.is_empty() {
+            self.group_channels
+                .insert(m.group_channel_id, replacement_group);
+        }
 
         Ok(())
     }
@@ -1158,5 +1227,357 @@ impl ChannelManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TproxyMode, error::Action};
+    use async_channel::{Receiver, unbounded};
+
+    fn channel_manager_with_mode(mode: TproxyMode) -> (ChannelManager, Receiver<MiningOwned>) {
+        let (upstream_sender, _upstream_receiver_for_test) = unbounded();
+        let (_upstream_sender_for_test, upstream_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
+        let (_sv1_server_sender_for_test, sv1_server_receiver) = unbounded();
+
+        (
+            ChannelManager::new(
+                upstream_sender,
+                upstream_receiver,
+                sv1_server_sender,
+                sv1_server_receiver,
+                vec![],
+                vec![],
+                mode,
+                #[cfg(feature = "monitoring")]
+                true,
+            ),
+            sv1_server_receiver_for_test,
+        )
+    }
+
+    fn channel_manager() -> (ChannelManager, Receiver<MiningOwned>) {
+        channel_manager_with_mode(TproxyMode::NonAggregated)
+    }
+
+    fn open_success(
+        request_id: u32,
+        channel_id: u32,
+        group_channel_id: u32,
+        prefix_byte: u8,
+        extranonce_size: u16,
+    ) -> OpenExtendedMiningChannelSuccessOwned {
+        OpenExtendedMiningChannelSuccessOwned {
+            request_id,
+            channel_id,
+            target: [0xff; 32].into(),
+            extranonce_size,
+            extranonce_prefix: vec![prefix_byte; 4].try_into().unwrap(),
+            group_channel_id,
+        }
+    }
+
+    fn extended_channel(channel_id: u32) -> ExtendedChannel {
+        ExtendedChannel::new(
+            channel_id,
+            format!("miner-{channel_id}"),
+            ExtranoncePrefix::from_wire(vec![channel_id as u8; 4]).unwrap(),
+            Target::from_le_bytes([0xff; 32]),
+            1.0,
+            true,
+            4,
+        )
+    }
+
+    fn assert_collision(error: TproxyError<error::ChannelManager>, channel_id: u32) {
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::ChannelIdAlreadyInUse(id) if id == channel_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_open_success_that_reuses_a_live_channel_id() {
+        let (mut manager, sv1_server_receiver) = channel_manager();
+        manager
+            .pending_downstream_channels
+            .insert(1, ("first-miner".to_string(), 1.0, 4));
+        manager
+            .handle_open_extended_mining_channel_success(
+                None,
+                open_success(1, 7, 100, 0xaa, 4),
+                None,
+            )
+            .await
+            .unwrap();
+        sv1_server_receiver.recv().await.unwrap();
+
+        manager
+            .pending_downstream_channels
+            .insert(2, ("second-miner".to_string(), 1.0, 6));
+        let error = manager
+            .handle_open_extended_mining_channel_success(
+                None,
+                open_success(2, 7, 200, 0xbb, 6),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_collision(error, 7);
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&7, |channel| channel.get_full_extranonce_size()),
+            Some(8)
+        );
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(7))
+                .unwrap_or(false)
+        );
+        assert!(!manager.group_channels.contains_key(&200));
+        assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_open_success_that_reinterprets_its_channel_as_a_group() {
+        let (mut manager, sv1_server_receiver) = channel_manager();
+        manager
+            .pending_downstream_channels
+            .insert(1, ("miner".to_string(), 1.0, 4));
+
+        let error = manager
+            .handle_open_extended_mining_channel_success(None, open_success(1, 7, 7, 0xaa, 4), None)
+            .await
+            .unwrap_err();
+
+        assert_collision(error, 7);
+        assert!(!manager.extended_channels.contains_key(&7));
+        assert!(!manager.group_channels.contains_key(&7));
+        assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_open_success_that_shadows_a_live_group() {
+        let (mut manager, sv1_server_receiver) = channel_manager();
+        manager.group_channels.insert(7, GroupChannel::new(7));
+        manager
+            .pending_downstream_channels
+            .insert(1, ("miner".to_string(), 1.0, 4));
+
+        let error = manager
+            .handle_open_extended_mining_channel_success(
+                None,
+                open_success(1, 7, 100, 0xaa, 4),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_collision(error, 7);
+        assert!(manager.group_channels.contains_key(&7));
+        assert!(!manager.group_channels.contains_key(&100));
+        assert!(!manager.extended_channels.contains_key(&7));
+        assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_group_id_that_shadows_a_live_extended_channel() {
+        let (mut manager, _sv1_server_receiver) = channel_manager();
+        manager.extended_channels.insert(7, extended_channel(7));
+        manager.extended_channels.insert(8, extended_channel(8));
+
+        let error = manager
+            .handle_set_group_channel(
+                None,
+                SetGroupChannelOwned {
+                    group_channel_id: 7,
+                    channel_ids: vec![8].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_collision(error, 7);
+        assert!(!manager.group_channels.contains_key(&7));
+        assert!(manager.extended_channels.contains_key(&7));
+        assert!(manager.extended_channels.contains_key(&8));
+    }
+
+    #[tokio::test]
+    async fn rejects_reserved_channel_id_in_aggregated_mode() {
+        let (mut manager, sv1_server_receiver) = channel_manager_with_mode(TproxyMode::Aggregated);
+        manager
+            .pending_downstream_channels
+            .insert(1, ("miner".to_string(), 1.0, 4));
+
+        let error = manager
+            .handle_open_extended_mining_channel_success(
+                None,
+                open_success(1, AGGREGATED_CHANNEL_ID, 100, 0xaa, 4),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_collision(error, AGGREGATED_CHANNEL_ID);
+        assert!(manager.extended_channels.is_empty());
+        assert!(manager.group_channels.is_empty());
+        assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_reserved_group_id() {
+        let (mut manager, sv1_server_receiver) = channel_manager();
+        manager
+            .pending_downstream_channels
+            .insert(1, ("miner".to_string(), 1.0, 4));
+
+        let error = manager
+            .handle_open_extended_mining_channel_success(
+                None,
+                open_success(1, 7, AGGREGATED_CHANNEL_ID, 0xaa, 4),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_collision(error, AGGREGATED_CHANNEL_ID);
+        assert!(manager.extended_channels.is_empty());
+        assert!(manager.group_channels.is_empty());
+        assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_set_group_channel_does_not_mutate_existing_groups() {
+        let (mut manager, _sv1_server_receiver) = channel_manager();
+        manager.extended_channels.insert(7, extended_channel(7));
+        let mut original_group = GroupChannel::new(100);
+        original_group.add_channel_id(7, 8).unwrap();
+        manager.group_channels.insert(100, original_group);
+
+        let error = manager
+            .handle_set_group_channel(
+                None,
+                SetGroupChannelOwned {
+                    group_channel_id: 200,
+                    channel_ids: vec![7, 999].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(error.kind, TproxyErrorKind::ChannelNotFound));
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(7))
+                .unwrap_or(false)
+        );
+        assert!(!manager.group_channels.contains_key(&200));
+    }
+
+    #[tokio::test]
+    async fn aggregated_set_group_channel_uses_the_wire_channel_id() {
+        let (mut manager, _sv1_server_receiver) = channel_manager_with_mode(TproxyMode::Aggregated);
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, extended_channel(7));
+        let mut original_group = GroupChannel::new(100);
+        original_group.add_channel_id(7, 8).unwrap();
+        manager.group_channels.insert(100, original_group);
+
+        manager
+            .handle_set_group_channel(
+                None,
+                SetGroupChannelOwned {
+                    group_channel_id: 200,
+                    channel_ids: vec![7].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!manager.group_channels.contains_key(&100));
+        assert!(
+            manager
+                .group_channels
+                .with(&200, |group| group.has_channel_id(7))
+                .unwrap_or(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_aggregated_set_group_channel_preserves_existing_group() {
+        let (mut manager, _sv1_server_receiver) = channel_manager_with_mode(TproxyMode::Aggregated);
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, extended_channel(7));
+        let mut original_group = GroupChannel::new(100);
+        original_group.add_channel_id(7, 8).unwrap();
+        manager.group_channels.insert(100, original_group);
+
+        let error = manager
+            .handle_set_group_channel(
+                None,
+                SetGroupChannelOwned {
+                    group_channel_id: 200,
+                    channel_ids: vec![8].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(error.kind, TproxyErrorKind::ChannelNotFound));
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(7))
+                .unwrap_or(false)
+        );
+        assert!(!manager.group_channels.contains_key(&200));
+    }
+
+    #[tokio::test]
+    async fn aggregated_set_group_channel_rejects_reserved_group_id_without_mutation() {
+        let (mut manager, _sv1_server_receiver) = channel_manager_with_mode(TproxyMode::Aggregated);
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, extended_channel(7));
+        let mut original_group = GroupChannel::new(100);
+        original_group.add_channel_id(7, 8).unwrap();
+        manager.group_channels.insert(100, original_group);
+
+        let error = manager
+            .handle_set_group_channel(
+                None,
+                SetGroupChannelOwned {
+                    group_channel_id: AGGREGATED_CHANNEL_ID,
+                    channel_ids: vec![7].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_collision(error, AGGREGATED_CHANNEL_ID);
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(7))
+                .unwrap_or(false)
+        );
+        assert!(!manager.group_channels.contains_key(&AGGREGATED_CHANNEL_ID));
     }
 }
