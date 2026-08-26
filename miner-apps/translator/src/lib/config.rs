@@ -37,7 +37,8 @@ pub struct TranslatorConfig {
     /// The size of the extranonce2 field for downstream mining connections.
     pub downstream_extranonce2_size: u16,
     /// Whether to verify upstream coinbase outputs against a payout address encoded in each
-    /// upstream `user_identity`.
+    /// upstream `user_identity`. Defaults to `false` for standard pool-mining configurations,
+    /// which trust the upstream's payout policy.
     #[serde(default)]
     pub verify_payout: bool,
     /// Configuration settings for managing difficulty on the downstream connection.
@@ -581,6 +582,7 @@ mod tests {
         assert_eq!(config.upstreams.len(), 2);
         assert_eq!(config.upstreams[0].user_identity, "sri/solo/bc1qprimary");
         assert_eq!(config.upstreams[1].user_identity, "bc1qbackup.worker");
+        assert!(!config.verify_payout);
     }
 }
 
