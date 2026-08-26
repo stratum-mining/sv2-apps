@@ -2,7 +2,6 @@ use crate::{
     downstream::Downstream,
     error::{self, PoolError, PoolErrorKind},
 };
-use std::convert::TryInto;
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Seq064KOwned,
@@ -92,7 +91,7 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|_| {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, self.downstream_id)
@@ -132,7 +131,7 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|_| {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, self.downstream_id)

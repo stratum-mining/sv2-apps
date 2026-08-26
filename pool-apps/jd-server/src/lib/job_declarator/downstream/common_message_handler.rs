@@ -58,7 +58,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                 .map_err(JDSError::shutdown)?;
             self.downstream_io
                 .to_downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|e| JDSError::disconnect(e, downstream_id))?;
 
@@ -87,7 +87,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                 .map_err(JDSError::shutdown)?;
             self.downstream_io
                 .to_downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|e| JDSError::disconnect(e, downstream_id))?;
 
@@ -121,7 +121,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                 .map_err(JDSError::shutdown)?;
             self.downstream_io
                 .to_downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|e| JDSError::disconnect(e, self.downstream_id))?;
 
@@ -140,7 +140,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             .map_err(JDSError::shutdown)?;
         self.downstream_io
             .to_downstream_sender
-            .send(frame)
+            .send(frame.into())
             .await
             .map_err(|e| JDSError::disconnect(e, self.downstream_id))?;
 

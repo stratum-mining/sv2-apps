@@ -24,7 +24,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, Sv2Frame},
+        types::{Message, OutboundFrame, SerializedFrame, Sv2Frame},
     },
 };
 
@@ -35,22 +35,22 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone)]
 struct UpstreamIo {
     /// Receiver for the SV2 Upstream role
-    upstream_receiver: Receiver<Sv2Frame>,
+    upstream_receiver: Receiver<SerializedFrame>,
     /// Sender for the SV2 Upstream role
-    upstream_sender: Sender<Sv2Frame>,
+    upstream_sender: Sender<OutboundFrame>,
     /// Sender for the ChannelManager to send SV2 frames
-    channel_manager_sender: Sender<Sv2Frame>,
+    channel_manager_sender: Sender<SerializedFrame>,
     /// Receiver for the ChannelManager to receive SV2 frames
-    channel_manager_receiver: Receiver<Sv2Frame>,
+    channel_manager_receiver: Receiver<OutboundFrame>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl UpstreamIo {
     fn new(
-        upstream_receiver: Receiver<Sv2Frame>,
-        upstream_sender: Sender<Sv2Frame>,
-        channel_manager_sender: Sender<Sv2Frame>,
-        channel_manager_receiver: Receiver<Sv2Frame>,
+        upstream_receiver: Receiver<SerializedFrame>,
+        upstream_sender: Sender<OutboundFrame>,
+        channel_manager_sender: Sender<SerializedFrame>,
+        channel_manager_receiver: Receiver<OutboundFrame>,
     ) -> Self {
         Self {
             upstream_receiver,
@@ -172,8 +172,8 @@ impl Upstream {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         upstream: &UpstreamEntry,
-        channel_manager_sender: Sender<Sv2Frame>,
-        channel_manager_receiver: Receiver<Sv2Frame>,
+        channel_manager_sender: Sender<SerializedFrame>,
+        channel_manager_receiver: Receiver<OutboundFrame>,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
@@ -342,14 +342,14 @@ impl Upstream {
         // Send SetupConnection message to upstream
         self.upstream_io
             .upstream_sender
-            .send(sv2_frame)
+            .send(sv2_frame.into())
             .await
             .map_err(|e| {
                 error!("Failed to send SetupConnection to upstream: {:?}", e);
                 TproxyError::fallback(TproxyErrorKind::ChannelErrorSender)
             })?;
 
-        let mut incoming: Sv2Frame = match self.upstream_io.upstream_receiver.recv().await {
+        let mut incoming: SerializedFrame = match self.upstream_io.upstream_receiver.recv().await {
             Ok(frame) => {
                 debug!("Received handshake response from upstream.");
                 frame
@@ -360,10 +360,7 @@ impl Upstream {
             }
         };
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Expected handshake frame but no header found.");
-            TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(0, 0))
-        })?;
+        let header = incoming.header();
 
         if header.ext_type() != 0
             || !matches!(
@@ -402,7 +399,7 @@ impl Upstream {
 
             self.upstream_io
                 .upstream_sender
-                .send(sv2_frame)
+                .send(sv2_frame.into())
                 .await
                 .map_err(|e| {
                     error!("Failed to send message to upstream: {:?}", e);
@@ -422,11 +419,7 @@ impl Upstream {
             .map_err(TproxyError::fallback)?;
 
         debug!("Upstream: received frame.");
-        let Some(header) = sv2_frame.get_header() else {
-            return Err(TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(
-                0, 0,
-            )));
-        };
+        let header = sv2_frame.header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Common => {

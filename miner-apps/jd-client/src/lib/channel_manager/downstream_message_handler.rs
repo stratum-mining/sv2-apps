@@ -144,7 +144,10 @@ impl RouteMessageTo {
             }
             RouteMessageTo::Upstream(message) => {
                 let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message).try_into()?;
-                channel_manager_io.upstream_sender.send(sv2_frame).await?;
+                channel_manager_io
+                    .upstream_sender
+                    .send(sv2_frame.into())
+                    .await?;
             }
             RouteMessageTo::JobDeclarator(message) => {
                 channel_manager_io.jd_sender.send(message).await?;

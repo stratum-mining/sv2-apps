@@ -27,7 +27,7 @@ use stratum_apps::{
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
-    utils::types::{DownstreamId, Message, Sv2Frame},
+    utils::types::{DownstreamId, OutboundFrame, SerializedFrame, Sv2Frame},
 };
 use tracing::{debug, error, warn};
 
@@ -53,8 +53,8 @@ mod extensions_message_handler;
 pub struct DownstreamIo {
     channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
     channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
-    downstream_sender: Sender<Sv2Frame>,
-    downstream_receiver: Receiver<Sv2Frame>,
+    downstream_sender: Sender<OutboundFrame>,
+    downstream_receiver: Receiver<SerializedFrame>,
 }
 
 impl DownstreamIo {
@@ -164,7 +164,7 @@ impl Downstream {
         group_channel: GroupChannel,
         channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
         channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
-        noise_stream: NoiseTcpStream<Message>,
+        noise_stream: NoiseTcpStream,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
@@ -172,8 +172,8 @@ impl Downstream {
         required_extensions: Vec<u16>,
     ) -> Self {
         let (noise_stream_reader, noise_stream_writer) = noise_stream.into_split();
-        let (inbound_tx, inbound_rx) = unbounded::<Sv2Frame>();
-        let (outbound_tx, outbound_rx) = unbounded::<Sv2Frame>();
+        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         // Create a per-connection child token so we can cancel this
         // connection's I/O tasks independently of the global shutdown.
@@ -312,7 +312,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| JDCError::disconnect(error, self.downstream_id))?;
-        let header = frame.get_header().expect("frame header must be present");
+        let header = frame.header();
         if header.ext_type() == 0 && header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
             self.handle_common_message_frame_from_client(None, header, frame.payload())
                 .await?;
@@ -346,7 +346,7 @@ impl Downstream {
 
         self.downstream_io
             .downstream_sender
-            .send(sv2_frame)
+            .send(sv2_frame.into())
             .await
             .map_err(|e| {
                 error!(?e, "Downstream send failed");
@@ -364,9 +364,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| JDCError::disconnect(error, self.downstream_id))?;
-        let header = sv2_frame
-            .get_header()
-            .expect("frame header must be present");
+        let header = sv2_frame.header();
         let payload = sv2_frame.payload();
         let negotiated_extensions = self
             .negotiated_extensions

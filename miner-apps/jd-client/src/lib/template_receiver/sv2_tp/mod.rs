@@ -23,7 +23,6 @@ use stratum_apps::{
         common_messages_sv2::{
             MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
         },
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         noise_sv2,
         parsers_sv2::{TemplateDistribution, TemplateDistributionOwned},
@@ -31,7 +30,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, Sv2Frame},
+        types::{Message, OutboundFrame, SerializedFrame, Sv2Frame},
     },
 };
 use tokio::{net::TcpStream, time::timeout};
@@ -56,8 +55,8 @@ mod message_handler;
 pub struct Sv2TpIo {
     channel_manager_sender: Sender<TemplateDistributionOwned>,
     channel_manager_receiver: Receiver<TemplateDistributionOwned>,
-    tp_sender: Sender<Sv2Frame>,
-    tp_receiver: Receiver<Sv2Frame>,
+    tp_sender: Sender<OutboundFrame>,
+    tp_receiver: Receiver<SerializedFrame>,
 }
 
 impl Sv2TpIo {
@@ -173,8 +172,8 @@ impl Sv2Tp {
                                     let (noise_stream_reader, noise_stream_writer) =
                                         noise_stream.into_split();
 
-                                    let (inbound_tx, inbound_rx) = unbounded::<Sv2Frame>();
-                                    let (outbound_tx, outbound_rx) = unbounded::<Sv2Frame>();
+                                    let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+                                    let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
                                     info!(attempt, "Spawning IO tasks for template receiver");
                                     spawn_io_tasks(
@@ -308,10 +307,7 @@ impl Sv2Tp {
             .map_err(JDCError::shutdown)?;
 
         debug!("Received SV2 frame from Template provider.");
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            JDCError::shutdown(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.header();
         let message_type = header.msg_type();
         let extension_type = header.ext_type();
 
@@ -360,7 +356,7 @@ impl Sv2Tp {
         let sv2_frame: Sv2Frame = msg.try_into().map_err(JDCError::shutdown)?;
         self.sv2_tp_io
             .tp_sender
-            .send(sv2_frame)
+            .send(sv2_frame.into())
             .await
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
 
@@ -384,21 +380,23 @@ impl Sv2Tp {
             .map_err(JDCError::shutdown)?;
 
         info!("Sending setup connection message to upstream");
-        self.sv2_tp_io.tp_sender.send(frame).await.map_err(|_| {
-            error!("Failed to send setup connection message upstream");
-            JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
-        })?;
+        self.sv2_tp_io
+            .tp_sender
+            .send(frame.into())
+            .await
+            .map_err(|_| {
+                error!("Failed to send setup connection message upstream");
+                JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
+            })?;
 
         info!("Waiting for upstream handshake response");
-        let mut incoming: Sv2Frame = self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
-            error!(?e, "Upstream connection closed during handshake");
-            JDCError::shutdown(noise_sv2::Error::ExpectedIncomingHandshakeMessage)
-        })?;
+        let mut incoming: SerializedFrame =
+            self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
+                error!(?e, "Upstream connection closed during handshake");
+                JDCError::shutdown(noise_sv2::Error::ExpectedIncomingHandshakeMessage)
+            })?;
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Handshake frame missing header");
-            JDCError::shutdown(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = incoming.header();
         debug!(ext_type = ?header.ext_type(),
             msg_type = ?header.msg_type(),
             "Received upstream handshake response");
@@ -424,6 +422,20 @@ impl Sv2Tp {
 
 #[cfg(test)]
 mod tests {
+
+    // A peer sends framed bytes, so a test standing in for one has to frame and serialize the
+    // message it injects.
+    fn serialize_frame(message: Message) -> SerializedFrame {
+        use stratum_apps::stratum_core::codec_sv2::EncodableFrame as _;
+        let frame: Sv2Frame = message
+            .try_into()
+            .expect("Failed to frame the injected message");
+        let mut bytes = vec![0u8; frame.encoded_length()];
+        frame
+            .encode_into(&mut bytes)
+            .expect("Failed to serialize the injected frame");
+        SerializedFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
+    }
     use super::*;
     use stratum_apps::stratum_core::{
         common_messages_sv2::ChannelEndpointChangedOwned, parsers_sv2::CommonMessagesOwned,
@@ -449,11 +461,9 @@ mod tests {
         let response: Message = Message::Common(CommonMessagesOwned::ChannelEndpointChanged(
             ChannelEndpointChangedOwned { channel_id: 0 },
         ));
-        let frame: Sv2Frame = response
-            .try_into()
-            .expect("Failed to serialize ChannelEndpointChanged frame");
+
         tp_inbound_tx
-            .send(frame)
+            .send(serialize_frame(response))
             .await
             .expect("Failed to inject ChannelEndpointChanged response");
 

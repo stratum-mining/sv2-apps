@@ -5,9 +5,8 @@ use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     channel_utils::ReceiverCleanup,
     network_helpers::noise_stream::{NoiseTcpReadHalf, NoiseTcpWriteHalf},
-    stratum_core::framing_sv2::framing::Frame,
     task_manager::TaskManager,
-    utils::types::{Message, Sv2Frame},
+    utils::types::{OutboundFrame, SerializedFrame},
 };
 use tracing::{Instrument as _, error, trace, warn};
 
@@ -16,10 +15,10 @@ use tracing::{Instrument as _, error, trace, warn};
 #[cfg_attr(not(test), hotpath::measure)]
 pub fn spawn_io_tasks(
     task_manager: Arc<TaskManager>,
-    mut reader: NoiseTcpReadHalf<Message>,
-    mut writer: NoiseTcpWriteHalf<Message>,
-    outbound_rx: Receiver<Sv2Frame>,
-    inbound_tx: Sender<Sv2Frame>,
+    mut reader: NoiseTcpReadHalf,
+    mut writer: NoiseTcpWriteHalf,
+    outbound_rx: Receiver<OutboundFrame>,
+    inbound_tx: Sender<SerializedFrame>,
     cancellation_token: CancellationToken,
 ) {
     let caller = std::panic::Location::caller();
@@ -41,21 +40,12 @@ pub fn spawn_io_tasks(
                         }
                         res = reader.read_frame() => {
                             match res {
-                                Ok(frame) => {
-                                    match frame {
-                                        Frame::HandShake(frame) => {
-                                            error!(?frame, "Received handshake frame");
-                                            drop(frame);
-                                            break;
-                                        },
-                                        Frame::Sv2(sv2_frame) => {
-                                            trace!("Received inbound frame");
-                                            if let Err(e) = inbound_tx.send(sv2_frame).await {
-                                                inbound_tx.close();
-                                                error!(error=?e, "Failed to forward inbound frame");
-                                                break;
-                                            }
-                                        },
+                                Ok(sv2_frame) => {
+                                    trace!("Received inbound frame");
+                                    if let Err(e) = inbound_tx.send(sv2_frame).await {
+                                        inbound_tx.close();
+                                        error!(error=?e, "Failed to forward inbound frame");
+                                        break;
                                     }
                                 }
                                 Err(e) => {
@@ -96,7 +86,7 @@ pub fn spawn_io_tasks(
                             match res {
                                 Ok(frame) => {
                                     trace!("Sending outbound frame");
-                                    if let Err(e) = writer.write_frame(frame.into()).await {
+                                    if let Err(e) = writer.write_frame(frame).await {
                                         error!(error=?e, "Writer error");
                                         outbound_rx.close_and_drain();
                                         break;

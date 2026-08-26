@@ -59,7 +59,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|_| {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, downstream_id)
@@ -90,7 +90,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .map_err(|_| {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, downstream_id)
@@ -129,7 +129,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             .map_err(PoolError::shutdown)?;
         self.downstream_io
             .downstream_sender
-            .send(frame)
+            .send(frame.into())
             .await
             .map_err(|_| {
                 PoolError::disconnect(PoolErrorKind::ChannelErrorSender, self.downstream_id)

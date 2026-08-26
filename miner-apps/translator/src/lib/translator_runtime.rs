@@ -11,7 +11,7 @@ use stratum_apps::{
     payout::PayoutMode,
     stratum_core::parsers_sv2::MiningOwned,
     task_manager::TaskManager,
-    utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, Sv2Frame},
+    utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, OutboundFrame, SerializedFrame},
 };
 use tracing::{debug, error, info, warn};
 
@@ -24,10 +24,10 @@ use crate::{
 };
 
 struct Io {
-    channel_manager_to_upstream_sender: Sender<Sv2Frame>,
-    channel_manager_to_upstream_receiver: Receiver<Sv2Frame>,
-    upstream_to_channel_manager_sender: Sender<Sv2Frame>,
-    upstream_to_channel_manager_receiver: Receiver<Sv2Frame>,
+    channel_manager_to_upstream_sender: Sender<OutboundFrame>,
+    channel_manager_to_upstream_receiver: Receiver<OutboundFrame>,
+    upstream_to_channel_manager_sender: Sender<SerializedFrame>,
+    upstream_to_channel_manager_receiver: Receiver<SerializedFrame>,
     channel_manager_to_sv1_server_sender: Sender<MiningOwned>,
     channel_manager_to_sv1_server_receiver: Receiver<MiningOwned>,
     sv1_server_to_channel_manager_sender: Sender<(MiningOwned, Option<String>)>,

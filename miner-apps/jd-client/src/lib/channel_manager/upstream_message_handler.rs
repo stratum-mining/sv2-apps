@@ -134,7 +134,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 .map_err(JDCError::shutdown)?;
             self.channel_manager_io
                 .upstream_sender
-                .send(sv2_frame)
+                .send(sv2_frame.into())
                 .await
                 .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
             return Ok(());
@@ -167,7 +167,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     .map_err(JDCError::shutdown)?;
                 self.channel_manager_io
                     .upstream_sender
-                    .send(sv2_frame)
+                    .send(sv2_frame.into())
                     .await
                     .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
                 return Ok(());
@@ -298,7 +298,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                         .map_err(JDCError::shutdown)?;
                     self.channel_manager_io
                         .upstream_sender
-                        .send(sv2_frame)
+                        .send(sv2_frame.into())
                         .await
                         .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
                     _ = self.allocate_tokens(1).await;

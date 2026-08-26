@@ -11,14 +11,13 @@ use stratum_apps::{
         common_messages_sv2::{
             MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
         },
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         parsers_sv2::JobDeclaration,
     },
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, Sv2Frame},
+        types::{Message, OutboundFrame, SerializedFrame, Sv2Frame},
     },
 };
 use tokio::net::TcpStream;
@@ -38,8 +37,8 @@ mod message_handler;
 pub struct JobDeclaratorIo {
     channel_manager_sender: Sender<JobDeclarationOwned>,
     channel_manager_receiver: Receiver<JobDeclarationOwned>,
-    jds_sender: Sender<Sv2Frame>,
-    jds_receiver: Receiver<Sv2Frame>,
+    jds_sender: Sender<OutboundFrame>,
+    jds_receiver: Receiver<SerializedFrame>,
 }
 
 impl JobDeclaratorIo {
@@ -165,8 +164,8 @@ impl JobDeclarator {
             }
         };
 
-        let (inbound_tx, inbound_rx) = unbounded::<Sv2Frame>();
-        let (outbound_tx, outbound_rx) = unbounded::<Sv2Frame>();
+        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         spawn_io_tasks(
             task_manager,
@@ -286,7 +285,12 @@ impl JobDeclarator {
                 JDCError::shutdown(e)
             })?;
 
-        if let Err(e) = self.job_declarator_io.jds_sender.send(sv2_frame).await {
+        if let Err(e) = self
+            .job_declarator_io
+            .jds_sender
+            .send(sv2_frame.into())
+            .await
+        {
             error!(error=?e, "Failed to send SetupConnection frame.");
             return Err(JDCError::fallback(JDCErrorKind::ChannelErrorSender));
         }
@@ -302,10 +306,7 @@ impl JobDeclarator {
                 JDCError::fallback(JDCErrorKind::ChannelErrorSender)
             })?;
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Handshake frame missing header.");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = incoming.header();
 
         debug!(ext_type = ?header.ext_type(),
             msg_type = ?header.msg_type(),
@@ -339,7 +340,7 @@ impl JobDeclarator {
                 let sv2_frame: Sv2Frame = message.try_into().map_err(JDCError::shutdown)?;
                 self.job_declarator_io
                     .jds_sender
-                    .send(sv2_frame)
+                    .send(sv2_frame.into())
                     .await
                     .map_err(|e| {
                         error!("Failed to send message to outbound channel: {:?}", e);
@@ -367,10 +368,7 @@ impl JobDeclarator {
             .map_err(JDCError::fallback)?;
 
         debug!("Received SV2 frame from JDS.");
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.header();
         let message_type = header.msg_type();
         let extension_type = header.ext_type();
 
@@ -404,6 +402,20 @@ impl JobDeclarator {
 
 #[cfg(test)]
 mod tests {
+
+    // A peer sends framed bytes, so a test standing in for one has to frame and serialize the
+    // message it injects.
+    fn serialize_frame(message: Message) -> SerializedFrame {
+        use stratum_apps::stratum_core::codec_sv2::EncodableFrame as _;
+        let frame: Sv2Frame = message
+            .try_into()
+            .expect("Failed to frame the injected message");
+        let mut bytes = vec![0u8; frame.encoded_length()];
+        frame
+            .encode_into(&mut bytes)
+            .expect("Failed to serialize the injected frame");
+        SerializedFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
+    }
     use super::*;
     use crate::config::ConfigJDCMode;
     use stratum_apps::stratum_core::{
@@ -431,11 +443,9 @@ mod tests {
         let response: Message = Message::Common(CommonMessagesOwned::ChannelEndpointChanged(
             ChannelEndpointChangedOwned { channel_id: 0 },
         ));
-        let frame: Sv2Frame = response
-            .try_into()
-            .expect("Failed to serialize ChannelEndpointChanged frame");
+
         jds_inbound_sender
-            .send(frame)
+            .send(serialize_frame(response))
             .await
             .expect("Failed to inject ChannelEndpointChanged response");
 

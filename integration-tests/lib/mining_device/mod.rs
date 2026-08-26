@@ -21,7 +21,7 @@ use stratum_apps::{
             CompactTarget, block::Version, blockdata::block::Header,
             consensus::encode::serialize as btc_serialize, hash_types::BlockHash, hashes::Hash,
         },
-        codec_sv2::{HandshakeRole, StandardEitherFrame, StandardSv2Frame},
+        codec_sv2::{StandardSerializedFrame, Sv2Frame},
         common_messages_sv2::{
             ChannelEndpointChangedOwned, Protocol, ReconnectOwned, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccessOwned,
@@ -135,13 +135,9 @@ pub async fn connect(
     info!("Pool tcp connection established at {}", address);
     let address = socket.peer_addr().unwrap();
     let initiator = Initiator::new(pub_key.map(|e| e.0));
-    let (receiver, sender) = Connection::new(
-        socket,
-        HandshakeRole::Initiator(initiator),
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let (receiver, sender) = Connection::connect(socket, initiator, CancellationToken::new())
+        .await
+        .unwrap();
     info!("Pool noise connection established at {}", address);
     Device::start(
         receiver,
@@ -157,8 +153,8 @@ pub async fn connect(
 }
 
 pub type Message = MiningDeviceMessagesOwned;
-pub type StdFrame = StandardSv2Frame<Message>;
-pub type EitherFrame = StandardEitherFrame<Message>;
+pub type StdFrame = Sv2Frame<Message>;
+pub type ReceivedFrame = StandardSerializedFrame;
 
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 struct Id {
@@ -210,8 +206,8 @@ impl SetupConnectionHandler {
     }
     pub async fn setup(
         self_: SharedLock<Self>,
-        receiver: &mut Receiver<EitherFrame>,
-        sender: &mut Sender<EitherFrame>,
+        receiver: &mut Receiver<ReceivedFrame>,
+        sender: &mut Sender<StdFrame>,
         device_id: Option<String>,
         address: SocketAddr,
     ) {
@@ -220,12 +216,11 @@ impl SetupConnectionHandler {
         let sv2_frame: StdFrame = MiningDeviceMessagesOwned::Common(setup_connection.into())
             .try_into()
             .unwrap();
-        let sv2_frame = sv2_frame.into();
         sender.send(sv2_frame).await.unwrap();
         info!("Setup connection sent to {}", address);
 
-        let mut incoming: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
-        let message_type = incoming.get_header().unwrap().msg_type();
+        let mut incoming: ReceivedFrame = receiver.recv().await.unwrap();
+        let message_type = incoming.header().msg_type();
         let payload = incoming.payload();
         Self::handle_message_common(self_, message_type, payload).unwrap();
     }
@@ -292,8 +287,8 @@ struct NewWorkNotifier {
 #[derive(Debug)]
 pub struct Device {
     #[allow(dead_code)]
-    receiver: Receiver<EitherFrame>,
-    sender: Sender<EitherFrame>,
+    receiver: Receiver<ReceivedFrame>,
+    sender: Sender<StdFrame>,
     #[allow(dead_code)]
     channel_opened: bool,
     channel_id: Option<u32>,
@@ -337,8 +332,8 @@ fn open_channel(
 impl Device {
     #[allow(clippy::too_many_arguments)]
     async fn start(
-        mut receiver: Receiver<EitherFrame>,
-        mut sender: Sender<EitherFrame>,
+        mut receiver: Receiver<ReceivedFrame>,
+        mut sender: Sender<StdFrame>,
         addr: SocketAddr,
         device_id: Option<String>,
         user_id: Option<String>,
@@ -377,7 +372,7 @@ impl Device {
                 open_channel(user_id, nominal_hashrate_multiplier, handicap),
             ));
         let frame: StdFrame = open_channel.try_into().unwrap();
-        self_.sender.send(frame.into()).await.unwrap();
+        self_.sender.send(frame).await.unwrap();
         let self_mutex = SharedLock::new(self_);
         let cloned = self_mutex.clone();
 
@@ -396,8 +391,8 @@ impl Device {
         });
 
         loop {
-            let mut incoming: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
-            let message_type = incoming.get_header().unwrap().msg_type();
+            let mut incoming: ReceivedFrame = receiver.recv().await.unwrap();
+            let message_type = incoming.header().msg_type();
             let payload = incoming.payload();
             Device::handle_message_mining(self_mutex.clone(), message_type, payload).unwrap();
             let mut notify_changes_to_mining_thread = self_mutex
@@ -437,7 +432,7 @@ impl Device {
         ));
         let frame: StdFrame = share.try_into().unwrap();
         let sender = self_mutex.with(|s| s.sender.clone()).unwrap();
-        sender.send(frame.into()).await.unwrap();
+        sender.send(frame).await.unwrap();
     }
 
     fn handle_message_mining(

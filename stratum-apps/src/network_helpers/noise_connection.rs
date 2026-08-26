@@ -6,8 +6,8 @@ use crate::network_helpers::{
 use async_channel::{Receiver, Sender, unbounded};
 use std::sync::Arc;
 use stratum_core::{
-    binary_sv2::{Deserialize, GetSize, Serialize},
-    codec_sv2::{HandshakeRole, StandardEitherFrame},
+    codec_sv2::{EncodableFrame, StandardSerializedFrame},
+    noise_sv2::{Initiator, Responder},
 };
 use tokio::{net::TcpStream, task};
 use tokio_util::sync::CancellationToken;
@@ -15,14 +15,14 @@ use tracing::{debug, error};
 
 pub struct Connection;
 
-struct ConnectionState<Message> {
-    sender_incoming: Sender<StandardEitherFrame<Message>>,
-    receiver_incoming: Receiver<StandardEitherFrame<Message>>,
-    sender_outgoing: Sender<StandardEitherFrame<Message>>,
-    receiver_outgoing: Receiver<StandardEitherFrame<Message>>,
+struct ConnectionState<F> {
+    sender_incoming: Sender<StandardSerializedFrame>,
+    receiver_incoming: Receiver<StandardSerializedFrame>,
+    sender_outgoing: Sender<F>,
+    receiver_outgoing: Receiver<F>,
 }
 
-impl<Message> ConnectionState<Message> {
+impl<F> ConnectionState<F> {
     fn close_all(&self) {
         self.sender_incoming.close();
         self.receiver_incoming.close();
@@ -32,22 +32,42 @@ impl<Message> ConnectionState<Message> {
 }
 
 impl Connection {
-    /// Performs the Noise handshake and spawns the reader and writer tasks.
+    /// Performs the Noise handshake as the initiator and spawns the reader and writer tasks.
     ///
     /// Cancelling `cancellation_token` makes both tasks exit and closes all channels.
-    pub async fn new<Message>(
+    pub async fn connect<F>(
         stream: TcpStream,
-        role: HandshakeRole,
+        initiator: Box<Initiator>,
         cancellation_token: CancellationToken,
-    ) -> Result<
-        (
-            Receiver<StandardEitherFrame<Message>>,
-            Sender<StandardEitherFrame<Message>>,
-        ),
-        Error,
-    >
+    ) -> Result<(Receiver<StandardSerializedFrame>, Sender<F>), Error>
     where
-        Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+        F: EncodableFrame + Send + 'static,
+    {
+        let stream = NoiseTcpStream::connect(stream, initiator, NOISE_HANDSHAKE_TIMEOUT).await?;
+        Self::spawn_tasks::<F>(stream, cancellation_token)
+    }
+
+    /// Performs the Noise handshake as the responder and spawns the reader and writer tasks.
+    ///
+    /// Cancelling `cancellation_token` makes both tasks exit and closes all channels.
+    pub async fn accept<F>(
+        stream: TcpStream,
+        responder: Box<Responder>,
+        cancellation_token: CancellationToken,
+    ) -> Result<(Receiver<StandardSerializedFrame>, Sender<F>), Error>
+    where
+        F: EncodableFrame + Send + 'static,
+    {
+        let stream = NoiseTcpStream::accept(stream, responder, NOISE_HANDSHAKE_TIMEOUT).await?;
+        Self::spawn_tasks::<F>(stream, cancellation_token)
+    }
+
+    fn spawn_tasks<F>(
+        stream: NoiseTcpStream,
+        cancellation_token: CancellationToken,
+    ) -> Result<(Receiver<StandardSerializedFrame>, Sender<F>), Error>
+    where
+        F: EncodableFrame + Send + 'static,
     {
         let (sender_incoming, receiver_incoming) = unbounded();
         let (sender_outgoing, receiver_outgoing) = unbounded();
@@ -59,28 +79,22 @@ impl Connection {
             receiver_outgoing,
         });
 
-        let (read_half, write_half) =
-            NoiseTcpStream::<Message>::new(stream, role, NOISE_HANDSHAKE_TIMEOUT)
-                .await?
-                .into_split();
+        let (read_half, write_half) = stream.into_split();
 
         Self::spawn_reader(
             read_half,
             Arc::clone(&conn_state),
             cancellation_token.clone(),
         );
-        Self::spawn_writer(write_half, conn_state, cancellation_token);
+        Self::spawn_writer::<F>(write_half, conn_state, cancellation_token);
 
         Ok((receiver_incoming, sender_outgoing))
     }
-    fn spawn_reader<Message>(
-        mut read_half: NoiseTcpReadHalf<Message>,
-        conn_state: Arc<ConnectionState<Message>>,
+    fn spawn_reader<F: Send + 'static>(
+        mut read_half: NoiseTcpReadHalf,
+        conn_state: Arc<ConnectionState<F>>,
         cancellation_token: CancellationToken,
-    ) -> task::JoinHandle<()>
-    where
-        Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
-    {
+    ) -> task::JoinHandle<()> {
         let sender_incoming = conn_state.sender_incoming.clone();
 
         task::spawn(async move {
@@ -109,13 +123,13 @@ impl Connection {
         })
     }
 
-    fn spawn_writer<Message>(
-        mut write_half: NoiseTcpWriteHalf<Message>,
-        conn_state: Arc<ConnectionState<Message>>,
+    fn spawn_writer<F>(
+        mut write_half: NoiseTcpWriteHalf,
+        conn_state: Arc<ConnectionState<F>>,
         cancellation_token: CancellationToken,
     ) -> task::JoinHandle<()>
     where
-        Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
+        F: EncodableFrame + Send + 'static,
     {
         let receiver_outgoing = conn_state.receiver_outgoing.clone();
 
@@ -156,6 +170,7 @@ mod tests {
     use crate::key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
     use std::time::Duration;
     use stratum_core::{
+        codec_sv2::Sv2Frame,
         noise_sv2::{Initiator, Responder},
         parsers_sv2::AnyMessageOwned,
     };
@@ -177,9 +192,9 @@ mod tests {
             let responder =
                 Responder::from_authority_kp(&pub_key, &prv_key, Duration::from_secs(10_000))
                     .unwrap();
-            Connection::new::<AnyMessageOwned>(
+            Connection::accept::<Sv2Frame<AnyMessageOwned>>(
                 stream,
-                HandshakeRole::Responder(responder),
+                responder,
                 CancellationToken::new(),
             )
             .await
@@ -189,9 +204,9 @@ mod tests {
         let stream = TcpStream::connect(addr).await.unwrap();
         let initiator = Initiator::without_pk().unwrap();
         let cancellation_token = CancellationToken::new();
-        let (receiver, sender) = Connection::new::<AnyMessageOwned>(
+        let (receiver, sender) = Connection::connect::<Sv2Frame<AnyMessageOwned>>(
             stream,
-            HandshakeRole::Initiator(initiator),
+            initiator,
             cancellation_token.clone(),
         )
         .await

@@ -22,8 +22,7 @@ pub use resolve_hostname::{ResolveError, resolve_host, resolve_host_port};
 use async_channel::{RecvError, SendError};
 use std::{fmt, time::Duration};
 use stratum_core::{
-    binary_sv2::{Deserialize, GetSize, Serialize},
-    codec_sv2::{Error as CodecError, HandshakeRole},
+    codec_sv2::Error as CodecError,
     noise_sv2::{Initiator, Responder},
 };
 use tokio::net::TcpStream;
@@ -117,23 +116,16 @@ pub const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Pass `Some(key)` to verify the server's authority public key, or `None` to skip
 /// verification (encrypted but unauthenticated — use only on trusted networks).
-pub async fn connect_with_noise<Message>(
+pub async fn connect_with_noise(
     stream: TcpStream,
     authority_pub_key: Option<Secp256k1PublicKey>,
-) -> Result<NoiseTcpStream<Message>, Error>
-where
-    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
-{
+) -> Result<NoiseTcpStream, Error> {
     let initiator = match authority_pub_key {
         Some(key) => Initiator::from_raw_k(key.into_bytes()).map_err(|_| Error::InvalidKey)?,
         None => Initiator::without_pk().map_err(|_| Error::InvalidKey)?,
     };
-    let stream = noise_stream::NoiseTcpStream::new(
-        stream,
-        HandshakeRole::Initiator(initiator),
-        NOISE_HANDSHAKE_TIMEOUT,
-    )
-    .await?;
+    let stream =
+        noise_stream::NoiseTcpStream::connect(stream, initiator, NOISE_HANDSHAKE_TIMEOUT).await?;
     Ok(stream)
 }
 
@@ -144,26 +136,19 @@ where
 ///
 /// `cert_validity` controls how long the generated Noise certificate is valid,
 /// which is independent of the handshake timeout.
-pub async fn accept_noise_connection<Message>(
+pub async fn accept_noise_connection(
     stream: TcpStream,
     pub_key: Secp256k1PublicKey,
     prv_key: Secp256k1SecretKey,
     cert_validity: u64,
-) -> Result<NoiseTcpStream<Message>, Error>
-where
-    Message: Serialize + for<'decoder> Deserialize<'decoder> + GetSize + Send + 'static,
-{
+) -> Result<NoiseTcpStream, Error> {
     let responder = Responder::from_authority_kp(
         &pub_key.into_bytes(),
         &prv_key.into_bytes(),
         Duration::from_secs(cert_validity),
     )
     .map_err(|_| Error::InvalidKey)?;
-    let stream = noise_stream::NoiseTcpStream::new(
-        stream,
-        HandshakeRole::Responder(responder),
-        NOISE_HANDSHAKE_TIMEOUT,
-    )
-    .await?;
+    let stream =
+        noise_stream::NoiseTcpStream::accept(stream, responder, NOISE_HANDSHAKE_TIMEOUT).await?;
     Ok(stream)
 }

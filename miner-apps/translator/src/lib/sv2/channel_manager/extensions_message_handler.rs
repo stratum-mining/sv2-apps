@@ -141,7 +141,7 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
 
             self.channel_manager_io
                 .upstream_sender
-                .send(sv2_frame)
+                .send(sv2_frame.into())
                 .await
                 .map_err(|e| {
                     error!("Failed to send message to upstream: {:?}", e);

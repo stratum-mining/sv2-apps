@@ -16,7 +16,9 @@ use stratum_apps::{
     },
     task_manager::TaskManager,
     tp_type::{TemplateProviderType, resolve_ipc_socket_path},
-    utils::types::{DownstreamId, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, Sv2Frame},
+    utils::types::{
+        DownstreamId, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, OutboundFrame, SerializedFrame,
+    },
 };
 use tracing::{error, info, warn};
 
@@ -38,10 +40,10 @@ use crate::{
 use std::net::SocketAddr;
 
 struct Io {
-    channel_manager_to_upstream_sender: Sender<Sv2Frame>,
-    channel_manager_to_upstream_receiver: Receiver<Sv2Frame>,
-    upstream_to_channel_manager_sender: Sender<Sv2Frame>,
-    upstream_to_channel_manager_receiver: Receiver<Sv2Frame>,
+    channel_manager_to_upstream_sender: Sender<OutboundFrame>,
+    channel_manager_to_upstream_receiver: Receiver<OutboundFrame>,
+    upstream_to_channel_manager_sender: Sender<SerializedFrame>,
+    upstream_to_channel_manager_receiver: Receiver<SerializedFrame>,
     channel_manager_to_jd_sender: Sender<JobDeclarationOwned>,
     channel_manager_to_jd_receiver: Receiver<JobDeclarationOwned>,
     jd_to_channel_manager_sender: Sender<JobDeclarationOwned>,

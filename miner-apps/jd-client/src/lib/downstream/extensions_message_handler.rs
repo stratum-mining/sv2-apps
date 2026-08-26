@@ -2,7 +2,6 @@ use crate::{
     downstream::Downstream,
     error::{self, JDCError, JDCErrorKind},
 };
-use std::convert::TryInto;
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Seq064KOwned,
@@ -85,7 +84,12 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
             let frame: Sv2Frame = AnyMessageOwned::Extensions(error.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+            if let Err(e) = self
+                .downstream_io
+                .downstream_sender
+                .send(frame.into())
+                .await
+            {
                 error!(
                     "Failed to send RequestExtensionsError to downstream {}: {e}",
                     self.downstream_id
@@ -126,7 +130,12 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
             let frame: Sv2Frame = AnyMessageOwned::Extensions(success.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+            if let Err(e) = self
+                .downstream_io
+                .downstream_sender
+                .send(frame.into())
+                .await
+            {
                 error!(
                     "Failed to send RequestExtensionsSuccess to downstream {}: {e}",
                     self.downstream_id

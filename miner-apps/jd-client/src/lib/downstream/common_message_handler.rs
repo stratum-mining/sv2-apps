@@ -79,7 +79,12 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+            if let Err(e) = self
+                .downstream_io
+                .downstream_sender
+                .send(frame.into())
+                .await
+            {
                 error!(
                     "Failed to send SetupConnectionError to downstream {}: {e}",
                     self.downstream_id
@@ -109,7 +114,12 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+            if let Err(e) = self
+                .downstream_io
+                .downstream_sender
+                .send(frame.into())
+                .await
+            {
                 error!(
                     "Failed to send SetupConnectionError to downstream {}: {e}",
                     self.downstream_id
@@ -134,7 +144,12 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
                 .try_into()
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+            if let Err(e) = self
+                .downstream_io
+                .downstream_sender
+                .send(frame.into())
+                .await
+            {
                 error!(
                     "Failed to send SetupConnectionError to downstream {}: {e}",
                     self.downstream_id
@@ -171,7 +186,12 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             .try_into()
             .map_err(JDCError::shutdown)?;
 
-        if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
+        if let Err(e) = self
+            .downstream_io
+            .downstream_sender
+            .send(frame.into())
+            .await
+        {
             error!(
                 "Failed to send SetupConnectionSuccess to downstream {}: {e}",
                 self.downstream_id

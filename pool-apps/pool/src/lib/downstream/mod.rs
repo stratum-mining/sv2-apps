@@ -14,7 +14,6 @@ use stratum_apps::{
             extended::ExtendedChannel, group::GroupChannel, standard::StandardChannel,
         },
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
-        framing_sv2,
         handlers_sv2::{
             HandleCommonMessagesFromClientOwnedAsync, HandleExtensionsFromClientOwnedAsync,
         },
@@ -24,7 +23,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{ChannelId, DownstreamId, Message, Sv2Frame},
+        types::{ChannelId, DownstreamId, OutboundFrame, SerializedFrame, Sv2Frame},
     },
 };
 use tracing::{debug, error, warn};
@@ -50,8 +49,8 @@ mod extensions_message_handler;
 pub struct DownstreamIo {
     channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
     channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
-    downstream_sender: Sender<Sv2Frame>,
-    downstream_receiver: Receiver<Sv2Frame>,
+    downstream_sender: Sender<OutboundFrame>,
+    downstream_receiver: Receiver<SerializedFrame>,
 }
 
 impl DownstreamIo {
@@ -140,15 +139,15 @@ impl Downstream {
         group_channel: GroupChannel,
         channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
         channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
-        noise_stream: NoiseTcpStream<Message>,
+        noise_stream: NoiseTcpStream,
         cancellation_token: CancellationToken,
         task_manager: Arc<TaskManager>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
     ) -> Self {
         let (noise_stream_reader, noise_stream_writer) = noise_stream.into_split();
-        let (inbound_tx, inbound_rx) = unbounded::<Sv2Frame>();
-        let (outbound_tx, outbound_rx) = unbounded::<Sv2Frame>();
+        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         // Create a per-connection child token so we can cancel this
         // connection's I/O tasks independently of the global shutdown.
@@ -268,13 +267,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| PoolError::disconnect(error, self.downstream_id))?;
-        let Some(header) = frame.get_header() else {
-            error!("SV2 frame missing header");
-            return Err(PoolError::disconnect(
-                framing_sv2::Error::MissingHeader,
-                self.downstream_id,
-            ));
-        };
+        let header = frame.header();
         // The first ever message received on a new downstream connection
         // should always be a setup connection message.
         if header.ext_type() == 0 && header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
@@ -316,7 +309,7 @@ impl Downstream {
 
         self.downstream_io
             .downstream_sender
-            .send(std_frame)
+            .send(std_frame.into())
             .await
             .map_err(|e| {
                 error!(?e, "Downstream send failed");
@@ -334,13 +327,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|error| PoolError::disconnect(error, self.downstream_id))?;
-        let Some(header) = sv2_frame.get_header() else {
-            error!("SV2 frame missing header");
-            return Err(PoolError::disconnect(
-                framing_sv2::Error::MissingHeader,
-                self.downstream_id,
-            ));
-        };
+        let header = sv2_frame.header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Mining => {
