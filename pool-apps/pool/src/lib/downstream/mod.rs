@@ -23,7 +23,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{ChannelId, DownstreamId, OutboundFrame, SerializedFrame, Sv2Frame},
+        types::{ChannelId, DownstreamId, InboundFrame, OutboundFrame},
     },
 };
 use tracing::{debug, error, warn};
@@ -50,7 +50,7 @@ pub struct DownstreamIo {
     channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
     channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
     downstream_sender: Sender<OutboundFrame>,
-    downstream_receiver: Receiver<SerializedFrame>,
+    downstream_receiver: Receiver<InboundFrame>,
 }
 
 impl DownstreamIo {
@@ -146,7 +146,7 @@ impl Downstream {
         required_extensions: Vec<u16>,
     ) -> Self {
         let (noise_stream_reader, noise_stream_writer) = noise_stream.into_split();
-        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
         let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         // Create a per-connection child token so we can cancel this
@@ -305,11 +305,11 @@ impl Downstream {
         };
 
         let message = AnyMessageOwned::Mining(msg);
-        let std_frame: Sv2Frame = message.try_into().map_err(PoolError::shutdown)?;
+        let std_frame = OutboundFrame::from_message(message).map_err(PoolError::shutdown)?;
 
         self.downstream_io
             .downstream_sender
-            .send(std_frame.into())
+            .send(std_frame)
             .await
             .map_err(|e| {
                 error!(?e, "Downstream send failed");

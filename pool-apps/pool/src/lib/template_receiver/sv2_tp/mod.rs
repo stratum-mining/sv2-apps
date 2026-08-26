@@ -17,7 +17,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, OutboundFrame, SerializedFrame, Sv2Frame},
+        types::{InboundFrame, Message, OutboundFrame},
     },
 };
 use tokio::{net::TcpStream, time::timeout};
@@ -34,7 +34,7 @@ pub struct Sv2TpIo {
     channel_manager_sender: Sender<TemplateDistributionOwned>,
     channel_manager_receiver: Receiver<TemplateDistributionOwned>,
     tp_sender: Sender<OutboundFrame>,
-    tp_receiver: Receiver<SerializedFrame>,
+    tp_receiver: Receiver<InboundFrame>,
 }
 
 impl Sv2TpIo {
@@ -126,7 +126,7 @@ impl Sv2Tp {
                                     let (noise_stream_reader, noise_stream_writer) =
                                         noise_stream.into_split();
 
-                                    let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+                                    let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
                                     let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
                                     info!(attempt, "Spawning IO tasks for template receiver");
@@ -306,12 +306,12 @@ impl Sv2Tp {
             .await
             .map_err(PoolError::shutdown)?;
         let message = AnyMessageOwned::TemplateDistribution(msg);
-        let frame: Sv2Frame = message.try_into().map_err(PoolError::shutdown)?;
+        let frame = OutboundFrame::from_message(message).map_err(PoolError::shutdown)?;
 
         debug!("Forwarding message from channel manager to outbound_tx");
         self.sv2_tp_io
             .tp_sender
-            .send(frame.into())
+            .send(frame)
             .await
             .map_err(|_| PoolError::shutdown(PoolErrorKind::ChannelErrorSender))?;
 
@@ -330,26 +330,20 @@ impl Sv2Tp {
 
         debug!(%socket, "Building SetupConnection message to the Template Provider");
         let setup_msg = get_setup_connection_message_tp(socket).map_err(PoolError::shutdown)?;
-        let frame: Sv2Frame = Message::Common(setup_msg.into())
-            .try_into()
+        let frame = OutboundFrame::from_message(Message::Common(setup_msg.into()))
             .map_err(PoolError::shutdown)?;
 
         info!("Sending SetupConnection message to the Template Provider");
-        self.sv2_tp_io
-            .tp_sender
-            .send(frame.into())
-            .await
-            .map_err(|_| {
-                error!("Failed to send setup connection message upstream");
-                PoolError::shutdown(PoolErrorKind::ChannelErrorSender)
-            })?;
+        self.sv2_tp_io.tp_sender.send(frame).await.map_err(|_| {
+            error!("Failed to send setup connection message upstream");
+            PoolError::shutdown(PoolErrorKind::ChannelErrorSender)
+        })?;
 
         info!("Waiting for upstream handshake response");
-        let mut incoming: SerializedFrame =
-            self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
-                error!(?e, "Upstream connection closed during handshake");
-                PoolError::shutdown(e)
-            })?;
+        let mut incoming: InboundFrame = self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
+            error!(?e, "Upstream connection closed during handshake");
+            PoolError::shutdown(e)
+        })?;
 
         let header = incoming.header();
         debug!(

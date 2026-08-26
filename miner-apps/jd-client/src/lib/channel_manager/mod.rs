@@ -48,8 +48,8 @@ use stratum_apps::{
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
         types::{
-            ChannelId, DownstreamId, OutboundFrame, RequestId, SerializedFrame, SharesBatchSize,
-            SharesPerMinute, Sv2Frame, TemplateId, UpstreamJobId, VardiffKey,
+            ChannelId, DownstreamId, InboundFrame, OutboundFrame, RequestId, SharesBatchSize,
+            SharesPerMinute, TemplateId, UpstreamJobId, VardiffKey,
         },
     },
 };
@@ -163,7 +163,7 @@ pub struct DeclaredJob {
 #[derive(Clone)]
 pub struct ChannelManagerIo {
     upstream_sender: Sender<OutboundFrame>,
-    upstream_receiver: Receiver<SerializedFrame>,
+    upstream_receiver: Receiver<InboundFrame>,
     jd_sender: Sender<JobDeclarationOwned>,
     jd_receiver: Receiver<JobDeclarationOwned>,
     tp_sender: Sender<TemplateDistributionOwned>,
@@ -381,7 +381,7 @@ impl ChannelManager {
     pub async fn new(
         config: JobDeclaratorClientConfig,
         upstream_sender: Sender<OutboundFrame>,
-        upstream_receiver: Receiver<SerializedFrame>,
+        upstream_receiver: Receiver<InboundFrame>,
         jd_sender: Sender<JobDeclarationOwned>,
         jd_receiver: Receiver<JobDeclarationOwned>,
         tp_sender: Sender<TemplateDistributionOwned>,
@@ -1025,12 +1025,13 @@ impl ChannelManager {
                             upstream_message.min_extranonce_size = upstream_min as u16;
                             let upstream_message =
                                 MiningOwned::OpenExtendedMiningChannel(upstream_message);
-                            let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(upstream_message)
-                                .try_into()
-                                .map_err(JDCError::shutdown)?;
+                            let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(
+                                upstream_message,
+                            ))
+                            .map_err(JDCError::shutdown)?;
                             self.channel_manager_io
                                 .upstream_sender
-                                .send(sv2_frame.into())
+                                .send(sv2_frame)
                                 .await
                                 .map_err(|_| {
                                     JDCError::fallback(JDCErrorKind::ChannelErrorSender)
@@ -1094,12 +1095,12 @@ impl ChannelManager {
                             };
 
                             let message = MiningOwned::OpenExtendedMiningChannel(upstream_open);
-                            let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
-                                .try_into()
-                                .map_err(JDCError::shutdown)?;
+                            let sv2_frame =
+                                OutboundFrame::from_message(AnyMessageOwned::Mining(message))
+                                    .map_err(JDCError::shutdown)?;
                             self.channel_manager_io
                                 .upstream_sender
-                                .send(sv2_frame.into())
+                                .send(sv2_frame)
                                 .await
                                 .map_err(|_| {
                                     JDCError::fallback(JDCErrorKind::ChannelErrorSender)

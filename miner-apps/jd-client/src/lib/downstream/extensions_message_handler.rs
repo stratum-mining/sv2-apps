@@ -11,7 +11,7 @@ use stratum_apps::{
         handlers_sv2::HandleExtensionsFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::OutboundFrame,
 };
 use tracing::{error, info};
 
@@ -81,15 +81,9 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                 })?,
             };
 
-            let frame: Sv2Frame = AnyMessageOwned::Extensions(error.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(error.into()))
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self
-                .downstream_io
-                .downstream_sender
-                .send(frame.into())
-                .await
-            {
+            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
                 error!(
                     "Failed to send RequestExtensionsError to downstream {}: {e}",
                     self.downstream_id
@@ -127,15 +121,9 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                 })?,
             };
 
-            let frame: Sv2Frame = AnyMessageOwned::Extensions(success.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(success.into()))
                 .map_err(JDCError::shutdown)?;
-            if let Err(e) = self
-                .downstream_io
-                .downstream_sender
-                .send(frame.into())
-                .await
-            {
+            if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
                 error!(
                     "Failed to send RequestExtensionsSuccess to downstream {}: {e}",
                     self.downstream_id

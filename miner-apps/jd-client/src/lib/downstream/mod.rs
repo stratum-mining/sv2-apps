@@ -27,7 +27,7 @@ use stratum_apps::{
     },
     sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
-    utils::types::{DownstreamId, OutboundFrame, SerializedFrame, Sv2Frame},
+    utils::types::{DownstreamId, InboundFrame, OutboundFrame},
 };
 use tracing::{debug, error, warn};
 
@@ -54,7 +54,7 @@ pub struct DownstreamIo {
     channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
     channel_manager_receiver: Receiver<(MiningOwned, Option<Vec<Tlv>>)>,
     downstream_sender: Sender<OutboundFrame>,
-    downstream_receiver: Receiver<SerializedFrame>,
+    downstream_receiver: Receiver<InboundFrame>,
 }
 
 impl DownstreamIo {
@@ -172,7 +172,7 @@ impl Downstream {
         required_extensions: Vec<u16>,
     ) -> Self {
         let (noise_stream_reader, noise_stream_writer) = noise_stream.into_split();
-        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
         let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         // Create a per-connection child token so we can cancel this
@@ -342,11 +342,11 @@ impl Downstream {
         };
 
         let message = AnyMessageOwned::Mining(message);
-        let sv2_frame: Sv2Frame = message.try_into().map_err(JDCError::shutdown)?;
+        let sv2_frame = OutboundFrame::from_message(message).map_err(JDCError::shutdown)?;
 
         self.downstream_io
             .downstream_sender
-            .send(sv2_frame.into())
+            .send(sv2_frame)
             .await
             .map_err(|e| {
                 error!(?e, "Downstream send failed");

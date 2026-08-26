@@ -37,7 +37,7 @@ use stratum_apps::{
         },
         template_distribution_sv2::SubmitSolutionOwned,
     },
-    utils::types::Sv2Frame,
+    utils::types::OutboundFrame,
 };
 use tracing::{debug, error, info, warn};
 
@@ -143,11 +143,8 @@ impl RouteMessageTo {
                 }
             }
             RouteMessageTo::Upstream(message) => {
-                let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message).try_into()?;
-                channel_manager_io
-                    .upstream_sender
-                    .send(sv2_frame.into())
-                    .await?;
+                let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))?;
+                channel_manager_io.upstream_sender.send(sv2_frame).await?;
             }
             RouteMessageTo::JobDeclarator(message) => {
                 channel_manager_io.jd_sender.send(message).await?;

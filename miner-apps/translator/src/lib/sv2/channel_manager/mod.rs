@@ -35,9 +35,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{
-            ChannelId, DownstreamId, Hashrate, OutboundFrame, RequestId, SerializedFrame, Sv2Frame,
-        },
+        types::{ChannelId, DownstreamId, Hashrate, InboundFrame, OutboundFrame, RequestId},
     },
 };
 
@@ -76,7 +74,7 @@ pub(crate) const NON_AGGREGATED_TPROXY_MAX_CHANNELS: u32 = 1;
 #[derive(Clone, Debug)]
 struct ChannelManagerIo {
     upstream_sender: Sender<OutboundFrame>,
-    upstream_receiver: Receiver<SerializedFrame>,
+    upstream_receiver: Receiver<InboundFrame>,
     sv1_server_sender: Sender<MiningOwned>,
     // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
     sv1_server_receiver: Receiver<(MiningOwned, Option<String>)>,
@@ -86,7 +84,7 @@ struct ChannelManagerIo {
 impl ChannelManagerIo {
     fn new(
         upstream_sender: Sender<OutboundFrame>,
-        upstream_receiver: Receiver<SerializedFrame>,
+        upstream_receiver: Receiver<InboundFrame>,
         sv1_server_sender: Sender<MiningOwned>,
         sv1_server_receiver: Receiver<(MiningOwned, Option<String>)>,
     ) -> Self {
@@ -301,7 +299,7 @@ impl ChannelManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         upstream_sender: Sender<OutboundFrame>,
-        upstream_receiver: Receiver<SerializedFrame>,
+        upstream_receiver: Receiver<InboundFrame>,
         sv1_server_sender: Sender<MiningOwned>,
         sv1_server_receiver: Receiver<(MiningOwned, Option<String>)>,
         supported_extensions: Vec<u16>,
@@ -574,12 +572,11 @@ impl ChannelManager {
                 );
 
                 let message = MiningOwned::OpenExtendedMiningChannel(open_channel_msg);
-                let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
-                    .try_into()
+                let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
                     .map_err(TproxyError::shutdown)?;
                 self.channel_manager_io
                     .upstream_sender
-                    .send(sv2_frame.into())
+                    .send(sv2_frame)
                     .await
                     .map_err(|e| {
                         error!("Failed to send open channel message to upstream: {:?}", e);
@@ -717,7 +714,7 @@ impl ChannelManager {
                             })?;
                         // The TLV bytes are already framed, so they go out as a raw frame.
                         let sv2_frame =
-                            SerializedFrame::from_bytes(frame_bytes.into()).map_err(|missing| {
+                            InboundFrame::from_bytes(frame_bytes.into()).map_err(|missing| {
                                 error!("Failed to frame the TLV bytes: {missing}");
                                 TproxyError::shutdown(TproxyErrorKind::UnexpectedMessage(0, 0))
                             })?;
@@ -738,12 +735,11 @@ impl ChannelManager {
 
                 if !sent {
                     let message = MiningOwned::SubmitSharesExtended(m);
-                    let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
-                        .try_into()
+                    let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
                         .map_err(TproxyError::shutdown)?;
                     self.channel_manager_io
                         .upstream_sender
-                        .send(sv2_frame.into())
+                        .send(sv2_frame)
                         .await
                         .map_err(|e| {
                             error!(
@@ -789,13 +785,12 @@ impl ChannelManager {
                 );
                 // Forward UpdateChannel message to upstream
                 let message = MiningOwned::UpdateChannel(m);
-                let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
-                    .try_into()
+                let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
                     .map_err(TproxyError::shutdown)?;
 
                 self.channel_manager_io
                     .upstream_sender
-                    .send(sv2_frame.into())
+                    .send(sv2_frame)
                     .await
                     .map_err(|e| {
                         error!("Failed to send UpdateChannel message to upstream: {:?}", e);
@@ -848,13 +843,12 @@ impl ChannelManager {
                 // them disconnects.
                 if !self.mode.is_aggregated() {
                     let message = MiningOwned::CloseChannel(m);
-                    let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
-                        .try_into()
+                    let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
                         .map_err(TproxyError::shutdown)?;
 
                     self.channel_manager_io
                         .upstream_sender
-                        .send(sv2_frame.into())
+                        .send(sv2_frame)
                         .await
                         .map_err(|e| {
                             error!("Failed to send CloseChannel message to upstream: {:?}", e);

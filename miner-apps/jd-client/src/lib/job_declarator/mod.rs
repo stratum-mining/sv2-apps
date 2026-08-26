@@ -17,7 +17,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, OutboundFrame, SerializedFrame, Sv2Frame},
+        types::{InboundFrame, Message, OutboundFrame},
     },
 };
 use tokio::net::TcpStream;
@@ -38,7 +38,7 @@ pub struct JobDeclaratorIo {
     channel_manager_sender: Sender<JobDeclarationOwned>,
     channel_manager_receiver: Receiver<JobDeclarationOwned>,
     jds_sender: Sender<OutboundFrame>,
-    jds_receiver: Receiver<SerializedFrame>,
+    jds_receiver: Receiver<InboundFrame>,
 }
 
 impl JobDeclaratorIo {
@@ -164,7 +164,7 @@ impl JobDeclarator {
             }
         };
 
-        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
         let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         spawn_io_tasks(
@@ -278,19 +278,13 @@ impl JobDeclarator {
         info!("Sending SetupConnection to JDS at {}", self.socket_address);
 
         let setup_connection = get_setup_connection_message_jds(&self.socket_address, &self.mode);
-        let sv2_frame: Sv2Frame = Message::Common(setup_connection.into())
-            .try_into()
+        let sv2_frame = OutboundFrame::from_message(Message::Common(setup_connection.into()))
             .map_err(|e| {
                 error!(error=?e, "Failed to serialize SetupConnection message.");
                 JDCError::shutdown(e)
             })?;
 
-        if let Err(e) = self
-            .job_declarator_io
-            .jds_sender
-            .send(sv2_frame.into())
-            .await
-        {
+        if let Err(e) = self.job_declarator_io.jds_sender.send(sv2_frame).await {
             error!(error=?e, "Failed to send SetupConnection frame.");
             return Err(JDCError::fallback(JDCErrorKind::ChannelErrorSender));
         }
@@ -337,10 +331,10 @@ impl JobDeclarator {
             Ok(msg) => {
                 debug!("Forwarding message from channel manager to JDS.");
                 let message = AnyMessageOwned::JobDeclaration(msg);
-                let sv2_frame: Sv2Frame = message.try_into().map_err(JDCError::shutdown)?;
+                let sv2_frame = OutboundFrame::from_message(message).map_err(JDCError::shutdown)?;
                 self.job_declarator_io
                     .jds_sender
-                    .send(sv2_frame.into())
+                    .send(sv2_frame)
                     .await
                     .map_err(|e| {
                         error!("Failed to send message to outbound channel: {:?}", e);
@@ -405,16 +399,15 @@ mod tests {
 
     // A peer sends framed bytes, so a test standing in for one has to frame and serialize the
     // message it injects.
-    fn serialize_frame(message: Message) -> SerializedFrame {
+    fn serialize_frame(message: Message) -> InboundFrame {
         use stratum_apps::stratum_core::codec_sv2::EncodableFrame as _;
-        let frame: Sv2Frame = message
-            .try_into()
-            .expect("Failed to frame the injected message");
+        let frame =
+            OutboundFrame::from_message(message).expect("Failed to frame the injected message");
         let mut bytes = vec![0u8; frame.encoded_length()];
         frame
             .encode_into(&mut bytes)
             .expect("Failed to serialize the injected frame");
-        SerializedFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
+        InboundFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
     }
     use super::*;
     use crate::config::ConfigJDCMode;

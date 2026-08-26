@@ -31,7 +31,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{DownstreamId, OutboundFrame, RequestId, SerializedFrame, Sv2Frame},
+        types::{DownstreamId, InboundFrame, OutboundFrame, RequestId},
     },
 };
 use tracing::{debug, error, info, warn};
@@ -49,7 +49,7 @@ pub struct DownstreamIo {
     to_job_declarator_sender: Sender<DownstreamJobDeclarationMessage>,
     from_job_declarator_receiver: Receiver<JobDeclarationMessage>,
     to_downstream_sender: Sender<OutboundFrame>,
-    from_downstream_receiver: Receiver<SerializedFrame>,
+    from_downstream_receiver: Receiver<InboundFrame>,
 }
 
 /// Represents a downstream client connected to this node.
@@ -121,7 +121,7 @@ impl Downstream {
         global_cancellation_token: CancellationToken,
     ) -> Self {
         let (noise_stream_reader, noise_stream_writer) = noise_stream.into_split();
-        let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+        let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
         let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         let downstream_cancellation_token = global_cancellation_token.child_token();
@@ -315,13 +315,12 @@ impl Downstream {
         };
 
         let message = AnyMessageOwned::JobDeclaration(msg);
-        let std_frame: Sv2Frame = message
-            .try_into()
+        let std_frame = OutboundFrame::from_message(message)
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
 
         self.downstream_io
             .to_downstream_sender
-            .send(std_frame.into())
+            .send(std_frame)
             .await
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
 

@@ -13,7 +13,7 @@ use stratum_apps::{
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::{SUPPORTED_PROTOCOL_VERSION, Sv2Frame},
+    utils::types::{OutboundFrame, SUPPORTED_PROTOCOL_VERSION},
 };
 use tracing::info;
 
@@ -54,12 +54,11 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                     .try_into()
                     .expect("error code must be valid string"),
             };
-            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
-                .send(frame.into())
+                .send(frame)
                 .await
                 .map_err(|_| {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, downstream_id)
@@ -85,12 +84,11 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                     .try_into()
                     .expect("error code must be valid string"),
             };
-            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
-                .send(frame.into())
+                .send(frame)
                 .await
                 .map_err(|_| {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, downstream_id)
@@ -124,12 +122,11 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             used_version: SUPPORTED_PROTOCOL_VERSION,
             flags: response_flags,
         };
-        let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-            .try_into()
+        let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
             .map_err(PoolError::shutdown)?;
         self.downstream_io
             .downstream_sender
-            .send(frame.into())
+            .send(frame)
             .await
             .map_err(|_| {
                 PoolError::disconnect(PoolErrorKind::ChannelErrorSender, self.downstream_id)

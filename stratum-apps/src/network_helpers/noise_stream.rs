@@ -15,7 +15,8 @@ use crate::network_helpers::Error;
 use stratum_core::{
     codec_sv2::{
         EncodableFrame, Handshake, NoiseEncoder, StandardNoiseDecoder, Transport,
-        TransportDecryptState, TransportEncryptState, state::HandshakeRole,
+        TransportDecryptState, TransportEncryptState,
+        state::{ExpectsHandshakeMessage, InitiatorSent},
     },
     noise_sv2::{INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE, Initiator, Responder},
 };
@@ -83,14 +84,14 @@ impl NoiseTcpStream {
         let (mut reader, mut writer) = stream.into_split();
         let mut decoder = StandardNoiseDecoder::new();
         let mut encoder = NoiseEncoder::new();
-        let mut handshake = Handshake::new(initiator);
+        let handshake = Handshake::new(initiator);
 
-        let first_msg = handshake.step_0()?;
+        let (first_msg, handshake) = handshake.step_0()?;
         send_handshake_frame(&mut writer, first_msg, &mut encoder).await?;
         debug!("First handshake message sent");
 
         let second_msg =
-            receive_handshake_frame(&mut reader, &handshake, &mut decoder, timeout).await?;
+            receive_handshake_frame::<InitiatorSent>(&mut reader, &mut decoder, timeout).await?;
         debug!("Second handshake message received");
         let payload: [u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = second_msg
             .payload()
@@ -125,7 +126,7 @@ impl NoiseTcpStream {
         let handshake = Handshake::new(responder);
 
         let first_msg =
-            receive_handshake_frame(&mut reader, &handshake, &mut decoder, timeout).await?;
+            receive_handshake_frame::<Responder>(&mut reader, &mut decoder, timeout).await?;
         debug!("First handshake message received");
         let payload: [u8; ELLSWIFT_ENCODING_SIZE] = first_msg
             .payload()
@@ -310,7 +311,7 @@ async fn send_handshake_frame(
     frame: HandshakeFrame,
     encoder: &mut NoiseEncoder,
 ) -> Result<(), Error> {
-    let buffer = encoder.encode_handshake(frame)?;
+    let buffer = encoder.encode_handshake(frame);
     writer
         .write_all(buffer.as_ref())
         .await
@@ -318,9 +319,8 @@ async fn send_handshake_frame(
     Ok(())
 }
 
-async fn receive_handshake_frame<R: HandshakeRole>(
+async fn receive_handshake_frame<R: ExpectsHandshakeMessage>(
     reader: &mut OwnedReadHalf,
-    handshake: &Handshake<R>,
     decoder: &mut StandardNoiseDecoder,
     timeout: Duration,
 ) -> Result<HandshakeFrame, Error> {
@@ -332,7 +332,7 @@ async fn receive_handshake_frame<R: HandshakeRole>(
             .map_err(|_| Error::SocketClosed)?;
         decoder.writable().copy_from_slice(&buffer);
 
-        match decoder.next_handshake_frame(handshake) {
+        match decoder.next_handshake_frame::<R>() {
             Ok(frame) => return Ok(frame),
             Err(stratum_core::codec_sv2::Error::MissingBytes(_)) => {
                 debug!("Waiting for more bytes during handshake");

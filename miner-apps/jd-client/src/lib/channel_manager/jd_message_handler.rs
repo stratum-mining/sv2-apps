@@ -17,7 +17,7 @@ use stratum_apps::{
         },
         template_distribution_sv2::CoinbaseOutputConstraintsOwned,
     },
-    utils::types::Sv2Frame,
+    utils::types::OutboundFrame,
 };
 use tracing::{debug, error, info, warn};
 
@@ -256,12 +256,11 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
         debug!("Sending SetCustomMiningJob to the upstream with channel_id: {channel_id}");
         let message = MiningOwned::SetCustomMiningJob(custom_job);
-        let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(message)
-            .try_into()
+        let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
             .map_err(JDCError::shutdown)?;
         self.channel_manager_io
             .upstream_sender
-            .send(sv2_frame.into())
+            .send(sv2_frame)
             .await
             .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
 

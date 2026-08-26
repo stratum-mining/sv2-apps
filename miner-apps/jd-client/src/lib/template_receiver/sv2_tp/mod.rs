@@ -30,7 +30,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, OutboundFrame, SerializedFrame, Sv2Frame},
+        types::{InboundFrame, Message, OutboundFrame},
     },
 };
 use tokio::{net::TcpStream, time::timeout};
@@ -56,7 +56,7 @@ pub struct Sv2TpIo {
     channel_manager_sender: Sender<TemplateDistributionOwned>,
     channel_manager_receiver: Receiver<TemplateDistributionOwned>,
     tp_sender: Sender<OutboundFrame>,
-    tp_receiver: Receiver<SerializedFrame>,
+    tp_receiver: Receiver<InboundFrame>,
 }
 
 impl Sv2TpIo {
@@ -172,7 +172,7 @@ impl Sv2Tp {
                                     let (noise_stream_reader, noise_stream_writer) =
                                         noise_stream.into_split();
 
-                                    let (inbound_tx, inbound_rx) = unbounded::<SerializedFrame>();
+                                    let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
                                     let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
                                     info!(attempt, "Spawning IO tasks for template receiver");
@@ -353,10 +353,10 @@ impl Sv2Tp {
                 .map_err(JDCError::shutdown)?,
         );
         debug!("Forwarding message from channel manager to outbound_tx");
-        let sv2_frame: Sv2Frame = msg.try_into().map_err(JDCError::shutdown)?;
+        let sv2_frame = OutboundFrame::from_message(msg).map_err(JDCError::shutdown)?;
         self.sv2_tp_io
             .tp_sender
-            .send(sv2_frame.into())
+            .send(sv2_frame)
             .await
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
 
@@ -375,26 +375,20 @@ impl Sv2Tp {
 
         info!(%socket, "Building setup connection message for upstream");
         let setup_msg = get_setup_connection_message_tp(socket);
-        let frame: Sv2Frame = Message::Common(setup_msg.into())
-            .try_into()
+        let frame = OutboundFrame::from_message(Message::Common(setup_msg.into()))
             .map_err(JDCError::shutdown)?;
 
         info!("Sending setup connection message to upstream");
-        self.sv2_tp_io
-            .tp_sender
-            .send(frame.into())
-            .await
-            .map_err(|_| {
-                error!("Failed to send setup connection message upstream");
-                JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
-            })?;
+        self.sv2_tp_io.tp_sender.send(frame).await.map_err(|_| {
+            error!("Failed to send setup connection message upstream");
+            JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
+        })?;
 
         info!("Waiting for upstream handshake response");
-        let mut incoming: SerializedFrame =
-            self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
-                error!(?e, "Upstream connection closed during handshake");
-                JDCError::shutdown(noise_sv2::Error::ExpectedIncomingHandshakeMessage)
-            })?;
+        let mut incoming: InboundFrame = self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
+            error!(?e, "Upstream connection closed during handshake");
+            JDCError::shutdown(noise_sv2::Error::ExpectedIncomingHandshakeMessage)
+        })?;
 
         let header = incoming.header();
         debug!(ext_type = ?header.ext_type(),
@@ -425,16 +419,15 @@ mod tests {
 
     // A peer sends framed bytes, so a test standing in for one has to frame and serialize the
     // message it injects.
-    fn serialize_frame(message: Message) -> SerializedFrame {
+    fn serialize_frame(message: Message) -> InboundFrame {
         use stratum_apps::stratum_core::codec_sv2::EncodableFrame as _;
-        let frame: Sv2Frame = message
-            .try_into()
-            .expect("Failed to frame the injected message");
+        let frame =
+            OutboundFrame::from_message(message).expect("Failed to frame the injected message");
         let mut bytes = vec![0u8; frame.encoded_length()];
         frame
             .encode_into(&mut bytes)
             .expect("Failed to serialize the injected frame");
-        SerializedFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
+        InboundFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
     }
     use super::*;
     use stratum_apps::stratum_core::{

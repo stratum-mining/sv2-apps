@@ -6,7 +6,7 @@ use stratum_apps::{
     channel_utils::ReceiverCleanup,
     network_helpers::noise_stream::{NoiseTcpReadHalf, NoiseTcpWriteHalf},
     task_manager::TaskManager,
-    utils::types::{OutboundFrame, SerializedFrame},
+    utils::types::{InboundFrame, OutboundFrame},
 };
 use tracing::{Instrument as _, error, trace, warn};
 
@@ -18,7 +18,7 @@ pub fn spawn_io_tasks(
     mut reader: NoiseTcpReadHalf,
     mut writer: NoiseTcpWriteHalf,
     outbound_rx: Receiver<OutboundFrame>,
-    inbound_tx: Sender<SerializedFrame>,
+    inbound_tx: Sender<InboundFrame>,
     cancellation_token: CancellationToken,
 ) {
     let caller = std::panic::Location::caller();

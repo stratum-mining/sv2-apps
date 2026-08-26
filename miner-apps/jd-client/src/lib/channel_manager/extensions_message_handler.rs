@@ -11,7 +11,7 @@ use stratum_apps::{
         handlers_sv2::HandleExtensionsFromServerOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::OutboundFrame,
 };
 use tracing::{error, info};
 
@@ -138,13 +138,14 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
                 requested_extensions: Seq064KOwned::new(can_support).unwrap(),
             };
 
-            let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(new_require_extensions.into())
-                .try_into()
-                .map_err(JDCError::shutdown)?;
+            let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(
+                new_require_extensions.into(),
+            ))
+            .map_err(JDCError::shutdown)?;
 
             self.channel_manager_io
                 .upstream_sender
-                .send(sv2_frame.into())
+                .send(sv2_frame)
                 .await
                 .map_err(|e| {
                     error!("Failed to send message to upstream: {:?}", e);

@@ -1,6 +1,6 @@
 use stratum_core::{
-    codec_sv2::{EncodableFrame, StandardSerializedFrame},
-    parsers_sv2::AnyMessageOwned,
+    codec_sv2::{EncodableFrame, StandardSerializedFrame, Sv2Frame},
+    parsers_sv2::{AnyMessageOwned, ParserError},
 };
 
 pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
@@ -23,32 +23,36 @@ pub type JdToken = u64;
 
 pub type Message = AnyMessageOwned;
 
-/// A frame on its way out, carrying a message still to be serialized.
-pub type Sv2Frame = stratum_core::codec_sv2::Sv2Frame<Message>;
-
-/// A frame on its way in, carrying the bytes read off the wire.
-pub type SerializedFrame = StandardSerializedFrame;
+/// A frame read off the wire: a header plus the raw payload bytes behind it.
+pub type InboundFrame = StandardSerializedFrame;
 
 /// A frame on its way out, for a sender that has either kind to send: a message the encoder will
 /// serialize, or bytes that were framed by hand, as the TLV path does.
 #[derive(Debug)]
 pub enum OutboundFrame {
     /// A message the encoder serializes on the way out.
-    Message(Sv2Frame),
+    Message(Sv2Frame<Message>),
 
     /// A frame that is already serialized, written out as it is.
-    Serialized(SerializedFrame),
+    Raw(StandardSerializedFrame),
 }
 
-impl From<Sv2Frame> for OutboundFrame {
-    fn from(frame: Sv2Frame) -> Self {
+impl OutboundFrame {
+    /// Frames `message` for the encoder to serialize as it writes it out.
+    pub fn from_message(message: Message) -> Result<Self, ParserError> {
+        Ok(Self::Message(message.try_into()?))
+    }
+}
+
+impl From<Sv2Frame<Message>> for OutboundFrame {
+    fn from(frame: Sv2Frame<Message>) -> Self {
         Self::Message(frame)
     }
 }
 
-impl From<SerializedFrame> for OutboundFrame {
-    fn from(frame: SerializedFrame) -> Self {
-        Self::Serialized(frame)
+impl From<StandardSerializedFrame> for OutboundFrame {
+    fn from(frame: StandardSerializedFrame) -> Self {
+        Self::Raw(frame)
     }
 }
 
@@ -56,14 +60,14 @@ impl EncodableFrame for OutboundFrame {
     fn encoded_length(&self) -> usize {
         match self {
             Self::Message(frame) => frame.encoded_length(),
-            Self::Serialized(frame) => frame.encoded_length(),
+            Self::Raw(frame) => frame.encoded_length(),
         }
     }
 
     fn encode_into(self, dst: &mut [u8]) -> Result<(), stratum_core::framing_sv2::Error> {
         match self {
             Self::Message(frame) => frame.encode_into(dst),
-            Self::Serialized(frame) => frame.encode_into(dst),
+            Self::Raw(frame) => frame.encode_into(dst),
         }
     }
 }
