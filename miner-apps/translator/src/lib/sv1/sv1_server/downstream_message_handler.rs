@@ -145,10 +145,17 @@ impl IsServer for Sv1Server {
                         channel_id
                     );
 
+                    let Some(job_extranonce) = data.extranonce_for_job(job_id) else {
+                        warn!(
+                            job_id,
+                            channel_id, "No extranonce is associated with submitted SV1 job"
+                        );
+                        return Ok(false);
+                    };
                     let is_valid = validate_sv1_share(
                         request,
                         data.target,
-                        data.extranonce1.clone().into(),
+                        job_extranonce.clone().into(),
                         data.version_rolling_mask.clone(),
                         job.clone(),
                     )
@@ -163,10 +170,10 @@ impl IsServer for Sv1Server {
                         channel_id,
                         downstream_id,
                         share: request.clone(),
-                        extranonce: data.extranonce1.clone().into(),
+                        extranonce: job_extranonce.into(),
                         extranonce2_len: data.extranonce2_len,
                         version_rolling_mask: data.version_rolling_mask.clone(),
-                        job_version: data.last_job_version_field,
+                        job_version: Some(job.version.0),
                     });
 
                     Ok(true)
@@ -176,8 +183,14 @@ impl IsServer for Sv1Server {
     }
 
     /// Indicates to the server that the client supports the mining.set_extranonce method.
-    fn handle_extranonce_subscribe(&self) -> Result<(), Self::Error> {
-        Ok(())
+    fn handle_extranonce_subscribe(&mut self, client_id: Option<usize>) -> Result<(), Self::Error> {
+        let downstream_id = client_id.expect("Downstream id should exist");
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.supports_set_extranonce = true)
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Checks if a Downstream role is authorized.
