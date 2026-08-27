@@ -188,6 +188,8 @@ pub enum TproxyErrorKind {
     ChannelErrorSender,
     /// A downstream sent too many SV1 messages while waiting for its SV2 channel to open.
     Sv1HandshakeMessageQueueFull,
+    /// An internally generated mining.set_extranonce notification could not be decoded.
+    InvalidSetExtranonceNotification(String),
     /// Operation timed out
     Timeout,
     /// Error converting SetDifficulty to Message
@@ -277,6 +279,9 @@ impl fmt::Display for TproxyErrorKind {
             ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
             Sv1HandshakeMessageQueueFull => write!(f, "SV1 handshake message queue is full"),
+            InvalidSetExtranonceNotification(error) => {
+                write!(f, "Invalid mining.set_extranonce notification: {error}")
+            }
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
