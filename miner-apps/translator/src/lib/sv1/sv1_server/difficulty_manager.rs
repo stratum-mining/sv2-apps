@@ -3,7 +3,10 @@ use stratum_apps::stratum_core::{mining_sv2::UpdateChannelOwned, parsers_sv2::Mi
 
 use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::{Sv1Server, sv1_server::SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING},
+    sv1::{
+        Sv1Server, downstream::Sv1ServerEvent,
+        sv1_server::SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
+    },
 };
 
 use stratum_apps::{
@@ -250,7 +253,10 @@ impl Sv1Server {
                 .sv1_server_to_downstream_sender
                 .get_cloned(&downstream_id)
             {
-                if let Err(e) = sender.send(set_difficulty_msg).await {
+                if let Err(e) = sender
+                    .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                    .await
+                {
                     warn!(
                         "Failed to send immediate mining.set_difficulty message to downstream {downstream_id}: {e:?}; skipping (likely disconnected)"
                     );
@@ -600,7 +606,10 @@ impl Sv1Server {
                 .sv1_server_to_downstream_sender
                 .get_cloned(&downstream_id)
             {
-                if let Err(e) = sender.send(set_difficulty_msg).await {
+                if let Err(e) = sender
+                    .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                    .await
+                {
                     warn!(
                         "Failed to send mining.set_difficulty to downstream {}: {:?}; skipping (likely disconnected)",
                         downstream_id, e
