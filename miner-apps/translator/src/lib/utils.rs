@@ -17,9 +17,7 @@ use stratum_apps::{
         },
         extensions_sv2::{MAX_USER_IDENTITY_LENGTH, UserIdentity},
         sv1_api::{
-            Message,
             client_to_server::{self, Submit},
-            json_rpc,
             server_to_client::Notify,
             utils::{HexU32Be, VERSION_ROLLING_MASK},
         },
@@ -255,15 +253,6 @@ pub struct SubmitShareWithChannelId {
 /// Delimiter used to separate original job ID from keepalive mutation counter.
 /// Format: `{original_job_id}#{counter}`
 pub(crate) const KEEPALIVE_JOB_ID_DELIMITER: char = '#';
-
-/// Check if Sv1 message is mining.authorize
-pub(crate) fn is_mining_authorize(msg: &Message) -> bool {
-    if let json_rpc::Message::StandardRequest(r) = &msg {
-        r.method == "mining.authorize"
-    } else {
-        false
-    }
-}
 
 /// Derives the SV1 worker name from the full `mining.authorize` username.
 pub(crate) fn sv1_worker_name_from_sv1_username(sv1_username: &str) -> &str {
