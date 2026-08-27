@@ -152,10 +152,8 @@ pub struct DownstreamData {
     /// Extranonce1 advertised for each job that reached this miner. This preserves validation of
     /// old-job shares across `mining.set_extranonce` transitions.
     pub(super) job_extranonces: HashMap<String, Extranonce>,
-    /// Number of `mining.set_extranonce` notifications queued behind older jobs.
-    pub(super) queued_set_extranonce: usize,
-    /// Suppresses keepalives until the first real job using a newly assigned prefix arrives.
-    pub(super) awaiting_new_extranonce_job: bool,
+    /// Number of queued `mining.set_extranonce` notifications not yet applied by this downstream.
+    pub(super) pending_set_extranonce_notifications: usize,
     // Next advertised SV1 target, applied when the corresponding
     // mining.set_difficulty is sent with a new mining.notify.
     pub pending_target: Option<Target>,
@@ -168,8 +166,11 @@ pub struct DownstreamData {
     // Exact target currently accepted upstream, used to decide whether a
     // stricter downstream difficulty must wait for a SetTarget response.
     pub upstream_target: Option<Target>,
-    // Timestamp of when the last job was received by this downstream, used for keepalive check
-    pub last_job_received_time: Option<Instant>,
+    /// Timestamp anchoring the next keepalive interval.
+    ///
+    /// `None` before the first job and while an extranonce change is waiting for the job that
+    /// activates it.
+    pub keepalive_timer_anchor: Option<Instant>,
     pub(super) supports_set_extranonce: bool,
 }
 
@@ -203,15 +204,14 @@ impl DownstreamData {
             cached_notify: None,
             session_state: Sv1SessionState::default(),
             job_extranonces: HashMap::new(),
-            queued_set_extranonce: 0,
-            awaiting_new_extranonce_job: false,
+            pending_set_extranonce_notifications: 0,
             pending_target: None,
             pending_hashrate: None,
             stable_hashrate: false,
             queued_sv1_handshake_messages: Vec::new(),
             pending_share: None,
             upstream_target: None,
-            last_job_received_time: None,
+            keepalive_timer_anchor: None,
             supports_set_extranonce: false,
         }
     }
@@ -222,8 +222,8 @@ impl DownstreamData {
         }
         self.job_extranonces
             .insert(notify.job_id.clone(), self.extranonce1.clone());
-        if self.queued_set_extranonce == 0 {
-            self.awaiting_new_extranonce_job = false;
+        if self.pending_set_extranonce_notifications == 0 {
+            self.keepalive_timer_anchor = Some(Instant::now());
         }
     }
 
@@ -545,7 +545,6 @@ impl Downstream {
                                         }
                                     }
                                     data.record_job_extranonce(&notify);
-                                    data.last_job_received_time = Some(Instant::now());
                                     Some((cached_set_difficulty, Message::from(notify)))
                                 })
                                 .map_err(TproxyError::shutdown)?;
@@ -607,11 +606,10 @@ impl Downstream {
                                     // queued, preventing keepalives until a job with the new
                                     // prefix arrives. Processing the notification in this task
                                     // preserves ordering with older jobs already in the queue.
-                                    data.queued_set_extranonce =
-                                        data.queued_set_extranonce.saturating_sub(1);
+                                    data.pending_set_extranonce_notifications =
+                                        data.pending_set_extranonce_notifications.saturating_sub(1);
                                     data.extranonce1 = set_extranonce.extra_nonce1.clone();
                                     data.extranonce2_len = set_extranonce.extra_nonce2_size;
-                                    data.awaiting_new_extranonce_job = true;
 
                                     if !data.session_state.is_ready() {
                                         // A cached job predates this prefix change but has not
@@ -830,9 +828,6 @@ impl Downstream {
                     error!("Down: Failed to send cached mining.notify to downstream: {error:?}");
                     TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, self.downstream_id)
                 })?;
-            self.downstream_data
-                .with(|data| data.last_job_received_time = Some(Instant::now()))
-                .map_err(TproxyError::shutdown)?;
         }
 
         Ok(())
@@ -1085,8 +1080,7 @@ mod tests {
                     subscribed: true,
                     authorized: true,
                 };
-                data.queued_set_extranonce = 1;
-                data.awaiting_new_extranonce_job = true;
+                data.pending_set_extranonce_notifications = 1;
             })
             .unwrap();
 
@@ -1127,7 +1121,7 @@ mod tests {
                 );
                 assert_eq!(data.extranonce1, new_extranonce);
                 assert_eq!(data.session_state, Sv1SessionState::Ready);
-                assert!(data.awaiting_new_extranonce_job);
+                assert!(data.keepalive_timer_anchor.is_none());
             })
             .unwrap();
     }
@@ -1175,8 +1169,7 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                data.queued_set_extranonce = 1;
-                data.awaiting_new_extranonce_job = true;
+                data.pending_set_extranonce_notifications = 1;
             })
             .unwrap();
         sv1_server_message_sender
@@ -1215,7 +1208,7 @@ mod tests {
                     data.extranonce_for_job("new").as_ref(),
                     Some(&new_extranonce)
                 );
-                assert!(!data.awaiting_new_extranonce_job);
+                assert!(data.keepalive_timer_anchor.is_some());
             })
             .unwrap();
     }
@@ -1243,8 +1236,7 @@ mod tests {
             .with(|data| {
                 data.supports_set_extranonce = true;
                 data.session_state = Sv1SessionState::Ready;
-                data.queued_set_extranonce = 2;
-                data.awaiting_new_extranonce_job = true;
+                data.pending_set_extranonce_notifications = 2;
             })
             .unwrap();
         let first_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
@@ -1272,8 +1264,8 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.queued_set_extranonce, 1);
-                assert!(data.awaiting_new_extranonce_job);
+                assert_eq!(data.pending_set_extranonce_notifications, 1);
+                assert!(data.keepalive_timer_anchor.is_none());
                 assert_eq!(
                     data.extranonce_for_job("first").as_ref(),
                     Some(&first_extranonce)
@@ -1286,8 +1278,8 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.queued_set_extranonce, 0);
-                assert!(!data.awaiting_new_extranonce_job);
+                assert_eq!(data.pending_set_extranonce_notifications, 0);
+                assert!(data.keepalive_timer_anchor.is_some());
                 assert_eq!(
                     data.extranonce_for_job("second").as_ref(),
                     Some(&second_extranonce)
@@ -1319,8 +1311,7 @@ mod tests {
             .downstream_data
             .with(|data| {
                 data.cached_notify = Some(notify("old"));
-                data.queued_set_extranonce = 1;
-                data.awaiting_new_extranonce_job = true;
+                data.pending_set_extranonce_notifications = 1;
             })
             .unwrap();
         sv1_server_message_sender
@@ -1342,8 +1333,8 @@ mod tests {
             .with(|data| {
                 assert_eq!(data.extranonce1, new_extranonce);
                 assert!(data.cached_notify.is_none());
-                assert_eq!(data.queued_set_extranonce, 0);
-                assert!(data.awaiting_new_extranonce_job);
+                assert_eq!(data.pending_set_extranonce_notifications, 0);
+                assert!(data.keepalive_timer_anchor.is_none());
             })
             .unwrap();
     }

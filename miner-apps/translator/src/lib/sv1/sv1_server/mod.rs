@@ -1288,8 +1288,9 @@ impl Sv1Server {
         downstream
             .downstream_data
             .with(|data| {
-                data.queued_set_extranonce = data.queued_set_extranonce.saturating_add(1);
-                data.awaiting_new_extranonce_job = true;
+                data.pending_set_extranonce_notifications =
+                    data.pending_set_extranonce_notifications.saturating_add(1);
+                data.keepalive_timer_anchor = None;
             })
             .map_err(TproxyError::shutdown)?;
 
@@ -1755,13 +1756,13 @@ impl Sv1Server {
                         // 2. Enough time has passed since last job
                         let handshake_complete = d.session_state.is_ready();
 
-                        if !handshake_complete || d.awaiting_new_extranonce_job {
+                        if !handshake_complete {
                             return None;
                         }
 
-                        let needs_keepalive = match d.last_job_received_time {
+                        let needs_keepalive = match d.keepalive_timer_anchor {
                             Some(last_time) => last_time.elapsed() >= interval,
-                            None => false, // No job received yet, don't send keepalive
+                            None => false, // No keepalive-eligible job yet.
                         };
 
                         if !needs_keepalive {
@@ -1823,7 +1824,7 @@ impl Sv1Server {
                     .with(|data| {
                         data.session_state.is_ready()
                             && data.channel_id.is_some()
-                            && !data.awaiting_new_extranonce_job
+                            && data.keepalive_timer_anchor.is_some()
                     })
                     .map_err(TproxyError::shutdown)?;
                 if is_ready {
@@ -1919,10 +1920,12 @@ impl Sv1Server {
             return Ok(());
         }
 
+        // The downstream resets this again when it processes the queued notify. Setting it here
+        // prevents another server keepalive tick before delivery; both writes only move it ahead.
         if let Err(e) = self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
-                .with(|data| data.last_job_received_time = Some(Instant::now()))
+                .with(|data| data.keepalive_timer_anchor = Some(Instant::now()))
                 .map_err(TproxyError::shutdown)
         }) && !matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_))
         {
@@ -2736,8 +2739,8 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.queued_set_extranonce, 1);
-                assert!(data.awaiting_new_extranonce_job);
+                assert_eq!(data.pending_set_extranonce_notifications, 1);
+                assert!(data.keepalive_timer_anchor.is_none());
             })
             .unwrap();
     }
@@ -3202,6 +3205,10 @@ mod tests {
                         .downstream_data
                         .with(|data| {
                             data.session_state = Sv1SessionState::Ready;
+                            // This harness observes the server-side queue directly instead of
+                            // running the downstream delivery task that normally starts the
+                            // keepalive timer when it forwards the original job.
+                            data.keepalive_timer_anchor = Some(Instant::now());
                         })
                         .unwrap();
                 })
@@ -3289,7 +3296,7 @@ mod tests {
                     .downstreams
                     .with(&downstream_id, |downstream| downstream
                         .downstream_data
-                        .with(|data| data.last_job_received_time.is_some())
+                        .with(|data| data.keepalive_timer_anchor.is_some())
                         .unwrap())
                     .unwrap()
             );
