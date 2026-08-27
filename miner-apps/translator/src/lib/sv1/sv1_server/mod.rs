@@ -21,10 +21,9 @@ pub mod downstream_message_handler;
 use crate::{
     config::TranslatorConfig,
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::downstream::{Downstream, Sv1HandshakeState},
+    sv1::downstream::{Downstream, Sv1SetupRequest},
     utils::{
         AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId, TproxyMode,
-        is_mining_authorize,
     },
 };
 use async_channel::{Receiver, Sender, unbounded};
@@ -83,6 +82,18 @@ const SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING: f64 = 1.0;
 // per-connection buffer without bound. The SV1 network reader separately limits each line to 64
 // KiB.
 const MAX_QUEUED_SV1_HANDSHAKE_MESSAGES: usize = 8;
+
+fn sv1_setup_request(message: &json_rpc::Message) -> Option<Sv1SetupRequest> {
+    let json_rpc::Message::StandardRequest(request) = message else {
+        return None;
+    };
+
+    match request.method.as_str() {
+        "mining.subscribe" => Some(Sv1SetupRequest::Subscribe),
+        "mining.authorize" => Some(Sv1SetupRequest::Authorize),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 struct Sv1ServerIo {
@@ -721,8 +732,23 @@ impl Sv1Server {
             return Ok(());
         }
 
-        let is_authorize = is_mining_authorize(&downstream_message);
+        self.process_sv1_message(downstream_id, downstream_message)
+            .await?;
 
+        Ok(())
+    }
+
+    /// Processes one SV1 message after its downstream SV2 channel is available.
+    ///
+    /// Setup progress is recorded only after a successful response reaches the miner. Mining
+    /// notifications remain cached until both `mining.subscribe` and `mining.authorize` have been
+    /// answered, regardless of which request arrived first.
+    async fn process_sv1_message(
+        &self,
+        downstream_id: DownstreamId,
+        downstream_message: json_rpc::Message,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let setup_request = sv1_setup_request(&downstream_message);
         let response = self
             .clone()
             .handle_message(Some(downstream_id), downstream_message)
@@ -746,12 +772,22 @@ impl Sv1Server {
                         TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
                     })?;
 
-                // Check if this was an authorize message and handle sv1 handshake completion
-                if is_authorize {
-                    info!("Down: Handling mining.authorize after handshake completion");
-                    if let Err(e) = downstream.handle_sv1_handshake_completion().await {
-                        error!("Down: Failed to handle handshake completion: {:?}", e);
-                        return Err(TproxyError::disconnect(e, downstream_id));
+                if let Some(setup_request) = setup_request {
+                    let setup_just_completed = downstream
+                        .downstream_data
+                        .with(|data| data.session_state.record_response(setup_request))
+                        .map_err(TproxyError::shutdown)?;
+                    if setup_just_completed {
+                        info!(
+                            "Down: mining.subscribe and mining.authorize responses sent; enabling mining notifications"
+                        );
+                        downstream
+                            .enable_notification_forwarding()
+                            .await
+                            .map_err(|e| {
+                                error!("Down: Failed to enable mining notifications: {e:?}");
+                                TproxyError::disconnect(e, downstream_id)
+                            })?;
                     }
                 }
             }
@@ -978,73 +1014,21 @@ impl Sv1Server {
                         self.channel_id_to_downstream_id
                             .insert(m.channel_id, downstream_id);
 
-                        Ok((
-                            queued_messages,
-                            downstream.downstream_io.downstream_sv1_sender.clone(),
-                            downstream.clone(),
-                        ))
+                        Ok(queued_messages)
                     });
 
                 match downstream_setup {
-                    Ok((queued_messages, downstream_sv1_sender, downstream)) => {
+                    Ok(queued_messages) => {
                         // Process all queued messages now that channel is established
-                        {
-                            if !queued_messages.is_empty() {
-                                info!(
-                                    "Processing {} queued Sv1 messages for downstream {}",
-                                    queued_messages.len(),
-                                    downstream_id
-                                );
+                        if !queued_messages.is_empty() {
+                            info!(
+                                "Processing {} queued Sv1 messages for downstream {}",
+                                queued_messages.len(),
+                                downstream_id
+                            );
 
-                                for message in queued_messages {
-                                    let is_authorize = is_mining_authorize(&message);
-                                    let response = self
-                                        .clone()
-                                        .handle_message(Some(downstream_id), message)
-                                        .map_err(|e| e.with_sv1_downstream_context(downstream_id));
-                                    match response {
-                                        Ok(Some(response_msg)) => {
-                                            downstream_sv1_sender.send(response_msg.into()).await
-                                            .map_err(|e| {
-                                                error!(
-                                                    "Down: Failed to send message to downstream: {e:?}"
-                                                );
-                                                TproxyError::disconnect(
-                                                    TproxyErrorKind::ChannelErrorSender, downstream_id
-                                                )
-                                            })?;
-
-                                            if is_authorize {
-                                                info!(
-                                                    "Down: Handling mining.authorize after upstream channel is open"
-                                                );
-                                                if let Err(e) = downstream
-                                                    .handle_sv1_handshake_completion()
-                                                    .await
-                                                {
-                                                    error!(
-                                                        "Down: Failed to handle handshake completion: {:?}",
-                                                        e
-                                                    );
-                                                    return Err(TproxyError::disconnect(
-                                                        e,
-                                                        downstream_id,
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            // Message was handled but no response needed
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "Down: Error handling downstream message: {:?}",
-                                                e
-                                            );
-                                            return Err(e);
-                                        }
-                                    }
-                                }
+                            for message in queued_messages {
+                                self.process_sv1_message(downstream_id, message).await?;
                             }
                         }
 
@@ -1631,8 +1615,7 @@ impl Sv1Server {
                         // Only send keepalive if:
                         // 1. Handshake is complete
                         // 2. Enough time has passed since last job
-                        let handshake_complete =
-                            d.sv1_handshake_state == Sv1HandshakeState::Complete;
+                        let handshake_complete = d.session_state.is_ready();
 
                         if !handshake_complete {
                             return None;
@@ -1700,7 +1683,7 @@ impl Sv1Server {
                 let is_ready = downstream
                     .downstream_data
                     .with(|data| {
-                        data.sv1_handshake_state == Sv1HandshakeState::Complete
+                        data.session_state.is_ready()
                             && data.channel_id.is_some()
                     })
                     .map_err(TproxyError::shutdown)?;
@@ -1872,6 +1855,7 @@ impl Sv1Server {
 mod tests {
     use super::*;
     use crate::config::{DownstreamDifficultyConfig, TranslatorConfig, Upstream};
+    use crate::sv1::downstream::Sv1SessionState;
     use async_channel::unbounded;
     use std::str::FromStr;
     use stratum_apps::{
@@ -1977,6 +1961,106 @@ mod tests {
         assert_eq!(server.shares_per_minute, 5.0);
         assert_eq!(server.listener_addr.ip().to_string(), "127.0.0.1");
         assert_eq!(server.listener_addr.port(), 3333);
+    }
+
+    #[tokio::test]
+    async fn authorize_before_subscribe_does_not_enable_mining_notifications_early() {
+        let server = create_test_sv1_server();
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_miner_sender, miner_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver) = unbounded();
+        let downstream_id = 7;
+        let target = hash_rate_to_target(100.0, 5.0).unwrap();
+        let downstream = Downstream::new(
+            downstream_id,
+            downstream_sv1_sender,
+            miner_receiver,
+            server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
+            sv1_server_receiver.clone(),
+            target,
+            Some(100.0),
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| data.channel_id = Some(9))
+            .unwrap();
+        server.downstreams.insert(downstream_id, downstream);
+        server.channel_id_to_downstream_id.insert(9, downstream_id);
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(downstream_id, sv1_server_sender);
+
+        let cached_set_difficulty: json_rpc::Message =
+            serde_json::from_str(r#"{"id":null,"method":"mining.set_difficulty","params":[1.0]}"#)
+                .unwrap();
+        let cached_notify: json_rpc::Message = serde_json::from_str(
+            r#"{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000","","",[],"20000000","1d00ffff","5f5e1000",true]}"#,
+        )
+        .unwrap();
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.cached_set_difficulty = Some(cached_set_difficulty);
+                        data.cached_notify = Some(cached_notify);
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        let authorize: json_rpc::Message = serde_json::from_str(
+            r#"{"id":1,"method":"mining.authorize","params":["user.worker","x"]}"#,
+        )
+        .unwrap();
+        server.process_sv1_message(7, authorize).await.unwrap();
+
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::OkResponse(_)
+        ));
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        assert_eq!(
+            server.downstreams.with(&7, |downstream| downstream
+                .downstream_data
+                .with(|data| data.session_state)
+                .unwrap()),
+            Some(Sv1SessionState::Starting {
+                subscribed: false,
+                authorized: true,
+            })
+        );
+
+        let subscribe: json_rpc::Message =
+            serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
+        server.process_sv1_message(7, subscribe).await.unwrap();
+
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::OkResponse(_)
+        ));
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::Notification(notification)
+                if notification.method == "mining.set_difficulty"
+        ));
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::Notification(notification)
+                if notification.method == "mining.notify"
+        ));
+        assert_eq!(
+            server.downstreams.with(&7, |downstream| downstream
+                .downstream_data
+                .with(|data| data.session_state)
+                .unwrap()),
+            Some(Sv1SessionState::Ready)
+        );
     }
 
     #[test]
@@ -2679,7 +2763,7 @@ mod tests {
                     downstream
                         .downstream_data
                         .with(|data| {
-                            data.sv1_handshake_state = Sv1HandshakeState::Complete;
+                            data.session_state = Sv1SessionState::Ready;
                         })
                         .unwrap();
                 })

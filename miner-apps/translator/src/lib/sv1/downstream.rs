@@ -57,13 +57,62 @@ impl DownstreamIo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Sv1HandshakeState {
-    /// The miner has not completed both `mining.subscribe` and `mining.authorize`.
-    Pending,
-    /// Cached setup notifications are being delivered in protocol order.
-    Completing,
-    /// Setup notifications were delivered and normal notification forwarding is enabled.
-    Complete,
+pub(super) enum Sv1SessionState {
+    /// Setup responses are still pending, or cached notifications are still being delivered.
+    Starting { subscribed: bool, authorized: bool },
+    /// Setup is complete and job notifications can be forwarded normally.
+    Ready,
+}
+
+impl Default for Sv1SessionState {
+    fn default() -> Self {
+        Self::Starting {
+            subscribed: false,
+            authorized: false,
+        }
+    }
+}
+
+impl Sv1SessionState {
+    /// Records a delivered setup response and returns `true` only when both required responses have
+    /// been delivered for the first time.
+    pub(super) fn record_response(&mut self, request: Sv1SetupRequest) -> bool {
+        let Self::Starting {
+            subscribed,
+            authorized,
+        } = self
+        else {
+            return false;
+        };
+
+        let was_complete = *subscribed && *authorized;
+        match request {
+            Sv1SetupRequest::Subscribe => *subscribed = true,
+            Sv1SetupRequest::Authorize => *authorized = true,
+        }
+        !was_complete && *subscribed && *authorized
+    }
+
+    pub(super) fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+
+    pub(super) fn is_subscribed(self) -> bool {
+        match self {
+            Self::Starting { subscribed, .. } => subscribed,
+            Self::Ready => true,
+        }
+    }
+
+    fn setup_complete(self) -> bool {
+        match self {
+            Self::Starting {
+                subscribed,
+                authorized,
+            } => subscribed && authorized,
+            Self::Ready => true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -84,7 +133,7 @@ pub struct DownstreamData {
     pub sv1_worker_name: String,
     pub cached_set_difficulty: Option<json_rpc::Message>,
     pub cached_notify: Option<json_rpc::Message>,
-    pub(super) sv1_handshake_state: Sv1HandshakeState,
+    pub(super) session_state: Sv1SessionState,
     // Next advertised SV1 target, applied when the corresponding
     // mining.set_difficulty is sent with a new mining.notify.
     pub pending_target: Option<Target>,
@@ -99,6 +148,12 @@ pub struct DownstreamData {
     pub upstream_target: Option<Target>,
     // Timestamp of when the last job was received by this downstream, used for keepalive check
     pub last_job_received_time: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Sv1SetupRequest {
+    Subscribe,
+    Authorize,
 }
 
 impl DownstreamData {
@@ -124,7 +179,7 @@ impl DownstreamData {
             sv1_worker_name: String::new(),
             cached_set_difficulty: None,
             cached_notify: None,
-            sv1_handshake_state: Sv1HandshakeState::Pending,
+            session_state: Sv1SessionState::default(),
             pending_target: None,
             pending_hashrate: None,
             stable_hashrate: false,
@@ -394,17 +449,17 @@ impl Downstream {
                     match notification.method.as_str() {
                         "mining.set_difficulty" => {
                             // Difficulty changes are always paired with the next notify. Keeping
-                            // the handshake state and cache under the same lock prevents handshake
+                            // the session state and cache under the same lock prevents setup
                             // completion from draining a newly arrived difficulty by itself.
-                            let handshake_state = self
+                            let session_state = self
                                 .downstream_data
                                 .with(|data| {
                                     data.cached_set_difficulty = Some(message);
-                                    data.sv1_handshake_state
+                                    data.session_state
                                 })
                                 .map_err(TproxyError::shutdown)?;
                             debug!(
-                                ?handshake_state,
+                                ?session_state,
                                 "Down: Caching mining.set_difficulty to send before next mining.notify"
                             );
                             return Ok(());
@@ -413,7 +468,7 @@ impl Downstream {
                             let messages_to_send = self
                                 .downstream_data
                                 .with(|data| {
-                                    if data.sv1_handshake_state != Sv1HandshakeState::Complete {
+                                    if !data.session_state.is_ready() {
                                         data.cached_notify = Some(message.clone());
                                         let notify = server_to_client::Notify::try_from(
                                             notification.clone(),
@@ -485,9 +540,7 @@ impl Downstream {
                         _ => {
                             let handshake_complete = self
                                 .downstream_data
-                                .with(|data| {
-                                    data.sv1_handshake_state == Sv1HandshakeState::Complete
-                                })
+                                .with(|data| data.session_state.is_ready())
                                 .map_err(TproxyError::shutdown)?;
                             if !handshake_complete {
                                 debug!(
@@ -558,27 +611,26 @@ impl Downstream {
         Ok(())
     }
 
-    /// Handles SV1 handshake completion after mining.authorize.
+    /// Enables normal notification forwarding after both setup responses are delivered.
     ///
     /// This method is called when the downstream completes the SV1 handshake
     /// (subscribe + authorize). It sends any cached messages in the correct order:
     /// set_difficulty first, then notify.
-    pub(super) async fn handle_sv1_handshake_completion(
+    pub(super) async fn enable_notification_forwarding(
         &self,
     ) -> TproxyResult<(), error::Downstream> {
         let cached_messages = self
             .downstream_data
             .with(|data| {
-                if data.sv1_handshake_state != Sv1HandshakeState::Pending {
+                if data.session_state.is_ready() || !data.session_state.setup_complete() {
                     return None;
                 }
-                data.sv1_handshake_state = Sv1HandshakeState::Completing;
                 Some((data.cached_set_difficulty.take(), data.cached_notify.take()))
             })
             .map_err(TproxyError::shutdown)?;
         let Some((cached_set_difficulty, cached_notify)) = cached_messages else {
             debug!(
-                "Down: Ignoring repeated SV1 handshake completion for downstream {}",
+                "Down: Notification forwarding already enabled for downstream {}",
                 self.downstream_id
             );
             return Ok(());
@@ -589,15 +641,15 @@ impl Downstream {
         self.send_cached_handshake_messages(cached_set_difficulty, cached_notify)
             .await?;
 
-        // Notifications can arrive while the initial cached pair is being sent. Keep the state
-        // in `Completing` until every cached notify has been flushed. A difficulty that arrives
+        // Notifications can arrive while the initial cached pair is being sent. Keep the session
+        // in `Starting` until every cached notify has been delivered. A difficulty that arrives
         // without a notify remains cached for the next normal notify instead of being sent bare.
         loop {
             let next_messages = self
                 .downstream_data
                 .with(|data| {
                     let Some(notify) = data.cached_notify.take() else {
-                        data.sv1_handshake_state = Sv1HandshakeState::Complete;
+                        data.session_state = Sv1SessionState::Ready;
                         return None;
                     };
                     Some((data.cached_set_difficulty.take(), Some(notify)))
@@ -738,13 +790,13 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                data.sv1_handshake_state = Sv1HandshakeState::Complete;
+                data.session_state = Sv1SessionState::Ready;
                 data.cached_set_difficulty = Some(set_difficulty());
                 data.pending_target = Some(new_target);
             })
             .unwrap();
 
-        downstream.handle_sv1_handshake_completion().await.unwrap();
+        downstream.enable_notification_forwarding().await.unwrap();
 
         assert!(downstream_sv1_receiver.try_recv().is_err());
         downstream
@@ -753,7 +805,7 @@ mod tests {
                 assert_eq!(data.target, old_target);
                 assert_eq!(data.pending_target, Some(new_target));
                 assert!(data.cached_set_difficulty.is_some());
-                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
             })
             .unwrap();
     }
@@ -780,21 +832,26 @@ mod tests {
         let concurrent_notify = notify("concurrent");
         downstream
             .downstream_data
-            .with(|data| data.cached_notify = Some(initial_notify.clone()))
+            .with(|data| {
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: true,
+                };
+                data.cached_notify = Some(initial_notify.clone());
+            })
             .unwrap();
 
         // Fill the outbound queue so completion pauses while sending its initial cached notify.
         downstream_sv1_sender.try_send(set_difficulty()).unwrap();
         let completing_downstream = downstream.clone();
-        let completion = tokio::spawn(async move {
-            completing_downstream
-                .handle_sv1_handshake_completion()
-                .await
-        });
+        let completion =
+            tokio::spawn(
+                async move { completing_downstream.enable_notification_forwarding().await },
+            );
         loop {
             if downstream
                 .downstream_data
-                .with(|data| data.sv1_handshake_state == Sv1HandshakeState::Completing)
+                .with(|data| !data.session_state.is_ready() && data.cached_notify.is_none())
                 .unwrap()
             {
                 break;
@@ -822,7 +879,7 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
                 assert!(data.cached_notify.is_none());
             })
             .unwrap();
@@ -850,20 +907,25 @@ mod tests {
         let concurrent_difficulty = set_difficulty();
         downstream
             .downstream_data
-            .with(|data| data.cached_notify = Some(initial_notify.clone()))
+            .with(|data| {
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: true,
+                };
+                data.cached_notify = Some(initial_notify.clone());
+            })
             .unwrap();
 
         downstream_sv1_sender.try_send(set_difficulty()).unwrap();
         let completing_downstream = downstream.clone();
-        let completion = tokio::spawn(async move {
-            completing_downstream
-                .handle_sv1_handshake_completion()
-                .await
-        });
+        let completion =
+            tokio::spawn(
+                async move { completing_downstream.enable_notification_forwarding().await },
+            );
         loop {
             if downstream
                 .downstream_data
-                .with(|data| data.sv1_handshake_state == Sv1HandshakeState::Completing)
+                .with(|data| !data.session_state.is_ready() && data.cached_notify.is_none())
                 .unwrap()
             {
                 break;
@@ -887,12 +949,28 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
                 assert_message_eq(
                     data.cached_set_difficulty.as_ref().unwrap(),
                     &concurrent_difficulty,
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn session_setup_completes_once_in_either_request_order() {
+        for requests in [
+            [Sv1SetupRequest::Subscribe, Sv1SetupRequest::Authorize],
+            [Sv1SetupRequest::Authorize, Sv1SetupRequest::Subscribe],
+        ] {
+            let mut state = Sv1SessionState::default();
+
+            assert!(!state.record_response(requests[0]));
+            assert!(state.record_response(requests[1]));
+            assert!(!state.is_ready());
+            assert!(!state.record_response(requests[0]));
+            assert!(!state.record_response(requests[1]));
+        }
     }
 }
