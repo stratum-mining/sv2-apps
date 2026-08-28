@@ -27,7 +27,7 @@ use stratum_apps::{
         },
         parsers_sv2::{MiningOwned, Tlv},
     },
-    utils::types::{ChannelId, DownstreamId, Hashrate},
+    utils::types::{ChannelId, DownstreamId},
 };
 use tracing::{error, info, warn};
 
@@ -404,30 +404,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             success.extranonce_prefix.to_owned_bytes(),
         );
 
-        // In aggregated mode, serve any downstream requests that were buffered in
-        // pending_channels while the upstream channel was being established (Pending state).
+        // In aggregated mode, serve downstream requests buffered while the upstream channel was
+        // being established.
         if self.mode.is_aggregated() {
-            let mut pending_requests: Vec<(u32, String, Hashrate, usize)> = Vec::new();
-            self.pending_downstream_channels
-                .for_each(|request_id, request| {
-                    pending_requests.push((
-                        request_id as u32,
-                        request.0.clone(),
-                        request.1,
-                        request.2,
-                    ));
-                });
-            self.pending_downstream_channels.clear();
-
-            for (req_id, user_identity, hashrate, min_extranonce_size) in pending_requests {
-                self.handle_downstream_channel_request_in_aggregated_mode(
-                    req_id,
-                    user_identity,
-                    hashrate,
-                    min_extranonce_size,
-                )
-                .await?;
-            }
+            self.open_pending_aggregated_downstream_channels().await?;
         }
 
         Ok(())
