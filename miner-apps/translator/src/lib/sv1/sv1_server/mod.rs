@@ -308,11 +308,7 @@ impl Sv1Server {
     /// In aggregated mode the channel manager rewrites the job's channel_id to
     /// `AGGREGATED_CHANNEL_ID` before forwarding, which signals a broadcast: send to every
     /// connected downstream.
-    async fn send_to_channel(
-        &self,
-        channel_id: ChannelId,
-        msg: stratum_apps::stratum_core::sv1_api::json_rpc::Message,
-    ) {
+    async fn send_to_channel(&self, channel_id: ChannelId, msg: Arc<server_to_client::Notify>) {
         if channel_id == AGGREGATED_CHANNEL_ID {
             let mut downstream_senders = Vec::new();
             self.sv1_server_io
@@ -322,7 +318,7 @@ impl Sv1Server {
                 });
             // Broadcast to every connected downstream.
             for (downstream_id, sender) in downstream_senders {
-                if let Err(e) = sender.send(Sv1ServerEvent::notification(msg.clone())).await {
+                if let Err(e) = sender.send(Sv1ServerEvent::Notify(msg.clone())).await {
                     warn!(
                         "Failed to send notify to downstream {}: channel closed: {}",
                         downstream_id, e
@@ -346,7 +342,7 @@ impl Sv1Server {
 
             let Some(sender) = sender else { return };
 
-            if let Err(e) = sender.send(Sv1ServerEvent::notification(msg)).await {
+            if let Err(e) = sender.send(Sv1ServerEvent::Notify(msg)).await {
                 warn!(
                     "Failed to send notify to downstream {}: channel closed: {}",
                     downstream_id, e
@@ -1063,7 +1059,7 @@ impl Sv1Server {
                             .get_cloned(&downstream_id)
                         {
                             sender
-                                .send(Sv1ServerEvent::notification(set_difficulty))
+                                .send(Sv1ServerEvent::SetDifficulty(set_difficulty))
                                 .await
                                 .map_err(|_| {
                                     TproxyError::disconnect(
@@ -1192,8 +1188,7 @@ impl Sv1Server {
                         store_notify();
                     }
 
-                    let notify_msg: stratum_apps::stratum_core::sv1_api::json_rpc::Message =
-                        notify.into();
+                    let notify_msg = Arc::new(notify);
                     // Normal aggregated jobs carry AGGREGATED_CHANNEL_ID and are broadcast. A
                     // bootstrap job for a late joiner carries that downstream's channel ID and
                     // must only be delivered to that miner.
@@ -1270,8 +1265,12 @@ impl Sv1Server {
         result
     }
 
-    /// Queues an upstream prefix change for the downstream task, which applies it in notification
-    /// order and decides whether an already-subscribed miner can receive it.
+    /// Orders a job's prefix against subscribe-response construction in this server task.
+    ///
+    /// Before subscription, update the response fields synchronously. The queued event must not
+    /// apply them again: newer updates may already be reflected in the response. After
+    /// subscription, the downstream applies the prefix in FIFO order and checks support when
+    /// delivering its job.
     async fn handle_upstream_extranonce_change(
         &self,
         message: stratum_apps::stratum_core::mining_sv2::SetExtranoncePrefixOwned,
@@ -1306,20 +1305,25 @@ impl Sv1Server {
             .to_owned_bytes()
             .try_into()
             .map_err(TproxyError::fallback)?;
-        downstream
+        let notify_miner = downstream
             .downstream_data
             .with(|data| {
                 data.pending_set_extranonce_notifications =
                     data.pending_set_extranonce_notifications.saturating_add(1);
                 data.keepalive_timer_anchor = None;
+                let notify_miner = data.session_state.is_subscribed();
+                if !notify_miner {
+                    data.extranonce1 = extranonce1.clone();
+                    data.extranonce2_len = extranonce2_len;
+                }
+                notify_miner
             })
             .map_err(TproxyError::shutdown)?;
 
-        let notification: json_rpc::Message = server_to_client::SetExtranonce {
+        let notification = server_to_client::SetExtranonce {
             extra_nonce1: extranonce1,
             extra_nonce2_size: extranonce2_len,
-        }
-        .into();
+        };
         self.sv1_server_io
             .sv1_server_to_downstream_sender
             .get_cloned(&downstream_id)
@@ -1329,7 +1333,10 @@ impl Sv1Server {
                     downstream_id,
                 )
             })?
-            .send(Sv1ServerEvent::notification(notification))
+            .send(Sv1ServerEvent::SetExtranonce {
+                message: notification,
+                notify_miner,
+            })
             .await
             .map_err(|error| {
                 error!(
@@ -1614,7 +1621,7 @@ impl Sv1Server {
                     }
                 };
             if let Err(e) = sender
-                .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                .send(Sv1ServerEvent::SetDifficulty(set_difficulty_msg))
                 .await
             {
                 error!(
@@ -1726,7 +1733,7 @@ impl Sv1Server {
 
         if let Some(sender) = sender {
             if let Err(e) = sender
-                .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                .send(Sv1ServerEvent::SetDifficulty(set_difficulty_msg))
                 .await
             {
                 error!(
@@ -1912,9 +1919,7 @@ impl Sv1Server {
             return Ok(());
         };
         if sender
-            .send(Sv1ServerEvent::notification(json_rpc::Message::from(
-                notify,
-            )))
+            .send(Sv1ServerEvent::Notify(Arc::new(notify)))
             .await
             .is_err()
         {
@@ -2128,7 +2133,9 @@ mod tests {
 
     fn message_from_server_event(event: Sv1ServerEvent) -> json_rpc::Message {
         match event {
-            Sv1ServerEvent::Notification(message) => message,
+            Sv1ServerEvent::Notify(notify) => (*notify).clone().into(),
+            Sv1ServerEvent::SetDifficulty(message) => message,
+            Sv1ServerEvent::SetExtranonce { message, .. } => message.into(),
             Sv1ServerEvent::SetupComplete => panic!("expected a server notification"),
         }
     }
@@ -2187,7 +2194,11 @@ mod tests {
                     .downstream_data
                     .with(|data| {
                         data.cached_set_difficulty = Some(cached_set_difficulty);
-                        data.cached_notify = Some(cached_notify);
+                        let Sv1ServerEvent::Notify(notify) = Sv1ServerEvent::from(cached_notify)
+                        else {
+                            panic!("expected notify fixture");
+                        };
+                        data.cached_notify = Some(notify);
                     })
                     .unwrap();
             })
@@ -2250,7 +2261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_extranonce_change_after_subscribe_response_is_forwarded() {
+    async fn queued_presubscribe_prefix_is_included_in_the_response() {
         let server = create_test_sv1_server();
         let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
         let (_miner_sender, miner_receiver) = unbounded();
@@ -2304,7 +2315,7 @@ mod tests {
             .unwrap();
 
         // Process subscribe before the downstream task consumes the queued prefix change. The
-        // response still advertises the old prefix, so a mining.set_extranonce must follow it.
+        // server has already applied this prefix, so the response needs no follow-up notification.
         let subscribe: json_rpc::Message =
             serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
         server.process_sv1_message(7, subscribe).await.unwrap();
@@ -2313,16 +2324,10 @@ mod tests {
             panic!("expected subscribe response");
         };
         let subscribe_response = server_to_client::Subscribe::try_from(&response).unwrap();
-        assert_ne!(subscribe_response.extra_nonce1, new_extranonce);
+        assert_eq!(subscribe_response.extra_nonce1, new_extranonce);
 
         downstream.handle_sv1_server_message().await.unwrap();
-        let json_rpc::Message::Notification(notification) =
-            downstream_sv1_receiver.recv().await.unwrap()
-        else {
-            panic!("expected mining.set_extranonce");
-        };
-        let set_extranonce = server_to_client::SetExtranonce::try_from(notification).unwrap();
-        assert_eq!(set_extranonce.extra_nonce1, new_extranonce);
+        assert!(downstream_sv1_receiver.try_recv().is_err());
 
         downstream.handle_sv1_server_message().await.unwrap();
         assert_eq!(
@@ -2644,8 +2649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_extranonce_prefix_change_disconnects_miner_and_keeps_channel_for_cleanup()
-    {
+    async fn unsupported_prefix_change_waits_for_job_then_keeps_channel_for_cleanup() {
         let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
         let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
         let config = create_test_config();
@@ -2683,6 +2687,27 @@ mod tests {
             .unwrap();
 
         assert!(!downstream.is_disconnected());
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert!(!downstream.is_disconnected());
+        let notify = serde_json::from_str::<json_rpc::Message>(
+            r#"{"id":null,"method":"mining.notify","params":["new","0000000000000000000000000000000000000000000000000000000000000000","","",[],"20000000","1d00ffff","5f5e1000",true]}"#,
+        ).unwrap();
+        let sender = server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&7)
+            .unwrap();
+        sender.send(Sv1ServerEvent::from(notify)).await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert!(!downstream.is_disconnected());
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.session_state
+                    .record_response(Sv1SetupRequest::Authorize);
+            })
+            .unwrap();
+        sender.send(Sv1ServerEvent::SetupComplete).await.unwrap();
         downstream.handle_sv1_server_message().await.unwrap();
         assert!(downstream.is_disconnected());
         assert_eq!(
@@ -2740,8 +2765,10 @@ mod tests {
         assert!(!downstream.is_disconnected());
         assert!(matches!(
             downstream_receiver.recv().await.unwrap(),
-            Sv1ServerEvent::Notification(json_rpc::Message::Notification(notification))
-                if notification.method == "mining.set_extranonce"
+            Sv1ServerEvent::SetExtranonce {
+                notify_miner: true,
+                ..
+            }
         ));
         downstream
             .downstream_data
