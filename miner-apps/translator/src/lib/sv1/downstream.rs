@@ -523,6 +523,14 @@ impl Downstream {
                             return Ok(());
                         }
                         "mining.notify" => {
+                            let notify = server_to_client::Notify::try_from(notification.clone())
+                                .map_err(|error| {
+                                TproxyError::shutdown(
+                                    TproxyErrorKind::InvalidMiningNotifyNotification(format!(
+                                        "{error:?}"
+                                    )),
+                                )
+                            })?;
                             let messages_to_send = self
                                 .downstream_data
                                 .with(|data| {
@@ -532,9 +540,7 @@ impl Downstream {
                                     }
 
                                     let cached_set_difficulty = data.cached_set_difficulty.take();
-                                    let mut notify =
-                                        server_to_client::Notify::try_from(notification.clone())
-                                            .expect("this must be a mining.notify");
+                                    let mut notify = notify;
                                     if cached_set_difficulty.is_some() {
                                         notify.clean_jobs = true;
                                         if let Some(new_target) = data.pending_target.take() {
@@ -810,10 +816,17 @@ impl Downstream {
         if let Some(notify_msg) = notify {
             debug!("Down: Sending cached mining.notify after handshake completion");
             let json_rpc::Message::Notification(notification) = notify_msg else {
-                unreachable!("cached mining.notify must be a notification");
+                return Err(TproxyError::shutdown(
+                    TproxyErrorKind::InvalidMiningNotifyNotification(
+                        "cached mining.notify was not a notification".to_string(),
+                    ),
+                ));
             };
-            let mut parsed = server_to_client::Notify::try_from(notification)
-                .expect("mining.notify is always valid here");
+            let mut parsed = server_to_client::Notify::try_from(notification).map_err(|error| {
+                TproxyError::shutdown(TproxyErrorKind::InvalidMiningNotifyNotification(format!(
+                    "{error:?}"
+                )))
+            })?;
             if did_send_difficulty {
                 parsed.clean_jobs = true;
             }
@@ -871,6 +884,15 @@ mod tests {
         .unwrap()
     }
 
+    fn invalid_notify() -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": null,
+            "method": "mining.notify",
+            "params": []
+        }))
+        .unwrap()
+    }
+
     fn assert_message_eq(actual: &Message, expected: &Message) {
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
@@ -920,6 +942,83 @@ mod tests {
                 assert_eq!(data.session_state, Sv1SessionState::Ready);
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_notify_returns_an_error_instead_of_panicking() {
+        let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| data.session_state = Sv1SessionState::Ready)
+            .unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::notification(invalid_notify()))
+            .await
+            .unwrap();
+
+        let error = downstream.handle_sv1_server_message().await.unwrap_err();
+
+        assert!(matches!(error.action, Action::Shutdown));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::InvalidMiningNotifyNotification(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_cached_notify_returns_an_error_instead_of_panicking() {
+        let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: true,
+                };
+                data.cached_notify = Some(invalid_notify());
+            })
+            .unwrap();
+
+        let error = downstream
+            .enable_notification_forwarding()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Shutdown));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::InvalidMiningNotifyNotification(_)
+        ));
     }
 
     #[tokio::test]

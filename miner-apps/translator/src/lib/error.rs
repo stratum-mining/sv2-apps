@@ -190,6 +190,8 @@ pub enum TproxyErrorKind {
     Sv1HandshakeMessageQueueFull,
     /// An internally generated mining.set_extranonce notification could not be decoded.
     InvalidSetExtranonceNotification(String),
+    /// An internally generated mining.notify notification could not be decoded.
+    InvalidMiningNotifyNotification(String),
     /// Operation timed out
     Timeout,
     /// Error converting SetDifficulty to Message
@@ -281,6 +283,9 @@ impl fmt::Display for TproxyErrorKind {
             Sv1HandshakeMessageQueueFull => write!(f, "SV1 handshake message queue is full"),
             InvalidSetExtranonceNotification(error) => {
                 write!(f, "Invalid mining.set_extranonce notification: {error}")
+            }
+            InvalidMiningNotifyNotification(error) => {
+                write!(f, "Invalid mining.notify notification: {error}")
             }
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(e) => {
