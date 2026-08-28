@@ -146,13 +146,15 @@ pub struct ChannelManager {
     ///    - Stores the initial downstream request that triggers the single upstream channel open.
     ///    - Buffers additional downstream open-channel requests received while awaiting the
     ///      upstream `OpenExtendedMiningChannelSuccess`.
+    ///    - Defers new downstreams while inherited jobs still contain a previous extranonce
+    ///      prefix.
     ///
     /// 2. Non-aggregated mode:
     ///    - Stores all downstreams that are currently waiting for their corresponding upstream
     ///      `OpenExtendedMiningChannelSuccess`.
     ///
-    /// Entries are removed once the upstream success message is received
-    /// and propagated accordingly.
+    /// Entries are removed when their upstream channel opens or, in aggregated mode, once their
+    /// shared channel and prefix-compatible job state are ready.
     pub pending_downstream_channels: SharedMap<DownstreamId, (String, Hashrate, usize)>,
     /// Map of active extended channels by channel ID.
     /// In aggregated mode, the shared upstream channel is stored under AGGREGATED_CHANNEL_ID.
@@ -986,6 +988,11 @@ impl ChannelManager {
     /// The new channel is initialized with the aggregated channel’s
     /// current state (chain tip, active job, and future jobs) so the
     /// downstream can start mining immediately.
+    ///
+    /// If any of that inherited work still carries a previous upstream
+    /// extranonce prefix, the request is deferred instead (the miner waits
+    /// at `mining.subscribe`) and served once compatible jobs arrive. See
+    /// [`Self::aggregated_jobs_use_current_prefix`].
     async fn handle_downstream_channel_request_in_aggregated_mode(
         &self,
         request_id: RequestId,
@@ -993,6 +1000,21 @@ impl ChannelManager {
         hashrate: Hashrate,
         min_extranonce_size: usize,
     ) -> TproxyResult<(), error::ChannelManager> {
+        let jobs_use_current_prefix = self
+            .aggregated_jobs_use_current_prefix()
+            .ok_or_else(|| TproxyError::shutdown(TproxyErrorKind::ChannelNotFound))?;
+        if !jobs_use_current_prefix {
+            info!(
+                request_id,
+                "Deferring aggregated downstream channel until a job uses the current extranonce prefix"
+            );
+            self.pending_downstream_channels.insert(
+                request_id as DownstreamId,
+                (user_identity, hashrate, min_extranonce_size),
+            );
+            return Ok(());
+        }
+
         // We already have the unique upstream channel open. Allocate a new
         // extranonce prefix for this downstream and send the
         // OpenExtendedMiningChannelSuccess message directly to the sv1
@@ -1160,6 +1182,76 @@ impl ChannelManager {
         }
     }
 
+    /// Returns whether every job that a late aggregated downstream would inherit was created with
+    /// the aggregate channel's current prefix.
+    ///
+    /// A late joiner's extranonce1 is minted from the allocator, so it can only carry the current
+    /// upstream prefix. The replay in
+    /// [`Self::handle_downstream_channel_request_in_aggregated_mode`] installs the aggregate's
+    /// active *and* future jobs on the new channel (future jobs so a later `SetNewPrevHash` does
+    /// not fail). Any of them created under a previous prefix would be mined with the wrong
+    /// extranonce1 — immediately for the active job, at the next block for a future one — so the
+    /// request is deferred until the upstream has sent replacement work. With an old-prefix future
+    /// job outstanding this can last until the next block plus one job.
+    fn aggregated_jobs_use_current_prefix(&self) -> Option<bool> {
+        self.extended_channels
+            .with(&AGGREGATED_CHANNEL_ID, |channel| {
+                let current_prefix = channel.get_extranonce_prefix();
+                let active_matches = channel
+                    .get_active_job()
+                    .is_none_or(|job| job.1 == current_prefix);
+                let future_jobs_match = channel
+                    .get_future_jobs()
+                    .all(|(_, job)| job.1 == current_prefix);
+                active_matches && future_jobs_match
+            })
+    }
+
+    /// Opens aggregated downstream requests once all inherited jobs use the current prefix.
+    async fn open_pending_aggregated_downstream_channels(
+        &self,
+    ) -> TproxyResult<(), error::ChannelManager> {
+        if self.aggregated_channel_state.get() != AggregatedState::Connected {
+            return Ok(());
+        }
+        let jobs_use_current_prefix = self
+            .aggregated_jobs_use_current_prefix()
+            .ok_or_else(|| TproxyError::shutdown(TproxyErrorKind::ChannelNotFound))?;
+        if !jobs_use_current_prefix {
+            return Ok(());
+        }
+
+        let mut pending_requests = Vec::new();
+        self.pending_downstream_channels
+            .for_each(|request_id, request| {
+                pending_requests.push((
+                    request_id as RequestId,
+                    request.0.clone(),
+                    request.1,
+                    request.2,
+                ));
+            });
+        self.pending_downstream_channels.clear();
+        if !pending_requests.is_empty() {
+            info!(
+                count = pending_requests.len(),
+                "Opening buffered aggregated downstream channel requests"
+            );
+        }
+
+        for (request_id, user_identity, hashrate, min_extranonce_size) in pending_requests {
+            self.handle_downstream_channel_request_in_aggregated_mode(
+                request_id,
+                user_identity,
+                hashrate,
+                min_extranonce_size,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
     /// Gets the next sequence number for a valid share and increments the counter.
     ///
     /// The counter_key determines which counter to use:
@@ -1255,6 +1347,25 @@ mod tests {
             .set(AggregatedState::Connected);
 
         (manager, sv1_server_receiver_for_test)
+    }
+
+    fn test_extended_job(channel_id: ChannelId, job_id: u32) -> NewExtendedMiningJobOwned {
+        NewExtendedMiningJobOwned {
+            channel_id,
+            job_id,
+            min_ntime: Sv2OptionOwned::new(None),
+            version: 0x20000000,
+            version_rolling_allowed: true,
+            merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+            coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        }
     }
 
     #[tokio::test]
@@ -2011,22 +2122,7 @@ mod tests {
             .extended_channels
             .with_mut(&AGGREGATED_CHANNEL_ID, |aggregated_channel| {
                 aggregated_channel
-                    .on_new_extended_mining_job(NewExtendedMiningJobOwned {
-                        channel_id: 42,
-                        job_id: 1,
-                        min_ntime: Sv2OptionOwned::new(None),
-                        version: 0x20000000,
-                        version_rolling_allowed: true,
-                        merkle_path: Seq0255Owned::new(vec![]).unwrap(),
-                        coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08")
-                            .unwrap()
-                            .try_into()
-                            .unwrap(),
-                        coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000")
-                            .unwrap()
-                            .try_into()
-                            .unwrap(),
-                    })
+                    .on_new_extended_mining_job(test_extended_job(42, 1))
                     .unwrap();
                 aggregated_channel
                     .on_set_new_prev_hash(SetNewPrevHashOwned {
@@ -2062,5 +2158,78 @@ mod tests {
         assert_eq!(job.channel_id, success.channel_id);
         assert_ne!(job.channel_id, AGGREGATED_CHANNEL_ID);
         assert!(sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn late_aggregated_join_waits_for_job_with_current_prefix() {
+        let (mut manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        manager
+            .extended_channels
+            .with_mut(&AGGREGATED_CHANNEL_ID, |channel| {
+                channel
+                    .on_new_extended_mining_job(test_extended_job(42, 1))
+                    .unwrap();
+                channel
+                    .on_set_new_prev_hash(SetNewPrevHashOwned {
+                        channel_id: 42,
+                        job_id: 1,
+                        prev_hash: vec![0; 32].try_into().unwrap(),
+                        min_ntime: 0,
+                        nbits: 0x207fffff,
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        manager
+            .handle_set_extranonce_prefix(
+                None,
+                SetExtranoncePrefixOwned {
+                    channel_id: 42,
+                    extranonce_prefix: vec![1, 2, 3].try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        manager
+            .handle_downstream_channel_request_in_aggregated_mode(
+                7,
+                "new-miner".to_string(),
+                1.0,
+                6,
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.pending_downstream_channels.contains_key(&7));
+        assert!(sv1_server_receiver.try_recv().is_err());
+
+        manager
+            .extended_channels
+            .with_mut(&AGGREGATED_CHANNEL_ID, |channel| {
+                let mut current_prefix_job = test_extended_job(42, 2);
+                current_prefix_job.min_ntime = Sv2OptionOwned::new(Some(0));
+                channel
+                    .on_new_extended_mining_job(current_prefix_job)
+                    .unwrap();
+            })
+            .unwrap();
+        manager
+            .open_pending_aggregated_downstream_channels()
+            .await
+            .unwrap();
+
+        assert!(!manager.pending_downstream_channels.contains_key(&7));
+        let success = match sv1_server_receiver.try_recv().unwrap() {
+            MiningOwned::OpenExtendedMiningChannelSuccess(success) => success,
+            other => panic!("expected open success, got {other:?}"),
+        };
+        let job = match sv1_server_receiver.try_recv().unwrap() {
+            MiningOwned::NewExtendedMiningJob(job) => job,
+            other => panic!("expected initial job, got {other:?}"),
+        };
+        assert_eq!(job.job_id, 2);
+        assert_eq!(job.channel_id, success.channel_id);
     }
 }
