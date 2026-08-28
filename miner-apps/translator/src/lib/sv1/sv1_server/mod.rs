@@ -560,13 +560,7 @@ impl Sv1Server {
                                     addr.ip(),
                                     connection_token,
                                 );
-                                // vardiff initialization (only if enabled)
                                 self.downstreams.insert(downstream_id, downstream.clone());
-                                // Insert vardiff state for this downstream only if vardiff is enabled
-                                if self.config.downstream_difficulty_config.enable_vardiff {
-                                    let vardiff = VardiffState::new().expect("Failed to create vardiffstate");
-                                    self.vardiff.insert(downstream_id, vardiff);
-                                }
                                 info!("Downstream {} registered successfully (channel will be opened after first message)", downstream_id);
 
                                 let sv1_server = self.clone();
@@ -1034,6 +1028,15 @@ impl Sv1Server {
 
                 match downstream_setup {
                     Ok(queued_messages) => {
+                        // A downstream starts contributing shares only after its SV2 channel is
+                        // open. Register vardiff at the same lifecycle boundary so the periodic
+                        // update does not include a miner that is still opening its channel.
+                        if self.config.downstream_difficulty_config.enable_vardiff {
+                            let vardiff =
+                                VardiffState::new().expect("Failed to create vardiffstate");
+                            self.vardiff.insert(downstream_id, vardiff);
+                        }
+
                         // Process all queued messages now that channel is established
                         if !queued_messages.is_empty() {
                             info!(
@@ -2844,7 +2847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregated_channel_open_refreshes_hashrate() {
+    async fn aggregated_channel_open_registers_vardiff_and_refreshes_hashrate() {
         let (channel_manager_sender, channel_manager_receiver) = unbounded();
         let (upstream_sender, upstream_receiver) = unbounded();
         let config = create_test_config();
@@ -2859,6 +2862,7 @@ mod tests {
         );
         register_test_downstream(&server, 1, Some(1), 100.0, false);
         register_test_downstream(&server, 2, None, 100.0, false);
+        assert!(!server.vardiff.contains_key(&2));
 
         server
             .send_update_channel_on_downstream_state_change()
@@ -2887,6 +2891,8 @@ mod tests {
             .unwrap();
 
         server.handle_upstream_message(target).await.unwrap();
+
+        assert!(server.vardiff.contains_key(&2));
 
         let (message, _) = channel_manager_receiver.recv().await.unwrap();
         let MiningOwned::UpdateChannel(update) = message else {

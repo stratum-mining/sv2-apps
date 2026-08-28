@@ -105,7 +105,12 @@ impl Sv1Server {
             };
 
             let Some(channel_id) = channel_id else {
-                error!("Channel id is none for downstream_id: {}", downstream_id);
+                // Upstream channel closure and downstream cleanup are asynchronous. A vardiff
+                // snapshot may briefly retain the downstream after its channel was cleared.
+                debug!(
+                    "Skipping vardiff update for downstream_id {} without an active channel",
+                    downstream_id
+                );
                 return Ok(());
             };
             let new_hashrate_opt =
