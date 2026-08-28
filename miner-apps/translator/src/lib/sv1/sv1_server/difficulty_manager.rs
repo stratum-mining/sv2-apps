@@ -254,7 +254,7 @@ impl Sv1Server {
                 .get_cloned(&downstream_id)
             {
                 if let Err(e) = sender
-                    .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                    .send(Sv1ServerEvent::SetDifficulty(set_difficulty_msg))
                     .await
                 {
                     warn!(
@@ -607,7 +607,7 @@ impl Sv1Server {
                 .get_cloned(&downstream_id)
             {
                 if let Err(e) = sender
-                    .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                    .send(Sv1ServerEvent::SetDifficulty(set_difficulty_msg))
                     .await
                 {
                     warn!(
