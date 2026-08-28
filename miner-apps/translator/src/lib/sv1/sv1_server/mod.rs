@@ -21,7 +21,10 @@ pub mod downstream_message_handler;
 use crate::{
     config::TranslatorConfig,
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::downstream::{Downstream, Sv1ServerEvent, Sv1SetupRequest},
+    sv1::{
+        downstream::{Downstream, Sv1ServerEvent, Sv1SetupRequest},
+        job_store::Sv1JobStore,
+    },
     utils::{
         AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId, TproxyMode,
     },
@@ -77,6 +80,23 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 const SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING: f64 = 1.0;
+
+#[derive(Clone, Debug)]
+struct StoredSv1Job {
+    notify: server_to_client::Notify,
+    /// Original upstream job time used to cap locally generated keepalive jobs.
+    keepalive_base_time: u32,
+}
+
+impl StoredSv1Job {
+    fn upstream(notify: server_to_client::Notify) -> Self {
+        let keepalive_base_time = notify.time.0;
+        Self {
+            notify,
+            keepalive_base_time,
+        }
+    }
+}
 
 // A miner can pipeline mining.configure, mining.subscribe, mining.extranonce.subscribe,
 // mining.suggest_difficulty, and mining.authorize while its SV2 channel is opening; some BIP 310
@@ -224,7 +244,7 @@ pub struct Sv1Server {
     pub(crate) pending_target_updates: SharedMap<DownstreamId, Target>,
     /// Valid Sv1 jobs storage, containing only a single shared entry (AGGREGATED_CHANNEL_ID) in
     /// case of channels aggregation (aggregated mode)
-    pub(crate) valid_sv1_jobs: SharedMap<ChannelId, Vec<server_to_client::Notify>>,
+    valid_sv1_jobs: SharedMap<ChannelId, Sv1JobStore<StoredSv1Job>>,
     pub(crate) mode: TproxyMode,
     user_identity: Arc<OnceLock<String>>,
 }
@@ -1154,13 +1174,16 @@ impl Sv1Server {
                     // keepalive gate. Bootstrap jobs for late joiners carry that downstream's
                     // channel ID, affect only that miner, and must not delay every other miner's
                     // keepalive.
+                    let resets_job_history = clean_jobs
+                        && (self.mode.is_non_aggregated() || m.channel_id == AGGREGATED_CHANNEL_ID);
                     let store_notify = || {
                         self.valid_sv1_jobs
                             .with_mut_or_default(job_channel_id, |channel_jobs| {
-                                if clean_jobs {
-                                    channel_jobs.clear();
-                                }
-                                channel_jobs.push(notify.clone());
+                                channel_jobs.activate(
+                                    notify.job_id.clone(),
+                                    StoredSv1Job::upstream(notify.clone()),
+                                    resets_job_history,
+                                );
                             });
                     };
                     if self.mode.is_aggregated() && m.channel_id == AGGREGATED_CHANNEL_ID {
@@ -1860,34 +1883,41 @@ impl Sv1Server {
         keepalive_interval_secs: u16,
     ) -> Option<server_to_client::Notify> {
         let last_job = self.get_last_job(channel_id)?;
-        let original_job_id = Self::extract_original_job_id(&last_job.job_id)
-            .unwrap_or_else(|| last_job.job_id.clone());
-        let base_time = self
-            .get_original_job(&original_job_id, channel_id)
-            .as_ref()
-            .map(|job| job.time.0)
-            .unwrap_or(last_job.time.0);
+        let original_job_id = Self::extract_original_job_id(&last_job.notify.job_id)
+            .unwrap_or_else(|| last_job.notify.job_id.clone());
+        let base_time = last_job.keepalive_base_time;
 
         // Keep nTime within Bitcoin Core's maximum future-time policy relative to the original
         // upstream job.
         const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;
         let new_time = last_job
+            .notify
             .time
             .0
             .saturating_add(keepalive_interval_secs as u32)
             .min(base_time.saturating_add(MAX_FUTURE_BLOCK_TIME));
-        if new_time == last_job.time.0 {
+        if new_time == last_job.notify.time.0 {
             return None;
         }
 
-        let mut keepalive_notify = last_job;
+        let mut keepalive_notify = last_job.notify;
         keepalive_notify.job_id = self.next_keepalive_job_id(&original_job_id);
         keepalive_notify.time = HexU32Be(new_time);
+        // A keepalive only rolls nTime on the current work and must not invalidate prior jobs.
+        keepalive_notify.clean_jobs = false;
 
         let job_channel_id = self.resolve_channel_id(channel_id);
         // Do not recreate job history for a channel that was removed after targets were collected.
-        self.valid_sv1_jobs
-            .with_mut(&job_channel_id, |jobs| jobs.push(keepalive_notify.clone()))?;
+        self.valid_sv1_jobs.with_mut(&job_channel_id, |jobs| {
+            jobs.activate(
+                keepalive_notify.job_id.clone(),
+                StoredSv1Job {
+                    notify: keepalive_notify.clone(),
+                    keepalive_base_time: base_time,
+                },
+                false,
+            )
+        })?;
 
         Some(keepalive_notify)
     }
@@ -1976,27 +2006,11 @@ impl Sv1Server {
     /// Gets the last job from the jobs storage.
     /// In aggregated mode, returns the last job from the shared job list.
     /// In non-aggregated mode, returns the last job for the specified channel.
-    fn get_last_job(&self, channel_id: ChannelId) -> Option<server_to_client::Notify> {
+    fn get_last_job(&self, channel_id: ChannelId) -> Option<StoredSv1Job> {
         let channel_id = self.resolve_channel_id(channel_id);
 
         self.valid_sv1_jobs
-            .with(&channel_id, |jobs| jobs.last().cloned())
-            .flatten()
-    }
-
-    /// Gets the original upstream job by its job_id.
-    /// This is used to find the base time for keepalive time capping.
-    fn get_original_job(
-        &self,
-        job_id: &str,
-        channel_id: ChannelId,
-    ) -> Option<server_to_client::Notify> {
-        let channel_id = self.resolve_channel_id(channel_id);
-
-        self.valid_sv1_jobs
-            .with(&channel_id, |jobs| {
-                jobs.iter().find(|j| j.job_id == job_id).cloned()
-            })
+            .with(&channel_id, |jobs| jobs.active().cloned())
             .flatten()
     }
 }
@@ -2005,7 +2019,7 @@ impl Sv1Server {
 mod tests {
     use super::*;
     use crate::config::{DownstreamDifficultyConfig, TranslatorConfig, Upstream};
-    use crate::sv1::downstream::Sv1SessionState;
+    use crate::sv1::downstream::{Sv1JobValidationContext, Sv1SessionState};
     use async_channel::unbounded;
     use std::str::FromStr;
     use stratum_apps::{
@@ -2018,6 +2032,7 @@ mod tests {
                 OpenMiningChannelErrorOwned, SetExtranoncePrefixOwned, SetNewPrevHashOwned,
                 SetTargetOwned,
             },
+            sv1_api::client_to_server,
         },
     };
 
@@ -2129,6 +2144,29 @@ mod tests {
         }
     }
 
+    fn test_sv1_notify(job_id: &str, clean_jobs: bool) -> server_to_client::Notify {
+        let message: json_rpc::Message = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "method": "mining.notify",
+            "params": [
+                job_id,
+                "00".repeat(32),
+                "02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff300344b70e162f5374726174756d2056322053524920506f6f6c2f2f14",
+                "feffffff0265adac120000000016001458806074c426bedea9376ac34685eca699f4e90f0000000000000000266a24aa21a9ed50d0d53c0b29a2c630b1c5bd7a133d4758910909abb1a70d37306ed810fa79bc43b70e00",
+                [],
+                "20000000",
+                "1d00ffff",
+                "00000001",
+                clean_jobs
+            ]
+        }))
+        .unwrap();
+        let json_rpc::Message::Notification(notification) = message else {
+            unreachable!();
+        };
+        server_to_client::Notify::try_from(notification).unwrap()
+    }
+
     #[test]
     fn test_sv1_server_creation() {
         let server = create_test_sv1_server();
@@ -2136,6 +2174,85 @@ mod tests {
         assert_eq!(server.shares_per_minute, 5.0);
         assert_eq!(server.listener_addr.ip().to_string(), "127.0.0.1");
         assert_eq!(server.listener_addr.port(), 3333);
+    }
+
+    #[test]
+    fn late_share_uses_its_job_validation_context() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let old_job = test_sv1_notify("old", false);
+        let mut current_job = test_sv1_notify("current", false);
+        current_job.version = HexU32Be(0x20000001);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    old_job.job_id.clone(),
+                    StoredSv1Job::upstream(old_job.clone()),
+                    false,
+                );
+                jobs.activate(
+                    current_job.job_id.clone(),
+                    StoredSv1Job::upstream(current_job.clone()),
+                    false,
+                );
+            });
+
+        let old_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            old_job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: old_extranonce.clone(),
+                                extranonce2_len: 16,
+                                // Any valid hash meets this target. The current target below
+                                // accepts none, proving submission uses the job's captured target.
+                                target: Target::from_le_bytes([0xff; 32]),
+                            },
+                            false,
+                        );
+                        data.extranonce1 = vec![9, 9, 9, 9].try_into().unwrap();
+                        data.extranonce2_len = 8;
+                        data.target = Target::from_le_bytes([0; 32]);
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        let submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "old".to_string(),
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+
+        assert!(server.handle_submit(Some(7), &submit).unwrap());
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        let pending_share = data.pending_share.as_ref().unwrap();
+                        assert_eq!(
+                            pending_share.extranonce,
+                            Vec::<u8>::from(old_extranonce.clone())
+                        );
+                        assert_eq!(pending_share.extranonce2_len, 16);
+                        assert_eq!(pending_share.job_version, Some(old_job.version.0));
+                        assert_ne!(pending_share.job_version, Some(current_job.version.0));
+                    })
+                    .unwrap();
+            })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -3266,12 +3383,19 @@ mod tests {
         second_receiver.recv().await.unwrap();
 
         server.send_keepalive_jobs(vec![], 1).await.unwrap();
-        assert_eq!(
+        let original_time = server
+            .valid_sv1_jobs
+            .with(&AGGREGATED_CHANNEL_ID, |jobs| {
+                assert_eq!(jobs.len(), 1);
+                jobs.active().unwrap().notify.time.0
+            })
+            .unwrap();
+        assert!(
             server
                 .valid_sv1_jobs
-                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.len()),
-            Some(1),
-            "an empty tick must not mutate the shared job history"
+                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.get("1").is_some())
+                .unwrap(),
+            "an empty tick must not mutate the shared job history",
         );
 
         server
@@ -3282,12 +3406,16 @@ mod tests {
         // their next deadlines are aligned.
         server.send_keepalive_jobs(vec![(1, 7)], 1).await.unwrap();
 
-        let jobs = server
+        server
             .valid_sv1_jobs
-            .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.clone())
+            .with(&AGGREGATED_CHANNEL_ID, |jobs| {
+                assert_eq!(jobs.len(), 2);
+                let active = jobs.active().unwrap();
+                assert_eq!(active.notify.time.0, original_time + 1);
+                assert!(!active.notify.clean_jobs);
+                assert_eq!(active.keepalive_base_time, original_time);
+            })
             .unwrap();
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[1].time.0, jobs[0].time.0 + 1);
 
         let first_keepalive = message_from_server_event(first_receiver.recv().await.unwrap());
         let second_keepalive = message_from_server_event(second_receiver.recv().await.unwrap());

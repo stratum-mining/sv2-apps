@@ -1,11 +1,12 @@
 use crate::{
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
+    sv1::job_store::Sv1JobStore,
     utils::SubmitShareWithChannelId,
 };
 use async_channel::{Receiver, Sender};
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
-use std::{collections::HashMap, future::Future, sync::Arc, time::Instant};
+use std::{future::Future, sync::Arc, time::Instant};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
@@ -131,6 +132,17 @@ impl Sv1SessionState {
     }
 }
 
+/// Downstream-specific values needed to validate and translate a share for one advertised job.
+///
+/// Difficulty and extranonce assignments take effect on job boundaries, so late shares must use
+/// the values that accompanied their own job rather than the downstream's newest values.
+#[derive(Clone, Debug)]
+pub(super) struct Sv1JobValidationContext {
+    pub(super) extranonce: Extranonce,
+    pub(super) extranonce2_len: usize,
+    pub(super) target: Target,
+}
+
 #[derive(Debug)]
 pub struct DownstreamData {
     pub channel_id: Option<ChannelId>,
@@ -149,9 +161,8 @@ pub struct DownstreamData {
     pub cached_set_difficulty: Option<json_rpc::Message>,
     pub cached_notify: Option<json_rpc::Message>,
     pub(super) session_state: Sv1SessionState,
-    /// Extranonce1 advertised for each job that reached this miner. This preserves validation of
-    /// old-job shares across `mining.set_extranonce` transitions.
-    pub(super) job_extranonces: HashMap<String, Extranonce>,
+    /// Per-job downstream state retained for late-share validation under the current chain tip.
+    pub(super) job_validation_contexts: Sv1JobStore<Sv1JobValidationContext>,
     /// Number of queued `mining.set_extranonce` notifications not yet applied by this downstream.
     pub(super) pending_set_extranonce_notifications: usize,
     // Next advertised SV1 target, applied when the corresponding
@@ -203,7 +214,7 @@ impl DownstreamData {
             cached_set_difficulty: None,
             cached_notify: None,
             session_state: Sv1SessionState::default(),
-            job_extranonces: HashMap::new(),
+            job_validation_contexts: Sv1JobStore::default(),
             pending_set_extranonce_notifications: 0,
             pending_target: None,
             pending_hashrate: None,
@@ -216,19 +227,21 @@ impl DownstreamData {
         }
     }
 
-    fn record_job_extranonce(&mut self, notify: &server_to_client::Notify) {
-        if notify.clean_jobs {
-            self.job_extranonces.clear();
-        }
-        self.job_extranonces
-            .insert(notify.job_id.clone(), self.extranonce1.clone());
+    fn record_job_validation_context(&mut self, notify: &server_to_client::Notify) {
+        let context = Sv1JobValidationContext {
+            extranonce: self.extranonce1.clone(),
+            extranonce2_len: self.extranonce2_len,
+            target: self.target,
+        };
+        self.job_validation_contexts
+            .activate(notify.job_id.clone(), context, notify.clean_jobs);
         if self.pending_set_extranonce_notifications == 0 {
             self.keepalive_timer_anchor = Some(Instant::now());
         }
     }
 
-    pub(super) fn extranonce_for_job(&self, job_id: &str) -> Option<Extranonce> {
-        self.job_extranonces.get(job_id).cloned()
+    pub(super) fn job_validation_context(&self, job_id: &str) -> Option<Sv1JobValidationContext> {
+        self.job_validation_contexts.get(job_id).cloned()
     }
 
     pub fn set_pending_target(&mut self, new_target: Target, downstream_id: DownstreamId) {
@@ -540,9 +553,7 @@ impl Downstream {
                                     }
 
                                     let cached_set_difficulty = data.cached_set_difficulty.take();
-                                    let mut notify = notify;
                                     if cached_set_difficulty.is_some() {
-                                        notify.clean_jobs = true;
                                         if let Some(new_target) = data.pending_target.take() {
                                             data.target = new_target;
                                         }
@@ -550,7 +561,7 @@ impl Downstream {
                                             data.hashrate = Some(new_hashrate);
                                         }
                                     }
-                                    data.record_job_extranonce(&notify);
+                                    data.record_job_validation_context(&notify);
                                     Some((cached_set_difficulty, Message::from(notify)))
                                 })
                                 .map_err(TproxyError::shutdown)?;
@@ -786,7 +797,6 @@ impl Downstream {
         set_difficulty: Option<json_rpc::Message>,
         notify: Option<json_rpc::Message>,
     ) -> TproxyResult<(), error::Downstream> {
-        let mut did_send_difficulty = false;
         if let Some(set_difficulty) = set_difficulty {
             debug!("Down: Sending cached mining.set_difficulty after handshake completion");
             self.downstream_io
@@ -810,7 +820,6 @@ impl Downstream {
                     }
                 })
                 .map_err(TproxyError::shutdown)?;
-            did_send_difficulty = true;
         }
 
         if let Some(notify_msg) = notify {
@@ -822,16 +831,13 @@ impl Downstream {
                     ),
                 ));
             };
-            let mut parsed = server_to_client::Notify::try_from(notification).map_err(|error| {
+            let parsed = server_to_client::Notify::try_from(notification).map_err(|error| {
                 TproxyError::shutdown(TproxyErrorKind::InvalidMiningNotifyNotification(format!(
                     "{error:?}"
                 )))
             })?;
-            if did_send_difficulty {
-                parsed.clean_jobs = true;
-            }
             self.downstream_data
-                .with(|data| data.record_job_extranonce(&parsed))
+                .with(|data| data.record_job_validation_context(&parsed))
                 .map_err(TproxyError::shutdown)?;
             self.downstream_io
                 .downstream_sv1_sender
@@ -1128,7 +1134,7 @@ mod tests {
             })
             .unwrap();
 
-        let next_notify = notify("next");
+        let next_notify = notify_with_clean_jobs("next", false);
         sv1_server_message_sender
             .send(Sv1ServerEvent::notification(next_notify.clone()))
             .await
@@ -1144,7 +1150,94 @@ mod tests {
         };
         let forwarded_notify = server_to_client::Notify::try_from(notification.clone()).unwrap();
         assert_eq!(forwarded_notify.job_id, "next");
-        assert!(forwarded_notify.clean_jobs);
+        assert!(!forwarded_notify.clean_jobs);
+    }
+
+    #[tokio::test]
+    async fn difficulty_change_preserves_previous_job_validation_context() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let old_target = Target::from_le_bytes([0x22; 32]);
+        let new_target = Target::from_le_bytes([0x11; 32]);
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            old_target,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| data.session_state = Sv1SessionState::Ready)
+            .unwrap();
+
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::notification(notify("old")))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream_sv1_receiver.recv().await.unwrap();
+
+        downstream
+            .downstream_data
+            .with(|data| data.pending_target = Some(new_target))
+            .unwrap();
+        for message in [set_difficulty(), notify_with_clean_jobs("new", false)] {
+            sv1_server_message_sender
+                .send(Sv1ServerEvent::notification(message))
+                .await
+                .unwrap();
+            downstream.handle_sv1_server_message().await.unwrap();
+        }
+        downstream_sv1_receiver.recv().await.unwrap();
+        let forwarded_notify = downstream_sv1_receiver.recv().await.unwrap();
+        let Message::Notification(notification) = forwarded_notify else {
+            panic!("expected mining.notify");
+        };
+        let forwarded_notify = server_to_client::Notify::try_from(notification).unwrap();
+        assert!(!forwarded_notify.clean_jobs);
+
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.target, new_target);
+                assert_eq!(
+                    data.job_validation_context("old")
+                        .map(|context| context.target),
+                    Some(old_target)
+                );
+                assert_eq!(
+                    data.job_validation_context("new")
+                        .map(|context| context.target),
+                    Some(new_target)
+                );
+                assert_eq!(data.job_validation_contexts.len(), 2);
+            })
+            .unwrap();
+
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::notification(notify("new-tip")))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream_sv1_receiver.recv().await.unwrap();
+
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert!(data.job_validation_context("old").is_none());
+                assert!(data.job_validation_context("new").is_none());
+                assert!(data.job_validation_context("new-tip").is_some());
+                assert_eq!(data.job_validation_contexts.len(), 1);
+            })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1215,8 +1308,9 @@ mod tests {
             .downstream_data
             .with(|data| {
                 assert_eq!(
-                    data.extranonce_for_job("old").as_ref(),
-                    Some(&old_extranonce)
+                    data.job_validation_context("old")
+                        .map(|context| context.extranonce),
+                    Some(old_extranonce)
                 );
                 assert_eq!(data.extranonce1, new_extranonce);
                 assert_eq!(data.session_state, Sv1SessionState::Ready);
@@ -1275,7 +1369,7 @@ mod tests {
             .send(Sv1ServerEvent::notification(Message::from(
                 server_to_client::SetExtranonce {
                     extra_nonce1: new_extranonce.clone(),
-                    extra_nonce2_size: 4,
+                    extra_nonce2_size: 6,
                 },
             )))
             .await
@@ -1300,12 +1394,24 @@ mod tests {
             .downstream_data
             .with(|data| {
                 assert_eq!(
-                    data.extranonce_for_job("old").as_ref(),
-                    Some(&old_extranonce)
+                    data.job_validation_context("old")
+                        .map(|context| context.extranonce),
+                    Some(old_extranonce)
                 );
                 assert_eq!(
-                    data.extranonce_for_job("new").as_ref(),
-                    Some(&new_extranonce)
+                    data.job_validation_context("new")
+                        .map(|context| context.extranonce),
+                    Some(new_extranonce)
+                );
+                assert_eq!(
+                    data.job_validation_context("old")
+                        .map(|context| context.extranonce2_len),
+                    Some(4)
+                );
+                assert_eq!(
+                    data.job_validation_context("new")
+                        .map(|context| context.extranonce2_len),
+                    Some(6)
                 );
                 assert!(data.keepalive_timer_anchor.is_some());
             })
@@ -1366,8 +1472,9 @@ mod tests {
                 assert_eq!(data.pending_set_extranonce_notifications, 1);
                 assert!(data.keepalive_timer_anchor.is_none());
                 assert_eq!(
-                    data.extranonce_for_job("first").as_ref(),
-                    Some(&first_extranonce)
+                    data.job_validation_context("first")
+                        .map(|context| context.extranonce),
+                    Some(first_extranonce)
                 );
             })
             .unwrap();
@@ -1380,8 +1487,9 @@ mod tests {
                 assert_eq!(data.pending_set_extranonce_notifications, 0);
                 assert!(data.keepalive_timer_anchor.is_some());
                 assert_eq!(
-                    data.extranonce_for_job("second").as_ref(),
-                    Some(&second_extranonce)
+                    data.job_validation_context("second")
+                        .map(|context| context.extranonce),
+                    Some(second_extranonce)
                 );
             })
             .unwrap();

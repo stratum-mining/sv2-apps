@@ -14,6 +14,7 @@
 //!   connections.
 
 mod downstream;
+mod job_store;
 #[cfg(feature = "monitoring")]
 mod monitoring;
 mod sv1_server;
