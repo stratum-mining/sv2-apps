@@ -1,6 +1,5 @@
 use stratum_apps::stratum_core::sv1_api::{
-    IsServer, client_to_server, json_rpc,
-    server_to_client::{self, Notify},
+    IsServer, client_to_server, json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be, VERSION_ROLLING_MASK},
 };
 use tracing::{debug, error, info, warn};
@@ -114,11 +113,11 @@ impl IsServer for Sv1Server {
             channel_id
         };
 
-        let find_job = |jobs: &[Notify]| jobs.iter().find(|j| j.job_id == *job_id).cloned();
-
         let job = self
             .valid_sv1_jobs
-            .with(&channel_id, |jobs| find_job(jobs.as_ref()))
+            .with(&channel_id, |jobs| {
+                jobs.get(job_id).map(|job| job.notify.clone())
+            })
             .flatten();
 
         let Some(job) = job else {
@@ -145,17 +144,17 @@ impl IsServer for Sv1Server {
                         channel_id
                     );
 
-                    let Some(job_extranonce) = data.extranonce_for_job(job_id) else {
-                        warn!(
+                    let Some(job_context) = data.job_validation_context(job_id) else {
+                        debug!(
                             job_id,
-                            channel_id, "No extranonce is associated with submitted SV1 job"
+                            channel_id, "Submitted SV1 job is no longer valid for this downstream"
                         );
                         return Ok(false);
                     };
                     let is_valid = validate_sv1_share(
                         request,
-                        data.target,
-                        job_extranonce.clone().into(),
+                        job_context.target,
+                        job_context.extranonce.clone().into(),
                         data.version_rolling_mask.clone(),
                         job.clone(),
                     )
@@ -170,8 +169,8 @@ impl IsServer for Sv1Server {
                         channel_id,
                         downstream_id,
                         share: request.clone(),
-                        extranonce: job_extranonce.into(),
-                        extranonce2_len: data.extranonce2_len,
+                        extranonce: job_context.extranonce.into(),
+                        extranonce2_len: job_context.extranonce2_len,
                         version_rolling_mask: data.version_rolling_mask.clone(),
                         job_version: Some(job.version.0),
                     });
