@@ -17,7 +17,10 @@ use std::{
 use stratum_apps::{
     stratum_core::{
         binary_sv2,
-        channels_sv2::client::error::GroupChannelError,
+        channels_sv2::{
+            client::error::GroupChannelError,
+            extranonce_manager::{ExtranonceAllocatorError, ExtranoncePrefixError},
+        },
         framing_sv2,
         handlers_sv2::HandlerErrorType,
         noise_sv2,
@@ -183,6 +186,12 @@ pub enum TproxyErrorKind {
     ChannelErrorReceiver(async_channel::RecvError),
     /// Channel sender error
     ChannelErrorSender,
+    /// A downstream sent too many SV1 messages while waiting for its SV2 channel to open.
+    Sv1HandshakeMessageQueueFull,
+    /// An internally generated mining.set_extranonce notification could not be decoded.
+    InvalidSetExtranonceNotification(String),
+    /// An internally generated mining.notify notification could not be decoded.
+    InvalidMiningNotifyNotification(String),
     /// Operation timed out
     Timeout,
     /// Error converting SetDifficulty to Message
@@ -219,14 +228,32 @@ pub enum TproxyErrorKind {
     DownstreamNotFoundWithChannelId(ChannelId),
     /// Channel not found
     ChannelNotFound,
+    /// An upstream identifier is already used by a different live channel scope.
+    ChannelIdAlreadyInUse(ChannelId),
     /// Failed to process SetNewPrevHash message
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
     FailedToProcessNewExtendedMiningJob,
+    /// Upstream disabled version rolling after accepting it as a required connection feature
+    VersionRollingNotAllowed,
     /// Failed to add channel id to group channel
     FailedToAddChannelIdToGroupChannel(GroupChannelError),
     /// Aggregated channel was closed
     AggregatedChannelClosed,
+    /// Aggregated channel state is missing its extranonce allocator
+    MissingAggregatedExtranonceAllocator,
+    /// Updated prefix and existing rollable space cannot form a supported extranonce
+    InvalidExtranonceSize {
+        prefix_len: usize,
+        rollable_size: u16,
+    },
+    /// Failed to update the shared allocator with a new upstream prefix
+    AggregatedExtranonceAllocatorUpdateFailed(ExtranonceAllocatorError),
+    /// A channel rejected its updated upstream-owned extranonce prefix bytes
+    UpstreamExtranoncePrefixUpdateFailed {
+        channel_id: ChannelId,
+        error: ExtranoncePrefixError,
+    },
     /// Invalid key
     InvalidKey,
     /// Downstream not found with given downstream_id
@@ -253,6 +280,13 @@ impl fmt::Display for TproxyErrorKind {
             PoisonLock => write!(f, "Poison Lock error"),
             ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
+            Sv1HandshakeMessageQueueFull => write!(f, "SV1 handshake message queue is full"),
+            InvalidSetExtranonceNotification(error) => {
+                write!(f, "Invalid mining.set_extranonce notification: {error}")
+            }
+            InvalidMiningNotifyNotification(error) => {
+                write!(f, "Invalid mining.notify notification: {error}")
+            }
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
@@ -299,14 +333,38 @@ impl fmt::Display for TproxyErrorKind {
                 write!(f, "Downstream not found with channel id: {channel_id}")
             }
             ChannelNotFound => write!(f, "Channel not found"),
+            ChannelIdAlreadyInUse(channel_id) => {
+                write!(f, "Channel ID is already in use: {channel_id}")
+            }
             FailedToProcessSetNewPrevHash => write!(f, "Failed to process SetNewPrevHash message"),
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")
             }
+            VersionRollingNotAllowed => write!(
+                f,
+                "Upstream sent a mining job that does not allow required version rolling"
+            ),
             FailedToAddChannelIdToGroupChannel(e) => {
                 write!(f, "Failed to add channel id to group channel: {e:?}")
             }
             AggregatedChannelClosed => write!(f, "Aggregated channel was closed"),
+            MissingAggregatedExtranonceAllocator => {
+                write!(f, "Aggregated channel has no extranonce allocator")
+            }
+            InvalidExtranonceSize {
+                prefix_len,
+                rollable_size,
+            } => write!(
+                f,
+                "Extranonce prefix length {prefix_len} plus rollable size {rollable_size} is unsupported"
+            ),
+            AggregatedExtranonceAllocatorUpdateFailed(e) => {
+                write!(f, "Failed to update aggregated extranonce allocator: {e}")
+            }
+            UpstreamExtranoncePrefixUpdateFailed { channel_id, error } => write!(
+                f,
+                "Channel {channel_id} rejected its updated upstream extranonce prefix: {error}"
+            ),
             InvalidKey => write!(f, "Invalid key used during noise handshake"),
             DownstreamNotPresent(downstream_id) => write!(
                 f,

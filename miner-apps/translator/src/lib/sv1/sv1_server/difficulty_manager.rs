@@ -3,7 +3,10 @@ use stratum_apps::stratum_core::{mining_sv2::UpdateChannelOwned, parsers_sv2::Mi
 
 use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::{Sv1Server, sv1_server::SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING},
+    sv1::{
+        Sv1Server, downstream::Sv1ServerEvent,
+        sv1_server::SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
+    },
 };
 
 use stratum_apps::{
@@ -62,10 +65,14 @@ impl Sv1Server {
     /// This method implements the core vardiff logic:
     /// 1. For each downstream, calculate if a target update is needed
     /// 2. Always send UpdateChannel to keep upstream informed
-    /// 3. Compare new target with upstream target to decide when to send set_difficulty:
-    ///    - If new_target >= upstream_target: send set_difficulty immediately
-    ///    - If new_target < upstream_target: wait for SetTarget response before sending
-    ///      set_difficulty
+    /// 3. Compare the new target with the upstream target to decide when to send set_difficulty.
+    ///    Bitcoin targets are ordered inversely to difficulty: a larger target is easier.
+    ///    - If `new_target >= upstream_target`, advertise it immediately. This preserves every
+    ///      upstream-valid share; additional easier shares are revalidated against the actual
+    ///      upstream channel target by the channel manager and filtered locally.
+    ///    - If `new_target < upstream_target`, wait for SetTarget. Advertising a harder target
+    ///      early would prevent the miner from submitting shares that the upstream would still
+    ///      accept and reward.
     /// 4. Handle aggregated vs non-aggregated modes for UpdateChannel messages
     pub(super) async fn handle_vardiff_updates(&self) -> TproxyResult<(), error::Sv1Server> {
         let mut immediate_updates = Vec::new();
@@ -98,7 +105,12 @@ impl Sv1Server {
             };
 
             let Some(channel_id) = channel_id else {
-                error!("Channel id is none for downstream_id: {}", downstream_id);
+                // Upstream channel closure and downstream cleanup are asynchronous. A vardiff
+                // snapshot may briefly retain the downstream after its channel was cleared.
+                debug!(
+                    "Skipping vardiff update for downstream_id {} without an active channel",
+                    downstream_id
+                );
                 return Ok(());
             };
             let new_hashrate_opt =
@@ -155,8 +167,10 @@ impl Sv1Server {
                     match upstream_target {
                         Some(upstream_target) => {
                             if new_target >= upstream_target {
-                                // Case 1: new_target >= upstream_target, send set_difficulty
-                                // immediately
+                                // A larger target is easier. Advertise it immediately so the miner
+                                // continues submitting every upstream-valid share; the channel
+                                // manager filters any additional shares that miss the actual
+                                // upstream target.
                                 trace!(
                                     "✅ Target comparison: new_target ({}) >= upstream_target ({}) for downstream {}, will send mining.set_difficulty immediately",
                                     new_target, upstream_target, downstream_id
@@ -171,8 +185,8 @@ impl Sv1Server {
                                 // difficulty.
                                 self.pending_target_updates.remove(&downstream_id);
                             } else {
-                                // Case 2: new_target < upstream_target, delay set_difficulty until
-                                // SetTarget
+                                // A smaller target is harder. Delay it until SetTarget confirms the
+                                // upstream no longer accepts the shares this target would suppress.
                                 trace!(
                                     "⏳ Target comparison: new_target ({}) < upstream_target ({}) for downstream {}, will delay mining.set_difficulty until SetTarget",
                                     new_target, upstream_target, downstream_id
@@ -244,7 +258,10 @@ impl Sv1Server {
                 .sv1_server_to_downstream_sender
                 .get_cloned(&downstream_id)
             {
-                if let Err(e) = sender.send(set_difficulty_msg).await {
+                if let Err(e) = sender
+                    .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                    .await
+                {
                     warn!(
                         "Failed to send immediate mining.set_difficulty message to downstream {downstream_id}: {e:?}; skipping (likely disconnected)"
                     );
@@ -545,8 +562,10 @@ impl Sv1Server {
                     return true; // keep pending (not relevant for this SetTarget)
                 }
 
+                // It is safe to advertise the pending target once it is at least as easy as the
+                // new upstream target. The miner will then submit every upstream-valid share;
+                // anything easier is filtered locally by channel-manager validation.
                 if *pending_target >= new_upstream_target {
-                    // Target is acceptable, can apply immediately
                     applicable_updates.push(PendingTargetUpdate {
                         downstream_id: *pending_downstream_id,
                         new_target: *pending_target,
@@ -592,7 +611,10 @@ impl Sv1Server {
                 .sv1_server_to_downstream_sender
                 .get_cloned(&downstream_id)
             {
-                if let Err(e) = sender.send(set_difficulty_msg).await {
+                if let Err(e) = sender
+                    .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                    .await
+                {
                     warn!(
                         "Failed to send mining.set_difficulty to downstream {}: {:?}; skipping (likely disconnected)",
                         downstream_id, e

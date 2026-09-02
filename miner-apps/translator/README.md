@@ -95,8 +95,10 @@ Make sure the machine running the Translator Proxy has its clock synced with an 
   address as the username.
 
 #### **Solo/Donation Payout Verification**
-Payout verification is disabled by default. Set `verify_payout = true` for solo mining or
-donation configurations where `user_identity` intentionally encodes an on-chain payout address:
+Payout verification defaults to `false` for compatibility with standard pool mining. In that mode,
+tProxy trusts the upstream's coinbase payout policy and does not verify that jobs pay the miner.
+Set `verify_payout = true` for solo mining or donation configurations where `user_identity`
+intentionally encodes an on-chain payout address:
 
 - `sri/solo/<payout_address>/<worker>`: tProxy verifies every upstream extended job pays 100% of spendable coinbase outputs to `<payout_address>`
 - `<payout_address>[.worker]`: legacy solo mode, verified by checking that at least 90% of spendable coinbase outputs go to `<payout_address>`

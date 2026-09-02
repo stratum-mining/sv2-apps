@@ -21,10 +21,12 @@ pub mod downstream_message_handler;
 use crate::{
     config::TranslatorConfig,
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::downstream::Downstream,
+    sv1::{
+        downstream::{Downstream, Sv1ServerEvent, Sv1SetupRequest},
+        job_store::Sv1JobStore,
+    },
     utils::{
         AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId, TproxyMode,
-        is_mining_authorize,
     },
 };
 use async_channel::{Receiver, Sender, unbounded};
@@ -64,9 +66,12 @@ use stratum_apps::{
                 sv1_advertised_target_from_sv2_target,
             },
         },
-        sv1_api::{IsServer, json_rpc, server_to_client, utils::HexU32Be},
+        sv1_api::{
+            IsServer, json_rpc, server_to_client,
+            utils::{Extranonce, HexU32Be},
+        },
     },
-    sync::SharedMap,
+    sync::{SharedLock, SharedMap},
     task_manager::TaskManager,
     utils::types::{ChannelId, DownstreamId, Hashrate, RequestId, SharesPerMinute},
 };
@@ -76,9 +81,46 @@ use tracing::{debug, error, info, trace, warn};
 
 const SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING: f64 = 1.0;
 
+#[derive(Clone, Debug)]
+struct StoredSv1Job {
+    notify: server_to_client::Notify,
+    /// Original upstream job time used to cap locally generated keepalive jobs.
+    keepalive_base_time: u32,
+}
+
+impl StoredSv1Job {
+    fn upstream(notify: server_to_client::Notify) -> Self {
+        let keepalive_base_time = notify.time.0;
+        Self {
+            notify,
+            keepalive_base_time,
+        }
+    }
+}
+
+// A miner can pipeline mining.configure, mining.subscribe, mining.extranonce.subscribe,
+// mining.suggest_difficulty, and mining.authorize while its SV2 channel is opening; some BIP 310
+// extensions also permit mining.configure to be repeated. Eight messages leave compatibility
+// headroom for that setup traffic while preventing an unauthenticated downstream from growing this
+// per-connection buffer without bound. The SV1 network reader separately limits each line to 64
+// KiB.
+const MAX_QUEUED_SV1_HANDSHAKE_MESSAGES: usize = 8;
+
+fn sv1_setup_request(message: &json_rpc::Message) -> Option<Sv1SetupRequest> {
+    let json_rpc::Message::StandardRequest(request) = message else {
+        return None;
+    };
+
+    match request.method.as_str() {
+        "mining.subscribe" => Some(Sv1SetupRequest::Subscribe),
+        "mining.authorize" => Some(Sv1SetupRequest::Authorize),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 struct Sv1ServerIo {
-    sv1_server_to_downstream_sender: SharedMap<DownstreamId, Sender<json_rpc::Message>>,
+    sv1_server_to_downstream_sender: SharedMap<DownstreamId, Sender<Sv1ServerEvent>>,
     downstream_to_sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
     downstream_to_sv1_server_receiver: Receiver<(DownstreamId, json_rpc::Message)>,
     channel_manager_receiver: Receiver<MiningOwned>,
@@ -182,6 +224,10 @@ pub struct Sv1Server {
     pub(crate) sequence_counter: Arc<AtomicU32>,
     pub(crate) miner_counter: Arc<AtomicU32>,
     pub(crate) keepalive_job_id_counter: Arc<AtomicU32>,
+    /// Wall-clock time of the last job appended to the shared aggregated history. This keeps
+    /// phased or unreachable downstreams from advancing the shared nTime more than once per
+    /// configured keepalive interval.
+    aggregated_job_mutation_time: SharedLock<Option<Instant>>,
     pub(crate) downstream_id_factory: Arc<AtomicUsize>,
     pub(crate) request_id_factory: Arc<AtomicU32>,
     pub(crate) downstreams: SharedMap<DownstreamId, Downstream>,
@@ -198,7 +244,7 @@ pub struct Sv1Server {
     pub(crate) pending_target_updates: SharedMap<DownstreamId, Target>,
     /// Valid Sv1 jobs storage, containing only a single shared entry (AGGREGATED_CHANNEL_ID) in
     /// case of channels aggregation (aggregated mode)
-    pub(crate) valid_sv1_jobs: SharedMap<ChannelId, Vec<server_to_client::Notify>>,
+    valid_sv1_jobs: SharedMap<ChannelId, Sv1JobStore<StoredSv1Job>>,
     pub(crate) mode: TproxyMode,
     user_identity: Arc<OnceLock<String>>,
 }
@@ -293,7 +339,7 @@ impl Sv1Server {
                 });
             // Broadcast to every connected downstream.
             for (downstream_id, sender) in downstream_senders {
-                if let Err(e) = sender.send(msg.clone()).await {
+                if let Err(e) = sender.send(Sv1ServerEvent::notification(msg.clone())).await {
                     warn!(
                         "Failed to send notify to downstream {}: channel closed: {}",
                         downstream_id, e
@@ -317,7 +363,7 @@ impl Sv1Server {
 
             let Some(sender) = sender else { return };
 
-            if let Err(e) = sender.send(msg).await {
+            if let Err(e) = sender.send(Sv1ServerEvent::notification(msg)).await {
                 warn!(
                     "Failed to send notify to downstream {}: channel closed: {}",
                     downstream_id, e
@@ -330,6 +376,7 @@ impl Sv1Server {
     fn cleanup(&self) {
         self.prevhashes.clear();
         self.valid_sv1_jobs.clear();
+        let _ = self.aggregated_job_mutation_time.set(None);
         if self.config.downstream_difficulty_config.enable_vardiff {
             self.vardiff.clear();
         }
@@ -395,6 +442,7 @@ impl Sv1Server {
             miner_counter: Arc::new(AtomicU32::new(0)),
             sequence_counter: Arc::new(AtomicU32::new(1)),
             keepalive_job_id_counter: Arc::new(AtomicU32::new(0)),
+            aggregated_job_mutation_time: SharedLock::new(None),
             downstream_id_factory: Arc::new(AtomicUsize::new(1)),
             request_id_factory: Arc::new(AtomicU32::new(1)),
             downstreams: SharedMap::new(),
@@ -532,13 +580,7 @@ impl Sv1Server {
                                     addr.ip(),
                                     connection_token,
                                 );
-                                // vardiff initialization (only if enabled)
                                 self.downstreams.insert(downstream_id, downstream.clone());
-                                // Insert vardiff state for this downstream only if vardiff is enabled
-                                if self.config.downstream_difficulty_config.enable_vardiff {
-                                    let vardiff = VardiffState::new().expect("Failed to create vardiffstate");
-                                    self.vardiff.insert(downstream_id, vardiff);
-                                }
                                 info!("Downstream {} registered successfully (channel will be opened after first message)", downstream_id);
 
                                 let sv1_server = self.clone();
@@ -685,21 +727,45 @@ impl Sv1Server {
                     downstream_id
                 );
             }
-            debug!("Down: Queuing Sv1 message until channel is established");
             self.with_registered_downstream(downstream_id, |downstream| {
                 downstream
                     .downstream_data
                     .with(|data| {
-                        data.queued_sv1_handshake_messages
-                            .push(downstream_message.clone())
+                        if data.queued_sv1_handshake_messages.len()
+                            >= MAX_QUEUED_SV1_HANDSHAKE_MESSAGES
+                        {
+                            return Err(TproxyError::disconnect(
+                                TproxyErrorKind::Sv1HandshakeMessageQueueFull,
+                                downstream_id,
+                            ));
+                        }
+
+                        data.queued_sv1_handshake_messages.push(downstream_message);
+                        Ok(())
                     })
-                    .map_err(TproxyError::shutdown)
+                    .map_err(TproxyError::shutdown)?
             })?;
+            debug!("Down: Queuing Sv1 message until channel is established");
             return Ok(());
         }
 
-        let is_authorize = is_mining_authorize(&downstream_message);
+        self.process_sv1_message(downstream_id, downstream_message)
+            .await?;
 
+        Ok(())
+    }
+
+    /// Processes one SV1 message after its downstream SV2 channel is available.
+    ///
+    /// Setup progress is recorded immediately after a successful response is queued to the miner.
+    /// Recording it here keeps response construction synchronized with upstream notifications;
+    /// the completion event only releases cached notifications in FIFO order.
+    async fn process_sv1_message(
+        &self,
+        downstream_id: DownstreamId,
+        downstream_message: json_rpc::Message,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let setup_request = sv1_setup_request(&downstream_message);
         let response = self
             .clone()
             .handle_message(Some(downstream_id), downstream_message)
@@ -708,27 +774,49 @@ impl Sv1Server {
         match response {
             Ok(Some(response_msg)) => {
                 debug!("Down: Sending Sv1 message to downstream: {}", response_msg);
-                let (downstream_sv1_sender, downstream) =
-                    self.with_registered_downstream(downstream_id, |downstream| {
-                        Ok((
-                            downstream.downstream_io.downstream_sv1_sender.clone(),
-                            downstream.clone(),
-                        ))
+                let downstream_sender = self
+                    .with_registered_downstream(downstream_id, |downstream| {
+                        Ok(downstream.downstream_io.downstream_sv1_sender.clone())
                     })?;
-                downstream_sv1_sender
+                downstream_sender
                     .send(response_msg.into())
                     .await
                     .map_err(|error| {
-                        error!("Down: Failed to send message to downstream: {error:?}");
+                        error!("Down: Failed to send SV1 response to downstream: {error:?}");
                         TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
                     })?;
 
-                // Check if this was an authorize message and handle sv1 handshake completion
-                if is_authorize {
-                    info!("Down: Handling mining.authorize after handshake completion");
-                    if let Err(e) = downstream.handle_sv1_handshake_completion().await {
-                        error!("Down: Failed to handle handshake completion: {:?}", e);
-                        return Err(TproxyError::disconnect(e, downstream_id));
+                if let Some(setup_request) = setup_request {
+                    let setup_just_completed =
+                        self.with_registered_downstream(downstream_id, |downstream| {
+                            downstream
+                                .downstream_data
+                                .with(|data| data.session_state.record_response(setup_request))
+                                .map_err(TproxyError::shutdown)
+                        })?;
+                    if setup_just_completed {
+                        let event_sender = self
+                            .sv1_server_io
+                            .sv1_server_to_downstream_sender
+                            .get_cloned(&downstream_id)
+                            .ok_or_else(|| {
+                                TproxyError::disconnect(
+                                    TproxyErrorKind::DownstreamNotPresent(downstream_id),
+                                    downstream_id,
+                                )
+                            })?;
+                        event_sender
+                            .send(Sv1ServerEvent::SetupComplete)
+                            .await
+                            .map_err(|error| {
+                                error!(
+                                    "Down: Failed to queue setup completion for downstream: {error:?}"
+                                );
+                                TproxyError::disconnect(
+                                    TproxyErrorKind::ChannelErrorSender,
+                                    downstream_id,
+                                )
+                            })?;
                     }
                 }
             }
@@ -955,73 +1043,30 @@ impl Sv1Server {
                         self.channel_id_to_downstream_id
                             .insert(m.channel_id, downstream_id);
 
-                        Ok((
-                            queued_messages,
-                            downstream.downstream_io.downstream_sv1_sender.clone(),
-                            downstream.clone(),
-                        ))
+                        Ok(queued_messages)
                     });
 
                 match downstream_setup {
-                    Ok((queued_messages, downstream_sv1_sender, downstream)) => {
+                    Ok(queued_messages) => {
+                        // A downstream starts contributing shares only after its SV2 channel is
+                        // open. Register vardiff at the same lifecycle boundary so the periodic
+                        // update does not include a miner that is still opening its channel.
+                        if self.config.downstream_difficulty_config.enable_vardiff {
+                            let vardiff =
+                                VardiffState::new().expect("Failed to create vardiffstate");
+                            self.vardiff.insert(downstream_id, vardiff);
+                        }
+
                         // Process all queued messages now that channel is established
-                        {
-                            if !queued_messages.is_empty() {
-                                info!(
-                                    "Processing {} queued Sv1 messages for downstream {}",
-                                    queued_messages.len(),
-                                    downstream_id
-                                );
+                        if !queued_messages.is_empty() {
+                            info!(
+                                "Processing {} queued Sv1 messages for downstream {}",
+                                queued_messages.len(),
+                                downstream_id
+                            );
 
-                                for message in queued_messages {
-                                    let is_authorize = is_mining_authorize(&message);
-                                    let response = self
-                                        .clone()
-                                        .handle_message(Some(downstream_id), message)
-                                        .map_err(|e| e.with_sv1_downstream_context(downstream_id));
-                                    match response {
-                                        Ok(Some(response_msg)) => {
-                                            downstream_sv1_sender.send(response_msg.into()).await
-                                            .map_err(|e| {
-                                                error!(
-                                                    "Down: Failed to send message to downstream: {e:?}"
-                                                );
-                                                TproxyError::disconnect(
-                                                    TproxyErrorKind::ChannelErrorSender, downstream_id
-                                                )
-                                            })?;
-
-                                            if is_authorize {
-                                                info!(
-                                                    "Down: Handling mining.authorize after upstream channel is open"
-                                                );
-                                                if let Err(e) = downstream
-                                                    .handle_sv1_handshake_completion()
-                                                    .await
-                                                {
-                                                    error!(
-                                                        "Down: Failed to handle handshake completion: {:?}",
-                                                        e
-                                                    );
-                                                    return Err(TproxyError::disconnect(
-                                                        e,
-                                                        downstream_id,
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        Ok(None) => {
-                                            // Message was handled but no response needed
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "Down: Error handling downstream message: {:?}",
-                                                e
-                                            );
-                                            return Err(e);
-                                        }
-                                    }
-                                }
+                            for message in queued_messages {
+                                self.process_sv1_message(downstream_id, message).await?;
                             }
                         }
 
@@ -1037,12 +1082,15 @@ impl Sv1Server {
                             .sv1_server_to_downstream_sender
                             .get_cloned(&downstream_id)
                         {
-                            sender.send(set_difficulty).await.map_err(|_| {
-                                TproxyError::disconnect(
-                                    TproxyErrorKind::ChannelErrorSender,
-                                    downstream_id,
-                                )
-                            })?;
+                            sender
+                                .send(Sv1ServerEvent::notification(set_difficulty))
+                                .await
+                                .map_err(|_| {
+                                    TproxyError::disconnect(
+                                        TproxyErrorKind::ChannelErrorSender,
+                                        downstream_id,
+                                    )
+                                })?;
                         }
 
                         // Opening a downstream changes the aggregate just like disconnecting one.
@@ -1118,15 +1166,36 @@ impl Sv1Server {
                     let notify = build_sv1_notify_from_sv2(prevhash, m.clone(), clean_jobs)
                         .map_err(TproxyError::shutdown)?;
 
-                    // Update job storage based on the configured mode
-                    let notify_parsed = notify.clone();
-                    self.valid_sv1_jobs
-                        .with_mut_or_default(job_channel_id, |channel_jobs| {
-                            if clean_jobs {
-                                channel_jobs.clear();
-                            }
-                            channel_jobs.push(notify_parsed);
-                        });
+                    // A real upstream job and a generated keepalive both mutate the same
+                    // aggregate history. Serialize those mutations and start the keepalive
+                    // interval from whichever one happened most recently.
+                    //
+                    // Only broadcast-addressed jobs (AGGREGATED_CHANNEL_ID) reset the shared
+                    // keepalive gate. Bootstrap jobs for late joiners carry that downstream's
+                    // channel ID, affect only that miner, and must not delay every other miner's
+                    // keepalive.
+                    let resets_job_history = clean_jobs
+                        && (self.mode.is_non_aggregated() || m.channel_id == AGGREGATED_CHANNEL_ID);
+                    let store_notify = || {
+                        self.valid_sv1_jobs
+                            .with_mut_or_default(job_channel_id, |channel_jobs| {
+                                channel_jobs.activate(
+                                    notify.job_id.clone(),
+                                    StoredSv1Job::upstream(notify.clone()),
+                                    resets_job_history,
+                                );
+                            });
+                    };
+                    if self.mode.is_aggregated() && m.channel_id == AGGREGATED_CHANNEL_ID {
+                        self.aggregated_job_mutation_time
+                            .with(|last_mutation| {
+                                store_notify();
+                                *last_mutation = Some(Instant::now());
+                            })
+                            .map_err(TproxyError::shutdown)?;
+                    } else {
+                        store_notify();
+                    }
 
                     let notify_msg: stratum_apps::stratum_core::sv1_api::json_rpc::Message =
                         notify.into();
@@ -1153,12 +1222,127 @@ impl Sv1Server {
                     self.handle_set_target_without_vardiff(m).await?;
                 }
             }
+            MiningOwned::CloseChannel(m) => {
+                self.disconnect_downstream_for_upstream_close(m.channel_id)?;
+            }
+            MiningOwned::SetExtranoncePrefix(m) => {
+                self.handle_upstream_extranonce_change(m).await?;
+            }
             // Guaranteed unreachable: the channel manager only forwards valid,
             // pre-filtered messages, so no other variants can arrive here.
             _ => unreachable!("Invalid message: should have been filtered earlier"),
         }
 
         Ok(())
+    }
+
+    /// Disconnects the SV1 miner whose dedicated SV2 channel was closed by the upstream.
+    ///
+    /// The channel association is cleared before cancellation so the downstream task's normal
+    /// cleanup does not echo a `CloseChannel` back to an upstream that already closed it.
+    #[allow(clippy::result_large_err)]
+    fn disconnect_downstream_for_upstream_close(
+        &self,
+        channel_id: ChannelId,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let Some((_, downstream_id)) = self.channel_id_to_downstream_id.remove(&channel_id) else {
+            warn!(
+                channel_id,
+                "No active SV1 downstream found for upstream-closed channel"
+            );
+            return Ok(());
+        };
+
+        let Some(result) = self.downstreams.with(&downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    if data.channel_id == Some(channel_id) {
+                        data.channel_id = None;
+                    }
+                })
+                .map_err(TproxyError::shutdown)?;
+            downstream.disconnect();
+            Ok(())
+        }) else {
+            warn!(
+                downstream_id,
+                channel_id, "SV1 downstream disappeared while processing upstream CloseChannel"
+            );
+            return Ok(());
+        };
+
+        result
+    }
+
+    /// Queues an upstream prefix change for the downstream task, which applies it in notification
+    /// order and decides whether an already-subscribed miner can receive it.
+    async fn handle_upstream_extranonce_change(
+        &self,
+        message: stratum_apps::stratum_core::mining_sv2::SetExtranoncePrefixOwned,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let channel_id = message.channel_id;
+        let Some(downstream_id) = self
+            .channel_id_to_downstream_id
+            .with(&channel_id, |downstream_id| *downstream_id)
+        else {
+            warn!(
+                channel_id,
+                "No active SV1 downstream found for changed extranonce prefix"
+            );
+            return Ok(());
+        };
+
+        let Some(downstream) = self.downstreams.get_cloned(&downstream_id) else {
+            warn!(
+                downstream_id,
+                channel_id, "SV1 downstream disappeared while processing SetExtranoncePrefix"
+            );
+            return Ok(());
+        };
+
+        let extranonce2_len = downstream
+            .downstream_data
+            .with(|data| data.extranonce2_len)
+            .map_err(TproxyError::shutdown)?;
+
+        let extranonce1: Extranonce = message
+            .extranonce_prefix
+            .to_owned_bytes()
+            .try_into()
+            .map_err(TproxyError::fallback)?;
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.pending_set_extranonce_notifications =
+                    data.pending_set_extranonce_notifications.saturating_add(1);
+                data.keepalive_timer_anchor = None;
+            })
+            .map_err(TproxyError::shutdown)?;
+
+        let notification: json_rpc::Message = server_to_client::SetExtranonce {
+            extra_nonce1: extranonce1,
+            extra_nonce2_size: extranonce2_len,
+        }
+        .into();
+        self.sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&downstream_id)
+            .ok_or_else(|| {
+                TproxyError::disconnect(
+                    TproxyErrorKind::DownstreamNotPresent(downstream_id),
+                    downstream_id,
+                )
+            })?
+            .send(Sv1ServerEvent::notification(notification))
+            .await
+            .map_err(|error| {
+                error!(
+                    downstream_id,
+                    channel_id, "Failed to queue mining.set_extranonce: {error:?}"
+                );
+                TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+            })
     }
 
     /// Opens an extended mining channel for a downstream connection.
@@ -1416,6 +1600,9 @@ impl Sv1Server {
             Ok::<(), TproxyError<error::Sv1Server>>(())
         })?;
 
+        // Finish the broadcast before reporting a closed sender, otherwise one disconnected miner
+        // prevents healthy miners later in the iteration from receiving the new difficulty.
+        let mut disconnected_downstream = None;
         for (downstream_id, sender) in tasks {
             let set_difficulty_msg =
                 match build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding(
@@ -1431,15 +1618,15 @@ impl Sv1Server {
                         return Err(TproxyError::shutdown(e));
                     }
                 };
-            if let Err(e) = sender.send(set_difficulty_msg).await {
+            if let Err(e) = sender
+                .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                .await
+            {
                 error!(
                     "Failed to send mining.set_difficulty to downstream {}: {:?}",
                     downstream_id, e
                 );
-                return Err(TproxyError::disconnect(
-                    TproxyErrorKind::ChannelErrorSender,
-                    downstream_id,
-                ));
+                disconnected_downstream.get_or_insert(downstream_id);
             } else {
                 debug!(
                     "Sent mining.set_difficulty to downstream {} (vardiff disabled)",
@@ -1447,6 +1634,14 @@ impl Sv1Server {
                 );
             }
         }
+
+        if let Some(downstream_id) = disconnected_downstream {
+            return Err(TproxyError::disconnect(
+                TproxyErrorKind::ChannelErrorSender,
+                downstream_id,
+            ));
+        }
+
         Ok(())
     }
 
@@ -1535,7 +1730,10 @@ impl Sv1Server {
             .get_cloned(&downstream_id);
 
         if let Some(sender) = sender {
-            if let Err(e) = sender.send(set_difficulty_msg).await {
+            if let Err(e) = sender
+                .send(Sv1ServerEvent::notification(set_difficulty_msg))
+                .await
+            {
                 error!(
                     "Failed to send SetDifficulty to downstream {}: {:?}",
                     downstream_id, e
@@ -1574,7 +1772,7 @@ impl Sv1Server {
 
         loop {
             tokio::time::sleep(check_interval).await;
-            let mut keepalive_targets = Vec::new();
+            let mut downstreams_due_for_keepalive = Vec::new();
             self.downstreams.try_for_each(|downstream_id, downstream| {
                 let keepalive_target = downstream
                     .downstream_data
@@ -1582,124 +1780,192 @@ impl Sv1Server {
                         // Only send keepalive if:
                         // 1. Handshake is complete
                         // 2. Enough time has passed since last job
-                        let handshake_complete =
-                            downstream.sv1_handshake_complete.load(Ordering::SeqCst);
+                        let handshake_complete = d.session_state.is_ready();
 
                         if !handshake_complete {
                             return None;
                         }
 
-                        let needs_keepalive = match d.last_job_received_time {
+                        let needs_keepalive = match d.keepalive_timer_anchor {
                             Some(last_time) => last_time.elapsed() >= interval,
-                            None => false, // No job received yet, don't send keepalive
+                            None => false, // No keepalive-eligible job yet.
                         };
 
-                        if needs_keepalive {
-                            Some((downstream_id, d.channel_id))
-                        } else {
-                            None
+                        if !needs_keepalive {
+                            return None;
                         }
+
+                        // Keepalive eligibility implies an established channel, so the pre-channel
+                        // `None` never reaches the keepalive layer.
+                        Some((downstream_id, d.channel_id?))
                     })
                     .map_err(TproxyError::shutdown)?;
                 if let Some(keepalive_target) = keepalive_target {
-                    keepalive_targets.push(keepalive_target);
+                    downstreams_due_for_keepalive.push(keepalive_target);
                 }
                 Ok::<(), TproxyError<error::Sv1Server>>(())
             })?;
 
-            // Send keepalive to each downstream that needs one
-            for (downstream_id, channel_id) in keepalive_targets {
-                // Get the appropriate job for this downstream's channel and create keepalive
-                let keepalive_job = self.get_last_job(channel_id).and_then(|last_job| {
-                    // Extract the original upstream job_id from the last job
-                    // If it's already a keepalive job, extract its original; otherwise use
-                    // as-is
-                    let original_job_id = Self::extract_original_job_id(&last_job.job_id)
-                        .unwrap_or_else(|| last_job.job_id.clone());
+            self.send_keepalive_jobs(downstreams_due_for_keepalive, keepalive_interval_secs)
+                .await?;
+        }
+    }
 
-                    // Find the original upstream job to get its base time
-                    let original_job = self.get_original_job(&original_job_id, channel_id);
-                    let base_time = original_job
-                        .as_ref()
-                        .map(|j| j.time.0)
-                        .unwrap_or(last_job.time.0);
+    async fn send_keepalive_jobs(
+        &self,
+        downstreams_due_for_keepalive: Vec<(DownstreamId, ChannelId)>,
+        keepalive_interval_secs: u16,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        if downstreams_due_for_keepalive.is_empty() {
+            return Ok(());
+        }
 
-                    // Increment the time by the keepalive interval, but cap at
-                    // MAX_FUTURE_BLOCK_TIME from the original job's time to maintain consensus
-                    // validity (see https://github.com/bitcoin/bitcoin/blob/cd6e4c9235f763b8077cece69c2e3b2025cc8d0f/src/chain.h#L29)
-                    const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;
-                    let new_time = last_job
-                        .time
-                        .0
-                        .saturating_add(keepalive_interval_secs as u32)
-                        .min(base_time.saturating_add(MAX_FUTURE_BLOCK_TIME));
-
-                    // If we've hit the cap, don't send another keepalive for this job
-                    if new_time == last_job.time.0 {
+        if self.mode.is_aggregated() {
+            let interval = Duration::from_secs(keepalive_interval_secs as u64);
+            // Each miner has its own local SV2 channel, but aggregated keepalives are generated
+            // from one shared SV1 job history. Gate its mutation on aggregate-wide wall time.
+            let notify = self
+                .aggregated_job_mutation_time
+                .with(|last_mutation| {
+                    if last_mutation.is_some_and(|last_mutation| last_mutation.elapsed() < interval)
+                    {
                         return None;
                     }
+                    let notify =
+                        self.create_keepalive_job(AGGREGATED_CHANNEL_ID, keepalive_interval_secs)?;
+                    *last_mutation = Some(Instant::now());
+                    Some(notify)
+                })
+                .map_err(TproxyError::shutdown)?;
+            let Some(notify) = notify else {
+                return Ok(());
+            };
 
-                    // Generate new keepalive job_id: {original_job_id}#{counter}
-                    let new_job_id = self.next_keepalive_job_id(&original_job_id);
-
-                    let mut keepalive_notify = last_job;
-                    keepalive_notify.job_id = new_job_id.clone();
-                    keepalive_notify.time = HexU32Be(new_time);
-
-                    // Add the keepalive job to valid jobs so shares can be validated
-                    let job_channel_id = if self.mode.is_aggregated() {
-                        Some(AGGREGATED_CHANNEL_ID)
-                    } else {
-                        channel_id
-                    };
-
-                    if let Some(ch_id) = job_channel_id {
-                        // Use with_mut (not with_mut_or_default) so we never
-                        // re-create a valid_sv1_jobs entry for a channel that was
-                        // already cleaned up.
-                        self.valid_sv1_jobs
-                            .with_mut(&ch_id, |jobs| jobs.push(keepalive_notify.clone()));
-                    }
-
-                    Some(keepalive_notify)
-                });
-
-                if let Some(notify) = keepalive_job {
-                    debug!(
-                        "Sending keepalive job to downstream {} with job_id: {}, time: {}",
-                        downstream_id, notify.job_id, notify.time.0
-                    );
-
-                    let sent = match self
-                        .sv1_server_io
-                        .sv1_server_to_downstream_sender
-                        .get_cloned(&downstream_id)
-                    {
-                        Some(sender) => sender.send(notify.into()).await.is_ok(),
-                        None => false,
-                    };
-                    if !sent {
-                        warn!(
-                            "Failed to send keepalive job to downstream {}",
-                            downstream_id
-                        );
-                    } else if let Err(e) =
-                        self.with_registered_downstream(downstream_id, |downstream| {
-                            downstream
-                                .downstream_data
-                                .with(|d| {
-                                    d.last_job_received_time = Some(Instant::now());
-                                })
-                                .map_err(TproxyError::shutdown)
-                        })
-                    {
-                        if !matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) {
-                            return Err(e);
-                        }
-                    }
+            // Any due downstream triggers one keepalive from the shared history. Send the same
+            // notification to every ready downstream so their keepalive timers stay aligned.
+            let mut recipients = Vec::new();
+            self.downstreams.try_for_each(|downstream_id, downstream| {
+                let is_ready = downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.session_state.is_ready()
+                            && data.channel_id.is_some()
+                            && data.keepalive_timer_anchor.is_some()
+                    })
+                    .map_err(TproxyError::shutdown)?;
+                if is_ready {
+                    recipients.push(downstream_id);
+                }
+                Ok::<(), TproxyError<error::Sv1Server>>(())
+            })?;
+            for downstream_id in recipients {
+                self.send_keepalive_to_downstream(downstream_id, notify.clone())
+                    .await?;
+            }
+        } else {
+            // Non-aggregated downstreams have independent job histories and therefore need one
+            // mutation per channel.
+            for (downstream_id, channel_id) in downstreams_due_for_keepalive {
+                if let Some(notify) = self.create_keepalive_job(channel_id, keepalive_interval_secs)
+                {
+                    self.send_keepalive_to_downstream(downstream_id, notify)
+                        .await?;
                 }
             }
         }
+
+        Ok(())
+    }
+
+    fn create_keepalive_job(
+        &self,
+        channel_id: ChannelId,
+        keepalive_interval_secs: u16,
+    ) -> Option<server_to_client::Notify> {
+        let last_job = self.get_last_job(channel_id)?;
+        let original_job_id = Self::extract_original_job_id(&last_job.notify.job_id)
+            .unwrap_or_else(|| last_job.notify.job_id.clone());
+        let base_time = last_job.keepalive_base_time;
+
+        // Keep nTime within Bitcoin Core's maximum future-time policy relative to the original
+        // upstream job.
+        const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;
+        let new_time = last_job
+            .notify
+            .time
+            .0
+            .saturating_add(keepalive_interval_secs as u32)
+            .min(base_time.saturating_add(MAX_FUTURE_BLOCK_TIME));
+        if new_time == last_job.notify.time.0 {
+            return None;
+        }
+
+        let mut keepalive_notify = last_job.notify;
+        keepalive_notify.job_id = self.next_keepalive_job_id(&original_job_id);
+        keepalive_notify.time = HexU32Be(new_time);
+        // A keepalive only rolls nTime on the current work and must not invalidate prior jobs.
+        keepalive_notify.clean_jobs = false;
+
+        let job_channel_id = self.resolve_channel_id(channel_id);
+        // Do not recreate job history for a channel that was removed after targets were collected.
+        self.valid_sv1_jobs.with_mut(&job_channel_id, |jobs| {
+            jobs.activate(
+                keepalive_notify.job_id.clone(),
+                StoredSv1Job {
+                    notify: keepalive_notify.clone(),
+                    keepalive_base_time: base_time,
+                },
+                false,
+            )
+        })?;
+
+        Some(keepalive_notify)
+    }
+
+    async fn send_keepalive_to_downstream(
+        &self,
+        downstream_id: DownstreamId,
+        notify: server_to_client::Notify,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        debug!(
+            "Sending keepalive job to downstream {} with job_id: {}, time: {}",
+            downstream_id, notify.job_id, notify.time.0
+        );
+
+        let sent = match self
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&downstream_id)
+        {
+            Some(sender) => sender
+                .send(Sv1ServerEvent::notification(json_rpc::Message::from(
+                    notify,
+                )))
+                .await
+                .is_ok(),
+            None => false,
+        };
+        if !sent {
+            warn!(
+                "Failed to send keepalive job to downstream {}",
+                downstream_id
+            );
+            return Ok(());
+        }
+
+        // The downstream resets this again when it processes the queued notify. Setting it here
+        // prevents another server keepalive tick before delivery; both writes only move it ahead.
+        if let Err(e) = self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.keepalive_timer_anchor = Some(Instant::now()))
+                .map_err(TproxyError::shutdown)
+        }) && !matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_))
+        {
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     /// Generates a keepalive job ID by appending a mutation counter to the original job ID.
@@ -1726,38 +1992,25 @@ impl Sv1Server {
         job_id.contains(KEEPALIVE_JOB_ID_DELIMITER)
     }
 
+    /// Resolves the storage key for a channel's job history. Aggregated downstreams share the
+    /// single broadcast history keyed by `AGGREGATED_CHANNEL_ID`, while non-aggregated channels
+    /// store their jobs under their own channel ID.
+    fn resolve_channel_id(&self, channel_id: ChannelId) -> ChannelId {
+        if self.mode.is_aggregated() {
+            AGGREGATED_CHANNEL_ID
+        } else {
+            channel_id
+        }
+    }
+
     /// Gets the last job from the jobs storage.
     /// In aggregated mode, returns the last job from the shared job list.
     /// In non-aggregated mode, returns the last job for the specified channel.
-    fn get_last_job(&self, channel_id: Option<u32>) -> Option<server_to_client::Notify> {
-        let channel_id = if self.mode.is_aggregated() {
-            AGGREGATED_CHANNEL_ID
-        } else {
-            channel_id?
-        };
+    fn get_last_job(&self, channel_id: ChannelId) -> Option<StoredSv1Job> {
+        let channel_id = self.resolve_channel_id(channel_id);
 
         self.valid_sv1_jobs
-            .with(&channel_id, |jobs| jobs.last().cloned())
-            .flatten()
-    }
-
-    /// Gets the original upstream job by its job_id.
-    /// This is used to find the base time for keepalive time capping.
-    fn get_original_job(
-        &self,
-        job_id: &str,
-        channel_id: Option<u32>,
-    ) -> Option<server_to_client::Notify> {
-        let channel_id = if self.mode.is_aggregated() {
-            AGGREGATED_CHANNEL_ID
-        } else {
-            channel_id?
-        };
-
-        self.valid_sv1_jobs
-            .with(&channel_id, |jobs| {
-                jobs.iter().find(|j| j.job_id == job_id).cloned()
-            })
+            .with(&channel_id, |jobs| jobs.active().cloned())
             .flatten()
     }
 }
@@ -1766,6 +2019,7 @@ impl Sv1Server {
 mod tests {
     use super::*;
     use crate::config::{DownstreamDifficultyConfig, TranslatorConfig, Upstream};
+    use crate::sv1::downstream::{Sv1JobValidationContext, Sv1SessionState};
     use async_channel::unbounded;
     use std::str::FromStr;
     use stratum_apps::{
@@ -1775,8 +2029,10 @@ mod tests {
             mining_sv2::{
                 ERROR_CODE_OPEN_MINING_CHANNEL_CHANNEL_CAPACITY_EXHAUSTED,
                 NewExtendedMiningJobOwned, OpenExtendedMiningChannelSuccessOwned,
-                OpenMiningChannelErrorOwned, SetNewPrevHashOwned, SetTargetOwned,
+                OpenMiningChannelErrorOwned, SetExtranoncePrefixOwned, SetNewPrevHashOwned,
+                SetTargetOwned,
             },
+            sv1_api::client_to_server,
         },
     };
 
@@ -1824,8 +2080,25 @@ mod tests {
         channel_id: Option<ChannelId>,
         hashrate: Hashrate,
         close_server_channel: bool,
-    ) {
-        let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
+    ) -> Receiver<Sv1ServerEvent> {
+        register_test_downstream_with_sv1_receiver(
+            server,
+            downstream_id,
+            channel_id,
+            hashrate,
+            close_server_channel,
+        )
+        .0
+    }
+
+    fn register_test_downstream_with_sv1_receiver(
+        server: &Sv1Server,
+        downstream_id: DownstreamId,
+        channel_id: Option<ChannelId>,
+        hashrate: Hashrate,
+        close_server_channel: bool,
+    ) -> (Receiver<Sv1ServerEvent>, Receiver<json_rpc::Message>) {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
         let (_miner_sender, miner_receiver) = unbounded();
         let (sv1_server_sender, sv1_server_receiver) = unbounded();
         if close_server_channel {
@@ -1838,7 +2111,7 @@ mod tests {
             downstream_sv1_sender,
             miner_receiver,
             server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
-            sv1_server_receiver,
+            sv1_server_receiver.clone(),
             target,
             Some(hashrate),
             #[cfg(feature = "monitoring")]
@@ -1860,6 +2133,38 @@ mod tests {
             .sv1_server_io
             .sv1_server_to_downstream_sender
             .insert(downstream_id, sv1_server_sender);
+
+        (sv1_server_receiver, downstream_sv1_receiver)
+    }
+
+    fn message_from_server_event(event: Sv1ServerEvent) -> json_rpc::Message {
+        match event {
+            Sv1ServerEvent::Notification(message) => message,
+            Sv1ServerEvent::SetupComplete => panic!("expected a server notification"),
+        }
+    }
+
+    fn test_sv1_notify(job_id: &str, clean_jobs: bool) -> server_to_client::Notify {
+        let message: json_rpc::Message = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "method": "mining.notify",
+            "params": [
+                job_id,
+                "00".repeat(32),
+                "02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff300344b70e162f5374726174756d2056322053524920506f6f6c2f2f14",
+                "feffffff0265adac120000000016001458806074c426bedea9376ac34685eca699f4e90f0000000000000000266a24aa21a9ed50d0d53c0b29a2c630b1c5bd7a133d4758910909abb1a70d37306ed810fa79bc43b70e00",
+                [],
+                "20000000",
+                "1d00ffff",
+                "00000001",
+                clean_jobs
+            ]
+        }))
+        .unwrap();
+        let json_rpc::Message::Notification(notification) = message else {
+            unreachable!();
+        };
+        server_to_client::Notify::try_from(notification).unwrap()
     }
 
     #[test]
@@ -1869,6 +2174,430 @@ mod tests {
         assert_eq!(server.shares_per_minute, 5.0);
         assert_eq!(server.listener_addr.ip().to_string(), "127.0.0.1");
         assert_eq!(server.listener_addr.port(), 3333);
+    }
+
+    #[test]
+    fn late_share_uses_its_job_validation_context() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let old_job = test_sv1_notify("old", false);
+        let mut current_job = test_sv1_notify("current", false);
+        current_job.version = HexU32Be(0x20000001);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    old_job.job_id.clone(),
+                    StoredSv1Job::upstream(old_job.clone()),
+                    false,
+                );
+                jobs.activate(
+                    current_job.job_id.clone(),
+                    StoredSv1Job::upstream(current_job.clone()),
+                    false,
+                );
+            });
+
+        let old_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            old_job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: old_extranonce.clone(),
+                                extranonce2_len: 16,
+                                // Any valid hash meets this target. The current target below
+                                // accepts none, proving submission uses the job's captured target.
+                                target: Target::from_le_bytes([0xff; 32]),
+                            },
+                            false,
+                        );
+                        data.extranonce1 = vec![9, 9, 9, 9].try_into().unwrap();
+                        data.extranonce2_len = 8;
+                        data.target = Target::from_le_bytes([0; 32]);
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        let submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "old".to_string(),
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Accepted
+        );
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        let pending_share = data.pending_share.as_ref().unwrap();
+                        assert_eq!(
+                            pending_share.extranonce,
+                            Vec::<u8>::from(old_extranonce.clone())
+                        );
+                        assert_eq!(pending_share.extranonce2_len, 16);
+                        assert_eq!(pending_share.job_version, Some(old_job.version.0));
+                        assert_ne!(pending_share.job_version, Some(current_job.version.0));
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicate_sv1_share_is_rejected_before_forwarding() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let job = test_sv1_notify("job", false);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    job.job_id.clone(),
+                    StoredSv1Job::upstream(job.clone()),
+                    false,
+                );
+            });
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: vec![1, 2, 3, 4].try_into().unwrap(),
+                                extranonce2_len: 16,
+                                target: Target::from_le_bytes([0xff; 32]),
+                            },
+                            false,
+                        );
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        let submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: job.job_id,
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Accepted
+        );
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Rejected(
+                client_to_server::SubmitError::DuplicateShare
+            )
+        );
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| assert_eq!(data.accepted_share_hashes.len(), 1))
+                    .unwrap();
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sv1_share_rejections_distinguish_missing_jobs_and_low_difficulty() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let mut submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "missing".to_string(),
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Rejected(client_to_server::SubmitError::JobNotFound)
+        );
+
+        let job = test_sv1_notify("job", false);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    job.job_id.clone(),
+                    StoredSv1Job::upstream(job.clone()),
+                    false,
+                );
+            });
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: vec![1, 2, 3, 4].try_into().unwrap(),
+                                extranonce2_len: 16,
+                                // No hash can meet the zero target.
+                                target: Target::from_le_bytes([0; 32]),
+                            },
+                            false,
+                        );
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        submit.job_id = job.job_id;
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Rejected(
+                client_to_server::SubmitError::LowDifficultyShare
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_before_subscribe_does_not_enable_mining_notifications_early() {
+        let server = create_test_sv1_server();
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_miner_sender, miner_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver) = unbounded();
+        let downstream_id = 7;
+        let target = hash_rate_to_target(100.0, 5.0).unwrap();
+        let downstream = Downstream::new(
+            downstream_id,
+            downstream_sv1_sender,
+            miner_receiver,
+            server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
+            sv1_server_receiver.clone(),
+            target,
+            Some(100.0),
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| data.channel_id = Some(9))
+            .unwrap();
+        server.downstreams.insert(downstream_id, downstream);
+        server.channel_id_to_downstream_id.insert(9, downstream_id);
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(downstream_id, sv1_server_sender);
+
+        let cached_set_difficulty: json_rpc::Message =
+            serde_json::from_str(r#"{"id":null,"method":"mining.set_difficulty","params":[1.0]}"#)
+                .unwrap();
+        let cached_notify: json_rpc::Message = serde_json::from_str(
+            r#"{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000","","",[],"20000000","1d00ffff","5f5e1000",true]}"#,
+        )
+        .unwrap();
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.cached_set_difficulty = Some(cached_set_difficulty);
+                        data.cached_notify = Some(cached_notify);
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        let authorize: json_rpc::Message = serde_json::from_str(
+            r#"{"id":1,"method":"mining.authorize","params":["user.worker","x"]}"#,
+        )
+        .unwrap();
+        server.process_sv1_message(7, authorize).await.unwrap();
+
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::OkResponse(_)
+        ));
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        assert_eq!(
+            server.downstreams.with(&7, |downstream| downstream
+                .downstream_data
+                .with(|data| data.session_state)
+                .unwrap()),
+            Some(Sv1SessionState::Starting {
+                subscribed: false,
+                authorized: true,
+            })
+        );
+
+        let subscribe: json_rpc::Message =
+            serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
+        server.process_sv1_message(7, subscribe).await.unwrap();
+        server
+            .downstreams
+            .get_cloned(&7)
+            .unwrap()
+            .handle_sv1_server_message()
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::OkResponse(_)
+        ));
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::Notification(notification)
+                if notification.method == "mining.set_difficulty"
+        ));
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::Notification(notification)
+                if notification.method == "mining.notify"
+        ));
+        assert_eq!(
+            server.downstreams.with(&7, |downstream| downstream
+                .downstream_data
+                .with(|data| data.session_state)
+                .unwrap()),
+            Some(Sv1SessionState::Ready)
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_extranonce_change_after_subscribe_response_is_forwarded() {
+        let server = create_test_sv1_server();
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_miner_sender, miner_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver) = unbounded();
+        let downstream_id = 7;
+        let target = hash_rate_to_target(100.0, 5.0).unwrap();
+        let downstream = Downstream::new(
+            downstream_id,
+            downstream_sv1_sender,
+            miner_receiver,
+            server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
+            sv1_server_receiver,
+            target,
+            Some(100.0),
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.channel_id = Some(42);
+                data.supports_set_extranonce = true;
+            })
+            .unwrap();
+        server.downstreams.insert(downstream_id, downstream.clone());
+        server.channel_id_to_downstream_id.insert(42, downstream_id);
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(downstream_id, sv1_server_sender);
+
+        let authorize: json_rpc::Message = serde_json::from_str(
+            r#"{"id":1,"method":"mining.authorize","params":["user.worker","x"]}"#,
+        )
+        .unwrap();
+        server.process_sv1_message(7, authorize).await.unwrap();
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            json_rpc::Message::OkResponse(_)
+        ));
+
+        let new_extranonce_bytes = vec![1, 2, 3, 4];
+        let new_extranonce: Extranonce = new_extranonce_bytes.clone().try_into().unwrap();
+        server
+            .handle_upstream_extranonce_change(SetExtranoncePrefixOwned {
+                channel_id: 42,
+                extranonce_prefix: new_extranonce_bytes.try_into().unwrap(),
+            })
+            .await
+            .unwrap();
+
+        // Process subscribe before the downstream task consumes the queued prefix change. The
+        // response still advertises the old prefix, so a mining.set_extranonce must follow it.
+        let subscribe: json_rpc::Message =
+            serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
+        server.process_sv1_message(7, subscribe).await.unwrap();
+        let json_rpc::Message::OkResponse(response) = downstream_sv1_receiver.recv().await.unwrap()
+        else {
+            panic!("expected subscribe response");
+        };
+        let subscribe_response = server_to_client::Subscribe::try_from(&response).unwrap();
+        assert_ne!(subscribe_response.extra_nonce1, new_extranonce);
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        let json_rpc::Message::Notification(notification) =
+            downstream_sv1_receiver.recv().await.unwrap()
+        else {
+            panic!("expected mining.set_extranonce");
+        };
+        let set_extranonce = server_to_client::SetExtranonce::try_from(notification).unwrap();
+        assert_eq!(set_extranonce.extra_nonce1, new_extranonce);
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.session_state)
+                .unwrap(),
+            Sv1SessionState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn extranonce_subscribe_records_downstream_support() {
+        let server = create_test_sv1_server();
+        let (_, downstream_sv1_receiver) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+        let subscribe: json_rpc::Message =
+            serde_json::from_str(r#"{"id":1,"method":"mining.extranonce.subscribe","params":[]}"#)
+                .unwrap();
+
+        server.process_sv1_message(7, subscribe).await.unwrap();
+
+        let json_rpc::Message::OkResponse(response) = downstream_sv1_receiver.recv().await.unwrap()
+        else {
+            panic!("expected mining.extranonce.subscribe response");
+        };
+        assert_eq!(response.id, 1);
+        assert_eq!(response.result, serde_json::json!(true));
+
+        assert_eq!(
+            server.downstreams.with(&7, |downstream| downstream
+                .downstream_data
+                .with(|data| data.supports_set_extranonce)
+                .unwrap()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -1965,6 +2694,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_channel_sv1_message_queue_disconnects_at_limit() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (_channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        server.set_user_identity("test_user".to_string());
+        let downstream_id = 7;
+        let _downstream_receiver =
+            register_test_downstream(&server, downstream_id, None, 100.0, false);
+        let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
+            id: 1,
+            method: "mining.subscribe".to_string(),
+            params: serde_json::Value::Null,
+        });
+
+        for _ in 0..MAX_QUEUED_SV1_HANDSHAKE_MESSAGES {
+            server
+                .sv1_server_io
+                .downstream_to_sv1_server_sender
+                .send((downstream_id, message.clone()))
+                .await
+                .unwrap();
+            server.handle_downstream_message().await.unwrap();
+        }
+
+        server
+            .sv1_server_io
+            .downstream_to_sv1_server_sender
+            .send((downstream_id, message))
+            .await
+            .unwrap();
+        let error = server.handle_downstream_message().await.unwrap_err();
+
+        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::Sv1HandshakeMessageQueueFull
+        ));
+        assert_eq!(
+            server
+                .with_registered_downstream(downstream_id, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| data.queued_sv1_handshake_messages.len())
+                        .map_err(TproxyError::shutdown)
+                })
+                .unwrap(),
+            MAX_QUEUED_SV1_HANDSHAKE_MESSAGES
+        );
+
+        let cancellation_token = CancellationToken::new();
+        let fallback_token = CancellationToken::new();
+        assert_eq!(
+            server
+                .handle_error_action(
+                    "pre_channel_sv1_message_queue_disconnects_at_limit",
+                    &error,
+                    &cancellation_token,
+                    &fallback_token,
+                )
+                .await,
+            LoopControl::Continue
+        );
+        assert!(!server.downstreams.contains_key(&downstream_id));
+    }
+
+    #[tokio::test]
     async fn downstream_removed_before_open_forwarding_clears_pending_request() {
         let server = create_test_sv1_server();
         server.request_id_to_downstream_id.insert(42, 7);
@@ -2035,6 +2839,156 @@ mod tests {
                 .sv1_server_to_downstream_sender
                 .contains_key(&7)
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_close_cancels_the_corresponding_sv1_connection() {
+        let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 7, Some(42), 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        channel_manager_to_server_sender
+            .send(MiningOwned::CloseChannel(CloseChannelOwned {
+                channel_id: 42,
+                reason_code: Str0255Owned::try_from("upstream closed channel".to_string()).unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(downstream.is_disconnected());
+        assert!(!server.channel_id_to_downstream_id.contains_key(&42));
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.channel_id)
+                .unwrap(),
+            None
+        );
+        assert!(server_to_channel_manager_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unsupported_extranonce_prefix_change_disconnects_miner_and_keeps_channel_for_cleanup()
+    {
+        let (server_to_channel_manager_sender, server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 7, Some(42), 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: false,
+                };
+            })
+            .unwrap();
+        channel_manager_to_server_sender
+            .send(MiningOwned::SetExtranoncePrefix(SetExtranoncePrefixOwned {
+                channel_id: 42,
+                extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(!downstream.is_disconnected());
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert!(downstream.is_disconnected());
+        assert_eq!(
+            server
+                .channel_id_to_downstream_id
+                .with(&42, |downstream_id| *downstream_id),
+            Some(7)
+        );
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.channel_id)
+                .unwrap(),
+            Some(42)
+        );
+        assert!(server_to_channel_manager_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn extranonce_prefix_change_notifies_supported_miner_without_disconnect() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        let downstream_receiver = register_test_downstream(&server, 7, Some(42), 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.supports_set_extranonce = true;
+                data.session_state = Sv1SessionState::Ready;
+            })
+            .unwrap();
+        channel_manager_to_server_sender
+            .send(MiningOwned::SetExtranoncePrefix(SetExtranoncePrefixOwned {
+                channel_id: 42,
+                extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(!downstream.is_disconnected());
+        assert!(matches!(
+            downstream_receiver.recv().await.unwrap(),
+            Sv1ServerEvent::Notification(json_rpc::Message::Notification(notification))
+                if notification.method == "mining.set_extranonce"
+        ));
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.pending_set_extranonce_notifications, 1);
+                assert!(data.keepalive_timer_anchor.is_none());
+            })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2136,7 +3090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregated_channel_open_refreshes_hashrate() {
+    async fn aggregated_channel_open_registers_vardiff_and_refreshes_hashrate() {
         let (channel_manager_sender, channel_manager_receiver) = unbounded();
         let (upstream_sender, upstream_receiver) = unbounded();
         let config = create_test_config();
@@ -2151,6 +3105,7 @@ mod tests {
         );
         register_test_downstream(&server, 1, Some(1), 100.0, false);
         register_test_downstream(&server, 2, None, 100.0, false);
+        assert!(!server.vardiff.contains_key(&2));
 
         server
             .send_update_channel_on_downstream_state_change()
@@ -2179,6 +3134,8 @@ mod tests {
             .unwrap();
 
         server.handle_upstream_message(target).await.unwrap();
+
+        assert!(server.vardiff.contains_key(&2));
 
         let (message, _) = channel_manager_receiver.recv().await.unwrap();
         let MiningOwned::UpdateChannel(update) = message else {
@@ -2260,7 +3217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_downstream_does_not_shutdown_on_aggregated_set_target() {
+    async fn closed_downstream_does_not_abort_aggregated_difficulty_broadcast() {
         let mut config = create_test_config();
         config.downstream_difficulty_config.enable_vardiff = false;
 
@@ -2269,7 +3226,30 @@ mod tests {
         let addr = "127.0.0.1:3333".parse().unwrap();
         let tproxy_mode = TproxyMode::from(config.aggregate_channels);
         let server = Sv1Server::new(addr, cm_receiver, cm_sender, config, tproxy_mode);
-        register_test_downstream(&server, 7, Some(9), 100.0, true);
+        let receivers = [
+            (
+                7,
+                register_test_downstream(&server, 7, Some(9), 100.0, false),
+            ),
+            (
+                8,
+                register_test_downstream(&server, 8, Some(10), 100.0, false),
+            ),
+        ];
+
+        let mut iteration_order = Vec::new();
+        server
+            .downstreams
+            .for_each(|downstream_id, _| iteration_order.push(downstream_id));
+        assert_eq!(iteration_order.len(), 2);
+        let closed_id = iteration_order[0];
+        let surviving_id = iteration_order[1];
+        receivers
+            .iter()
+            .find(|(downstream_id, _)| *downstream_id == closed_id)
+            .unwrap()
+            .1
+            .close();
 
         let target = hash_rate_to_target(200.0, 5.0).unwrap();
         let error = server
@@ -2280,8 +3260,18 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error.action, Action::Disconnect(7)));
+        assert!(matches!(error.action, Action::Disconnect(id) if id == closed_id));
         assert!(matches!(error.kind, TproxyErrorKind::ChannelErrorSender));
+        assert!(
+            receivers
+                .iter()
+                .find(|(downstream_id, _)| *downstream_id == surviving_id)
+                .unwrap()
+                .1
+                .try_recv()
+                .is_ok(),
+            "a closed peer aborted the broadcast before the surviving miner received the new difficulty"
+        );
     }
 
     #[tokio::test]
@@ -2340,7 +3330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immediate_vardiff_update_clears_stale_pending_target() {
+    async fn easier_vardiff_target_does_not_wait_for_upstream() {
         use stratum_apps::stratum_core::channels_sv2::Vardiff;
 
         let server = create_test_sv1_server();
@@ -2378,20 +3368,38 @@ mod tests {
         // the pending-map bookkeeping we assert on happens before that.
         let _ = server.handle_vardiff_updates().await;
 
+        let pending_target = server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| data.pending_target)
+                    .unwrap()
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            pending_target > upstream_target,
+            "a larger target is easier and must preserve every upstream-valid share"
+        );
         assert!(
             !server.pending_target_updates.contains_key(&7),
-            "immediate update must clear the superseded pending target"
+            "an easier target must be advertised immediately and clear stale pending state"
         );
     }
 
     #[tokio::test]
-    async fn stale_set_target_keeps_pending_update_until_satisfied() {
+    async fn harder_vardiff_target_waits_until_upstream_accepts_it() {
         let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
 
         // The downstream wants a harder (lower) target than the upstream currently has.
         let pending_target = hash_rate_to_target(200.0, 5.0).unwrap();
         let stale_upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        assert!(
+            pending_target < stale_upstream_target,
+            "a smaller target is harder and would suppress upstream-valid shares"
+        );
         server.pending_target_updates.insert(7, pending_target);
 
         // A SetTarget that does not satisfy the pending update (e.g. the reply to an
@@ -2417,6 +3425,154 @@ mod tests {
             .await
             .unwrap();
         assert!(server.pending_target_updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aggregated_keepalive_advances_shared_job_once_and_sends_it_to_all_targets() {
+        let (server_to_channel_manager_sender, _server_to_channel_manager_receiver) = unbounded();
+        let (channel_manager_to_server_sender, channel_manager_to_server_receiver) = unbounded();
+        let mut config = create_test_config();
+        config
+            .downstream_difficulty_config
+            .job_keepalive_interval_secs = 1;
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            channel_manager_to_server_receiver,
+            server_to_channel_manager_sender,
+            config,
+            mode,
+        );
+        let first_receiver = register_test_downstream(&server, 1, Some(7), 100.0, false);
+        let second_receiver = register_test_downstream(&server, 2, Some(8), 100.0, false);
+        for downstream_id in [1, 2] {
+            server
+                .downstreams
+                .with(&downstream_id, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| {
+                            data.session_state = Sv1SessionState::Ready;
+                            // This harness observes the server-side queue directly instead of
+                            // running the downstream delivery task that normally starts the
+                            // keepalive timer when it forwards the original job.
+                            data.keepalive_timer_anchor = Some(Instant::now());
+                        })
+                        .unwrap();
+                })
+                .unwrap();
+        }
+
+        channel_manager_to_server_sender
+            .send(MiningOwned::SetNewPrevHash(SetNewPrevHashOwned {
+                channel_id: AGGREGATED_CHANNEL_ID,
+                job_id: 1,
+                prev_hash: vec![0; 32].try_into().unwrap(),
+                min_ntime: 0,
+                nbits: 0x207fffff,
+            }))
+            .await
+            .unwrap();
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+        channel_manager_to_server_sender
+            .send(MiningOwned::NewExtendedMiningJob(
+                NewExtendedMiningJobOwned {
+                    channel_id: AGGREGATED_CHANNEL_ID,
+                    job_id: 1,
+                    min_ntime: Sv2OptionOwned::new(None),
+                    version: 0x20000000,
+                    version_rolling_allowed: true,
+                    merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                    coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                    coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                },
+            ))
+            .await
+            .unwrap();
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        // Drain the original job broadcast so the next messages are the keepalive under test.
+        first_receiver.recv().await.unwrap();
+        second_receiver.recv().await.unwrap();
+
+        server.send_keepalive_jobs(vec![], 1).await.unwrap();
+        let original_time = server
+            .valid_sv1_jobs
+            .with(&AGGREGATED_CHANNEL_ID, |jobs| {
+                assert_eq!(jobs.len(), 1);
+                jobs.active().unwrap().notify.time.0
+            })
+            .unwrap();
+        assert!(
+            server
+                .valid_sv1_jobs
+                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.get("1").is_some())
+                .unwrap(),
+            "an empty tick must not mutate the shared job history",
+        );
+
+        server
+            .aggregated_job_mutation_time
+            .set(Some(Instant::now() - Duration::from_secs(1)))
+            .unwrap();
+        // Only the first miner is due. The new shared job is nevertheless delivered to both so
+        // their next deadlines are aligned.
+        server.send_keepalive_jobs(vec![(1, 7)], 1).await.unwrap();
+
+        server
+            .valid_sv1_jobs
+            .with(&AGGREGATED_CHANNEL_ID, |jobs| {
+                assert_eq!(jobs.len(), 2);
+                let active = jobs.active().unwrap();
+                assert_eq!(active.notify.time.0, original_time + 1);
+                assert!(!active.notify.clean_jobs);
+                assert_eq!(active.keepalive_base_time, original_time);
+            })
+            .unwrap();
+
+        let first_keepalive = message_from_server_event(first_receiver.recv().await.unwrap());
+        let second_keepalive = message_from_server_event(second_receiver.recv().await.unwrap());
+        assert_eq!(
+            serde_json::to_value(first_keepalive).unwrap(),
+            serde_json::to_value(second_keepalive).unwrap(),
+            "aggregated downstreams must receive the same shared keepalive job"
+        );
+        for downstream_id in [1, 2] {
+            assert!(
+                server
+                    .downstreams
+                    .with(&downstream_id, |downstream| downstream
+                        .downstream_data
+                        .with(|data| data.keepalive_timer_anchor.is_some())
+                        .unwrap())
+                    .unwrap()
+            );
+        }
+
+        // A miner that remains due (for example because its sender is unreachable) cannot cause
+        // another shared nTime mutation before a full wall-clock interval has elapsed.
+        server.send_keepalive_jobs(vec![(2, 8)], 1).await.unwrap();
+        assert_eq!(
+            server
+                .valid_sv1_jobs
+                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.len()),
+            Some(2)
+        );
+        assert!(first_receiver.try_recv().is_err());
+        assert!(second_receiver.try_recv().is_err());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use stratum_apps::{
     stratum_core::{
         binary_sv2::U256Owned,
         bitcoin::{
-            CompactTarget, Target, TxMerkleNode,
+            BlockHash, CompactTarget, Target, TxMerkleNode,
             block::{Header, Version},
             hashes::Hash,
         },
@@ -17,9 +17,7 @@ use stratum_apps::{
         },
         extensions_sv2::{MAX_USER_IDENTITY_LENGTH, UserIdentity},
         sv1_api::{
-            Message,
             client_to_server::{self, Submit},
-            json_rpc,
             server_to_client::Notify,
             utils::{HexU32Be, VERSION_ROLLING_MASK},
         },
@@ -49,20 +47,25 @@ pub const AGGREGATED_CHANNEL_ID: ChannelId = u32::MAX;
 /// * `target` - The target difficulty for this share
 /// * `extranonce1` - The first part of the extranonce (from server)
 /// * `version_rolling_mask` - Optional mask for version rolling
-/// * `sv1_server_data` - Reference to shared SV1 server data for accessing valid jobs
-/// * `channel_id` - Channel ID for job lookup
+/// * `job` - The SV1 job advertised to the downstream
 ///
 /// # Returns
-/// * `Ok(true)` if the share is valid and meets the target
-/// * `Ok(false)` if the share is valid but doesn't meet the target
+/// * `Ok(Sv1ShareValidationOutcome::MeetsTarget(hash))` if the share meets the target
+/// * `Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget)` otherwise
 /// * `Err(TproxyError)` if validation fails due to missing job or invalid data
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sv1ShareValidationOutcome {
+    MeetsTarget(BlockHash),
+    DoesNotMeetTarget,
+}
+
 pub fn validate_sv1_share(
     share: &client_to_server::Submit,
     target: Target,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<HexU32Be>,
     job: Notify,
-) -> Result<bool, TproxyErrorKind> {
+) -> Result<Sv1ShareValidationOutcome, TproxyErrorKind> {
     let mut full_extranonce = vec![];
     full_extranonce.extend_from_slice(extranonce1.as_slice());
     full_extranonce.extend_from_slice(share.extra_nonce2.0.as_ref());
@@ -120,14 +123,10 @@ pub fn validate_sv1_share(
     );
     // check if the share hash meets the downstream target
     if hash_as_target < target {
-        /*if self.share_accounting.is_share_seen(hash.to_raw_hash()) {
-            return Err(ShareValidationError::DuplicateShare);
-        }*/
-
-        return Ok(true);
+        return Ok(Sv1ShareValidationOutcome::MeetsTarget(hash));
     }
 
-    Ok(false)
+    Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget)
 }
 
 /// Tracks the state of the single upstream extended channel in aggregated mode.
@@ -255,15 +254,6 @@ pub struct SubmitShareWithChannelId {
 /// Delimiter used to separate original job ID from keepalive mutation counter.
 /// Format: `{original_job_id}#{counter}`
 pub(crate) const KEEPALIVE_JOB_ID_DELIMITER: char = '#';
-
-/// Check if Sv1 message is mining.authorize
-pub(crate) fn is_mining_authorize(msg: &Message) -> bool {
-    if let json_rpc::Message::StandardRequest(r) = &msg {
-        r.method == "mining.authorize"
-    } else {
-        false
-    }
-}
 
 /// Derives the SV1 worker name from the full `mining.authorize` username.
 pub(crate) fn sv1_worker_name_from_sv1_username(sv1_username: &str) -> &str {

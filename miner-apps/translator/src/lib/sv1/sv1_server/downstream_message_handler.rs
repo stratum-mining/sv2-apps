@@ -1,6 +1,7 @@
 use stratum_apps::stratum_core::sv1_api::{
-    IsServer, client_to_server, json_rpc,
-    server_to_client::{self, Notify},
+    IsServer,
+    client_to_server::{self, SubmitError, SubmitOutcome},
+    json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be, VERSION_ROLLING_MASK},
 };
 use tracing::{debug, error, info, warn};
@@ -9,8 +10,8 @@ use crate::{
     error::{self, TproxyError},
     sv1::Sv1Server,
     utils::{
-        AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, sv1_worker_name_from_sv1_username,
-        validate_sv1_share,
+        AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, Sv1ShareValidationOutcome,
+        sv1_worker_name_from_sv1_username, validate_sv1_share,
     },
 };
 
@@ -93,7 +94,7 @@ impl IsServer for Sv1Server {
         &self,
         client_id: Option<usize>,
         request: &client_to_server::Submit,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<SubmitOutcome, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
         let job_id = &request.job_id;
@@ -105,7 +106,7 @@ impl IsServer for Sv1Server {
                 .map_err(TproxyError::shutdown)
         })?
         else {
-            return Ok(false);
+            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
         };
 
         let channel_id = if self.mode.is_aggregated() {
@@ -114,15 +115,15 @@ impl IsServer for Sv1Server {
             channel_id
         };
 
-        let find_job = |jobs: &[Notify]| jobs.iter().find(|j| j.job_id == *job_id).cloned();
-
         let job = self
             .valid_sv1_jobs
-            .with(&channel_id, |jobs| find_job(jobs.as_ref()))
+            .with(&channel_id, |jobs| {
+                jobs.get(job_id).map(|job| job.notify.clone())
+            })
             .flatten();
 
         let Some(job) = job else {
-            return Ok(false);
+            return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
         };
 
         self.with_registered_downstream(downstream_id, |downstream| {
@@ -136,7 +137,7 @@ impl IsServer for Sv1Server {
                                 "Cannot submit share: channel_id is None \
                          (waiting for OpenExtendedMiningChannelSuccess)"
                             );
-                            return Ok(false);
+                            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
                         }
                     };
 
@@ -145,39 +146,59 @@ impl IsServer for Sv1Server {
                         channel_id
                     );
 
-                    let is_valid = validate_sv1_share(
+                    let Some(job_context) = data.job_validation_context(job_id) else {
+                        debug!(
+                            job_id,
+                            channel_id, "Submitted SV1 job is no longer valid for this downstream"
+                        );
+                        return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
+                    };
+                    let share_hash = match validate_sv1_share(
                         request,
-                        data.target,
-                        data.extranonce1.clone().into(),
+                        job_context.target,
+                        job_context.extranonce.clone().into(),
                         data.version_rolling_mask.clone(),
                         job.clone(),
-                    )
-                    .unwrap_or(false);
+                    ) {
+                        Ok(Sv1ShareValidationOutcome::MeetsTarget(hash)) => hash,
+                        Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget) => {
+                            return Ok(SubmitOutcome::Rejected(SubmitError::LowDifficultyShare));
+                        }
+                        Err(error) => {
+                            debug!(channel_id, ?error, "SV1 share could not be validated");
+                            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
+                        }
+                    };
 
-                    if !is_valid {
-                        error!("Invalid share for channel id: {}", channel_id);
-                        return Ok(false);
+                    if !data.accepted_share_hashes.insert_if_new(share_hash) {
+                        return Ok(SubmitOutcome::Rejected(SubmitError::DuplicateShare));
                     }
 
                     data.pending_share = Some(SubmitShareWithChannelId {
                         channel_id,
                         downstream_id,
                         share: request.clone(),
-                        extranonce: data.extranonce1.clone().into(),
-                        extranonce2_len: data.extranonce2_len,
+                        extranonce: job_context.extranonce.into(),
+                        extranonce2_len: job_context.extranonce2_len,
                         version_rolling_mask: data.version_rolling_mask.clone(),
-                        job_version: data.last_job_version_field,
+                        job_version: Some(job.version.0),
                     });
 
-                    Ok(true)
+                    Ok(SubmitOutcome::Accepted)
                 })
                 .map_err(TproxyError::shutdown)?
         })
     }
 
     /// Indicates to the server that the client supports the mining.set_extranonce method.
-    fn handle_extranonce_subscribe(&self) -> Result<(), Self::Error> {
-        Ok(())
+    fn handle_extranonce_subscribe(&mut self, client_id: Option<usize>) -> Result<(), Self::Error> {
+        let downstream_id = client_id.expect("Downstream id should exist");
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.supports_set_extranonce = true)
+                .map_err(TproxyError::shutdown)
+        })
     }
 
     /// Checks if a Downstream role is authorized.
