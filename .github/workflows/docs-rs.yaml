@@ -1,0 +1,33 @@
+name: Docs.rs
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  docs-rs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Build docs.rs sandbox
+        run: docker build --file scripts/docs-rs.Dockerfile --tag sv2-docs-rs .
+
+      - name: Check docs.rs compatibility
+        run: |
+          docker run --rm --network none sv2-docs-rs \
+            stratum-apps/Cargo.toml \
+            pool-apps/pool/Cargo.toml \
+            pool-apps/jd-server/Cargo.toml \
+            miner-apps/jd-client/Cargo.toml \
+            miner-apps/translator/Cargo.toml \
+            integration-tests/Cargo.toml \
+            bitcoin-core-sv2/Cargo.toml

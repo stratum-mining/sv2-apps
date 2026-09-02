@@ -51,6 +51,17 @@ This directory contains utility scripts for building, testing, and publishing th
 
 ### 📊 Testing & Coverage Scripts
 
+#### `docs-rs-check.sh`
+**Run docs.rs-like builds for one or more crates**
+- Uses dependencies prefetched by the CI sandbox image
+- Runs `cargo docs-rs --offline` while the container has no network
+- Intended for CI jobs that validate docs.rs compatibility
+
+**Usage:**
+```bash
+./scripts/docs-rs-check.sh <manifest-path> [<manifest-path> ...]
+```
+
 #### `coverage-apps.sh`
 **Generate test coverage reports**
 - Uses cargo-tarpaulin for coverage analysis
