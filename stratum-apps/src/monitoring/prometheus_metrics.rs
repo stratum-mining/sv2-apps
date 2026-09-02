@@ -27,6 +27,9 @@ pub struct PrometheusMetrics {
     // SV1 metrics
     pub sv1_clients_total: Option<Gauge>,
     pub sv1_hashrate_total: Option<Gauge>,
+    /// Per-SV1-client hashrate. Cardinality scales with miner count, so this is
+    /// opt-in via `with_sv1_per_client` rather than registered by default.
+    pub sv1_client_hashrate: Option<GaugeVec>,
 }
 
 impl PrometheusMetrics {
@@ -210,7 +213,23 @@ impl PrometheusMetrics {
             sv2_client_blocks_found_total,
             sv1_clients_total,
             sv1_hashrate_total,
+            sv1_client_hashrate: None,
         })
+    }
+
+    /// Register the per-SV1-client hashrate `GaugeVec`.
+    ///
+    /// Kept opt-in because the series count scales with connected miners. The
+    /// label is `user_identity` (the SV1 username) rather than a connection
+    /// identifier, so a reconnecting miner continues the same series.
+    pub fn with_sv1_per_client(mut self) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let metric = GaugeVec::new(
+            Opts::new("sv1_client_hashrate", "Hashrate per individual SV1 client"),
+            &["user_identity"],
+        )?;
+        self.registry.register(Box::new(metric.clone()))?;
+        self.sv1_client_hashrate = Some(metric);
+        Ok(self)
     }
 }
 

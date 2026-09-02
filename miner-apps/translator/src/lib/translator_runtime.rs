@@ -499,7 +499,10 @@ impl TranslatorRuntime<UpstreamReady> {
         .map_err(|e| {
             TproxyErrorKind::General(format!("failed to initialize monitoring server: {e}"))
         })?
-        .with_sv1_monitoring(self.state.sv1_server.clone())
+        .with_sv1_monitoring(
+            self.state.sv1_server.clone(),
+            self.translator.config.monitoring_sv1_per_client_metrics(),
+        )
         .map_err(|e| TproxyErrorKind::General(format!("failed to add SV1 monitoring: {e}")))?;
 
         let cancellation_token_clone = self.translator.cancellation_token.clone();
