@@ -179,7 +179,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             JobFactory::new(true, pool_tag_string, Some(self.miner_tag_string.clone()));
         let extranonce_prefix = ExtranoncePrefix::from_wire(msg.extranonce_prefix.to_owned_bytes())
             .expect("prefix length already validated by allocator");
-        let mut extended_channel = ExtendedChannel::new(
+        let mut extended_channel = match ExtendedChannel::new(
             msg.channel_id,
             self.user_identity().to_string(),
             extranonce_prefix,
@@ -188,7 +188,15 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             true,
             msg.extranonce_size,
             self.max_past_jobs,
-        );
+        ) {
+            Ok(channel) => channel,
+            Err(e) => {
+                // an upstream that hands out a target no share can meet is misbehaving, so
+                // fall back
+                warn!("Upstream OpenExtendedMiningChannelSuccess rejected: {e:?}");
+                return Err(JDCError::fallback(e));
+            }
+        };
 
         if let Some(prevhash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? {
             _ = extended_channel.on_chain_tip_update(prevhash.clone().into());
@@ -756,14 +764,22 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
         self.upstream_channel
-            .with(|upstream_channel| {
+            .with(|upstream_channel| -> Result<(), Self::Error> {
                 if let Some(upstream) = upstream_channel.as_mut() {
-                    upstream.set_target(Target::from_le_bytes(
-                        msg.maximum_target.clone().as_ref().try_into().unwrap(),
-                    ));
+                    upstream
+                        .set_target(Target::from_le_bytes(
+                            msg.maximum_target.clone().as_ref().try_into().unwrap(),
+                        ))
+                        .map_err(|e| {
+                            // an upstream that hands out a target no share can meet is
+                            // misbehaving, so fall back
+                            warn!("Upstream SetTarget rejected: {e:?}");
+                            JDCError::fallback(e)
+                        })?;
                 }
+                Ok(())
             })
-            .map_err(JDCError::shutdown)?;
+            .map_err(JDCError::shutdown)??;
         Ok(())
     }
 
