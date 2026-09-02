@@ -42,6 +42,47 @@ use tracing::{debug, error, info, warn};
 
 use jd_server_sv2::job_declarator::JobDeclarator;
 
+/// Per-process and system-wide file-descriptor exhaustion, as raw errno values.
+///
+/// `std::io::ErrorKind` maps both to `Uncategorized`, so there is no stable variant to match
+/// on. The numeric values agree across Linux and the BSDs, including macOS.
+#[cfg(unix)]
+const EMFILE: i32 = 24;
+#[cfg(unix)]
+const ENFILE: i32 = 23;
+
+/// Delay applied after the first `accept()` failure that would recur immediately, then doubled
+/// on each consecutive failure up to [`ACCEPT_BACKOFF_MAX`].
+const ACCEPT_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(5);
+/// Ceiling for the accept-retry delay, so a sustained failure settles at one attempt per second.
+const ACCEPT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether `accept()` failed because no file descriptor was available.
+///
+/// The listener stays readable when the process or the system is out of descriptors, so the
+/// failing call returns immediately and an undelayed retry fails again at once. Without a delay
+/// the accept loop spins at CPU speed and writes one log line per iteration for as long as the
+/// condition lasts.
+fn is_fd_exhaustion(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(EMFILE) | Some(ENFILE))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Delay to wait before the next accept attempt, given the delay already applied.
+fn next_accept_backoff(previous: Option<std::time::Duration>) -> std::time::Duration {
+    match previous {
+        None => ACCEPT_BACKOFF_MIN,
+        Some(previous) => (previous * 2).min(ACCEPT_BACKOFF_MAX),
+    }
+}
+
 use crate::{
     config::PoolConfig,
     downstream::Downstream,
@@ -320,6 +361,10 @@ impl ChannelManager {
                 return;
             }
 
+            // Delay currently applied between accept attempts, set only while descriptors are
+            // exhausted and cleared as soon as a connection is accepted.
+            let mut accept_backoff: Option<std::time::Duration> = None;
+
             loop {
                 select! {
                     biased;
@@ -330,6 +375,7 @@ impl ChannelManager {
                     res = server.accept() => {
                         match res {
                             Ok((stream, socket_address)) => {
+                                accept_backoff = None;
                                 info!(%socket_address, "New downstream connection");
 
                                 let this = Arc::clone(&this);
@@ -411,6 +457,29 @@ impl ChannelManager {
 
                                 Err(e) => {
                                     error!(error = ?e, "Failed to accept new downstream connection");
+
+                                    // A descriptor shortage leaves the listener readable, so
+                                    // retrying without a delay spins at CPU speed and floods the
+                                    // log until the shortage clears. Back off instead, and let
+                                    // shutdown interrupt the wait.
+                                    if is_fd_exhaustion(&e) {
+                                        let delay = next_accept_backoff(accept_backoff);
+                                        accept_backoff = Some(delay);
+                                        warn!(
+                                            delay_ms = delay.as_millis() as u64,
+                                            "Out of file descriptors while accepting; delaying next accept"
+                                        );
+                                        select! {
+                                            biased;
+                                            _ = cancellation_token_clone.cancelled() => {
+                                                info!("Channel Manager: shutdown while backing off accept");
+                                                break;
+                                            }
+                                            _ = tokio::time::sleep(delay) => {}
+                                        }
+                                    } else {
+                                        accept_backoff = None;
+                                    }
                                 }
                             }
                     }
@@ -792,5 +861,80 @@ impl RouteMessageTo {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod accept_backoff_tests {
+    use super::{ACCEPT_BACKOFF_MAX, ACCEPT_BACKOFF_MIN, is_fd_exhaustion, next_accept_backoff};
+    use std::{io, time::Duration};
+
+    /// Descriptor exhaustion is the case that must be delayed, because the listener stays
+    /// readable and an undelayed retry fails again immediately.
+    #[test]
+    fn descriptor_exhaustion_is_recognised() {
+        for raw in [24 /* EMFILE */, 23 /* ENFILE */] {
+            let error = io::Error::from_raw_os_error(raw);
+            assert!(
+                is_fd_exhaustion(&error),
+                "errno {raw} should be treated as descriptor exhaustion, kind={:?}",
+                error.kind()
+            );
+        }
+    }
+
+    /// Other accept failures are per-connection and must not delay the loop, otherwise one
+    /// aborted handshake slows admission for everyone.
+    #[test]
+    fn other_failures_are_not_delayed() {
+        let cases = [
+            io::Error::from(io::ErrorKind::ConnectionAborted),
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            io::Error::from(io::ErrorKind::Interrupted),
+        ];
+        for error in cases {
+            assert!(
+                !is_fd_exhaustion(&error),
+                "{:?} should not be treated as descriptor exhaustion",
+                error.kind()
+            );
+        }
+    }
+
+    /// The first delay is the floor, consecutive delays double, and the schedule settles at the
+    /// ceiling rather than growing without bound.
+    #[test]
+    fn backoff_starts_at_the_floor_then_doubles_to_the_ceiling() {
+        assert_eq!(next_accept_backoff(None), ACCEPT_BACKOFF_MIN);
+        assert_eq!(
+            next_accept_backoff(Some(ACCEPT_BACKOFF_MIN)),
+            ACCEPT_BACKOFF_MIN * 2
+        );
+
+        let mut delay = next_accept_backoff(None);
+        for _ in 0..32 {
+            delay = next_accept_backoff(Some(delay));
+            assert!(
+                delay <= ACCEPT_BACKOFF_MAX,
+                "delay {delay:?} exceeded the ceiling"
+            );
+        }
+        assert_eq!(
+            delay, ACCEPT_BACKOFF_MAX,
+            "schedule should reach the ceiling"
+        );
+    }
+
+    /// A delay already at the ceiling stays there.
+    #[test]
+    fn backoff_is_idempotent_at_the_ceiling() {
+        assert_eq!(
+            next_accept_backoff(Some(ACCEPT_BACKOFF_MAX)),
+            ACCEPT_BACKOFF_MAX
+        );
+        assert_eq!(
+            next_accept_backoff(Some(Duration::from_secs(30))),
+            ACCEPT_BACKOFF_MAX
+        );
     }
 }
