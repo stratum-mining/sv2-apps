@@ -1,5 +1,7 @@
 use stratum_apps::stratum_core::sv1_api::{
-    IsServer, client_to_server, json_rpc, server_to_client,
+    IsServer,
+    client_to_server::{self, SubmitError, SubmitOutcome},
+    json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be, VERSION_ROLLING_MASK},
 };
 use tracing::{debug, error, info, warn};
@@ -8,8 +10,8 @@ use crate::{
     error::{self, TproxyError},
     sv1::Sv1Server,
     utils::{
-        AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, sv1_worker_name_from_sv1_username,
-        validate_sv1_share,
+        AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, Sv1ShareValidationOutcome,
+        sv1_worker_name_from_sv1_username, validate_sv1_share,
     },
 };
 
@@ -92,7 +94,7 @@ impl IsServer for Sv1Server {
         &self,
         client_id: Option<usize>,
         request: &client_to_server::Submit,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<SubmitOutcome, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
         let job_id = &request.job_id;
@@ -104,7 +106,7 @@ impl IsServer for Sv1Server {
                 .map_err(TproxyError::shutdown)
         })?
         else {
-            return Ok(false);
+            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
         };
 
         let channel_id = if self.mode.is_aggregated() {
@@ -121,7 +123,7 @@ impl IsServer for Sv1Server {
             .flatten();
 
         let Some(job) = job else {
-            return Ok(false);
+            return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
         };
 
         self.with_registered_downstream(downstream_id, |downstream| {
@@ -135,7 +137,7 @@ impl IsServer for Sv1Server {
                                 "Cannot submit share: channel_id is None \
                          (waiting for OpenExtendedMiningChannelSuccess)"
                             );
-                            return Ok(false);
+                            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
                         }
                     };
 
@@ -149,20 +151,27 @@ impl IsServer for Sv1Server {
                             job_id,
                             channel_id, "Submitted SV1 job is no longer valid for this downstream"
                         );
-                        return Ok(false);
+                        return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
                     };
-                    let is_valid = validate_sv1_share(
+                    let share_hash = match validate_sv1_share(
                         request,
                         job_context.target,
                         job_context.extranonce.clone().into(),
                         data.version_rolling_mask.clone(),
                         job.clone(),
-                    )
-                    .unwrap_or(false);
+                    ) {
+                        Ok(Sv1ShareValidationOutcome::MeetsTarget(hash)) => hash,
+                        Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget) => {
+                            return Ok(SubmitOutcome::Rejected(SubmitError::LowDifficultyShare));
+                        }
+                        Err(error) => {
+                            debug!(channel_id, ?error, "SV1 share could not be validated");
+                            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
+                        }
+                    };
 
-                    if !is_valid {
-                        error!("Invalid share for channel id: {}", channel_id);
-                        return Ok(false);
+                    if !data.accepted_share_hashes.insert_if_new(share_hash) {
+                        return Ok(SubmitOutcome::Rejected(SubmitError::DuplicateShare));
                     }
 
                     data.pending_share = Some(SubmitShareWithChannelId {
@@ -175,7 +184,7 @@ impl IsServer for Sv1Server {
                         job_version: Some(job.version.0),
                     });
 
-                    Ok(true)
+                    Ok(SubmitOutcome::Accepted)
                 })
                 .map_err(TproxyError::shutdown)?
         })

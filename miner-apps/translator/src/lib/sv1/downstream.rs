@@ -6,12 +6,13 @@ use crate::{
 use async_channel::{Receiver, Sender};
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
-use std::{future::Future, sync::Arc, time::Instant};
+use std::{collections::VecDeque, future::Future, sync::Arc, time::Instant};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
     stratum_core::{
-        bitcoin::Target,
+        bitcoin::{BlockHash, Target},
+        channels_sv2::client::MAX_SEEN_SHARES,
         sv1_api::{
             json_rpc::{self, Message},
             server_to_client,
@@ -143,6 +144,40 @@ pub(super) struct Sv1JobValidationContext {
     pub(super) target: Target,
 }
 
+/// Accepted SV1 share hashes retained for per-downstream duplicate detection.
+///
+/// This mirrors the client-channel policy in `channels_sv2`: the oldest hash is evicted once the
+/// shared `MAX_SEEN_SHARES` bound is reached, and the cache is cleared on a chain-tip transition.
+/// It remains separate from the SV2 channel cache because tProxy accepts shares at each miner's
+/// advertised target even when they do not meet the upstream channel target.
+#[derive(Debug, Default)]
+pub(super) struct Sv1AcceptedShareCache {
+    hashes: VecDeque<BlockHash>,
+}
+
+impl Sv1AcceptedShareCache {
+    /// Records a share hash and returns `false` when it was already present.
+    pub(super) fn insert_if_new(&mut self, hash: BlockHash) -> bool {
+        if self.hashes.contains(&hash) {
+            return false;
+        }
+        if self.hashes.len() == MAX_SEEN_SHARES {
+            self.hashes.pop_front();
+        }
+        self.hashes.push_back(hash);
+        true
+    }
+
+    fn clear(&mut self) {
+        self.hashes.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.hashes.len()
+    }
+}
+
 #[derive(Debug)]
 pub struct DownstreamData {
     pub channel_id: Option<ChannelId>,
@@ -163,6 +198,8 @@ pub struct DownstreamData {
     pub(super) session_state: Sv1SessionState,
     /// Per-job downstream state retained for late-share validation under the current chain tip.
     pub(super) job_validation_contexts: Sv1JobStore<Sv1JobValidationContext>,
+    /// Bounded hashes of shares accepted from this miner under the current chain tip.
+    pub(super) accepted_share_hashes: Sv1AcceptedShareCache,
     /// Number of queued `mining.set_extranonce` notifications not yet applied by this downstream.
     pub(super) pending_set_extranonce_notifications: usize,
     // Next advertised SV1 target, applied when the corresponding
@@ -215,6 +252,7 @@ impl DownstreamData {
             cached_notify: None,
             session_state: Sv1SessionState::default(),
             job_validation_contexts: Sv1JobStore::default(),
+            accepted_share_hashes: Sv1AcceptedShareCache::default(),
             pending_set_extranonce_notifications: 0,
             pending_target: None,
             pending_hashrate: None,
@@ -228,6 +266,9 @@ impl DownstreamData {
     }
 
     fn record_job_validation_context(&mut self, notify: &server_to_client::Notify) {
+        if notify.clean_jobs {
+            self.accepted_share_hashes.clear();
+        }
         let context = Sv1JobValidationContext {
             extranonce: self.extranonce1.clone(),
             extranonce2_len: self.extranonce2_len,
@@ -857,6 +898,27 @@ impl Downstream {
 mod tests {
     use super::*;
     use async_channel::unbounded;
+    use stratum_apps::stratum_core::bitcoin::hashes::Hash;
+
+    #[test]
+    fn accepted_share_cache_uses_channels_sv2_bound() {
+        let mut cache = Sv1AcceptedShareCache::default();
+        let mut first_hash = None;
+        let mut last_hash = None;
+
+        for value in 0..=MAX_SEEN_SHARES {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
+            let hash = BlockHash::from_byte_array(bytes);
+            first_hash.get_or_insert(hash);
+            last_hash = Some(hash);
+            assert!(cache.insert_if_new(hash));
+        }
+
+        assert_eq!(cache.len(), MAX_SEEN_SHARES);
+        assert!(cache.insert_if_new(first_hash.unwrap()));
+        assert!(!cache.insert_if_new(last_hash.unwrap()));
+    }
 
     fn notify_with_clean_jobs(job_id: &str, clean_jobs: bool) -> Message {
         serde_json::from_value(serde_json::json!({
@@ -1219,6 +1281,10 @@ mod tests {
                     Some(new_target)
                 );
                 assert_eq!(data.job_validation_contexts.len(), 2);
+                assert!(
+                    data.accepted_share_hashes
+                        .insert_if_new(BlockHash::all_zeros())
+                );
             })
             .unwrap();
 
@@ -1236,6 +1302,7 @@ mod tests {
                 assert!(data.job_validation_context("new").is_none());
                 assert!(data.job_validation_context("new-tip").is_some());
                 assert_eq!(data.job_validation_contexts.len(), 1);
+                assert_eq!(data.accepted_share_hashes.len(), 0);
             })
             .unwrap();
     }

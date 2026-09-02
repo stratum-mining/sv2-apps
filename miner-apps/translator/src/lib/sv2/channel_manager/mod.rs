@@ -17,7 +17,10 @@ use stratum_apps::{
     payout::PayoutMode,
     stratum_core::{
         channels_sv2::{
-            client::{extended::ExtendedChannel, group::GroupChannel},
+            client::{
+                extended::ExtendedChannel, group::GroupChannel,
+                share_accounting::ShareValidationError,
+            },
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
         },
         codec_sv2::StandardSv2Frame,
@@ -741,17 +744,44 @@ impl ChannelManager {
                         .with_mut(&AGGREGATED_CHANNEL_ID, |aggregated_channel| {
                             aggregated_channel.validate_share(m.clone())
                         });
-                    if let Some(Ok(_result)) = value {
-                        info!(
-                            "SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {} ☑️",
-                            upstream_extended_channel_id, m.sequence_number
-                        );
+                    match value {
+                        Some(Ok(_result)) => {
+                            info!(
+                                "SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {} ☑️",
+                                upstream_extended_channel_id, m.sequence_number
+                            );
 
-                        // In aggregated mode, use a single sequence counter for all valid shares
-                        m.sequence_number =
-                            self.next_share_sequence_number(upstream_extended_channel_id);
-                    } else {
-                        return Ok(());
+                            // In aggregated mode, use a single sequence counter for all valid
+                            // shares.
+                            m.sequence_number =
+                                self.next_share_sequence_number(upstream_extended_channel_id);
+                        }
+                        Some(Err(ShareValidationError::DoesNotMeetTarget(error_code))) => {
+                            // Per-miner vardiff can intentionally be easier than the aggregated
+                            // upstream target, so these locally accepted shares are expected to be
+                            // filtered here.
+                            debug!(
+                                channel_id = upstream_extended_channel_id,
+                                error_code,
+                                "SubmitSharesExtended does not meet the upstream channel target"
+                            );
+                            return Ok(());
+                        }
+                        Some(Err(validation_error)) => {
+                            warn!(
+                                channel_id = upstream_extended_channel_id,
+                                ?validation_error,
+                                "SubmitSharesExtended rejected by upstream channel validation"
+                            );
+                            return Ok(());
+                        }
+                        None => {
+                            warn!(
+                                channel_id = upstream_extended_channel_id,
+                                "SubmitSharesExtended references an unknown upstream channel"
+                            );
+                            return Ok(());
+                        }
                     }
                 } else {
                     let value = self
@@ -759,34 +789,60 @@ impl ChannelManager {
                         .with_mut(&m.channel_id, |extended_channel| {
                             extended_channel.validate_share(m.clone())
                         });
-                    if let Some(Ok(_result)) = value {
-                        info!(
-                            "SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {} ☑️",
-                            m.channel_id, m.sequence_number
-                        );
-                        // In non-aggregated mode, each downstream channel has its own sequence
-                        // counter
-                        m.sequence_number = self.next_share_sequence_number(m.channel_id);
+                    match value {
+                        Some(Ok(_result)) => {
+                            info!(
+                                "SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {} ☑️",
+                                m.channel_id, m.sequence_number
+                            );
+                            // In non-aggregated mode, each downstream channel has its own sequence
+                            // counter.
+                            m.sequence_number = self.next_share_sequence_number(m.channel_id);
 
-                        // Rebuild the upstream share extranonce as
-                        // `local_prefix | local_index | miner extranonce`.
-                        // A wire-sourced prefix is entirely `upstream_prefix`,
-                        // so this naturally leaves no local bytes to prepend.
-                        let local_prefix_and_index =
-                            self.extended_channels.with(&m.channel_id, |c| {
-                                c.get_extranonce_prefix()[c.upstream_prefix_len() as usize..]
-                                    .to_vec()
-                            });
-                        if let Some(local_prefix_and_index) =
-                            local_prefix_and_index.filter(|prefix| !prefix.is_empty())
-                        {
-                            let mut new_extranonce = local_prefix_and_index;
-                            new_extranonce.extend_from_slice(m.extranonce.as_ref());
-                            m.extranonce =
-                                new_extranonce.try_into().map_err(TproxyError::shutdown)?;
+                            // Rebuild the upstream share extranonce as
+                            // `local_prefix | local_index | miner extranonce`.
+                            // A wire-sourced prefix is entirely `upstream_prefix`,
+                            // so this naturally leaves no local bytes to prepend.
+                            let local_prefix_and_index =
+                                self.extended_channels.with(&m.channel_id, |c| {
+                                    c.get_extranonce_prefix()[c.upstream_prefix_len() as usize..]
+                                        .to_vec()
+                                });
+                            if let Some(local_prefix_and_index) =
+                                local_prefix_and_index.filter(|prefix| !prefix.is_empty())
+                            {
+                                let mut new_extranonce = local_prefix_and_index;
+                                new_extranonce.extend_from_slice(m.extranonce.as_ref());
+                                m.extranonce =
+                                    new_extranonce.try_into().map_err(TproxyError::shutdown)?;
+                            }
                         }
-                    } else {
-                        return Ok(());
+                        Some(Err(ShareValidationError::DoesNotMeetTarget(error_code))) => {
+                            // A downstream vardiff target can intentionally be easier than its
+                            // upstream channel target, so these locally accepted shares are
+                            // expected to be filtered here.
+                            debug!(
+                                channel_id = m.channel_id,
+                                error_code,
+                                "SubmitSharesExtended does not meet the upstream channel target"
+                            );
+                            return Ok(());
+                        }
+                        Some(Err(validation_error)) => {
+                            warn!(
+                                channel_id = m.channel_id,
+                                ?validation_error,
+                                "SubmitSharesExtended rejected by upstream channel validation"
+                            );
+                            return Ok(());
+                        }
+                        None => {
+                            warn!(
+                                channel_id = m.channel_id,
+                                "SubmitSharesExtended references an unknown upstream channel"
+                            );
+                            return Ok(());
+                        }
                     }
                 }
 

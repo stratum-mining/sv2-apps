@@ -2234,7 +2234,10 @@ mod tests {
             id: 1,
         };
 
-        assert!(server.handle_submit(Some(7), &submit).unwrap());
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Accepted
+        );
         server
             .downstreams
             .with(&7, |downstream| {
@@ -2253,6 +2256,129 @@ mod tests {
                     .unwrap();
             })
             .unwrap();
+    }
+
+    #[test]
+    fn duplicate_sv1_share_is_rejected_before_forwarding() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let job = test_sv1_notify("job", false);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    job.job_id.clone(),
+                    StoredSv1Job::upstream(job.clone()),
+                    false,
+                );
+            });
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: vec![1, 2, 3, 4].try_into().unwrap(),
+                                extranonce2_len: 16,
+                                target: Target::from_le_bytes([0xff; 32]),
+                            },
+                            false,
+                        );
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        let submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: job.job_id,
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Accepted
+        );
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Rejected(
+                client_to_server::SubmitError::DuplicateShare
+            )
+        );
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| assert_eq!(data.accepted_share_hashes.len(), 1))
+                    .unwrap();
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sv1_share_rejections_distinguish_missing_jobs_and_low_difficulty() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let mut submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "missing".to_string(),
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Rejected(client_to_server::SubmitError::JobNotFound)
+        );
+
+        let job = test_sv1_notify("job", false);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    job.job_id.clone(),
+                    StoredSv1Job::upstream(job.clone()),
+                    false,
+                );
+            });
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: vec![1, 2, 3, 4].try_into().unwrap(),
+                                extranonce2_len: 16,
+                                // No hash can meet the zero target.
+                                target: Target::from_le_bytes([0; 32]),
+                            },
+                            false,
+                        );
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        submit.job_id = job.job_id;
+
+        assert_eq!(
+            server.handle_submit(Some(7), &submit).unwrap(),
+            client_to_server::SubmitOutcome::Rejected(
+                client_to_server::SubmitError::LowDifficultyShare
+            )
+        );
     }
 
     #[tokio::test]
