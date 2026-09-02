@@ -149,6 +149,7 @@ mod tests {
             4,
             None,
         )
+        .unwrap()
     }
 
     #[test]
