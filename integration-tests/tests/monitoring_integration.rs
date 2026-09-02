@@ -326,7 +326,42 @@ async fn block_found_detected_in_pool_metrics() {
     assert_metric_present(&pool_metrics, "sv2_uptime_seconds");
     assert_metric_eq(&pool_metrics, "sv2_clients_total", 1.0);
 
-    shutdown_all!(pool, jdc, tproxy);
+    // The count must survive the disconnect of the client that found the block.
+    // Compare against the value observed now, not a literal: shutdown drains
+    // gracefully and the miner can find further low-difficulty regtest blocks
+    // meanwhile, so the total may legitimately climb. It must never decrease.
+    const BLOCKS_FOUND: &str = "sv2_client_blocks_found_total";
+    let blocks_before = parse_metric_value(&pool_metrics, BLOCKS_FOUND).unwrap();
+
+    shutdown_all!(jdc, tproxy);
+
+    // Wait for the disconnect to land in the monitoring snapshot, so the
+    // assertion below cannot pass on a pre-disconnect reading.
+    let deadline = tokio::time::Instant::now() + METRIC_POLL_TIMEOUT;
+    let post_disconnect_metrics = loop {
+        let metrics = pool_mon.fetch_metrics().await;
+        if metrics
+            .lines()
+            .any(|line| line.trim() == "sv2_clients_total 0")
+        {
+            break metrics;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pool never observed the client disconnect. Last /metrics:\n{metrics}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    assert_metric_eq(&post_disconnect_metrics, "sv2_clients_total", 0.0);
+    let blocks_after = parse_metric_value(&post_disconnect_metrics, BLOCKS_FOUND).unwrap();
+    assert!(
+        blocks_after >= blocks_before,
+        "{BLOCKS_FOUND} regressed from {blocks_before} to {blocks_after} \
+         after the finding client disconnected"
+    );
+
+    shutdown_all!(pool);
 }
 
 // ---------------------------------------------------------------------------
