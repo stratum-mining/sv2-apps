@@ -7,7 +7,7 @@ use stratum_apps::{
     stratum_core::{
         binary_sv2::U256Owned,
         bitcoin::{
-            CompactTarget, Target, TxMerkleNode,
+            BlockHash, CompactTarget, Target, TxMerkleNode,
             block::{Header, Version},
             hashes::Hash,
         },
@@ -33,10 +33,17 @@ use crate::error::TproxyErrorKind;
 /// This sentinel value distinguishes broadcast from a legitimate channel 0.
 pub const AGGREGATED_CHANNEL_ID: ChannelId = u32::MAX;
 
+/// Whether the reconstructed share meets the target advertised for its job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sv1ShareValidationOutcome {
+    MeetsTarget(BlockHash),
+    DoesNotMeetTarget,
+}
+
 /// Validates an SV1 share against the target difficulty and job parameters.
 ///
 /// This function performs complete share validation by:
-/// 1. Finding the corresponding job from the valid jobs storage
+/// 1. Using the supplied job and its advertised validation parameters
 /// 2. Constructing the full extranonce from extranonce1 and extranonce2
 /// 3. Calculating the merkle root from the coinbase transaction and merkle path
 /// 4. Building the block header with the share's nonce and timestamp
@@ -47,20 +54,19 @@ pub const AGGREGATED_CHANNEL_ID: ChannelId = u32::MAX;
 /// * `target` - The target difficulty for this share
 /// * `extranonce1` - The first part of the extranonce (from server)
 /// * `version_rolling_mask` - Optional mask for version rolling
-/// * `sv1_server_data` - Reference to shared SV1 server data for accessing valid jobs
-/// * `channel_id` - Channel ID for job lookup
+/// * `job` - The SV1 job advertised to the downstream
 ///
 /// # Returns
-/// * `Ok(true)` if the share is valid and meets the target
-/// * `Ok(false)` if the share is valid but doesn't meet the target
-/// * `Err(TproxyError)` if validation fails due to missing job or invalid data
+/// * `Ok(Sv1ShareValidationOutcome::MeetsTarget(hash))` if the share meets the target
+/// * `Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget)` otherwise
+/// * `Err(TproxyErrorKind)` if the supplied data cannot form a valid header
 pub fn validate_sv1_share(
     share: &client_to_server::Submit,
     target: Target,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<HexU32Be>,
     job: Notify,
-) -> Result<bool, TproxyErrorKind> {
+) -> Result<Sv1ShareValidationOutcome, TproxyErrorKind> {
     let mut full_extranonce = vec![];
     full_extranonce.extend_from_slice(extranonce1.as_slice());
     full_extranonce.extend_from_slice(share.extra_nonce2.0.as_ref());
@@ -118,14 +124,10 @@ pub fn validate_sv1_share(
     );
     // check if the share hash meets the downstream target
     if hash_as_target < target {
-        /*if self.share_accounting.is_share_seen(hash.to_raw_hash()) {
-            return Err(ShareValidationError::DuplicateShare);
-        }*/
-
-        return Ok(true);
+        return Ok(Sv1ShareValidationOutcome::MeetsTarget(hash));
     }
 
-    Ok(false)
+    Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget)
 }
 
 /// Tracks the state of the single upstream extended channel in aggregated mode.
