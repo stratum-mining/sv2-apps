@@ -961,7 +961,16 @@ impl ChannelManager {
                     true,
                     min_extranonce_size as u16,
                     self.max_past_jobs,
-                );
+                )
+                .map_err(|e| {
+                    // the target is the aggregated channel's own, validated when it was
+                    // installed, so this only fails on an internal inconsistency
+                    error!(
+                        "Aggregated channel holds a target no share can meet: {:?}",
+                        e
+                    );
+                    TproxyError::shutdown(TproxyErrorKind::OpenMiningChannelError)
+                })?;
                 self.extended_channels
                     .insert(next_channel_id, new_downstream_extended_channel);
                 let success_message = MiningOwned::OpenExtendedMiningChannelSuccess(
@@ -1146,7 +1155,8 @@ mod tests {
                 true,
                 8,
                 None,
-            ),
+            )
+            .unwrap(),
         );
         manager
             .aggregated_extranonce_allocator
@@ -1362,7 +1372,8 @@ mod tests {
                 true,
                 6,
                 None,
-            ),
+            )
+            .unwrap(),
         );
 
         manager
