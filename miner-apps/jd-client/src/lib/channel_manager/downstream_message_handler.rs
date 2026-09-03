@@ -323,6 +323,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 self.shares_per_minute,
                 pool_tag_string,
                 self.miner_tag_string.clone(),
+                self.max_past_jobs,
             ) {
                 Ok(standard_channel) => Some(standard_channel),
                 Err(e) => {
@@ -564,6 +565,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         self.shares_per_minute,
                         pool_tag_string,
                         self.miner_tag_string.clone(),
+                        self.max_past_jobs,
                     ) {
                         Ok(channel) => Some(channel),
                         Err(e) => {

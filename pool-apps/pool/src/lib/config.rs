@@ -50,6 +50,16 @@ pub struct PoolConfig {
     jds: Option<JDSPartialConfig>,
     #[serde(default)]
     monitoring_cache_refresh_secs: Option<u64>,
+    /// Past jobs retained per channel for late-share validation.
+    ///
+    /// `None` (the default) and `Some(0)` both select the `channels_sv2` default. It is a
+    /// retention window — `cap / job rate` — and the rate is this deployment's, which is why it
+    /// is settable here; see `channels_sv2` for sizing.
+    ///
+    /// Do not lower it on a pool serving job-declaration clients: each accepted
+    /// `SetCustomMiningJob` retires the active job, so the rate is the client's, not this pool's.
+    #[serde(default)]
+    max_past_jobs: Option<usize>,
 }
 
 impl PoolConfig {
@@ -83,6 +93,7 @@ impl PoolConfig {
             pool_signature: pool_connection.signature,
             shares_per_minute,
             share_batch_size,
+            max_past_jobs: None,
             log_file: None,
             server_id,
             supported_extensions,
@@ -139,6 +150,17 @@ impl PoolConfig {
     }
 
     /// Returns the shares per minute.
+    /// Past jobs retained per channel, or `None` to use the `channels_sv2` default.
+    pub fn max_past_jobs(&self) -> Option<usize> {
+        self.max_past_jobs
+    }
+
+    /// Overrides the retained past-jobs cap. Mainly for tests and A/B deployments that vary
+    /// it between otherwise-identical instances.
+    pub fn set_max_past_jobs(&mut self, max_past_jobs: Option<usize>) {
+        self.max_past_jobs = max_past_jobs;
+    }
+
     pub fn shares_per_minute(&self) -> f32 {
         self.shares_per_minute
     }
@@ -237,5 +259,67 @@ impl ConnectionConfig {
             cert_validity_sec,
             signature,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::config_helpers::load_config;
+
+    /// Writes a minimal pool config with `extra` spliced in, so each test varies exactly
+    /// one thing, and loads it through the SAME loader the binary uses — not a bare
+    /// `toml::from_str`. That way the test covers serde attributes, the env-override layer
+    /// and the enum handling, rather than just the struct definition.
+    fn load_with(extra: &str, name: &str) -> PoolConfig {
+        let path = std::env::temp_dir().join(format!("pool-config-{name}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+listen_address = "0.0.0.0:34254"
+authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
+cert_validity_sec = 3600
+coinbase_reward_script = "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)"
+pool_signature = "test"
+shares_per_minute = 6.0
+share_batch_size = 10
+{extra}
+
+[template_provider_type.Sv2Tp]
+address = "127.0.0.1:8442"
+"#
+            ),
+        )
+        .expect("write temp config");
+        let cfg = load_config(&path, "POOL_TEST_UNUSED", &[], &["template_provider_type"])
+            .expect("config loads");
+        let _ = std::fs::remove_file(&path);
+        cfg
+    }
+
+    #[test]
+    fn max_past_jobs_defaults_to_none_when_absent() {
+        // Absent must mean "use the library default", not 0: a zero cap would evict the job
+        // that just retired and reject the most common late share as invalid-job-id.
+        assert_eq!(load_with("", "absent").max_past_jobs(), None);
+    }
+
+    #[test]
+    fn max_past_jobs_is_read_from_config() {
+        // The A/B deployment varies this single value between otherwise-identical pools, so
+        // it has to survive loading verbatim.
+        assert_eq!(
+            load_with("max_past_jobs = 2", "set").max_past_jobs(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn max_past_jobs_setter_overrides() {
+        let mut cfg = load_with("", "setter");
+        cfg.set_max_past_jobs(Some(50));
+        assert_eq!(cfg.max_past_jobs(), Some(50));
     }
 }

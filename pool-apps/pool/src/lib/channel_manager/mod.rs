@@ -111,6 +111,8 @@ pub struct ChannelManager {
     pool_tag_string: String,
     share_batch_size: usize,
     shares_per_minute: SharesPerMinute,
+    /// Past jobs retained per channel; `None` uses the `channels_sv2` default.
+    max_past_jobs: Option<usize>,
     coinbase_reward_script: CoinbaseRewardScript,
     /// Protocol extensions that the pool supports (will accept if requested by clients).
     supported_extensions: Vec<u16>,
@@ -183,6 +185,14 @@ impl ChannelManager {
             downstream_receiver,
         };
 
+        // Record the cap actually in force. When unset it comes from the `channels_sv2`
+        // default, so it appears nowhere in this application's own config and is
+        // otherwise not recoverable from a running pool.
+        match config.max_past_jobs() {
+            Some(n) if n > 0 => info!(max_past_jobs = n, "past-jobs retention cap configured"),
+            _ => info!("past-jobs retention cap: using channels_sv2 default"),
+        }
+
         let channel_manager = ChannelManager {
             downstreams: SharedMap::new(),
             extranonce_allocator: SharedLock::new(extranonce_allocator),
@@ -194,6 +204,7 @@ impl ChannelManager {
             channel_manager_io,
             share_batch_size: config.share_batch_size(),
             shares_per_minute: config.shares_per_minute(),
+            max_past_jobs: config.max_past_jobs(),
             pool_tag_string: config.pool_signature().to_string(),
             coinbase_reward_script: config.coinbase_reward_script().clone(),
             supported_extensions: config.supported_extensions().to_vec(),
