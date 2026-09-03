@@ -91,6 +91,28 @@ For connections with a Sv2 Template Provider, you may want to verify that your T
 
 Make sure the machine running the JDC has its clock synced with an NTP server. Certificate validation is time-sensitive, and even a small drift of a few seconds can trigger an `InvalidCertificate` error.
 
+### Upstreams
+
+The `[[upstreams]]` array lists the Pool + JDS pairs JDC connects to, tried in the order they appear
+in the file. Each entry requires a `user_identity`: the account name JDC presents to that upstream.
+JDC sends it unchanged as `OpenExtendedMiningChannel.user_identity` to the Pool and as
+`AllocateMiningJobToken.user_identifier` to the JDS.
+
+```toml
+[[upstreams]]
+authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+pool_address = "0.0.0.0"
+pool_port = 3333
+jds_address = "0.0.0.0"
+jds_port = 3334
+user_identity = "your_primary_username_here"
+```
+
+`user_identity` belongs to the upstream rather than to JDC as a whole because each upstream is a
+separate operator: the account you hold at your primary pool is not the account you hold at your
+backup. It is mandatory, and JDC exits with an error if any entry omits it. Solo mining mode has no
+upstreams (`upstreams = []`) and therefore no `user_identity`.
+
 ### Miner Telemetry
 
 JDC can enrich the monitoring API with telemetry from SV2 ASIC miners that connect directly to JDC.
