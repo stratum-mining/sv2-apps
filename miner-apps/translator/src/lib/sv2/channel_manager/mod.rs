@@ -136,6 +136,8 @@ pub struct ChannelManager {
     pub supported_extensions: Vec<u16>,
     /// Extensions that the translator requires (must be supported by server)
     pub required_extensions: Vec<u16>,
+    /// Past jobs retained per channel; `None` uses the `channels_sv2` default.
+    pub max_past_jobs: Option<usize>,
     /// Store pending channel info by downstream_id: (user_identity, hashrate,
     /// downstream_extranonce_len)
     ///
@@ -305,8 +307,17 @@ impl ChannelManager {
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
         tproxy_mode: TproxyMode,
+        max_past_jobs: Option<usize>,
         #[cfg(feature = "monitoring")] report_hashrate: bool,
     ) -> Self {
+        // Record the cap actually in force. When unset it comes from the `channels_sv2`
+        // default, so it appears nowhere in this application's own config and is
+        // otherwise not recoverable from a running instance.
+        match max_past_jobs {
+            Some(n) if n > 0 => info!(max_past_jobs = n, "past-jobs retention cap configured"),
+            _ => info!("past-jobs retention cap: using channels_sv2 default"),
+        }
+
         let channel_manager_io = ChannelManagerIo::new(
             upstream_sender,
             upstream_receiver,
@@ -318,6 +329,7 @@ impl ChannelManager {
             channel_manager_io,
             supported_extensions,
             required_extensions,
+            max_past_jobs,
             pending_downstream_channels: SharedMap::new(),
             extended_channels: SharedMap::new(),
             group_channels: SharedMap::new(),
@@ -948,6 +960,7 @@ impl ChannelManager {
                     hashrate,
                     true,
                     min_extranonce_size as u16,
+                    self.max_past_jobs,
                 );
                 self.extended_channels
                     .insert(next_channel_id, new_downstream_extended_channel);
@@ -1097,6 +1110,7 @@ mod tests {
             vec![],
             vec![],
             TproxyMode::from(true),
+            None,
             #[cfg(feature = "monitoring")]
             true,
         )
@@ -1116,6 +1130,7 @@ mod tests {
             vec![],
             vec![],
             TproxyMode::Aggregated,
+            None,
             #[cfg(feature = "monitoring")]
             true,
         );
@@ -1130,6 +1145,7 @@ mod tests {
                 1.0,
                 true,
                 8,
+                None,
             ),
         );
         manager
@@ -1254,6 +1270,7 @@ mod tests {
             vec![],
             vec![],
             TproxyMode::Aggregated,
+            None,
             #[cfg(feature = "monitoring")]
             true,
         ));
@@ -1344,6 +1361,7 @@ mod tests {
                 1.0,
                 true,
                 6,
+                None,
             ),
         );
 

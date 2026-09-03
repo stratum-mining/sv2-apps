@@ -256,6 +256,7 @@ impl TranslatorRuntime<IoReady> {
             self.translator.config.supported_extensions.clone(),
             self.translator.config.required_extensions.clone(),
             self.tproxy_mode,
+            self.translator.config.max_past_jobs,
             #[cfg(feature = "monitoring")]
             self.translator
                 .config

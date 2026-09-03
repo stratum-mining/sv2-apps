@@ -179,6 +179,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     nominal_hashrate,
                     version_rolling,
                     m.extranonce_size,
+                    self.max_past_jobs,
                 );
                 self.extended_channels
                     .insert(AGGREGATED_CHANNEL_ID, upstream_channel);
@@ -197,6 +198,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     nominal_hashrate,
                     true,
                     downstream_extranonce_len as u16,
+                    self.max_past_jobs,
                 );
                 self.extended_channels
                     .insert(1, new_downstream_extended_channel);
@@ -329,6 +331,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     nominal_hashrate,
                     version_rolling,
                     downstream_extranonce_len as u16,
+                    self.max_past_jobs,
                 );
                 self.extended_channels
                     .insert(m.channel_id, new_downstream_extended_channel);

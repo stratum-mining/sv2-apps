@@ -39,6 +39,10 @@ upstreams = []
 
 # Templates come directly from the Template Provider below.
 
+# Past jobs retained per channel for late-share validation (optional). Unset or 0 uses the
+# channels_sv2 default of 16; set `ceil(16s / your job interval)` to reclaim ~4.5 kB per job.
+# max_past_jobs = 3
+
 # LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
 [miner_telemetry]
 cidrs = ["192.168.1.0/24"]

@@ -187,6 +187,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             hashrate,
             true,
             msg.extranonce_size,
+            self.max_past_jobs,
         );
 
         if let Some(prevhash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? {

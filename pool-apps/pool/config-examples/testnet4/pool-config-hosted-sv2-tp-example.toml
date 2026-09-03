@@ -25,6 +25,12 @@ pool_signature = "Stratum V2 SRI Pool"
 shares_per_minute = 6.0
 # How many shares do we want to acknowledge in a batch
 share_batch_size = 10
+# Past jobs retained per channel for late-share validation (optional). Unset or 0 uses the
+# channels_sv2 default of 16; set `ceil(16s / your job interval)` to reclaim ~4.5 kB per job.
+# Keep the default if this pool serves job-declaration clients: each SetCustomMiningJob
+# retires the active job, so the client sets the rate.
+# max_past_jobs = 3
+
 
 # Monitoring HTTP server address for exposing channel data (optional)
 monitoring_address = "127.0.0.1:9090"

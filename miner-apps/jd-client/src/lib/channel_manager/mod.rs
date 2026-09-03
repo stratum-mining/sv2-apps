@@ -301,6 +301,8 @@ pub struct ChannelManager {
     miner_tag_string: String,
     share_batch_size: SharesBatchSize,
     shares_per_minute: SharesPerMinute,
+    /// Past jobs retained per channel; `None` uses the `channels_sv2` default.
+    max_past_jobs: Option<usize>,
     user_identity: Arc<OnceLock<String>>,
     reserved_downstream_rollable_extranonce_size: u8,
     /// This represent the current state of Upstream channel
@@ -398,6 +400,14 @@ impl ChannelManager {
             ExtranonceAllocator::new(Vec::new(), SOLO_FULL_EXTRANONCE_SIZE, JDC_MAX_CHANNELS)
                 .map_err(JDCError::<error::ChannelManager>::shutdown)?;
 
+        // Record the cap actually in force. When unset it comes from the `channels_sv2`
+        // default, so it appears nowhere in this application's own config and is
+        // otherwise not recoverable from a running instance.
+        match config.max_past_jobs() {
+            Some(n) if n > 0 => info!(max_past_jobs = n, "past-jobs retention cap configured"),
+            _ => info!("past-jobs retention cap: using channels_sv2 default"),
+        }
+
         let channel_manager_io = ChannelManagerIo {
             upstream_sender,
             upstream_receiver,
@@ -435,6 +445,7 @@ impl ChannelManager {
             cached_shares: SharedMap::new(),
             share_batch_size: config.share_batch_size(),
             shares_per_minute: config.shares_per_minute(),
+            max_past_jobs: config.max_past_jobs(),
             miner_tag_string: config.jdc_signature().to_string(),
             user_identity: Arc::new(OnceLock::new()),
             reserved_downstream_rollable_extranonce_size: config
