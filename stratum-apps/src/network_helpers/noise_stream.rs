@@ -14,8 +14,8 @@ use std::time::Duration;
 use crate::network_helpers::Error;
 use stratum_core::{
     codec_sv2::{
-        EncodableFrame, Handshake, NoiseEncoder, StandardNoiseDecoder, Transport,
-        TransportDecryptState, TransportEncryptState,
+        EncodableFrame, Handshake, NoiseDecoder, NoiseEncoder, Transport, TransportDecryptState,
+        TransportEncryptState,
         state::{ExpectsHandshakeMessage, InitiatorSent},
     },
     noise_sv2::{INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE, Initiator, Responder},
@@ -53,7 +53,7 @@ pub struct NoiseTcpStream {
 /// and exposes a method to retrieve structured messages of type `Message`.
 pub struct NoiseTcpReadHalf {
     reader: OwnedReadHalf,
-    decoder: StandardNoiseDecoder,
+    decoder: NoiseDecoder,
     state: TransportDecryptState,
     current_frame_buf: Vec<u8>,
     bytes_read: usize,
@@ -82,9 +82,9 @@ impl NoiseTcpStream {
         timeout: Duration,
     ) -> Result<Self, Error> {
         let (mut reader, mut writer) = stream.into_split();
-        let mut decoder = StandardNoiseDecoder::new();
+        let mut decoder = NoiseDecoder::new();
         let mut encoder = NoiseEncoder::new();
-        let handshake = Handshake::new(initiator);
+        let handshake = Handshake::initiator(initiator);
 
         let (first_msg, handshake) = handshake.step_0()?;
         send_handshake_frame(&mut writer, first_msg, &mut encoder).await?;
@@ -121,9 +121,9 @@ impl NoiseTcpStream {
         timeout: Duration,
     ) -> Result<Self, Error> {
         let (mut reader, mut writer) = stream.into_split();
-        let mut decoder = StandardNoiseDecoder::new();
+        let mut decoder = NoiseDecoder::new();
         let mut encoder = NoiseEncoder::new();
-        let handshake = Handshake::new(responder);
+        let handshake = Handshake::responder(responder);
 
         let first_msg =
             receive_handshake_frame::<Responder>(&mut reader, &mut decoder, timeout).await?;
@@ -146,7 +146,7 @@ impl NoiseTcpStream {
     fn from_transport(
         reader: OwnedReadHalf,
         writer: OwnedWriteHalf,
-        decoder: StandardNoiseDecoder,
+        decoder: NoiseDecoder,
         encoder: NoiseEncoder,
         transport: Transport,
     ) -> Self {
@@ -321,7 +321,7 @@ async fn send_handshake_frame(
 
 async fn receive_handshake_frame<R: ExpectsHandshakeMessage>(
     reader: &mut OwnedReadHalf,
-    decoder: &mut StandardNoiseDecoder,
+    decoder: &mut NoiseDecoder,
     timeout: Duration,
 ) -> Result<HandshakeFrame, Error> {
     loop {
