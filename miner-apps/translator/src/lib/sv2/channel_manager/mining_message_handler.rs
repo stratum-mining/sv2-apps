@@ -813,8 +813,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                                     .clone()
                             })
                             .expect("aggregated channel must exist");
-                        new_extended_mining_job_message.0.channel_id = AGGREGATED_CHANNEL_ID;
-                        new_extended_mining_job_messages.push(new_extended_mining_job_message.0);
+                        new_extended_mining_job_message.job_message.channel_id =
+                            AGGREGATED_CHANNEL_ID;
+                        new_extended_mining_job_messages
+                            .push(new_extended_mining_job_message.job_message);
                     } else {
                         // we got a nonsense channel id, we should log an error and ignore
                         // the message
@@ -861,7 +863,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                                             .get_active_job()
                                             .expect("active job must exist")
                                             .clone();
-                                        Ok::<_, Self::Error>(new_extended_mining_job_message.0)
+                                        Ok::<_, Self::Error>(
+                                            new_extended_mining_job_message.job_message,
+                                        )
                                     })
                                     .ok_or(TproxyError::fallback(
                                         TproxyErrorKind::ChannelNotFound,
@@ -904,7 +908,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                                     .get_active_job()
                                     .expect("active job must exist")
                                     .clone();
-                                Ok::<_, Self::Error>(new_extended_mining_job_message.0)
+                                Ok::<_, Self::Error>(new_extended_mining_job_message.job_message)
                             });
                     let Some(new_extended_mining_job_message) = messages else {
                         // we got a nonsense channel id, we should log an error and ignore the
