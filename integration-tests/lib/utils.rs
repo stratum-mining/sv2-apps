@@ -19,14 +19,14 @@ use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::noise_connection::Connection,
     stratum_core::{
-        codec_sv2::{HandshakeRole, StandardEitherFrame},
-        framing_sv2::framing::{Frame, Sv2Frame},
+        framing_sv2::framing::Sv2Frame,
         noise_sv2::{Initiator, Responder},
         parsers_sv2::{
             AnyMessage, AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, IsSv2Message,
             Tlv, message_type_to_name, parse_message_frame_with_tlvs,
         },
     },
+    utils::types::OutboundFrame,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -228,7 +228,7 @@ pub async fn wait_for_client(listen_socket: SocketAddr) -> tokio::net::TcpStream
 
 pub async fn create_downstream(
     stream: tokio::net::TcpStream,
-) -> Option<(Receiver<MessageFrame>, Sender<MessageFrame>)> {
+) -> Option<(Receiver<MessageFrame>, Sender<OutboundFrame>)> {
     let pub_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
         .to_string()
         .parse::<Secp256k1PublicKey>()
@@ -243,12 +243,8 @@ pub async fn create_downstream(
         Responder::from_authority_kp(&pub_key, &prv_key, std::time::Duration::from_secs(10000))
             .unwrap();
 
-    if let Ok((receiver_from_client, sender_to_client)) = Connection::new::<AnyMessageOwned>(
-        stream,
-        HandshakeRole::Responder(responder),
-        CancellationToken::new(),
-    )
-    .await
+    if let Ok((receiver_from_client, sender_to_client)) =
+        Connection::accept::<OutboundFrame>(stream, responder, CancellationToken::new()).await
     {
         Some((receiver_from_client, sender_to_client))
     } else {
@@ -258,20 +254,16 @@ pub async fn create_downstream(
 
 pub async fn create_upstream(
     stream: tokio::net::TcpStream,
-) -> Option<(Receiver<MessageFrame>, Sender<MessageFrame>)> {
+) -> Option<(Receiver<MessageFrame>, Sender<OutboundFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
-    Connection::new::<AnyMessageOwned>(
-        stream,
-        HandshakeRole::Initiator(initiator),
-        CancellationToken::new(),
-    )
-    .await
-    .ok()
+    Connection::connect::<OutboundFrame>(stream, initiator, CancellationToken::new())
+        .await
+        .ok()
 }
 
 pub async fn recv_from_down_send_to_up(
     recv: Receiver<MessageFrame>,
-    send: Sender<MessageFrame>,
+    send: Sender<OutboundFrame>,
     downstream_messages: MessagesAggregator,
     action: Vec<InterceptAction>,
     identifier: &str,
@@ -311,21 +303,19 @@ pub async fn recv_from_down_send_to_up(
                     continue;
                 }
                 InterceptAction::ReplaceMessage(intercept_message) => {
-                    let intercept_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
-                        Sv2Frame::from_message(
-                            intercept_message.replacement_message.clone(),
-                            intercept_message.replacement_message.message_type(),
-                            0,
-                            false,
-                        )
-                        .expect("Failed to create the frame"),
-                    );
+                    let intercept_frame = Sv2Frame::from_message(
+                        intercept_message.replacement_message.clone(),
+                        intercept_message.replacement_message.message_type(),
+                        0,
+                        false,
+                    )
+                    .expect("Failed to create the frame");
                     downstream_messages.add_message_with_tlvs(
                         intercept_message.replacement_message.message_type(),
                         intercept_message.replacement_message.clone(),
                         None,
                     );
-                    send.send(intercept_frame)
+                    send.send(intercept_frame.into())
                         .await
                         .map_err(|_| SnifferError::UpstreamClosed)?;
                     tracing::info!(
@@ -338,7 +328,7 @@ pub async fn recv_from_down_send_to_up(
             }
         } else {
             downstream_messages.add_message_with_tlvs(msg_type, msg.clone(), tlv_fields);
-            send.send(frame)
+            send.send(frame.into())
                 .await
                 .map_err(|_| SnifferError::UpstreamClosed)?;
             tracing::info!(
@@ -354,7 +344,7 @@ pub async fn recv_from_down_send_to_up(
 
 pub async fn recv_from_up_send_to_down(
     recv: Receiver<MessageFrame>,
-    send: Sender<MessageFrame>,
+    send: Sender<OutboundFrame>,
     upstream_messages: MessagesAggregator,
     action: Vec<InterceptAction>,
     identifier: &str,
@@ -395,21 +385,19 @@ pub async fn recv_from_up_send_to_down(
                     continue;
                 }
                 InterceptAction::ReplaceMessage(intercept_message) => {
-                    let intercept_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
-                        Sv2Frame::from_message(
-                            intercept_message.replacement_message.clone(),
-                            intercept_message.replacement_message.message_type(),
-                            0,
-                            false,
-                        )
-                        .expect("Failed to create the frame"),
-                    );
+                    let intercept_frame = Sv2Frame::from_message(
+                        intercept_message.replacement_message.clone(),
+                        intercept_message.replacement_message.message_type(),
+                        0,
+                        false,
+                    )
+                    .expect("Failed to create the frame");
                     upstream_messages.add_message_with_tlvs(
                         intercept_message.replacement_message.message_type(),
                         intercept_message.replacement_message.clone(),
                         None,
                     );
-                    send.send(intercept_frame)
+                    send.send(intercept_frame.into())
                         .await
                         .map_err(|_| SnifferError::DownstreamClosed)?;
                     tracing::info!(
@@ -422,7 +410,7 @@ pub async fn recv_from_up_send_to_down(
             }
         } else {
             upstream_messages.add_message_with_tlvs(msg_type, msg.clone(), tlv_fields);
-            send.send(frame)
+            send.send(frame.into())
                 .await
                 .map_err(|_| SnifferError::DownstreamClosed)?;
             tracing::info!(
@@ -445,47 +433,34 @@ pub fn message_from_frame_with_tlvs(
     frame: &mut MessageFrame,
     negotiated_extensions: &[u16],
 ) -> (MsgType, AnyMessageOwned, Option<Vec<Tlv>>) {
-    match frame {
-        Frame::Sv2(frame) => {
-            if let Some(header) = frame.get_header() {
-                let payload = frame.payload();
+    let header = frame.header();
+    let payload = frame.payload();
 
-                // Try to parse with TLV support if extensions are negotiated
-                if !negotiated_extensions.is_empty() {
-                    match parse_message_frame_with_tlvs(header, payload, negotiated_extensions) {
-                        Ok((message, tlv_fields)) => {
-                            let message = into_owned(message);
-                            return (header.msg_type(), message, tlv_fields);
-                        }
-                        Err(e) => {
-                            println!(
-                                "Failed to parse frame with TLVs: {e:?}, falling back to standard parsing"
-                            );
-                        }
-                    }
-                }
-
-                // Fallback to standard parsing without TLV support
-                let mut payload = frame.payload().to_vec();
-                let message: Result<AnyMessage<'_>, _> =
-                    (header, payload.as_mut_slice()).try_into();
-                match message {
-                    Ok(message) => {
-                        let message = into_owned(message);
-                        (header.msg_type(), message, None)
-                    }
-                    _ => {
-                        println!("Received frame with invalid payload or message type: {frame:?}");
-                        panic!();
-                    }
-                }
-            } else {
-                println!("Received frame with invalid header: {frame:?}");
-                panic!();
+    // Try to parse with TLV support if extensions are negotiated
+    if !negotiated_extensions.is_empty() {
+        match parse_message_frame_with_tlvs(header, payload, negotiated_extensions) {
+            Ok((message, tlv_fields)) => {
+                let message = into_owned(message);
+                return (header.msg_type(), message, tlv_fields);
+            }
+            Err(e) => {
+                println!(
+                    "Failed to parse frame with TLVs: {e:?}, falling back to standard parsing"
+                );
             }
         }
-        Frame::HandShake(f) => {
-            println!("Received unexpected handshake frame: {f:?}");
+    }
+
+    // Fallback to standard parsing without TLV support
+    let mut payload = frame.payload().to_vec();
+    let message: Result<AnyMessage<'_>, _> = (header, payload.as_mut_slice()).try_into();
+    match message {
+        Ok(message) => {
+            let message = into_owned(message);
+            (header.msg_type(), message, None)
+        }
+        _ => {
+            println!("Received frame with invalid payload or message type: {frame:?}");
             panic!();
         }
     }

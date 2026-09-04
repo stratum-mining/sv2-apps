@@ -23,7 +23,6 @@ use stratum_apps::{
     network_helpers::noise_stream::NoiseTcpStream,
     stratum_core::{
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         job_declaration_sv2::DeclareMiningJobOwned,
         parsers_sv2::{AnyMessageOwned, parse_message_frame_with_tlvs},
@@ -32,7 +31,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{DownstreamId, Message, RequestId, Sv2Frame},
+        types::{DownstreamId, InboundFrame, OutboundFrame, RequestId},
     },
 };
 use tracing::{debug, error, info, warn};
@@ -49,8 +48,8 @@ pub type PendingDeclareMiningJob = (Instant, DeclareMiningJobOwned);
 pub struct DownstreamIo {
     to_job_declarator_sender: Sender<DownstreamJobDeclarationMessage>,
     from_job_declarator_receiver: Receiver<JobDeclarationMessage>,
-    to_downstream_sender: Sender<Sv2Frame>,
-    from_downstream_receiver: Receiver<Sv2Frame>,
+    to_downstream_sender: Sender<OutboundFrame>,
+    from_downstream_receiver: Receiver<InboundFrame>,
 }
 
 /// Represents a downstream client connected to this node.
@@ -113,7 +112,7 @@ impl Downstream {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         downstream_id: DownstreamId,
-        noise_stream: NoiseTcpStream<Message>,
+        noise_stream: NoiseTcpStream,
         to_job_declarator_sender: Sender<DownstreamJobDeclarationMessage>,
         from_job_declarator_receiver: Receiver<JobDeclarationMessage>,
         supported_extensions: Vec<u16>,
@@ -122,8 +121,8 @@ impl Downstream {
         global_cancellation_token: CancellationToken,
     ) -> Self {
         let (noise_stream_reader, noise_stream_writer) = noise_stream.into_split();
-        let (inbound_tx, inbound_rx) = unbounded::<Sv2Frame>();
-        let (outbound_tx, outbound_rx) = unbounded::<Sv2Frame>();
+        let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
+        let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         let downstream_cancellation_token = global_cancellation_token.child_token();
 
@@ -277,10 +276,7 @@ impl Downstream {
             .await
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
 
-        let header = frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            error::JDSError::disconnect(framing_sv2::Error::MissingHeader, self.downstream_id)
-        })?;
+        let header = frame.header();
 
         if header.ext_type() == 0 && header.msg_type() == MESSAGE_TYPE_SETUP_CONNECTION {
             self.handle_common_message_frame_from_client(
@@ -319,8 +315,7 @@ impl Downstream {
         };
 
         let message = AnyMessageOwned::JobDeclaration(msg);
-        let std_frame: Sv2Frame = message
-            .try_into()
+        let std_frame = OutboundFrame::from_message(message)
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
 
         self.downstream_io
@@ -340,10 +335,7 @@ impl Downstream {
             .recv()
             .await
             .map_err(|e| error::JDSError::disconnect(e, self.downstream_id))?;
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            error::JDSError::disconnect(framing_sv2::Error::MissingHeader, self.downstream_id)
-        })?;
+        let header = sv2_frame.header();
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::JobDeclaration => {

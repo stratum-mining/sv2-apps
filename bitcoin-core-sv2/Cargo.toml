@@ -27,4 +27,4 @@ bitcoin_capnp_types_v31 = { package = "bitcoin-capnp-types", version = "0.2.1" }
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before bitcoin-core-sv2 is published to crates.io
 # with the proper version of stratum-core being fetched from crates.io as well
-stratum-core = { git = "https://github.com/stratum-mining/stratum", branch = "main" }
+stratum-core = { git = "https://github.com/bit-aloo/stratum", branch = "2026-08-25-refactor-codec-and-framing" }

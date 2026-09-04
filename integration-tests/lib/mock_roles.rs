@@ -1,16 +1,13 @@
 use crate::utils::{create_downstream, create_upstream, message_from_frame, wait_for_client};
 use async_channel::Sender;
 use std::{convert::TryInto, net::SocketAddr, time::Duration};
-use stratum_apps::{
-    stratum_core::{
-        codec_sv2::StandardEitherFrame,
-        common_messages_sv2::{
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
-            Protocol, SetupConnectionErrorOwned, SetupConnectionOwned, SetupConnectionSuccessOwned,
-        },
-        parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, IsSv2Message},
+use stratum_apps::stratum_core::{
+    codec_sv2::Sv2Frame,
+    common_messages_sv2::{
+        ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION, Protocol,
+        SetupConnectionErrorOwned, SetupConnectionOwned, SetupConnectionSuccessOwned,
     },
-    utils::types::Sv2Frame,
+    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, IsSv2Message},
 };
 use tokio::net::TcpStream;
 use tracing::info;
@@ -81,12 +78,10 @@ impl MockDownstream {
             let msg =
                 AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(setup_connection));
             let message_type = msg.message_type();
-            let frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
-                Sv2Frame::from_message(msg, message_type, 0, false)
-                    .expect("Failed to create SetupConnection frame"),
-            );
+            let frame = Sv2Frame::from_message(msg, message_type, 0, false)
+                .expect("Failed to create SetupConnection frame");
             upstream_sender
-                .send(frame)
+                .send(frame.into())
                 .await
                 .expect("Failed to send SetupConnection");
             info!(
@@ -108,11 +103,9 @@ impl MockDownstream {
         tokio::spawn(async move {
             while let Ok(message) = proxy_receiver.recv().await {
                 let message_type = message.message_type();
-                let frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
-                    Sv2Frame::from_message(message, message_type, 0, false)
-                        .expect("Failed to create frame from message"),
-                );
-                if upstream_sender.send(frame).await.is_err() {
+                let frame = Sv2Frame::from_message(message, message_type, 0, false)
+                    .expect("Failed to create frame from message");
+                if upstream_sender.send(frame.into()).await.is_err() {
                     break;
                 }
             }
@@ -182,12 +175,11 @@ impl MockUpstream {
                                 ),
                             );
                             let success_type = success.message_type();
-                            let response_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
+                            let response_frame =
                                 Sv2Frame::from_message(success, success_type, 0, false)
-                                    .expect("Failed to create SetupConnectionSuccess frame"),
-                            );
+                                    .expect("Failed to create SetupConnectionSuccess frame");
                             downstream_sender
-                                .send(response_frame)
+                                .send(response_frame.into())
                                 .await
                                 .expect("Failed to send SetupConnectionSuccess");
                             info!(
@@ -215,12 +207,11 @@ impl MockUpstream {
                                     },
                                 ));
                             let error_type = error.message_type();
-                            let response_frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
+                            let response_frame =
                                 Sv2Frame::from_message(error, error_type, 0, false)
-                                    .expect("Failed to create SetupConnectionError frame"),
-                            );
+                                    .expect("Failed to create SetupConnectionError frame");
                             downstream_sender
-                                .send(response_frame)
+                                .send(response_frame.into())
                                 .await
                                 .expect("Failed to send SetupConnectionError");
                             info!(
@@ -246,11 +237,9 @@ impl MockUpstream {
 
             while let Ok(message) = proxy_receiver.recv().await {
                 let message_type = message.message_type();
-                let frame = StandardEitherFrame::<AnyMessageOwned>::Sv2(
-                    Sv2Frame::from_message(message, message_type, 0, false)
-                        .expect("Failed to create frame from message"),
-                );
-                if downstream_sender.send(frame).await.is_err() {
+                let frame = Sv2Frame::from_message(message, message_type, 0, false)
+                    .expect("Failed to create frame from message");
+                if downstream_sender.send(frame.into()).await.is_err() {
                     break;
                 }
             }

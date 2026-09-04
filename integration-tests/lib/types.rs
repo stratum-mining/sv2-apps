@@ -1,4 +1,5 @@
-use stratum_apps::stratum_core::{codec_sv2::StandardEitherFrame, parsers_sv2::AnyMessageOwned};
+use stratum_apps::stratum_core::codec_sv2::StandardSerializedFrame;
 
-pub type MessageFrame = StandardEitherFrame<AnyMessageOwned>;
+/// A frame received from a role under test.
+pub type MessageFrame = StandardSerializedFrame;
 pub type MsgType = u8;

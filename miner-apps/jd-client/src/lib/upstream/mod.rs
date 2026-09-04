@@ -24,14 +24,13 @@ use stratum_apps::{
         common_messages_sv2::{
             MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
         },
-        framing_sv2,
         handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         parsers_sv2::AnyMessageOwned,
     },
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{Message, Sv2Frame},
+        types::{InboundFrame, Message, OutboundFrame},
     },
 };
 use tokio::net::TcpStream;
@@ -53,10 +52,10 @@ mod message_handler;
 /// - `inbound_rx` → receives frames inbound from upstream
 #[derive(Clone)]
 pub struct UpstreamIo {
-    channel_manager_sender: Sender<Sv2Frame>,
-    channel_manager_receiver: Receiver<Sv2Frame>,
-    upstream_sender: Sender<Sv2Frame>,
-    upstream_receiver: Receiver<Sv2Frame>,
+    channel_manager_sender: Sender<InboundFrame>,
+    channel_manager_receiver: Receiver<OutboundFrame>,
+    upstream_sender: Sender<OutboundFrame>,
+    upstream_receiver: Receiver<InboundFrame>,
 }
 
 impl UpstreamIo {
@@ -145,8 +144,8 @@ impl Upstream {
     /// - Spawns IO tasks to handle inbound/outbound traffic
     pub async fn new(
         upstream_entry: &UpstreamEntry,
-        channel_manager_sender: Sender<Sv2Frame>,
-        channel_manager_receiver: Receiver<Sv2Frame>,
+        channel_manager_sender: Sender<InboundFrame>,
+        channel_manager_receiver: Receiver<OutboundFrame>,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
@@ -183,8 +182,8 @@ impl Upstream {
             }
         }?;
 
-        let (inbound_tx, inbound_rx) = unbounded::<Sv2Frame>();
-        let (outbound_tx, outbound_rx) = unbounded::<Sv2Frame>();
+        let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
+        let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
         spawn_io_tasks(
             task_manager,
@@ -223,8 +222,7 @@ impl Upstream {
             get_setup_connection_message(min_version, max_version, &self.address)
                 .map_err(JDCError::shutdown)?;
         debug!(?setup_connection, "Prepared `SetupConnection` message");
-        let sv2_frame: Sv2Frame = Message::Common(setup_connection.into())
-            .try_into()
+        let sv2_frame = OutboundFrame::from_message(Message::Common(setup_connection.into()))
             .map_err(JDCError::shutdown)?;
         debug!(?sv2_frame, "Encoded `SetupConnection` frame");
 
@@ -246,13 +244,10 @@ impl Upstream {
             }
         };
 
-        let mut incoming: Sv2Frame = incoming_frame;
+        let mut incoming: InboundFrame = incoming_frame;
         debug!(?incoming, "Decoded inbound handshake frame");
 
-        let header = incoming.get_header().ok_or_else(|| {
-            error!("Handshake frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = incoming.header();
 
         info!(ext_type = ?header.ext_type(), msg_type = ?header.msg_type(), "Dispatching inbound handshake message");
 
@@ -304,9 +299,9 @@ impl Upstream {
             self.required_extensions
         );
 
-        let sv2_frame: Sv2Frame = AnyMessageOwned::Extensions(request_extensions.into())
-            .try_into()
-            .map_err(JDCError::shutdown)?;
+        let sv2_frame =
+            OutboundFrame::from_message(AnyMessageOwned::Extensions(request_extensions.into()))
+                .map_err(JDCError::shutdown)?;
 
         self.upstream_io
             .upstream_sender
@@ -427,10 +422,7 @@ impl Upstream {
             .recv()
             .await
             .map_err(JDCError::fallback)?;
-        let header = sv2_frame.get_header().ok_or_else(|| {
-            error!("SV2 frame missing header");
-            JDCError::fallback(framing_sv2::Error::MissingHeader)
-        })?;
+        let header = sv2_frame.header();
         let message_type = header.msg_type();
         let extension_type = header.ext_type();
 
@@ -483,6 +475,19 @@ impl Upstream {
 
 #[cfg(test)]
 mod tests {
+
+    // A peer sends framed bytes, so a test standing in for one has to frame and serialize the
+    // message it injects.
+    fn serialize_frame(message: Message) -> InboundFrame {
+        use stratum_apps::stratum_core::codec_sv2::EncodableFrame as _;
+        let frame =
+            OutboundFrame::from_message(message).expect("Failed to frame the injected message");
+        let mut bytes = vec![0u8; frame.encoded_length()];
+        frame
+            .encode_into(&mut bytes)
+            .expect("Failed to serialize the injected frame");
+        InboundFrame::from_bytes(bytes.into()).expect("Injected frame is a whole frame")
+    }
     use super::*;
     use stratum_apps::stratum_core::{
         common_messages_sv2::ChannelEndpointChangedOwned, parsers_sv2::CommonMessagesOwned,
@@ -506,13 +511,11 @@ mod tests {
             address: "127.0.0.1:1234".parse().expect("valid socket address"),
         };
 
-        let response: Sv2Frame = Message::Common(CommonMessagesOwned::ChannelEndpointChanged(
+        let response = Message::Common(CommonMessagesOwned::ChannelEndpointChanged(
             ChannelEndpointChangedOwned { channel_id: 0 },
-        ))
-        .try_into()
-        .expect("Failed to serialize ChannelEndpointChanged frame");
+        ));
         upstream_inbound_sender
-            .send(response)
+            .send(serialize_frame(response))
             .await
             .expect("Failed to inject ChannelEndpointChanged response");
 

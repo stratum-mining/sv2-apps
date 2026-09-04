@@ -2,7 +2,6 @@ use crate::{
     downstream::Downstream,
     error::{self, PoolError, PoolErrorKind},
 };
-use std::convert::TryInto;
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Seq064KOwned,
@@ -12,7 +11,7 @@ use stratum_apps::{
         handlers_sv2::HandleExtensionsFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::OutboundFrame,
 };
 use tracing::{error, info};
 
@@ -87,8 +86,7 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                     .map_err(PoolError::shutdown)?,
             };
 
-            let frame: Sv2Frame = AnyMessageOwned::Extensions(error.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(error.into()))
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender
@@ -127,8 +125,7 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                     .map_err(PoolError::shutdown)?,
             };
 
-            let frame: Sv2Frame = AnyMessageOwned::Extensions(success.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(success.into()))
                 .map_err(PoolError::shutdown)?;
             self.downstream_io
                 .downstream_sender

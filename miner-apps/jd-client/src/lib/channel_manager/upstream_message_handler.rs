@@ -24,7 +24,7 @@ use stratum_apps::{
         mining_sv2::*,
         parsers_sv2::{AnyMessageOwned, MiningOwned, Tlv},
     },
-    utils::types::Sv2Frame,
+    utils::types::OutboundFrame,
 };
 use tracing::{debug, error, info, warn};
 
@@ -129,8 +129,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             let close_channel =
                 create_close_channel_msg(msg.channel_id, "downstream not available");
             let close_channel = MiningOwned::CloseChannel(close_channel);
-            let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(close_channel)
-                .try_into()
+            let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(close_channel))
                 .map_err(JDCError::shutdown)?;
             self.channel_manager_io
                 .upstream_sender
@@ -162,8 +161,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 let close_channel =
                     create_close_channel_msg(msg.channel_id, "downstream not available");
                 let close_channel = MiningOwned::CloseChannel(close_channel);
-                let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(close_channel)
-                    .try_into()
+                let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(close_channel))
                     .map_err(JDCError::shutdown)?;
                 self.channel_manager_io
                     .upstream_sender
@@ -293,9 +291,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             if self.mode.is_coinbase_only() {
                 if let Some(custom_job) = set_custom_job {
                     let set_custom_job = MiningOwned::SetCustomMiningJob(custom_job);
-                    let sv2_frame: Sv2Frame = AnyMessageOwned::Mining(set_custom_job)
-                        .try_into()
-                        .map_err(JDCError::shutdown)?;
+                    let sv2_frame =
+                        OutboundFrame::from_message(AnyMessageOwned::Mining(set_custom_job))
+                            .map_err(JDCError::shutdown)?;
                     self.channel_manager_io
                         .upstream_sender
                         .send(sv2_frame)
