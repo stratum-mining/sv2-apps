@@ -15,14 +15,14 @@ use tracing::{debug, error};
 
 pub struct Connection;
 
-struct ConnectionState<F> {
+struct ConnectionIo<F> {
     sender_incoming: Sender<StandardSerializedFrame>,
     receiver_incoming: Receiver<StandardSerializedFrame>,
     sender_outgoing: Sender<F>,
     receiver_outgoing: Receiver<F>,
 }
 
-impl<F> ConnectionState<F> {
+impl<F> ConnectionIo<F> {
     fn close_all(&self) {
         self.sender_incoming.close();
         self.receiver_incoming.close();
@@ -72,7 +72,7 @@ impl Connection {
         let (sender_incoming, receiver_incoming) = unbounded();
         let (sender_outgoing, receiver_outgoing) = unbounded();
 
-        let conn_state = Arc::new(ConnectionState {
+        let conn_state = Arc::new(ConnectionIo {
             sender_incoming,
             receiver_incoming: receiver_incoming.clone(),
             sender_outgoing: sender_outgoing.clone(),
@@ -92,7 +92,7 @@ impl Connection {
     }
     fn spawn_reader<F: Send + 'static>(
         mut read_half: NoiseTcpReadHalf,
-        conn_state: Arc<ConnectionState<F>>,
+        conn_state: Arc<ConnectionIo<F>>,
         cancellation_token: CancellationToken,
     ) -> task::JoinHandle<()> {
         let sender_incoming = conn_state.sender_incoming.clone();
@@ -125,7 +125,7 @@ impl Connection {
 
     fn spawn_writer<F>(
         mut write_half: NoiseTcpWriteHalf,
-        conn_state: Arc<ConnectionState<F>>,
+        conn_state: Arc<ConnectionIo<F>>,
         cancellation_token: CancellationToken,
     ) -> task::JoinHandle<()>
     where
