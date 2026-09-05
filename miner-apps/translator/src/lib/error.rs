@@ -183,6 +183,8 @@ pub enum TproxyErrorKind {
     ChannelErrorReceiver(async_channel::RecvError),
     /// Channel sender error
     ChannelErrorSender,
+    /// A downstream sent too many SV1 messages while waiting for its SV2 channel to open.
+    Sv1HandshakeMessageQueueFull,
     /// Operation timed out
     Timeout,
     /// Error converting SetDifficulty to Message
@@ -219,6 +221,8 @@ pub enum TproxyErrorKind {
     DownstreamNotFoundWithChannelId(ChannelId),
     /// Channel not found
     ChannelNotFound,
+    /// An upstream identifier is already used by a different live channel scope.
+    ChannelIdAlreadyInUse(ChannelId),
     /// Failed to process SetNewPrevHash message
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
@@ -253,6 +257,7 @@ impl fmt::Display for TproxyErrorKind {
             PoisonLock => write!(f, "Poison Lock error"),
             ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
+            Sv1HandshakeMessageQueueFull => write!(f, "SV1 handshake message queue is full"),
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
@@ -299,6 +304,9 @@ impl fmt::Display for TproxyErrorKind {
                 write!(f, "Downstream not found with channel id: {channel_id}")
             }
             ChannelNotFound => write!(f, "Channel not found"),
+            ChannelIdAlreadyInUse(channel_id) => {
+                write!(f, "Channel ID is already in use: {channel_id}")
+            }
             FailedToProcessSetNewPrevHash => write!(f, "Failed to process SetNewPrevHash message"),
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")

@@ -6,8 +6,8 @@
 //! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
 //!   intentionally mismatched.
 //! - `DeclareMiningJob` does not retain client-supplied transactions when validation fails.
-//! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without
-//!   tearing down the IPC connection.
+//! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without tearing
+//!   down the IPC connection.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
