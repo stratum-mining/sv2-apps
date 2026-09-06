@@ -180,7 +180,16 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     version_rolling,
                     m.extranonce_size,
                     self.max_past_jobs,
-                );
+                )
+                .map_err(|e| {
+                    // an upstream that hands out a target no share can meet is misbehaving, so
+                    // fall back
+                    error!(
+                        "Upstream OpenExtendedMiningChannelSuccess rejected: {:?}",
+                        e
+                    );
+                    TproxyError::fallback(TproxyErrorKind::OpenMiningChannelError)
+                })?;
                 self.extended_channels
                     .insert(AGGREGATED_CHANNEL_ID, upstream_channel);
 
@@ -199,7 +208,14 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     true,
                     downstream_extranonce_len as u16,
                     self.max_past_jobs,
-                );
+                )
+                .map_err(|e| {
+                    error!(
+                        "Upstream OpenExtendedMiningChannelSuccess rejected: {:?}",
+                        e
+                    );
+                    TproxyError::fallback(TproxyErrorKind::OpenMiningChannelError)
+                })?;
                 self.extended_channels
                     .insert(1, new_downstream_extended_channel);
                 // Keep the allocator alive; subsequent downstream channels in
@@ -332,7 +348,16 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     version_rolling,
                     downstream_extranonce_len as u16,
                     self.max_past_jobs,
-                );
+                )
+                .map_err(|e| {
+                    // an upstream that hands out a target no share can meet is misbehaving, so
+                    // fall back
+                    error!(
+                        "Upstream OpenExtendedMiningChannelSuccess rejected: {:?}",
+                        e
+                    );
+                    TproxyError::fallback(TproxyErrorKind::OpenMiningChannelError)
+                })?;
                 self.extended_channels
                     .insert(m.channel_id, new_downstream_extended_channel);
 
@@ -788,8 +813,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                                     .clone()
                             })
                             .expect("aggregated channel must exist");
-                        new_extended_mining_job_message.0.channel_id = AGGREGATED_CHANNEL_ID;
-                        new_extended_mining_job_messages.push(new_extended_mining_job_message.0);
+                        new_extended_mining_job_message.job_message.channel_id =
+                            AGGREGATED_CHANNEL_ID;
+                        new_extended_mining_job_messages
+                            .push(new_extended_mining_job_message.job_message);
                     } else {
                         // we got a nonsense channel id, we should log an error and ignore
                         // the message
@@ -836,7 +863,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                                             .get_active_job()
                                             .expect("active job must exist")
                                             .clone();
-                                        Ok::<_, Self::Error>(new_extended_mining_job_message.0)
+                                        Ok::<_, Self::Error>(
+                                            new_extended_mining_job_message.job_message,
+                                        )
                                     })
                                     .ok_or(TproxyError::fallback(
                                         TproxyErrorKind::ChannelNotFound,
@@ -879,7 +908,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                                     .get_active_job()
                                     .expect("active job must exist")
                                     .clone();
-                                Ok::<_, Self::Error>(new_extended_mining_job_message.0)
+                                Ok::<_, Self::Error>(new_extended_mining_job_message.job_message)
                             });
                     let Some(new_extended_mining_job_message) = messages else {
                         // we got a nonsense channel id, we should log an error and ignore the
@@ -998,10 +1027,17 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
                 // was the message sent to the aggregated channel?
                 if aggregated_channel_id == m.channel_id || group_channel_id == m.channel_id {
-                    // Update target for all extended channels (including AGGREGATED_CHANNEL_ID)
-                    self.extended_channels.for_each_mut(|_, channel| {
-                        channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()));
-                    });
+                    // Update target for all extended channels (including AGGREGATED_CHANNEL_ID);
+                    // an upstream that hands out a target no share can meet is misbehaving, so
+                    // fall back
+                    self.extended_channels.try_for_each_mut(|_, channel| {
+                        channel
+                            .set_target(Target::from_le_bytes(m.maximum_target.to_array()))
+                            .map_err(|e| {
+                                error!("Upstream SetTarget rejected: {:?}", e);
+                                TproxyError::fallback(TproxyErrorKind::FailedToProcessSetTarget)
+                            })
+                    })?;
 
                     let mut message = m_static.clone();
                     message.channel_id = AGGREGATED_CHANNEL_ID;
@@ -1026,9 +1062,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 for channel_id in channel_ids {
                     self.extended_channels
                         .with_mut(&channel_id, |channel| {
-                            channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()));
+                            channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()))
                         })
-                        .ok_or(TproxyError::fallback(TproxyErrorKind::ChannelNotFound))?;
+                        .ok_or(TproxyError::fallback(TproxyErrorKind::ChannelNotFound))?
+                        .map_err(|e| {
+                            error!("Upstream SetTarget rejected: {:?}", e);
+                            TproxyError::fallback(TproxyErrorKind::FailedToProcessSetTarget)
+                        })?;
 
                     let mut message = m_static.clone();
                     message.channel_id = channel_id;
@@ -1037,8 +1077,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             // if the message was not sent to a group channel, and we're not in aggregated
             // mode, we need to process the message for a specific channel
             } else {
-                let Some(()) = self.extended_channels.with_mut(&m.channel_id, |channel| {
-                    channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()));
+                let Some(res) = self.extended_channels.with_mut(&m.channel_id, |channel| {
+                    channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()))
                 }) else {
                     // we got a nonsense channel id, we should log an error and ignore the
                     // message
@@ -1048,6 +1088,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     );
                     return Err(TproxyError::log(TproxyErrorKind::ChannelNotFound));
                 };
+                res.map_err(|e| {
+                    error!("Upstream SetTarget rejected: {:?}", e);
+                    TproxyError::fallback(TproxyErrorKind::FailedToProcessSetTarget)
+                })?;
 
                 set_target_messages.push(m_static.clone());
             }

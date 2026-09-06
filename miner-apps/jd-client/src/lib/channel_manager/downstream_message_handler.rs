@@ -329,7 +329,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 Err(e) => {
                     error!(?e, "Failed to create standard channel");
                     match e {
-                        StandardChannelError::OpenChannelInvalidNominalHashrate(code) => {
+                        StandardChannelError::OpenChannelInvalidNominalHashrate(code)
+                        | StandardChannelError::OpenChannelInvalidMaxTarget(code) => {
                             messages.push((downstream_id, build_error(code)).into());
                             None
                         }
@@ -571,7 +572,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         Err(e) => {
                             error!(?e, "Failed to create ExtendedChannel");
                             match e {
-                                ExtendedChannelError::OpenChannelInvalidNominalHashrate(code) => {
+                                ExtendedChannelError::OpenChannelInvalidNominalHashrate(code)
+                                | ExtendedChannelError::OpenChannelInvalidMaxTarget(code) => {
                                     messages.push((downstream_id, build_error(code)).into());
                                     None
                                 }
@@ -759,9 +761,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         if let Err(e) = update_channel {
                             error!(channel_id, ?e, "StandardChannel update failed");
                             let err_code = match e {
-                                StandardChannelError::UpdateChannelInvalidNominalHashrate(code) => {
-                                    code
-                                }
+                                StandardChannelError::UpdateChannelInvalidNominalHashrate(code)
+                                | StandardChannelError::UpdateChannelInvalidMaxTarget(code) => code,
                                 _ => "internal-error",
                             };
                             if err_code != "internal-error" {
@@ -795,9 +796,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         if let Err(e) = update_channel {
                             error!(channel_id, ?e, "ExtendedChannel update failed");
                             let err_code = match e {
-                                ExtendedChannelError::UpdateChannelInvalidNominalHashrate(code) => {
-                                    code
-                                }
+                                ExtendedChannelError::UpdateChannelInvalidNominalHashrate(code)
+                                | ExtendedChannelError::UpdateChannelInvalidMaxTarget(code) => code,
                                 _ => "internal-error",
                             };
                             if err_code != "internal-error" {
