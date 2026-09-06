@@ -239,6 +239,8 @@ impl ChannelManager {
         let mut group_channel = match GroupChannel::new_for_pool(
             channel_id,
             FULL_EXTRANONCE_SIZE as usize,
+            // the extended channels importing the group's jobs are opened with rolling allowed
+            true,
             self.pool_tag_string.clone(),
         ) {
             Ok(channel) => channel,
