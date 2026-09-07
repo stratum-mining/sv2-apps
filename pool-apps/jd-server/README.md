@@ -12,6 +12,8 @@ The goal of the `JobValidationEngine` trait is to allow for Custom Job validatio
 
 The initial implementation is based on Bitcoin Core over IPC, but other approaches should be doable by implementing the `JobValidationEngine` trait.
 
+That implementation trusts whatever process serves Bitcoin Core's `node.sock`, including its block validation results. See [Socket Trust](../../bitcoin-core-sv2/README.md#socket-trust) for the deployment requirement this puts on the socket directory.
+
 Please note that token management is not covered here.
 More specifically, it is the `JobDeclarator` responsability to leverage a `TokenManager` to manage the tokens to be
 added to:
