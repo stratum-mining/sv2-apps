@@ -39,6 +39,8 @@ monitoring_cache_refresh_secs = 15
 # Bitcoin Core IPC config
 # Supported networks: mainnet, testnet4, signet, regtest
 # Default data_dir: ~/.bitcoin (Linux) or ~/Library/Application Support/Bitcoin (macOS)
+# The directory holding node.sock must be owned by the Bitcoin Core user and not writable by
+# others; run this app as that user. See bitcoin-core-sv2/README.md, section "Socket Trust".
 [template_provider_type.BitcoinCoreIpc]
 version = 31
 network = "mainnet"
