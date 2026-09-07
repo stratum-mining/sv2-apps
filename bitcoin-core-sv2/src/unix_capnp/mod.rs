@@ -6,9 +6,18 @@
 //!
 //! Due to `capnp-rpc` `!Send` internals, these runtimes must execute inside a
 //! [`tokio::task::LocalSet`].
+//!
+//! ## Socket trust
+//!
+//! The IPC transport carries no authentication. Each runtime connects to whatever process listens
+//! at the configured socket path and logs the uid serving it. Keeping that path replaceable only
+//! by the user running Bitcoin Core is a deployment requirement; see the crate README.
 
 pub mod v30x;
 pub mod v31x;
+
+use tokio::net::UnixStream;
+use tracing::{info, warn};
 
 /// The minimum block reserved weight established by Bitcoin Core.
 const MIN_BLOCK_RESERVED_WEIGHT: u64 = 2000;
@@ -38,3 +47,15 @@ const FORCE_UPDATE_MAX_ATTEMPTS: usize = 3;
 
 /// Backoff between `force_update_mempool_mirror` retry attempts (in milliseconds).
 const FORCE_UPDATE_RETRY_BACKOFF_MS: u64 = 25;
+
+/// Logs the effective uid of the process serving a connected Bitcoin Core IPC socket.
+///
+/// The IPC transport carries no authentication of its own: whatever process owns the socket at
+/// the configured path answers as Bitcoin Core. Logging the uid lets an operator confirm from the
+/// logs that the socket is served by the user running their node.
+pub(crate) fn log_peer_uid(stream: &UnixStream) {
+    match stream.peer_cred() {
+        Ok(cred) => info!("Bitcoin Core IPC socket is served by uid {}", cred.uid()),
+        Err(e) => warn!("Cannot read Bitcoin Core IPC peer credentials: {e}"),
+    }
+}
