@@ -756,9 +756,17 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
     async fn handle_set_custom_mining_job(
         &self,
         downstream_id: DownstreamId,
+        user_identity: Option<String>,
         set_custom_mining_job: SetCustomMiningJobOwned,
         allocated_token: JdToken, // Note: This is the corresponding DeclareMiningJob token
     ) -> SetCustomMiningJobResult {
+        tracing::debug!(
+            downstream_id,
+            user_identity = ?user_identity,
+            allocated_token,
+            "BitcoinCoreIPCEngine handling SetCustomMiningJob"
+        );
+
         let declared_custom_job = match self
             .downstream_states
             .with_mut(&downstream_id, |state| {

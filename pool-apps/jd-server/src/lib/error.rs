@@ -121,6 +121,7 @@ pub enum JDSErrorKind {
     OneshotRecv(tokio::sync::oneshot::error::RecvError),
     InvalidConfig(String),
     PoisonLock,
+    InvalidUserIdentifier(String),
 }
 
 impl<T> From<PoisonError<T>> for JDSErrorKind {
