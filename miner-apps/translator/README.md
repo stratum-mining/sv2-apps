@@ -81,6 +81,12 @@ Make sure the machine running the Translator Proxy has its clock synced with an 
 - `downstream_address`: IP address for SV1 miners to connect to
 - `downstream_port`: Port for SV1 miners to connect to
 
+tProxy uses `sv1_api` to parse the initial `mining.configure`, `mining.subscribe`, or
+`mining.authorize` request before requesting a mining channel. Configure is optional,
+and subscribe and authorize may arrive in either order. Ancillary setup requests may
+follow; shares are accepted only after both subscribe and authorize responses have
+completed.
+
 #### **Protocol Configuration**
 - `max_supported_version`/`min_supported_version`: SV2 protocol version support
 - `min_extranonce2_size`: Minimum extranonce2 size (affects mining efficiency)
