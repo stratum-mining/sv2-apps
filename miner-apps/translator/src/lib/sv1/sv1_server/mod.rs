@@ -67,7 +67,9 @@ use stratum_apps::{
             },
         },
         sv1_api::{
-            IsServer, json_rpc,
+            IsServer,
+            client_to_server::{SubmitError, SubmitOutcome},
+            json_rpc,
             methods::Client2Server,
             server_to_client,
             utils::{Extranonce, HexU32Be},
@@ -699,14 +701,14 @@ impl Sv1Server {
             .await
             .map_err(TproxyError::shutdown)?;
 
-        let (channel_id, setup_complete, opening) =
+        let (channel_id, subscribed, opening) =
             match self.with_registered_downstream(downstream_id, |downstream| {
                 downstream
                     .downstream_data
                     .with(|data| {
                         (
                             data.channel_id,
-                            data.session_state.setup_complete(),
+                            data.session_state.is_subscribed(),
                             !data.queued_sv1_handshake_messages.is_empty(),
                         )
                     })
@@ -726,16 +728,39 @@ impl Sv1Server {
                 downstream_id,
             )
         })?;
+        // A well-formed submit before mining.subscribe is a request-level rejection, not a
+        // transport violation. Reply without allocating an upstream channel so the miner can
+        // subscribe and retry on the same connection.
+        if !subscribed {
+            if let Client2Server::Submit(submit) = &request {
+                let response = submit
+                    .clone()
+                    .respond(SubmitOutcome::Rejected(SubmitError::NotSubscribed));
+                let downstream_sender = self
+                    .with_registered_downstream(downstream_id, |downstream| {
+                        Ok(downstream.downstream_io.downstream_sv1_sender.clone())
+                    })?;
+                downstream_sender
+                    .send(response.into())
+                    .await
+                    .map_err(|error| {
+                        error!(
+                            "Down: Failed to send not-subscribed response to downstream: {error:?}"
+                        );
+                        TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+                    })?;
+                return Ok(());
+            }
+        }
         // Configure is optional; subscribe and authorize may arrive in either order. Ancillary
-        // setup requests may follow the opening request, but a submit cannot start a session or
-        // be buffered for later acceptance before both setup responses have completed.
+        // setup requests may follow the opening request. A submit cannot start a session; the
+        // not-subscribed case was answered above, while an unauthorized worker is rejected by
+        // sv1_api after the channel needed for normal request processing is available.
         let can_start = matches!(
             request,
             Client2Server::Configure(_) | Client2Server::Subscribe(_) | Client2Server::Authorize(_)
         );
-        if (channel_id.is_none() && !opening && !can_start)
-            || (!setup_complete && matches!(request, Client2Server::Submit(_)))
-        {
+        if channel_id.is_none() && !opening && !can_start {
             return Err(TproxyError::disconnect(
                 TproxyErrorKind::Sv1RequestBeforeSetup,
                 downstream_id,
@@ -4310,7 +4335,6 @@ mod tests {
                 r#"{"id":1,"method":"mining.subscribe","params":[123]}"#,
                 r#"{"id":1,"method":"mining.authorize","params":[123, ""]}"#,
                 r#"{"id":1,"method":"mining.configure","params":null}"#,
-                r#"{"id":1,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#,
                 r#"{"id":1,"method":"mining.extranonce.subscribe","params":[]}"#,
                 r#"{"id":1,"method":"mining.suggest_difficulty","params":[1]}"#,
                 r#"{"id":1,"result":true,"error":null}"#,
@@ -4356,6 +4380,67 @@ mod tests {
                 assert!(server.vardiff.is_empty());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn submit_before_subscribe_returns_code_25_without_opening_channel() {
+        let (server, _to_server, from_server) = server_with_channels(false);
+        let (_events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, None, 100.0, false);
+
+        receive_request(&server, serde_json::from_str(r#"{"id":1,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap();
+
+        let response = responses.recv().await.unwrap();
+        let json_rpc::Message::ErrorResponse(response) = response else {
+            panic!("expected mining.submit error response");
+        };
+        assert_eq!(response.id, 1);
+        assert_eq!(response.error.unwrap().code, 25);
+        assert!(from_server.is_empty());
+        assert!(server.request_id_to_downstream_id.is_empty());
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        assert!(data.queued_sv1_handshake_messages.is_empty());
+                        assert!(data.channel_id.is_none());
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthorized_worker_returns_code_24_without_disconnect() {
+        let (server, _to_server, _from_server) = server_with_channels(false);
+        let (_events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(42), 100.0, false);
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.session_state = Sv1SessionState::Starting {
+                            subscribed: true,
+                            authorized: false,
+                        };
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        receive_request(&server, serde_json::from_str(r#"{"id":1,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap();
+
+        let response = responses.recv().await.unwrap();
+        let json_rpc::Message::ErrorResponse(response) = response else {
+            panic!("expected mining.submit error response");
+        };
+        assert_eq!(response.id, 1);
+        assert_eq!(response.error.unwrap().code, 24);
+        assert!(server.downstreams.contains_key(&7));
     }
 
     #[tokio::test]
@@ -4460,7 +4545,8 @@ mod tests {
     #[tokio::test]
     async fn repeated_setup_and_premature_submit_never_open_a_second_channel() {
         let (server, _to_server, from_server) = server_with_channels(false);
-        let _events = register_test_downstream(&server, 7, None, 100.0, false);
+        let (_events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, None, 100.0, false);
         for _ in 0..3 {
             receive_request(
                 &server,
@@ -4471,18 +4557,15 @@ mod tests {
             .unwrap();
         }
         assert_eq!(from_server.len(), 1);
-        let error = receive_request(&server, serde_json::from_str(r#"{"id":2,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap_err();
-        assert!(matches!(error.kind, TproxyErrorKind::Sv1RequestBeforeSetup));
+        receive_request(&server, serde_json::from_str(r#"{"id":2,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap();
+        let response = responses.recv().await.unwrap();
+        let json_rpc::Message::ErrorResponse(response) = response else {
+            panic!("expected mining.submit error response");
+        };
+        assert_eq!(response.id, 2);
+        assert_eq!(response.error.unwrap().code, 25);
         assert_eq!(from_server.len(), 1);
-        server
-            .handle_error_action(
-                "admission test",
-                &error,
-                &CancellationToken::new(),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(server.request_id_to_downstream_id.is_empty());
+        assert_eq!(server.request_id_to_downstream_id.len(), 1);
     }
 
     async fn advertise_job(
