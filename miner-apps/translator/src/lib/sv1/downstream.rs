@@ -14,7 +14,9 @@ use stratum_apps::{
         bitcoin::{BlockHash, Target},
         channels_sv2::client::MAX_SEEN_SHARES,
         sv1_api::{
-            json_rpc, server_to_client,
+            json_rpc,
+            methods::Client2Server,
+            server_to_client,
             utils::{Extranonce, HexU32Be},
         },
     },
@@ -122,7 +124,7 @@ impl Sv1SessionState {
         }
     }
 
-    fn setup_complete(self) -> bool {
+    pub(super) fn setup_complete(self) -> bool {
         match self {
             Self::Starting {
                 subscribed,
@@ -211,7 +213,7 @@ pub struct DownstreamData {
     pub pending_hashrate: Option<Hashrate>,
     pub stable_hashrate: bool,
     // Queue of Sv1 handshake messages received while waiting for SV2 channel to open
-    pub queued_sv1_handshake_messages: Vec<json_rpc::Message>,
+    pub queued_sv1_handshake_messages: Vec<Client2Server>,
     // Stores pending shares to be sent to the sv1_server
     pub pending_share: Option<SubmitShareWithChannelId>,
     // Exact target currently accepted upstream, used to decide whether a
@@ -487,7 +489,6 @@ impl Downstream {
                         info!("Downstream {downstream_id}: fallback triggered");
                         break;
                     }
-
                     // Handle downstream -> server message
                     res = self.handle_downstream_message() => {
                         if let Err(e) = res {

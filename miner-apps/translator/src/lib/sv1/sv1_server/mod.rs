@@ -67,7 +67,9 @@ use stratum_apps::{
             },
         },
         sv1_api::{
-            IsServer, json_rpc, server_to_client,
+            IsServer, json_rpc,
+            methods::Client2Server,
+            server_to_client,
             utils::{Extranonce, HexU32Be},
         },
     },
@@ -109,14 +111,10 @@ impl StoredSv1Job {
 // KiB.
 const MAX_QUEUED_SV1_HANDSHAKE_MESSAGES: usize = 8;
 
-fn sv1_setup_request(message: &json_rpc::Message) -> Option<Sv1SetupRequest> {
-    let json_rpc::Message::StandardRequest(request) = message else {
-        return None;
-    };
-
-    match request.method.as_str() {
-        "mining.subscribe" => Some(Sv1SetupRequest::Subscribe),
-        "mining.authorize" => Some(Sv1SetupRequest::Authorize),
+fn sv1_setup_request(request: &Client2Server) -> Option<Sv1SetupRequest> {
+    match request {
+        Client2Server::Subscribe(_) => Some(Sv1SetupRequest::Subscribe),
+        Client2Server::Authorize(_) => Some(Sv1SetupRequest::Authorize),
         _ => None,
     }
 }
@@ -701,31 +699,49 @@ impl Sv1Server {
             .await
             .map_err(TproxyError::shutdown)?;
 
-        let channel_id = match self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.channel_id)
-                .map_err(TproxyError::shutdown)
-        }) {
-            Ok(channel_id) => channel_id,
-            Err(e) if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) => return Ok(()),
-            Err(e) => return Err(e),
-        };
+        let (channel_id, setup_complete, opening) =
+            match self.with_registered_downstream(downstream_id, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        (
+                            data.channel_id,
+                            data.session_state.setup_complete(),
+                            !data.queued_sv1_handshake_messages.is_empty(),
+                        )
+                    })
+                    .map_err(TproxyError::shutdown)
+            }) {
+                Ok(state) => state,
+                Err(e) if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+        // sv1_api owns all wire-shape and parameter validation. Keep the decoded request so the
+        // normal handler can execute it later without a second parser or duplicated checks.
+        let request = Client2Server::try_from(downstream_message).map_err(|error| {
+            TproxyError::disconnect(
+                stratum_apps::stratum_core::sv1_api::error::Error::from(error),
+                downstream_id,
+            )
+        })?;
+        // Configure is optional; subscribe and authorize may arrive in either order. Ancillary
+        // setup requests may follow the opening request, but a submit cannot start a session or
+        // be buffered for later acceptance before both setup responses have completed.
+        let can_start = matches!(
+            request,
+            Client2Server::Configure(_) | Client2Server::Subscribe(_) | Client2Server::Authorize(_)
+        );
+        if (channel_id.is_none() && !opening && !can_start)
+            || (!setup_complete && matches!(request, Client2Server::Submit(_)))
+        {
+            return Err(TproxyError::disconnect(
+                TproxyErrorKind::Sv1RequestBeforeSetup,
+                downstream_id,
+            ));
+        }
         if channel_id.is_none() {
-            let is_first_message =
-                self.with_registered_downstream(downstream_id, |downstream| {
-                    downstream
-                        .downstream_data
-                        .with(|d| d.queued_sv1_handshake_messages.is_empty())
-                        .map_err(TproxyError::shutdown)
-                })?;
-            if is_first_message {
-                self.handle_open_channel_request(downstream_id).await?;
-                debug!(
-                    "Down: Sent OpenChannel request for downstream {}",
-                    downstream_id
-                );
-            }
             self.with_registered_downstream(downstream_id, |downstream| {
                 downstream
                     .downstream_data
@@ -739,17 +755,19 @@ impl Sv1Server {
                             ));
                         }
 
-                        data.queued_sv1_handshake_messages.push(downstream_message);
+                        data.queued_sv1_handshake_messages.push(request);
                         Ok(())
                     })
                     .map_err(TproxyError::shutdown)?
             })?;
+            if !opening {
+                self.handle_open_channel_request(downstream_id).await?;
+            }
             debug!("Down: Queuing Sv1 message until channel is established");
             return Ok(());
         }
 
-        self.process_sv1_message(downstream_id, downstream_message)
-            .await?;
+        self.process_sv1_message(downstream_id, request).await?;
 
         Ok(())
     }
@@ -762,12 +780,12 @@ impl Sv1Server {
     async fn process_sv1_message(
         &self,
         downstream_id: DownstreamId,
-        downstream_message: json_rpc::Message,
+        downstream_message: Client2Server,
     ) -> TproxyResult<(), error::Sv1Server> {
         let setup_request = sv1_setup_request(&downstream_message);
         let response = self
             .clone()
-            .handle_message(Some(downstream_id), downstream_message)
+            .handle_parsed_request(Some(downstream_id), downstream_message)
             .map_err(|e| e.with_sv1_downstream_context(downstream_id));
 
         match response {
@@ -1007,6 +1025,27 @@ impl Sv1Server {
                 let downstream_id = self.request_id_to_downstream_id.remove(&m.request_id);
 
                 let Some((_, downstream_id)) = downstream_id else {
+                    // A setup error may disconnect the miner while its channel is opening. If the
+                    // success races with that cleanup, release the resulting unclaimed channel.
+                    // Do not close a channel already routed by an earlier success.
+                    if !self.channel_id_to_downstream_id.contains_key(&m.channel_id) {
+                        self.sv1_server_io
+                            .channel_manager_sender
+                            .send((
+                                MiningOwned::CloseChannel(CloseChannelOwned {
+                                    channel_id: m.channel_id,
+                                    reason_code: Str0255Owned::try_from(
+                                        "downstream disconnected".to_string(),
+                                    )
+                                    .unwrap(),
+                                }),
+                                None,
+                            ))
+                            .await
+                            .map_err(|_| {
+                                TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
+                            })?;
+                    }
                     return Err(TproxyError::log(TproxyErrorKind::RequestIdNotFound(
                         m.request_id,
                     )));
@@ -1033,11 +1072,7 @@ impl Sv1Server {
 
                         let queued_messages = downstream
                             .downstream_data
-                            .with(|d| {
-                                let messages = d.queued_sv1_handshake_messages.clone();
-                                d.queued_sv1_handshake_messages.clear();
-                                messages
-                            })
+                            .with(|d| std::mem::take(&mut d.queued_sv1_handshake_messages))
                             .map_err(TproxyError::shutdown)?;
                         self.channel_id_to_downstream_id
                             .insert(m.channel_id, downstream_id);
@@ -1476,6 +1511,8 @@ impl Sv1Server {
             .remove(&downstream_id);
 
         let current_downstream = self.downstreams.remove(&downstream_id);
+        self.request_id_to_downstream_id
+            .retain(|_, id| *id != downstream_id);
 
         if let Some((downstream_id, downstream)) = current_downstream {
             info!(
@@ -2455,7 +2492,10 @@ mod tests {
             r#"{"id":1,"method":"mining.authorize","params":["user.worker","x"]}"#,
         )
         .unwrap();
-        server.process_sv1_message(7, authorize).await.unwrap();
+        server
+            .process_sv1_message(7, authorize.try_into().unwrap())
+            .await
+            .unwrap();
 
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
@@ -2475,7 +2515,10 @@ mod tests {
 
         let subscribe: json_rpc::Message =
             serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
-        server.process_sv1_message(7, subscribe).await.unwrap();
+        server
+            .process_sv1_message(7, subscribe.try_into().unwrap())
+            .await
+            .unwrap();
         server
             .downstreams
             .get_cloned(&7)
@@ -2545,7 +2588,10 @@ mod tests {
             r#"{"id":1,"method":"mining.authorize","params":["user.worker","x"]}"#,
         )
         .unwrap();
-        server.process_sv1_message(7, authorize).await.unwrap();
+        server
+            .process_sv1_message(7, authorize.try_into().unwrap())
+            .await
+            .unwrap();
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
             json_rpc::Message::OkResponse(_)
@@ -2565,7 +2611,10 @@ mod tests {
         // server has already applied this prefix, so the response needs no follow-up notification.
         let subscribe: json_rpc::Message =
             serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
-        server.process_sv1_message(7, subscribe).await.unwrap();
+        server
+            .process_sv1_message(7, subscribe.try_into().unwrap())
+            .await
+            .unwrap();
         let json_rpc::Message::OkResponse(response) = downstream_sv1_receiver.recv().await.unwrap()
         else {
             panic!("expected subscribe response");
@@ -2595,7 +2644,10 @@ mod tests {
             serde_json::from_str(r#"{"id":1,"method":"mining.extranonce.subscribe","params":[]}"#)
                 .unwrap();
 
-        server.process_sv1_message(7, subscribe).await.unwrap();
+        server
+            .process_sv1_message(7, subscribe.try_into().unwrap())
+            .await
+            .unwrap();
 
         let json_rpc::Message::OkResponse(response) = downstream_sv1_receiver.recv().await.unwrap()
         else {
@@ -2727,7 +2779,7 @@ mod tests {
         let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
             id: 1,
             method: "mining.subscribe".to_string(),
-            params: serde_json::Value::Null,
+            params: serde_json::json!([]),
         });
 
         for _ in 0..MAX_QUEUED_SV1_HANDSHAKE_MESSAGES {
@@ -3863,5 +3915,224 @@ mod tests {
         let seq_id = server.sequence_counter.fetch_add(1, Ordering::SeqCst);
         assert_eq!(seq_id, 1);
         assert_eq!(server.sequence_counter.load(Ordering::SeqCst), 2);
+    }
+
+    type TestChannels = (
+        Sv1Server,
+        Sender<MiningOwned>,
+        Receiver<(MiningOwned, Option<String>)>,
+    );
+
+    pub(super) fn server_with_channels(aggregated: bool) -> TestChannels {
+        let (to_manager, from_server) = unbounded();
+        let (to_server, from_manager) = unbounded();
+        let mut config = create_test_config();
+        config.aggregate_channels = aggregated;
+        config.downstream_difficulty_config.enable_vardiff = false;
+        let server = Sv1Server::new(
+            "127.0.0.1:3333".parse().unwrap(),
+            from_manager,
+            to_manager,
+            config,
+            TproxyMode::from(aggregated),
+        );
+        server.set_user_identity("test_user".to_string());
+        (server, to_server, from_server)
+    }
+
+    async fn receive_request(
+        server: &Sv1Server,
+        message: json_rpc::Message,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        server
+            .sv1_server_io
+            .downstream_to_sv1_server_sender
+            .send((7, message))
+            .await
+            .unwrap();
+        server.handle_downstream_message().await
+    }
+
+    #[tokio::test]
+    async fn invalid_initial_requests_allocate_no_channel_or_pending_state() {
+        for aggregated in [false, true] {
+            for wire in [
+                r#"{"id":1,"method":"mining.foobar","params":[]}"#,
+                r#"{"id":1,"method":"mining.subscribe","params":[123]}"#,
+                r#"{"id":1,"method":"mining.authorize","params":[123, ""]}"#,
+                r#"{"id":1,"method":"mining.configure","params":null}"#,
+                r#"{"id":1,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#,
+                r#"{"id":1,"method":"mining.extranonce.subscribe","params":[]}"#,
+                r#"{"id":1,"method":"mining.suggest_difficulty","params":[1]}"#,
+                r#"{"id":1,"result":true,"error":null}"#,
+            ] {
+                let (server, _to_server, from_server) = server_with_channels(aggregated);
+                let _events = register_test_downstream(&server, 7, None, 100.0, false);
+                let error = receive_request(&server, serde_json::from_str(wire).unwrap())
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error.action, Action::Disconnect(7)), "{wire}");
+                assert!(
+                    from_server.is_empty(),
+                    "invalid request opened a channel: {wire}"
+                );
+                assert!(server.request_id_to_downstream_id.is_empty());
+                server
+                    .downstreams
+                    .with(&7, |downstream| {
+                        downstream
+                            .downstream_data
+                            .with(|data| {
+                                assert!(data.queued_sv1_handshake_messages.is_empty());
+                                assert!(data.channel_id.is_none());
+                            })
+                            .unwrap();
+                    })
+                    .unwrap();
+                server
+                    .handle_error_action(
+                        "admission test",
+                        &error,
+                        &CancellationToken::new(),
+                        &CancellationToken::new(),
+                    )
+                    .await;
+                assert!(server.downstreams.is_empty());
+                assert!(
+                    server
+                        .sv1_server_io
+                        .sv1_server_to_downstream_sender
+                        .is_empty()
+                );
+                assert!(server.vardiff.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_setup_is_parsed_before_open_and_dispatched_after_success() {
+        let configure = r#"{"id":1,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"1fffe000","version-rolling.min-bit-count":2}]}"#;
+        let authorize = r#"{"id":3,"method":"mining.authorize","params":["worker",""]}"#;
+        for aggregated in [false, true] {
+            // Preserve the subscribe forms supported by sv1_api, including BOSminer variants.
+            for params in [
+                "[]",
+                r#"["miner/1.0"]"#,
+                r#"["miner/1.0","01020304"]"#,
+                r#"["bosminer",null]"#,
+                r#"["bosminer",null,"url",null]"#,
+            ] {
+                let subscribe =
+                    format!(r#"{{"id":2,"method":"mining.subscribe","params":{params}}}"#);
+                for sequence in [
+                    vec![configure, subscribe.as_str(), authorize],
+                    vec![subscribe.as_str(), authorize],
+                    vec![authorize, subscribe.as_str()],
+                ] {
+                    let (server, to_server, from_server) = server_with_channels(aggregated);
+                    let (_events, responses) =
+                        register_test_downstream_with_sv1_receiver(&server, 7, None, 100.0, false);
+                    for wire in &sequence {
+                        receive_request(&server, serde_json::from_str(wire).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    let (MiningOwned::OpenExtendedMiningChannel(open), _) =
+                        from_server.try_recv().unwrap()
+                    else {
+                        panic!("expected channel open");
+                    };
+                    assert!(from_server.is_empty(), "only one open per miner");
+                    assert!(
+                        responses.is_empty(),
+                        "subscribe must wait for the real extranonce"
+                    );
+                    server
+                        .downstreams
+                        .with(&7, |downstream| {
+                            downstream
+                                .downstream_data
+                                .with(|data| {
+                                    assert!(!data.session_state.setup_complete());
+                                    assert!(
+                                        data.version_rolling_mask.is_none(),
+                                        "parsing must not execute configure"
+                                    );
+                                })
+                                .unwrap()
+                        })
+                        .unwrap();
+                    let target = hash_rate_to_target(100.0, 5.0).unwrap();
+                    to_server
+                        .send(MiningOwned::OpenExtendedMiningChannelSuccess(
+                            OpenExtendedMiningChannelSuccessOwned {
+                                request_id: open.request_id,
+                                channel_id: 9,
+                                target: target.to_le_bytes().into(),
+                                extranonce_size: 4,
+                                extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+                                group_channel_id: 0,
+                            },
+                        ))
+                        .await
+                        .unwrap();
+                    server.handle_upstream_message(target).await.unwrap();
+                    for wire in sequence {
+                        let input: serde_json::Value = serde_json::from_str(wire).unwrap();
+                        let json_rpc::Message::OkResponse(response) = responses.try_recv().unwrap()
+                        else {
+                            panic!("expected setup response");
+                        };
+                        assert_eq!(serde_json::json!(response.id), input["id"]);
+                        if response.id == 2 {
+                            assert_eq!(response.result[1], "01020304");
+                            assert_eq!(response.result[2], 4);
+                        }
+                    }
+                    assert!(responses.is_empty());
+                    assert!(server.request_id_to_downstream_id.is_empty());
+                    server
+                        .downstreams
+                        .with(&7, |downstream| {
+                            downstream
+                                .downstream_data
+                                .with(|data| {
+                                    assert!(data.session_state.setup_complete());
+                                    assert!(data.queued_sv1_handshake_messages.is_empty());
+                                })
+                                .unwrap()
+                        })
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_setup_and_premature_submit_never_open_a_second_channel() {
+        let (server, _to_server, from_server) = server_with_channels(false);
+        let _events = register_test_downstream(&server, 7, None, 100.0, false);
+        for _ in 0..3 {
+            receive_request(
+                &server,
+                serde_json::from_str(r#"{"id":1,"method":"mining.subscribe","params":[]}"#)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(from_server.len(), 1);
+        let error = receive_request(&server, serde_json::from_str(r#"{"id":2,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap_err();
+        assert!(matches!(error.kind, TproxyErrorKind::Sv1RequestBeforeSetup));
+        assert_eq!(from_server.len(), 1);
+        server
+            .handle_error_action(
+                "admission test",
+                &error,
+                &CancellationToken::new(),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(server.request_id_to_downstream_id.is_empty());
     }
 }
