@@ -29,3 +29,4 @@ stratum-message-generator
 bitcoin-core-sv2/Cargo.lock
 docker/docker_env
 AGENTS_CUSTOM.md
+/stratum

@@ -22,7 +22,7 @@ In order to get Integration Tests to pass, PRs that introduce breaking changes t
 
 PRs on `sv2-apps` always need a temporary commit that replaces `stratum-core` dependency from `main`'s HEAD with the contributor's fork of `stratum`. This temporary commit is only used to get Integration Tests to pass, and its commit message should always make that explicitly clear. After the `stratum` PR is merged, the temporary commit is dropped and `stratum-core` is updated `stratum`'s new `main` HEAD. This coordination is delicate and requires human supervision to avoid accidents.
 
-For local development, `sv2-apps` has a `cross-repo.sh` script that allows an automated workflow for updating `sv2-apps` with the corresponding changes from `stratum`.
+For local development, `sv2-apps` has a `scripts/cross-repo.sh` script that allows an automated workflow for updating `sv2-apps` with the corresponding changes from `stratum`.
 
 ## Bug patching
 
