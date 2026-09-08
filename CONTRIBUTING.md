@@ -90,7 +90,14 @@ The SRI project follows an open contributor model, where anyone is welcome to co
 
 2. **Create a Branch**
 
-3. **Commit Your Changes**
+3. **Make Your Changes**
+
+    These guidelines should be kept in mind:
+    - When touching Rust code, make sure the changes have corresponding Rustdocs. Be concise and avoid unnecessary verbosity.
+    - When adding or modifying features, check whether some corresponding documentation on .md files needs to be updated accordingly.
+    - Make sure to run `./scripts/build-all-workspaces.sh` (builds all workspaces: pool-apps, miner-apps, integration-tests) and `./scripts/clippy-fmt-and-test.sh` (runs clippy, tests and formatting across all workspaces) on your changes. The equivalent `cargo build`, `cargo test`, `cargo clippy` and `cargo fmt` commands can also be run individually in each workspace.
+
+4. **Commit Your Changes**
 
     These guidelines should be kept in mind:
     - Progressive commit history, with clear separation of concerns.
@@ -100,19 +107,6 @@ The SRI project follows an open contributor model, where anyone is welcome to co
     - If possible, sign your commits with your GPG key.
     - Writing style: [chris.beams.io/posts/git-commit](https://chris.beams.io/posts/git-commit/)
     - Structure: [conventionalcommits.org](https://www.conventionalcommits.org/)
-
-4. **Run Tests, Clippy, and Formatter**
-
-    For this repository, you can use the convenient scripts to run tests across all workspaces:
-
-    `./scripts/build-all-workspaces.sh`: builds all workspaces (pool-apps, miner-apps, integration-tests)
-
-    `./scripts/clippy-fmt-and-test.sh`: runs clippy, tests, and formatting across all workspaces
-
-    Or run commands individually in each workspace:
-    - `cargo test`: runs the project's test suite. Ensure that all tests pass without errors.
-    - `cargo clippy`: linter tool for detecting common mistakes and style issues. Address any warnings or errors reported by Clippy.
-    - `cargo fmt`: formats your code according to the project's style guidelines.
 
 5. **Submit a Pull Request**
 
