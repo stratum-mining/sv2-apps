@@ -237,6 +237,7 @@ impl DownstreamData {
     pub fn new(
         hashrate: Option<Hashrate>,
         target: Target,
+        max_past_jobs: Option<usize>,
         #[cfg(feature = "monitoring")] connection_ip: IpAddr,
     ) -> Self {
         DownstreamData {
@@ -257,7 +258,7 @@ impl DownstreamData {
             cached_notify: None,
             cached_set_extranonce: None,
             session_state: Sv1SessionState::default(),
-            job_validation_contexts: Sv1JobStore::default(),
+            job_validation_contexts: Sv1JobStore::new(max_past_jobs),
             accepted_share_hashes: Sv1AcceptedShareCache::default(),
             pending_set_extranonce_notifications: 0,
             pending_target: None,
@@ -425,12 +426,14 @@ impl Downstream {
         sv1_server_receiver: Receiver<Sv1ServerEvent>,
         target: Target,
         hashrate: Option<Hashrate>,
+        max_past_jobs: Option<usize>,
         #[cfg(feature = "monitoring")] connection_ip: IpAddr,
         downstream_cancellation_token: CancellationToken,
     ) -> Self {
         let downstream_data = SharedLock::new(DownstreamData::new(
             hashrate,
             target,
+            max_past_jobs,
             #[cfg(feature = "monitoring")]
             connection_ip,
         ));
@@ -809,6 +812,7 @@ mod tests {
             sv1_server_receiver,
             old_target,
             None,
+            None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -850,6 +854,7 @@ mod tests {
             sv1_server_sender,
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
+            None,
             None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
@@ -905,6 +910,7 @@ mod tests {
             sv1_server_sender,
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
+            None,
             None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
@@ -978,6 +984,7 @@ mod tests {
             sv1_server_sender,
             sv1_server_receiver,
             old_target,
+            None,
             None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
@@ -1069,6 +1076,7 @@ mod tests {
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
             None,
+            None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -1144,6 +1152,7 @@ mod tests {
             sv1_server_sender,
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
+            None,
             None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
@@ -1244,6 +1253,7 @@ mod tests {
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
             None,
+            None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -1320,6 +1330,7 @@ mod tests {
             sv1_server_sender,
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
+            None,
             None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),

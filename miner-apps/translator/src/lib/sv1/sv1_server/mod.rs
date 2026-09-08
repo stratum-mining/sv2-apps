@@ -575,6 +575,7 @@ impl Sv1Server {
                                     sv1_server_receiver,
                                     first_target,
                                     Some(self.config.downstream_difficulty_config.min_individual_miner_hashrate),
+                                    self.config.max_past_jobs,
                                     #[cfg(feature = "monitoring")]
                                     addr.ip(),
                                     connection_token,
@@ -1255,14 +1256,17 @@ impl Sv1Server {
                     let resets_job_history = clean_jobs
                         && (self.mode.is_non_aggregated() || m.channel_id == AGGREGATED_CHANNEL_ID);
                     let store_notify = || {
-                        self.valid_sv1_jobs
-                            .with_mut_or_default(job_channel_id, |channel_jobs| {
+                        self.valid_sv1_jobs.with_mut_or_insert_with(
+                            job_channel_id,
+                            || Sv1JobStore::new(self.config.max_past_jobs),
+                            |channel_jobs| {
                                 channel_jobs.activate(
                                     notify.job_id.clone(),
                                     StoredSv1Job::upstream(notify.clone()),
                                     resets_job_history,
                                 );
-                            });
+                            },
+                        );
                     };
                     if self.mode.is_aggregated() && m.channel_id == AGGREGATED_CHANNEL_ID {
                         self.aggregated_job_mutation_time
@@ -2190,6 +2194,7 @@ mod tests {
             sv1_server_receiver.clone(),
             target,
             Some(hashrate),
+            server.config.max_past_jobs,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -2475,6 +2480,7 @@ mod tests {
             sv1_server_receiver.clone(),
             target,
             Some(100.0),
+            server.config.max_past_jobs,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -2592,6 +2598,7 @@ mod tests {
             sv1_server_receiver,
             target,
             Some(100.0),
+            server.config.max_past_jobs,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -4312,6 +4319,78 @@ mod tests {
         );
         server.set_user_identity("test_user".to_string());
         (server, to_server, from_server)
+    }
+
+    #[tokio::test]
+    async fn configured_history_cap_reaches_shared_jobs_and_downstream_validation() {
+        use stratum_apps::stratum_core::channels_sv2::client::MAX_PAST_JOBS;
+
+        for aggregated in [false, true] {
+            for cap in [2, MAX_PAST_JOBS + 10] {
+                let (mut server, to_server, _from_server) = server_with_channels(aggregated);
+                server.config.max_past_jobs = Some(cap);
+                let (_events, responses) =
+                    register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+                let downstream = server.downstreams.get_cloned(&7).unwrap();
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.session_state = Sv1SessionState::Ready;
+                    })
+                    .unwrap();
+                let job_channel = if aggregated { AGGREGATED_CHANNEL_ID } else { 9 };
+                let target = Target::from_le_bytes([0xff; 32]);
+                to_server
+                    .send(MiningOwned::SetNewPrevHash(SetNewPrevHashOwned {
+                        channel_id: job_channel,
+                        job_id: 0,
+                        prev_hash: vec![0; 32].try_into().unwrap(),
+                        min_ntime: 1,
+                        nbits: 0x207fffff,
+                    }))
+                    .await
+                    .unwrap();
+                server.handle_upstream_message(target).await.unwrap();
+
+                for job_id in 0..cap as u32 + 2 {
+                    to_server.send(MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
+                        channel_id: job_channel,
+                        job_id,
+                        min_ntime: Sv2OptionOwned::new(Some(1)),
+                        version: 0x20000000,
+                        version_rolling_allowed: true,
+                        merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                        coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08").unwrap().try_into().unwrap(),
+                        coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
+                    })).await.unwrap();
+                    server.handle_upstream_message(target).await.unwrap();
+                    downstream.handle_sv1_server_message().await.unwrap();
+                    let json_rpc::Message::Notification(sent) = responses.try_recv().unwrap()
+                    else {
+                        panic!("expected mining.notify");
+                    };
+                    let sent = server_to_client::Notify::try_from(sent).unwrap();
+                    assert_eq!(sent.job_id, job_id.to_string());
+                }
+
+                server
+                    .valid_sv1_jobs
+                    .with(&job_channel, |jobs| {
+                        assert_eq!(jobs.len(), cap + 1);
+                        assert!(jobs.get("0").is_none());
+                        assert!(jobs.get("1").is_some());
+                    })
+                    .unwrap();
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        assert_eq!(data.job_validation_contexts.len(), cap + 1);
+                        assert!(data.job_validation_contexts.get("0").is_none());
+                        assert!(data.job_validation_contexts.get("1").is_some());
+                    })
+                    .unwrap();
+            }
+        }
     }
 
     async fn receive_request(

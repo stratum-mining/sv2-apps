@@ -5,30 +5,39 @@ use stratum_apps::stratum_core::channels_sv2::client::MAX_PAST_JOBS;
 /// Bounded active and past-job storage for the SV1 side of the translator.
 ///
 /// This mirrors the client-channel lifecycle in `channels_sv2`: one active job and at most
-/// `MAX_PAST_JOBS` jobs retired under the current chain tip. SV1 future jobs need no equivalent
-/// because tProxy does not advertise them to miners before activation.
+/// the configured cap of jobs retired under the current chain tip. SV1 future jobs need no
+/// equivalent because tProxy does not advertise them to miners before activation.
 #[derive(Debug)]
 pub(super) struct Sv1JobStore<T> {
     active_job: Option<(String, T)>,
     past_jobs: HashMap<String, T>,
     past_job_order: VecDeque<String>,
+    max_past_jobs: usize,
 }
 
 impl<T> Default for Sv1JobStore<T> {
     fn default() -> Self {
-        Self {
-            active_job: None,
-            past_jobs: HashMap::new(),
-            past_job_order: VecDeque::new(),
-        }
+        Self::new(None)
     }
 }
 
 impl<T> Sv1JobStore<T> {
+    /// Uses the same cap and unset/zero defaults as the corresponding SV2 channel.
+    pub(super) fn new(max_past_jobs: Option<usize>) -> Self {
+        Self {
+            active_job: None,
+            past_jobs: HashMap::new(),
+            past_job_order: VecDeque::new(),
+            max_past_jobs: max_past_jobs
+                .filter(|cap| *cap > 0)
+                .unwrap_or(MAX_PAST_JOBS),
+        }
+    }
+
     /// Installs a new active job.
     ///
     /// When `clean_jobs` is true, all previous work is invalidated. Otherwise the displaced
-    /// active job remains available for late-share validation, subject to `MAX_PAST_JOBS`.
+    /// active job remains available for late-share validation, subject to the configured cap.
     pub(super) fn activate(&mut self, job_id: String, job: T, clean_jobs: bool) {
         if clean_jobs {
             self.clear();
@@ -42,7 +51,7 @@ impl<T> Sv1JobStore<T> {
                 }
             }
 
-            while self.past_jobs.len() > MAX_PAST_JOBS {
+            while self.past_jobs.len() > self.max_past_jobs {
                 if let Some(evicted_job_id) = self.past_job_order.pop_front() {
                     self.past_jobs.remove(&evicted_job_id);
                 }
@@ -99,6 +108,25 @@ mod tests {
         assert!(jobs.get("0").is_none());
         assert_eq!(jobs.get("1"), Some(&1));
         assert_eq!(jobs.active(), Some(&(MAX_PAST_JOBS + 1)));
+    }
+
+    #[test]
+    fn configured_cap_matches_channel_defaults_and_overrides() {
+        for (configured, cap) in [
+            (None, MAX_PAST_JOBS),
+            (Some(0), MAX_PAST_JOBS),
+            (Some(2), 2),
+            (Some(MAX_PAST_JOBS + 10), MAX_PAST_JOBS + 10),
+        ] {
+            let mut jobs = Sv1JobStore::new(configured);
+            for job_id in 0..cap + 2 {
+                jobs.activate(job_id.to_string(), job_id, false);
+            }
+            assert_eq!(jobs.len(), cap + 1);
+            assert!(jobs.get("0").is_none());
+            assert_eq!(jobs.get("1"), Some(&1));
+            assert_eq!(jobs.active(), Some(&(cap + 1)));
+        }
     }
 
     #[test]
