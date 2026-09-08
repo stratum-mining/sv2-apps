@@ -775,8 +775,9 @@ impl Sv1Server {
     /// Processes one SV1 message after its downstream SV2 channel is available.
     ///
     /// Setup progress is recorded immediately after a successful response is queued to the miner.
-    /// Recording it here keeps response construction synchronized with upstream notifications;
-    /// the completion event only releases cached notifications in FIFO order.
+    /// Pre-subscribe prefix updates are applied in this same server task, so a queued downstream
+    /// event cannot change the response prefix during construction. The completion event releases
+    /// cached notifications in FIFO order.
     async fn process_sv1_message(
         &self,
         downstream_id: DownstreamId,
@@ -2636,6 +2637,250 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_prefix_cannot_change_an_in_flight_subscribe_response() {
+        let server = create_test_sv1_server();
+        // Backpressure is only a test scheduling barrier: pause the real response path
+        // after it has captured extranonce1 but before record_response runs.
+        let (wire_sender, wire_receiver) = async_channel::bounded(1);
+        let (_miner_sender, miner_receiver) = unbounded();
+        let (event_sender, event_receiver) = unbounded();
+        let downstream = Downstream::new(
+            7,
+            wire_sender.clone(),
+            miner_receiver,
+            server.sv1_server_io.downstream_to_sv1_server_sender.clone(),
+            event_receiver,
+            hash_rate_to_target(100.0, 5.0).unwrap(),
+            Some(100.0),
+            server.config.max_past_jobs,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.channel_id = Some(42);
+                data.extranonce1 = vec![1, 2, 3, 4].try_into().unwrap();
+                data.supports_set_extranonce = true;
+            })
+            .unwrap();
+        server.downstreams.insert(7, downstream.clone());
+        server.channel_id_to_downstream_id.insert(42, 7);
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .insert(7, event_sender);
+
+        wire_sender
+            .send(serde_json::from_str(r#"{"id":99,"result":true,"error":null}"#).unwrap())
+            .await
+            .unwrap();
+        let new_extranonce: Extranonce = vec![9; 4].try_into().unwrap();
+        server
+            .handle_upstream_extranonce_change(SetExtranoncePrefixOwned {
+                channel_id: 42,
+                extranonce_prefix: vec![8; 4].try_into().unwrap(),
+            })
+            .await
+            .unwrap();
+        server
+            .handle_upstream_extranonce_change(SetExtranoncePrefixOwned {
+                channel_id: 42,
+                extranonce_prefix: vec![9; 4].try_into().unwrap(),
+            })
+            .await
+            .unwrap();
+        let subscribe: json_rpc::Message =
+            serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
+        let mut response = Box::pin(server.process_sv1_message(7, subscribe.try_into().unwrap()));
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(response.as_mut(), cx).is_pending())
+        })
+        .await;
+        assert!(pending);
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.extranonce1.clone())
+                .unwrap(),
+            new_extranonce
+        );
+        wire_receiver.recv().await.unwrap();
+        response.await.unwrap();
+        let json_rpc::Message::OkResponse(response) = wire_receiver.recv().await.unwrap() else {
+            panic!("expected subscribe response");
+        };
+        assert!(
+            wire_receiver.is_empty(),
+            "no correcting set_extranonce was sent"
+        );
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data.extranonce1.clone())
+                .unwrap(),
+            new_extranonce
+        );
+        let subscribe_response = server_to_client::Subscribe::try_from(&response).unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert!(wire_receiver.try_recv().is_err());
+        assert_eq!(
+            subscribe_response.extra_nonce1, new_extranonce,
+            "a silently applied prefix must also be advertised in subscribe"
+        );
+    }
+
+    #[tokio::test]
+    async fn prefix_support_is_required_at_job_delivery_not_during_setup() {
+        for mode in [TproxyMode::Aggregated, TproxyMode::NonAggregated] {
+            for ready_before_change in [false, true] {
+                for announce_support in [false, true] {
+                    let mut server = create_test_sv1_server();
+                    server.mode = mode;
+                    let (_, wire) = register_test_downstream_with_sv1_receiver(
+                        &server,
+                        7,
+                        Some(42),
+                        100.0,
+                        false,
+                    );
+                    let downstream = server.downstreams.get_cloned(&7).unwrap();
+                    let request = |id, method, params| {
+                        let message: json_rpc::Message =
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "method": method, "params": params,
+                            }))
+                            .unwrap();
+                        Client2Server::try_from(message).unwrap()
+                    };
+                    server
+                        .process_sv1_message(
+                            7,
+                            request(1, "mining.subscribe", serde_json::json!([])),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(matches!(
+                        wire.try_recv().unwrap(),
+                        json_rpc::Message::OkResponse(_)
+                    ));
+                    if ready_before_change {
+                        server
+                            .process_sv1_message(
+                                7,
+                                request(
+                                    2,
+                                    "mining.authorize",
+                                    serde_json::json!(["user.worker", "x"]),
+                                ),
+                            )
+                            .await
+                            .unwrap();
+                        wire.try_recv().unwrap();
+                        downstream.handle_sv1_server_message().await.unwrap();
+                    }
+                    server
+                        .handle_upstream_extranonce_change(SetExtranoncePrefixOwned {
+                            channel_id: 42,
+                            extranonce_prefix: vec![9; 4].try_into().unwrap(),
+                        })
+                        .await
+                        .unwrap();
+                    downstream.handle_sv1_server_message().await.unwrap();
+                    assert!(!downstream.is_disconnected());
+                    assert!(wire.try_recv().is_err());
+                    let notify: json_rpc::Message = serde_json::from_value(serde_json::json!({
+                        "id": null, "method": "mining.notify",
+                        "params": ["new", "00".repeat(32), "", "", [], "20000000",
+                            "1d00ffff", "5f5e1000", true],
+                    }))
+                    .unwrap();
+                    let sender = server
+                        .sv1_server_io
+                        .sv1_server_to_downstream_sender
+                        .get_cloned(&7)
+                        .unwrap();
+                    if !ready_before_change {
+                        sender
+                            .send(Sv1ServerEvent::from(notify.clone()))
+                            .await
+                            .unwrap();
+                        downstream.handle_sv1_server_message().await.unwrap();
+                        assert!(!downstream.is_disconnected());
+                    }
+                    // This announcement is deliberately after the prefix event, and in the
+                    // ready case also after authorize. It must still be honored before delivery.
+                    if announce_support {
+                        server
+                            .process_sv1_message(
+                                7,
+                                request(3, "mining.extranonce.subscribe", serde_json::json!([])),
+                            )
+                            .await
+                            .unwrap();
+                        let json_rpc::Message::OkResponse(response) = wire.try_recv().unwrap()
+                        else {
+                            panic!("expected capability acknowledgement");
+                        };
+                        assert_eq!(response.result, serde_json::json!(true));
+                    }
+                    if ready_before_change {
+                        sender
+                            .send(Sv1ServerEvent::from(notify.clone()))
+                            .await
+                            .unwrap();
+                    } else {
+                        server
+                            .process_sv1_message(
+                                7,
+                                request(
+                                    2,
+                                    "mining.authorize",
+                                    serde_json::json!(["user.worker", "x"]),
+                                ),
+                            )
+                            .await
+                            .unwrap();
+                        wire.try_recv().unwrap();
+                    }
+                    downstream.handle_sv1_server_message().await.unwrap();
+                    assert_eq!(downstream.is_disconnected(), !announce_support);
+                    if announce_support {
+                        let json_rpc::Message::Notification(update) = wire.try_recv().unwrap()
+                        else {
+                            panic!("expected prefix update before notify");
+                        };
+                        let update = server_to_client::SetExtranonce::try_from(update).unwrap();
+                        assert_eq!(update.extra_nonce1, vec![9; 4].try_into().unwrap());
+                        assert_eq!(
+                            serde_json::to_value(wire.try_recv().unwrap()).unwrap(),
+                            serde_json::to_value(&notify).unwrap()
+                        );
+                        assert_eq!(
+                            downstream
+                                .downstream_data
+                                .with(|data| data.job_validation_context("new").unwrap().extranonce)
+                                .unwrap(),
+                            update.extra_nonce1
+                        );
+                    } else {
+                        assert!(
+                            downstream
+                                .downstream_data
+                                .with(|data| data.job_validation_context("new").is_none())
+                                .unwrap()
+                        );
+                    }
+                    assert!(wire.try_recv().is_err());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn extranonce_subscribe_records_downstream_support() {
         let server = create_test_sv1_server();
         let (_, downstream_sv1_receiver) =
@@ -3898,6 +4143,110 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reused_keepalive_preserves_each_miners_context_and_prefix_pause() {
+        let server = create_test_sv1_server();
+        let original = test_sv1_notify("1", false);
+        server
+            .valid_sv1_jobs
+            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
+                jobs.activate(
+                    "1".to_string(),
+                    StoredSv1Job::upstream(original.clone()),
+                    false,
+                );
+            });
+        let mut miners = Vec::new();
+        for id in [1, 2] {
+            let (_events, wire) = register_test_downstream_with_sv1_receiver(
+                &server,
+                id,
+                Some(id as u32),
+                100.0,
+                false,
+            );
+            let downstream = server.downstreams.get_cloned(&id).unwrap();
+            downstream
+                .downstream_data
+                .with(|data| {
+                    data.session_state = Sv1SessionState::Ready;
+                    data.supports_set_extranonce = true;
+                    data.extranonce1 = vec![id as u8; 4].try_into().unwrap();
+                    data.target = Target::from_le_bytes([id as u8; 32]);
+                })
+                .unwrap();
+            advertise_job(&server, id, &wire, original.clone(), None).await;
+            miners.push((downstream, wire));
+        }
+
+        let mut received_jobs = Vec::new();
+        for (index, (downstream, wire)) in miners.iter().enumerate() {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    data.keepalive_timer_anchor = Some(Instant::now() - Duration::from_secs(60));
+                })
+                .unwrap();
+            server.send_keepalive_jobs(60).await.unwrap();
+            downstream.handle_sv1_server_message().await.unwrap();
+            let json_rpc::Message::Notification(message) = wire.try_recv().unwrap() else {
+                panic!("expected mining.notify");
+            };
+            let notify = server_to_client::Notify::try_from(message).unwrap();
+            assert!(!notify.clean_jobs);
+            downstream
+                .downstream_data
+                .with(|data| {
+                    let old = data.job_validation_context("1").unwrap();
+                    let keepalive = data.job_validation_context(&notify.job_id).unwrap();
+                    assert_eq!(keepalive.extranonce, old.extranonce);
+                    assert_eq!(keepalive.target, old.target);
+                    assert_eq!(keepalive.extranonce2_len, old.extranonce2_len);
+                    assert_eq!(
+                        keepalive.extranonce,
+                        vec![(index + 1) as u8; 4].try_into().unwrap()
+                    );
+                })
+                .unwrap();
+            received_jobs.push(serde_json::to_value(json_rpc::Message::from(notify)).unwrap());
+        }
+        assert_eq!(received_jobs[0], received_jobs[1]);
+        assert_eq!(server.keepalive_job_id_counter.load(Ordering::Relaxed), 1);
+
+        // A prefix change pauses keepalives both while the event is queued and after
+        // it is consumed, until a matching new-prefix job is delivered.
+        server
+            .handle_upstream_extranonce_change(
+                stratum_apps::stratum_core::mining_sv2::SetExtranoncePrefixOwned {
+                    channel_id: 1,
+                    extranonce_prefix: vec![9; 4].try_into().unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        server.send_keepalive_jobs(60).await.unwrap();
+        miners[0].0.handle_sv1_server_message().await.unwrap();
+        assert!(miners[0].1.try_recv().is_err());
+        server.send_keepalive_jobs(60).await.unwrap();
+        for (downstream, wire) in &miners {
+            assert!(wire.is_empty());
+            assert!(
+                downstream
+                    .downstream_data
+                    .with(|data| { data.job_validation_context("1").is_some() })
+                    .unwrap()
+            );
+        }
+        assert!(
+            miners[0]
+                .0
+                .downstream_data
+                .with(|data| data.keepalive_timer_anchor.is_none())
+                .unwrap()
+        );
+        assert_eq!(server.keepalive_job_id_counter.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn test_sv1_server_counters() {
         let server = create_test_sv1_server();
@@ -4134,5 +4483,198 @@ mod tests {
             )
             .await;
         assert!(server.request_id_to_downstream_id.is_empty());
+    }
+
+    async fn advertise_job(
+        server: &Sv1Server,
+        downstream_id: usize,
+        responses: &Receiver<json_rpc::Message>,
+        notify: server_to_client::Notify,
+        next_target: Option<Target>,
+    ) {
+        let downstream = server.downstreams.get_cloned(&downstream_id).unwrap();
+        let events = server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&downstream_id)
+            .unwrap();
+        if let Some(target) = next_target {
+            downstream
+                .downstream_data
+                .with(|data| data.pending_target = Some(target))
+                .unwrap();
+            // Synthetic targets make share acceptance/rejection deterministic. This test exercises
+            // the difficulty/notify boundary; target-to-difficulty conversion is tested separately.
+            events
+                .send(Sv1ServerEvent::SetDifficulty(
+                    server_to_client::SetDifficulty { value: 1.0 }.into(),
+                ))
+                .await
+                .unwrap();
+            downstream.handle_sv1_server_message().await.unwrap();
+            assert!(responses.is_empty(), "difficulty waits for its notify");
+        }
+        events
+            .send(Sv1ServerEvent::Notify(Arc::new(notify.clone())))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        if next_target.is_some() {
+            let json_rpc::Message::Notification(difficulty) = responses.try_recv().unwrap() else {
+                panic!("expected difficulty");
+            };
+            assert_eq!(difficulty.method, "mining.set_difficulty");
+        }
+        let json_rpc::Message::Notification(sent) = responses.try_recv().unwrap() else {
+            panic!("expected job");
+        };
+        let sent = server_to_client::Notify::try_from(sent).unwrap();
+        assert_eq!(sent.job_id, notify.job_id);
+        assert_eq!(sent.clean_jobs, notify.clean_jobs);
+    }
+
+    async fn submit_old_job(
+        server: &Sv1Server,
+        downstream_id: usize,
+        responses: &Receiver<json_rpc::Message>,
+        forwarded: &Receiver<(MiningOwned, Option<String>)>,
+        nonce: u32,
+        expected_error: Option<i32>,
+    ) {
+        let request = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "1".to_string(),
+            extra_nonce2: vec![0; 16].try_into().unwrap(),
+            time: HexU32Be(1),
+            nonce: HexU32Be(nonce),
+            version_bits: None,
+            id: 42,
+        };
+        server
+            .sv1_server_io
+            .downstream_to_sv1_server_sender
+            .send((downstream_id, request.into()))
+            .await
+            .unwrap();
+        server.handle_downstream_message().await.unwrap();
+        let response = serde_json::to_value(responses.try_recv().unwrap()).unwrap();
+        assert_eq!(response["id"], 42);
+        match expected_error {
+            Some(code) => {
+                assert_eq!(response["error"][0], code);
+                assert!(response["result"].is_null());
+                assert!(
+                    forwarded.is_empty(),
+                    "rejected work must not reach ChannelManager"
+                );
+            }
+            None => {
+                assert_eq!(response["result"], true);
+                assert!(response["error"].is_null());
+                assert!(matches!(
+                    forwarded.try_recv().unwrap().0,
+                    MiningOwned::SubmitSharesExtended(_)
+                ));
+                assert!(forwarded.is_empty());
+            }
+        }
+    }
+
+    // Loupe #228 / sv2-apps #832: exercise the actual per-miner notification FIFO, the SV1
+    // response path, and the ChannelManager boundary, even while the shared job still exists.
+    #[tokio::test]
+    async fn advertised_clean_jobs_invalidate_only_the_recipient_and_cannot_be_revived_by_difficulty()
+     {
+        for aggregated in [false, true] {
+            for easier in [false, true] {
+                let (server, _to_server, forwarded) = server_with_channels(aggregated);
+                let max_target = Target::from_le_bytes([0xff; 32]);
+                let zero_target = Target::from_le_bytes([0; 32]);
+                let (old_target, new_target) = if easier {
+                    (zero_target, max_target)
+                } else {
+                    (max_target, zero_target)
+                };
+                let mut miners = Vec::new();
+                for (id, channel_id) in [(7, 9), (8, 10)] {
+                    let (_events, responses) = register_test_downstream_with_sv1_receiver(
+                        &server,
+                        id,
+                        Some(channel_id),
+                        100.0,
+                        false,
+                    );
+                    server
+                        .downstreams
+                        .with(&id, |downstream| {
+                            downstream
+                                .downstream_data
+                                .with(|data| {
+                                    data.session_state = Sv1SessionState::Ready;
+                                    data.sv1_username = "worker".to_string();
+                                    data.extranonce1 = vec![1, 2, 3, 4].try_into().unwrap();
+                                    data.extranonce2_len = 16;
+                                    data.target = if id == 7 { old_target } else { max_target };
+                                    data.version_rolling_mask = None;
+                                })
+                                .unwrap()
+                        })
+                        .unwrap();
+                    let job_channel = if aggregated {
+                        AGGREGATED_CHANNEL_ID
+                    } else {
+                        channel_id
+                    };
+                    server
+                        .valid_sv1_jobs
+                        .with_mut_or_default(job_channel, |jobs| {
+                            for name in ["1", "2", "3", "4"] {
+                                let job = test_sv1_notify(name, false);
+                                jobs.activate(name.to_string(), StoredSv1Job::upstream(job), false);
+                            }
+                        });
+                    advertise_job(&server, id, &responses, test_sv1_notify("1", false), None).await;
+                    miners.push(responses);
+                }
+                let before_clean_error = if easier { Some(23) } else { None };
+                submit_old_job(&server, 7, &miners[0], &forwarded, 0, before_clean_error).await;
+
+                // An ordinary difficulty transition is not a clean job. Old work still uses its
+                // original target, whether the new target is easier or harder.
+                advertise_job(
+                    &server,
+                    7,
+                    &miners[0],
+                    test_sv1_notify("2", false),
+                    Some(new_target),
+                )
+                .await;
+                submit_old_job(&server, 7, &miners[0], &forwarded, 1, before_clean_error).await;
+
+                // Only miner 7 receives a clean transition. Its old shares must now be stale,
+                // including ones that would satisfy the easiest possible current target.
+                advertise_job(
+                    &server,
+                    7,
+                    &miners[0],
+                    test_sv1_notify("3", true),
+                    Some(new_target),
+                )
+                .await;
+                submit_old_job(&server, 7, &miners[0], &forwarded, 2, Some(21)).await;
+                advertise_job(
+                    &server,
+                    7,
+                    &miners[0],
+                    test_sv1_notify("4", false),
+                    Some(max_target),
+                )
+                .await;
+                submit_old_job(&server, 7, &miners[0], &forwarded, 3, Some(21)).await;
+
+                // The other miner never received clean_jobs=true and can still submit the old job.
+                submit_old_job(&server, 8, &miners[1], &forwarded, 4, None).await;
+            }
+        }
     }
 }

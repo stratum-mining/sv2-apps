@@ -87,6 +87,21 @@ and subscribe and authorize may arrive in either order. Ancillary setup requests
 follow; shares are accepted only after both subscribe and authorize responses have
 completed.
 
+Prefix updates follow job boundaries. If a change is processed before subscription,
+the subscribe response includes it. Otherwise, tProxy sends `mining.set_extranonce`
+immediately before the first delivered job using that prefix. During setup, it caches
+the transition instead of disconnecting immediately. The miner must announce support
+with `mining.extranonce.subscribe` before that job is delivered; without support,
+tProxy disconnects rather than advertising work with an unknown prefix. There is no
+additional capability-negotiation timeout.
+
+In aggregated mode, new miners can join while old-prefix jobs remain active or pending.
+Their subscribe response uses the active job's prefix, and inherited jobs retain their
+own upstream prefixes and validation targets. Later jobs use the current upstream state.
+As in `channels_sv2`, target changes update queued future jobs but leave active jobs' targets intact.
+All prefix variants preserve the miner's allocated `local_prefix | local_index`; joining
+does not reset the shared allocator, job history, or keepalive timer.
+
 #### **Protocol Configuration**
 - `max_supported_version`/`min_supported_version`: SV2 protocol version support
 - `min_extranonce2_size`: Minimum extranonce2 size (affects mining efficiency)
