@@ -91,8 +91,15 @@ The SRI project follows an open contributor model, where anyone is welcome to co
 2. **Create a Branch** 
 
 3. **Commit Your Changes**
-    
-    **Note:** Commits should cover both the issue fixed and the solution's rationale. These [guidelines](https://chris.beams.io/posts/git-commit/) should be kept in mind.
+
+    These guidelines should be kept in mind:
+    - Progressive commit history, with clear separation of concerns.
+    - Avoid individual commits that address specific review findings, which breaks commit history cohesion. Always fold review findings into the original commit.
+    - Commit messages should provide a clear and concise explanation of the solution's rationale.
+    - If the specific commit closes some specific github issue, include the issue URL in the commit message.
+    - If possible, sign your commits with your GPG key.
+    - Writing style: [chris.beams.io/posts/git-commit](https://chris.beams.io/posts/git-commit/)
+    - Structure: [conventionalcommits.org](https://www.conventionalcommits.org/)
 
 4. **Run Tests, Clippy, and Formatter:** 
 
