@@ -961,7 +961,16 @@ impl ChannelManager {
                     true,
                     min_extranonce_size as u16,
                     self.max_past_jobs,
-                );
+                )
+                .map_err(|e| {
+                    // the target is the aggregated channel's own, validated when it was
+                    // installed, so this only fails on an internal inconsistency
+                    error!(
+                        "Aggregated channel holds a target no share can meet: {:?}",
+                        e
+                    );
+                    TproxyError::shutdown(TproxyErrorKind::OpenMiningChannelError)
+                })?;
                 self.extended_channels
                     .insert(next_channel_id, new_downstream_extended_channel);
                 let success_message = MiningOwned::OpenExtendedMiningChannelSuccess(
@@ -996,11 +1005,13 @@ impl ChannelManager {
                         .extended_channels
                         .with(&AGGREGATED_CHANNEL_ID, |aggregated_channel| {
                             (
-                                aggregated_channel.get_active_job().map(|j| j.0.clone()),
+                                aggregated_channel
+                                    .get_active_job()
+                                    .map(|j| j.job_message.clone()),
                                 aggregated_channel
                                     .get_future_jobs()
                                     .map(|(_, job)| job)
-                                    .map(|j| j.0.clone())
+                                    .map(|j| j.job_message.clone())
                                     .collect::<Vec<_>>(),
                                 aggregated_channel.get_chain_tip().cloned(),
                             )
@@ -1146,7 +1157,8 @@ mod tests {
                 true,
                 8,
                 None,
-            ),
+            )
+            .unwrap(),
         );
         manager
             .aggregated_extranonce_allocator
@@ -1362,7 +1374,8 @@ mod tests {
                 true,
                 6,
                 None,
-            ),
+            )
+            .unwrap(),
         );
 
         manager

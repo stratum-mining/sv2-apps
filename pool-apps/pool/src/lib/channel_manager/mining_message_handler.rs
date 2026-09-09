@@ -242,7 +242,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 ) {
                     Ok(channel) => channel,
                     Err(e) => match e {
-                        StandardChannelError::OpenChannelInvalidNominalHashrate(code) => {
+                        StandardChannelError::OpenChannelInvalidNominalHashrate(code)
+                        | StandardChannelError::OpenChannelInvalidMaxTarget(code) => {
                             error!("OpenMiningChannelError: {}", code);
                             let open_standard_mining_channel_error = OpenMiningChannelErrorOwned {
                                 request_id,
@@ -482,7 +483,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 ) {
                     Ok(channel) => channel,
                     Err(e) => match e {
-                        ExtendedChannelError::OpenChannelInvalidNominalHashrate(code) => {
+                        ExtendedChannelError::OpenChannelInvalidNominalHashrate(code)
+                        | ExtendedChannelError::OpenChannelInvalidMaxTarget(code) => {
                             error!("OpenMiningChannelError: {}", code);
                             let open_extended_mining_channel_error = OpenMiningChannelErrorOwned {
                                 request_id,
@@ -1219,7 +1221,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         Err(e) => {
                             error!("UpdateChannelError: {:?}", e);
                             match e {
-                                StandardChannelError::UpdateChannelInvalidNominalHashrate(code) => {
+                                StandardChannelError::UpdateChannelInvalidNominalHashrate(code)
+                                | StandardChannelError::UpdateChannelInvalidMaxTarget(code) => {
                                     error!("UpdateChannelError: {}", code);
                                     let update_channel_error = UpdateChannelErrorOwned {
                                         channel_id,
@@ -1260,7 +1263,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 match e {
                                     ExtendedChannelError::UpdateChannelInvalidNominalHashrate(
                                         code,
-                                    ) => {
+                                    )
+                                    | ExtendedChannelError::UpdateChannelInvalidMaxTarget(code) => {
                                         error!("UpdateChannelError: {}", code);
                                         let update_channel_error = UpdateChannelErrorOwned {
                                             channel_id,

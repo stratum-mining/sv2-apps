@@ -516,6 +516,8 @@ impl ChannelManager {
         let mut group_channel = match GroupChannel::new_for_job_declaration_client(
             channel_id,
             full_extranonce_size,
+            // the extended channels importing the group's jobs are opened with rolling allowed
+            true,
             pool_tag_string.clone(),
             miner_tag_string.clone(),
         ) {
