@@ -47,6 +47,20 @@ This directory contains utility scripts for building, testing, and publishing th
 ./scripts/build-all-workspaces.sh
 ```
 
+#### `cross-repo.sh`
+**Local development against a stratum checkout**
+- Must be *sourced*, not executed, since it defines shell functions
+- `patch-cargo-toml` points `stratum-core` at a local `stratum` checkout, across all workspace manifests
+- `restore-cargo-toml` drops the patch sections and refreshes the lockfiles
+- `get-stratum-core-path` resolves the checkout and keeps the `stratum` symlink at the repository root pointed at it
+
+**Usage:**
+```bash
+source scripts/cross-repo.sh
+patch-cargo-toml            # or: patch-cargo-toml /path/to/stratum
+restore-cargo-toml
+```
+
 
 
 ### 📊 Testing & Coverage Scripts

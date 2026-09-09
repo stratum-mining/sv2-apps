@@ -88,30 +88,35 @@ The SRI project follows an open contributor model, where anyone is welcome to co
 
 1. **Fork the Repository**
 
-2. **Create a Branch** 
+2. **Create a Branch**
 
-3. **Commit Your Changes**
-    
-    **Note:** Commits should cover both the issue fixed and the solution's rationale. These [guidelines](https://chris.beams.io/posts/git-commit/) should be kept in mind.
+3. **Make Your Changes**
 
-4. **Run Tests, Clippy, and Formatter:** 
+    These guidelines should be kept in mind:
+    - When touching Rust code, make sure the changes have corresponding Rustdocs. Be concise and avoid unnecessary verbosity.
+    - When adding or modifying features, check whether some corresponding documentation on .md files needs to be updated accordingly.
+    - Make sure to run `./scripts/build-all-workspaces.sh` (builds all workspaces: pool-apps, miner-apps, integration-tests) and `./scripts/clippy-fmt-and-test.sh` (runs clippy, tests and formatting across all workspaces) on your changes. The equivalent `cargo build`, `cargo test`, `cargo clippy` and `cargo fmt` commands can also be run individually in each workspace.
 
-    For this repository, you can use the convenient scripts to run tests across all workspaces:
+4. **Commit Your Changes**
 
-    `./scripts/build-all-workspaces.sh`: builds all workspaces (pool-apps, miner-apps, integration-tests)
+    These guidelines should be kept in mind:
+    - Progressive commit history, with clear separation of concerns.
+    - Avoid individual commits that address specific review findings, which breaks commit history cohesion. Always fold review findings into the original commit.
+    - Commit messages should provide a clear and concise explanation of the solution's rationale.
+    - If the specific commit closes some specific github issue, include the issue URL in the commit message.
+    - If possible, sign your commits with your GPG key.
+    - Writing style: [chris.beams.io/posts/git-commit](https://chris.beams.io/posts/git-commit/)
+    - Structure: [conventionalcommits.org](https://www.conventionalcommits.org/)
 
-    `./scripts/clippy-fmt-and-test.sh`: runs clippy, tests, and formatting across all workspaces
+5. **Submit a Pull Request**
 
-    Or run commands individually in each workspace:
-    - `cargo test`: runs the project's test suite. Ensure that all tests pass without errors.
-    - `cargo clippy`: linter tool for detecting common mistakes and style issues. Address any warnings or errors reported by Clippy.
-    - `cargo fmt`: formats your code according to the project's style guidelines.
+    Once you're satisfied with your changes, submit a pull request to this repository. Provide a clear and concise description of the changes you've made. If your pull request addresses an existing issue, reference the issue number in the description. Every PR must be opened against the `main` branch.
 
-5. **Submit a Pull Request:** once you're satisfied with your changes, submit a pull request to this repository. Provide a clear and concise description of the changes you've made. If your pull request addresses an existing issue, reference the issue number in the description. Every PR must be opened against the `main` branch.
+6. **Review and Iterate**
 
-6. **Review and Iterate** 
+7. **Merge and Close**
 
-7. **Merge and Close:** Once your pull request has been approved and all discussions have been resolved, a project maintainer will merge your changes into the `main` branch. Your contribution will then be officially part of the project. The pull request will be closed, marking the completion of your contribution.
+    Once your pull request has been approved and all discussions have been resolved, a project maintainer will merge your changes into the `main` branch. Your contribution will then be officially part of the project. The pull request will be closed, marking the completion of your contribution.
 
 ### Monitoring API Schema
 
