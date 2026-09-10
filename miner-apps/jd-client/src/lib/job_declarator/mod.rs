@@ -137,7 +137,7 @@ impl JobDeclarator {
         mode: JDMode,
         task_manager: Arc<TaskManager>,
     ) -> JDCResult<Self, error::JobDeclarator> {
-        let addr = resolve_host(&upstream_entry.jds_host, upstream_entry.jds_port)
+        let candidate_addrs = resolve_host(&upstream_entry.jds_host, upstream_entry.jds_port)
             .await
             .map_err(|e| {
                 error!(
@@ -147,11 +147,17 @@ impl JobDeclarator {
                 JDCError::fallback(JDCErrorKind::NetworkHelpersError(e.into()))
             })?;
 
-        info!("Connecting to JD Server at {addr}");
-        let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .map_err(JDCError::fallback)?
-            .map_err(JDCError::fallback)?;
+        info!("Connecting to JD Server at {candidate_addrs:?}");
+        // Each resolved address gets an attempt, so a JD Server that publishes both an IPv6 and
+        // an IPv4 address is still reachable when only one of the two accepts connections.
+        let stream = tokio::time::timeout(
+            TCP_CONNECT_TIMEOUT,
+            TcpStream::connect(&candidate_addrs[..]),
+        )
+        .await
+        .map_err(JDCError::fallback)?
+        .map_err(JDCError::fallback)?;
+        let addr = stream.peer_addr().map_err(JDCError::fallback)?;
         info!("Connection established with JD Server at {addr} in mode: {mode:?}");
 
         let (noise_stream_reader, noise_stream_writer) = tokio::select! {

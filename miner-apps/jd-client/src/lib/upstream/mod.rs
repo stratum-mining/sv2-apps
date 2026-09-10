@@ -152,7 +152,7 @@ impl Upstream {
         task_manager: Arc<TaskManager>,
         required_extensions: Vec<u16>,
     ) -> JDCResult<Self, error::Upstream> {
-        let addr = resolve_host(&upstream_entry.pool_host, upstream_entry.pool_port)
+        let candidate_addrs = resolve_host(&upstream_entry.pool_host, upstream_entry.pool_port)
             .await
             .map_err(|e| {
                 error!(
@@ -162,10 +162,16 @@ impl Upstream {
                 JDCError::fallback(JDCErrorKind::NetworkHelpersError(e.into()))
             })?;
 
-        let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .map_err(JDCError::fallback)?
-            .map_err(JDCError::fallback)?;
+        // Each resolved address gets an attempt, so a pool that publishes both an IPv6 and an
+        // IPv4 address is still reachable when only one of the two accepts connections.
+        let stream = tokio::time::timeout(
+            TCP_CONNECT_TIMEOUT,
+            TcpStream::connect(&candidate_addrs[..]),
+        )
+        .await
+        .map_err(JDCError::fallback)?
+        .map_err(JDCError::fallback)?;
+        let addr = stream.peer_addr().map_err(JDCError::fallback)?;
         info!("Connected to upstream at {}", addr);
         debug!("Begin with noise setup in upstream connection");
 
