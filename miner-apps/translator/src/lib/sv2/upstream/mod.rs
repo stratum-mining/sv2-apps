@@ -191,7 +191,7 @@ impl Upstream {
             ));
         }
 
-        let resolved_addr = resolve_host(&upstream.host, upstream.port)
+        let candidate_addrs = resolve_host(&upstream.host, upstream.port)
             .await
             .map_err(|e| {
                 error!(
@@ -201,11 +201,17 @@ impl Upstream {
                 TproxyError::fallback(TproxyErrorKind::NetworkHelpersError(e.into()))
             })?;
 
-        match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(resolved_addr))
-            .await
-            .map_err(TproxyError::fallback)?
+        // Each resolved address gets an attempt, so a pool that publishes both an IPv6 and an
+        // IPv4 address is still reachable when only one of the two accepts connections.
+        match tokio::time::timeout(
+            TCP_CONNECT_TIMEOUT,
+            TcpStream::connect(&candidate_addrs[..]),
+        )
+        .await
+        .map_err(TproxyError::fallback)?
         {
             Ok(socket) => {
+                let resolved_addr = socket.peer_addr().map_err(TproxyError::fallback)?;
                 info!("Connected to upstream at {}", resolved_addr);
 
                 tokio::select! {
@@ -266,7 +272,7 @@ impl Upstream {
                 }
             }
             Err(e) => {
-                error!("Failed to connect to {}: {e}.", resolved_addr);
+                error!("Failed to connect to any of {:?}: {e}.", candidate_addrs);
                 Err(TproxyError::fallback(e))
             }
         }
