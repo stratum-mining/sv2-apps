@@ -2190,7 +2190,7 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
     // SetTarget message with channel id not present in downstream
     let set_target = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(SetTargetOwned {
         channel_id: 5,
-        maximum_target: [0; 32].into(),
+        target: [0; 32].into(),
     }));
     send_to_tproxy_a.send(set_target).await.unwrap();
 

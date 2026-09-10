@@ -1485,7 +1485,7 @@ mod tests {
         let update_channel = UpdateChannelOwned {
             channel_id: 1,
             nominal_hash_rate: 2000.0,
-            maximum_target: [0xFFu8; 32].into(),
+            max_target: [0xFFu8; 32].into(),
         };
 
         // Test that the message can be handled
@@ -1524,7 +1524,7 @@ mod tests {
         let update_channel = UpdateChannelOwned {
             channel_id: 0,
             nominal_hash_rate: 0.0,
-            maximum_target: [0xFFu8; 32].into(),
+            max_target: [0xFFu8; 32].into(),
         };
 
         sv1_server_sender_for_test

@@ -737,7 +737,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         info!("Received: {}", msg);
         let channel_id = msg.channel_id;
         let new_nominal_hash_rate = msg.nominal_hash_rate;
-        let requested_maximum_target = Target::from_le_bytes(msg.maximum_target.to_array());
+        let requested_max_target = Target::from_le_bytes(msg.max_target.to_array());
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
@@ -755,7 +755,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     .with_mut(&channel_id, |standard_channel| {
                         let mut messages: Vec<RouteMessageTo> = vec![];
                         let update_channel = standard_channel
-                            .update_channel(new_nominal_hash_rate, Some(requested_maximum_target));
+                            .update_channel(new_nominal_hash_rate, Some(requested_max_target));
                         let new_target = standard_channel.get_target();
 
                         if let Err(e) = update_channel {
@@ -776,7 +776,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 downstream_id,
                                 MiningOwned::SetTarget(SetTargetOwned {
                                     channel_id,
-                                    maximum_target: new_target.to_le_bytes().into(),
+                                    target: new_target.to_le_bytes().into(),
                                 }),
                             )
                                 .into(),
@@ -790,7 +790,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     .with_mut(&channel_id, |extended_channel| {
                         let mut messages: Vec<RouteMessageTo> = vec![];
                         let update_channel = extended_channel
-                            .update_channel(new_nominal_hash_rate, Some(requested_maximum_target));
+                            .update_channel(new_nominal_hash_rate, Some(requested_max_target));
                         let new_target = extended_channel.get_target();
 
                         if let Err(e) = update_channel {
@@ -811,7 +811,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 downstream_id,
                                 MiningOwned::SetTarget(SetTargetOwned {
                                     channel_id,
-                                    maximum_target: new_target.to_le_bytes().into(),
+                                    target: new_target.to_le_bytes().into(),
                                 }),
                             )
                                 .into(),
@@ -865,7 +865,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         MiningOwned::UpdateChannel(UpdateChannelOwned {
                             channel_id: upstream_channel.get_channel_id(),
                             nominal_hash_rate: downstream_hashrate,
-                            maximum_target: min_target.to_le_bytes().into(),
+                            max_target: min_target.to_le_bytes().into(),
                         })
                         .into(),
                     );
