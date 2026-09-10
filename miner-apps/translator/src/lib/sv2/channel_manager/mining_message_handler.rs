@@ -1032,7 +1032,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     // fall back
                     self.extended_channels.try_for_each_mut(|_, channel| {
                         channel
-                            .set_target(Target::from_le_bytes(m.maximum_target.to_array()))
+                            .set_target(Target::from_le_bytes(m.target.to_array()))
                             .map_err(|e| {
                                 error!("Upstream SetTarget rejected: {:?}", e);
                                 TproxyError::fallback(TproxyErrorKind::FailedToProcessSetTarget)
@@ -1062,7 +1062,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 for channel_id in channel_ids {
                     self.extended_channels
                         .with_mut(&channel_id, |channel| {
-                            channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()))
+                            channel.set_target(Target::from_le_bytes(m.target.to_array()))
                         })
                         .ok_or(TproxyError::fallback(TproxyErrorKind::ChannelNotFound))?
                         .map_err(|e| {
@@ -1078,7 +1078,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             // mode, we need to process the message for a specific channel
             } else {
                 let Some(res) = self.extended_channels.with_mut(&m.channel_id, |channel| {
-                    channel.set_target(Target::from_le_bytes(m.maximum_target.to_array()))
+                    channel.set_target(Target::from_le_bytes(m.target.to_array()))
                 }) else {
                     // we got a nonsense channel id, we should log an error and ignore the
                     // message
