@@ -42,10 +42,14 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// Resolves a host string and port to a [`SocketAddr`].
+/// Resolves a host string and port to every [`SocketAddr`] it maps to.
 ///
 /// This function first attempts to parse the host as an IP address (fast path, no DNS).
 /// If that fails, it performs an async DNS lookup via [`tokio::net::lookup_host`].
+///
+/// Every resolved address is returned, in resolver order. Pass the slice straight to
+/// [`tokio::net::TcpStream::connect`], which attempts each address until one succeeds, so a
+/// dual-stack host still connects over IPv4 when its IPv6 address is unreachable.
 ///
 /// This should be called at connection time (not config parse time) so that DNS changes
 /// are picked up on reconnection attempts.
@@ -54,36 +58,45 @@ impl std::error::Error for ResolveError {}
 ///
 /// ```ignore
 /// // IP address (fast path)
-/// let addr = resolve_host("127.0.0.1", 3333).await?;
+/// let addrs = resolve_host("127.0.0.1", 3333).await?;
 ///
 /// // Hostname (DNS lookup)
-/// let addr = resolve_host("pool.example.com", 3333).await?;
+/// let addrs = resolve_host("pool.example.com", 3333).await?;
+/// let stream = TcpStream::connect(&addrs[..]).await?;
 /// ```
-pub async fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, ResolveError> {
+pub async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, ResolveError> {
     // Fast path: try parsing as an IP address directly (no DNS needed)
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, port));
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
     // Slow path: perform async DNS resolution
     info!("Resolving hostname '{host}' via DNS...");
     let lookup = format!("{host}:{port}");
-    let addr = tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host(&lookup))
-        .await
-        .map_err(|_| ResolveError::Timeout(host.to_string()))?
-        .map_err(ResolveError::LookupFailed)?
-        // DNS can return multiple addresses; take the first one
-        .next()
-        .ok_or_else(|| ResolveError::NoResults(host.to_string()))?;
+    let addrs: Vec<SocketAddr> =
+        tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host(&lookup))
+            .await
+            .map_err(|_| ResolveError::Timeout(host.to_string()))?
+            .map_err(ResolveError::LookupFailed)?
+            .collect();
 
-    debug!("Resolved '{host}' -> {addr}");
-    Ok(addr)
+    if addrs.is_empty() {
+        return Err(ResolveError::NoResults(host.to_string()));
+    }
+
+    debug!("Resolved '{host}' -> {addrs:?}");
+    Ok(addrs)
 }
 
-/// Resolves a `"host:port"` string to a [`SocketAddr`].
+/// Resolves a `"host:port"` string to a single [`SocketAddr`].
 ///
 /// Accepts both IP addresses and hostnames in the `"host:port"` format.
 /// For hostnames, performs async DNS resolution via [`tokio::net::lookup_host`].
+///
+/// Only the first resolved address is returned, which suits callers that need one concrete
+/// address to describe an endpoint. To open a connection, use [`resolve_host`] or hand the
+/// `"host:port"` string to [`tokio::net::TcpStream::connect`] instead, so that every address
+/// behind the name gets an attempt.
 ///
 /// # Examples
 ///
@@ -120,22 +133,40 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ipv4_address() {
-        let addr = resolve_host("127.0.0.1", 3333).await.unwrap();
-        assert_eq!(addr, SocketAddr::new("127.0.0.1".parse().unwrap(), 3333));
+        let addrs = resolve_host("127.0.0.1", 3333).await.unwrap();
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 3333)]
+        );
     }
 
     #[tokio::test]
     async fn resolve_ipv6_address() {
-        let addr = resolve_host("::1", 3333).await.unwrap();
-        assert_eq!(addr, SocketAddr::new("::1".parse().unwrap(), 3333));
+        let addrs = resolve_host("::1", 3333).await.unwrap();
+        assert_eq!(addrs, vec![SocketAddr::new("::1".parse().unwrap(), 3333)]);
     }
 
     #[tokio::test]
     async fn resolve_localhost_hostname() {
-        let addr = resolve_host("localhost", 3333).await.unwrap();
-        // localhost can resolve to either 127.0.0.1 or ::1 depending on the system
-        assert_eq!(addr.port(), 3333);
-        assert!(addr.ip().is_loopback());
+        let addrs = resolve_host("localhost", 3333).await.unwrap();
+        assert!(!addrs.is_empty());
+        // localhost can resolve to 127.0.0.1, ::1, or both depending on the system
+        assert!(
+            addrs
+                .iter()
+                .all(|a| a.port() == 3333 && a.ip().is_loopback())
+        );
+    }
+
+    /// Every address behind a name must survive resolution: dropping any of them leaves a
+    /// dual-stack pool unreachable whenever the resolver happens to list a dead address first.
+    #[tokio::test]
+    async fn resolve_keeps_every_address_dns_returns() {
+        let expected: Vec<SocketAddr> = tokio::net::lookup_host("localhost:3333")
+            .await
+            .unwrap()
+            .collect();
+        assert_eq!(resolve_host("localhost", 3333).await.unwrap(), expected);
     }
 
     #[tokio::test]
