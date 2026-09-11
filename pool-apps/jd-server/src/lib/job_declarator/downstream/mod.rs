@@ -68,6 +68,8 @@ pub struct Downstream {
     /// Extensions that JDS requires
     #[allow(unused)]
     pub required_extensions: Vec<u16>,
+    /// The authenticated user identity bound to this connection via AllocateMiningJobToken.
+    pub user_identity: SharedLock<Option<String>>,
     /// Per-downstream cancellation token (child of the global token).
     /// Cancelling this stops IO tasks, the pending jobs janitor, and the downstream loop
     /// without affecting other downstreams or the server.
@@ -138,6 +140,7 @@ impl Downstream {
 
         let negotiated_extensions = SharedLock::new(Vec::new());
         let pending_declare_mining_jobs = SharedMap::new();
+        let user_identity = SharedLock::new(None);
 
         let downstream_io = DownstreamIo {
             to_job_declarator_sender,
@@ -153,6 +156,7 @@ impl Downstream {
             downstream_id,
             supported_extensions,
             required_extensions,
+            user_identity,
             downstream_cancellation_token,
         }
     }

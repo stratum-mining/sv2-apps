@@ -1562,3 +1562,170 @@ async fn jdc_per_upstream_identity_switches_on_fallback() {
 
     shutdown_all!(jdc);
 }
+
+// This test verifies that JDS immediately drops the connection if a downstream
+// attempts to allocate a job token using an empty user_identifier.
+#[tokio::test]
+async fn test_jds_rejects_empty_identity() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    let send_to_jds = MockDownstream::new(
+        jds_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    let empty_identity_msg = AnyMessageOwned::JobDeclaration(
+        parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+            request_id: 1,
+            user_identifier: "".try_into().unwrap(),
+        }),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    send_to_jds.send(empty_identity_msg).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Dummy send to flush the mock downstream proxy loop and force it to close
+    let _ = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 2,
+                user_identifier: "test".try_into().unwrap(),
+            }),
+        ))
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let res = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 3,
+                user_identifier: "test".try_into().unwrap(),
+            }),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "JDS should have disconnected the client for empty identity"
+    );
+
+    shutdown_all!(pool);
+}
+
+// This test verifies that JDS requires all subsequent token allocations on a single
+// connection to use the exact same identity, preventing mid-session identity swapping.
+#[tokio::test]
+async fn test_jds_rejects_inconsistent_identity() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    let send_to_jds = MockDownstream::new(
+        jds_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    let valid_identity_msg = AnyMessageOwned::JobDeclaration(
+        parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+            request_id: 1,
+            user_identifier: "farm_01".try_into().unwrap(),
+        }),
+    );
+    send_to_jds.send(valid_identity_msg).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let inconsistent_identity_msg = AnyMessageOwned::JobDeclaration(
+        parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+            request_id: 2,
+            user_identifier: "farm_02".try_into().unwrap(),
+        }),
+    );
+    send_to_jds.send(inconsistent_identity_msg).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Dummy send to flush the mock downstream proxy loop and force it to close
+    let _ = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 3,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let res = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 4,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "JDS should have disconnected the client for inconsistent identity"
+    );
+
+    shutdown_all!(pool);
+}
+
+// This test verifies that JDS accepts subsequent token allocations on a single
+// connection as long as they use the exact same (replayed) identity.
+#[tokio::test]
+async fn test_jds_accepts_replayed_identity() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    let send_to_jds = MockDownstream::new(
+        jds_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    let valid_identity_msg = AnyMessageOwned::JobDeclaration(
+        parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+            request_id: 1,
+            user_identifier: "farm_01".try_into().unwrap(),
+        }),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    send_to_jds.send(valid_identity_msg.clone()).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let replayed_identity_msg = AnyMessageOwned::JobDeclaration(
+        parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+            request_id: 2,
+            user_identifier: "farm_01".try_into().unwrap(), // Same identity
+        }),
+    );
+    send_to_jds.send(replayed_identity_msg).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let res = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 3,
+                user_identifier: "farm_01".try_into().unwrap(), // Still the same identity
+            }),
+        ))
+        .await;
+    assert!(
+        res.is_ok(),
+        "JDS should have accepted the replayed identity and kept the connection alive"
+    );
+
+    shutdown_all!(pool);
+}

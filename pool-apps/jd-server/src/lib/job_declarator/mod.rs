@@ -470,9 +470,20 @@ impl JobDeclarator {
         // Clean up TokenManager
         self.token_manager.deactivate(active_token);
 
+        let user_identity = self
+            .downstream_clients
+            .with(&downstream_id, |d| d.user_identity.get().ok())
+            .flatten()
+            .flatten();
+
         match self
             .job_validator
-            .handle_set_custom_mining_job(downstream_id, set_custom_mining_job, allocated_token)
+            .handle_set_custom_mining_job(
+                downstream_id,
+                user_identity,
+                set_custom_mining_job,
+                allocated_token,
+            )
             .await
         {
             SetCustomMiningJobResult::Success => {

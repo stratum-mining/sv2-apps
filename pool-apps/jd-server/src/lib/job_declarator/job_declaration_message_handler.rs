@@ -53,10 +53,63 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         msg: AllocateMiningJobTokenOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!(
+            "Received AllocateMiningJobToken request_id: {}",
+            msg.request_id
+        );
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
+
+        let incoming_identity = std::str::from_utf8(msg.user_identifier.as_ref())
+            .map_err(|_| {
+                JDSError::disconnect(
+                    error::JDSErrorKind::InvalidUserIdentifier(
+                        "Invalid UTF-8 in user_identifier".to_string(),
+                    ),
+                    client_id,
+                )
+            })?
+            .to_string();
+
+        if incoming_identity.is_empty() {
+            return Err(JDSError::disconnect(
+                error::JDSErrorKind::InvalidUserIdentifier(
+                    "user_identifier cannot be empty".to_string(),
+                ),
+                client_id,
+            ));
+        }
+
+        let downstream = self
+            .downstream_clients
+            .with(&client_id, |d| d.clone())
+            .ok_or_else(|| {
+                JDSError::disconnect(error::JDSErrorKind::ClientNotFound(client_id), client_id)
+            })?;
+
+        let mismatch = downstream
+            .user_identity
+            .with(|bound_identity| {
+                if let Some(existing) = bound_identity {
+                    if existing != &incoming_identity {
+                        return true;
+                    }
+                } else {
+                    *bound_identity = Some(incoming_identity);
+                }
+                false
+            })
+            .map_err(|_| JDSError::shutdown(error::JDSErrorKind::PoisonLock))?;
+
+        if mismatch {
+            return Err(JDSError::disconnect(
+                error::JDSErrorKind::InvalidUserIdentifier(
+                    "Mismatched user_identifier on the same connection".to_string(),
+                ),
+                client_id,
+            ));
+        }
 
         let allocated_token = self.token_manager.allocate(client_id);
 

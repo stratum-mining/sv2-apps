@@ -49,6 +49,7 @@ pub trait JobValidationEngine: Send + Sync {
     async fn handle_set_custom_mining_job(
         &self,
         downstream_id: DownstreamId,
+        user_identity: Option<String>,
         set_custom_mining_job: SetCustomMiningJobOwned,
         allocated_token: JdToken,
     ) -> SetCustomMiningJobResult;
