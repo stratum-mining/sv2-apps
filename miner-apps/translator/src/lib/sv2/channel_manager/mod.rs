@@ -17,7 +17,11 @@ use stratum_apps::{
     payout::PayoutMode,
     stratum_core::{
         channels_sv2::{
-            client::{extended::ExtendedChannel, group::GroupChannel},
+            client::{
+                extended::ExtendedChannel,
+                group::GroupChannel,
+                share_accounting::{ShareValidationError, ShareValidationResult},
+            },
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
         },
         codec_sv2::StandardSv2Frame,
@@ -629,7 +633,7 @@ impl ChannelManager {
                         .with_mut(&AGGREGATED_CHANNEL_ID, |aggregated_channel| {
                             aggregated_channel.validate_share(m.clone())
                         });
-                    if let Some(Ok(_result)) = value {
+                    if let Some(Ok(_result)) = &value {
                         info!(
                             "SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {} ☑️",
                             upstream_extended_channel_id, m.sequence_number
@@ -639,6 +643,7 @@ impl ChannelManager {
                         m.sequence_number =
                             self.next_share_sequence_number(upstream_extended_channel_id);
                     } else {
+                        warn_dropped_share(&value, upstream_extended_channel_id, m.sequence_number);
                         return Ok(());
                     }
                 } else {
@@ -647,7 +652,7 @@ impl ChannelManager {
                         .with_mut(&m.channel_id, |extended_channel| {
                             extended_channel.validate_share(m.clone())
                         });
-                    if let Some(Ok(_result)) = value {
+                    if let Some(Ok(_result)) = &value {
                         info!(
                             "SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {} ☑️",
                             m.channel_id, m.sequence_number
@@ -686,6 +691,7 @@ impl ChannelManager {
                                 new_extranonce.try_into().map_err(TproxyError::shutdown)?;
                         }
                     } else {
+                        warn_dropped_share(&value, m.channel_id, m.sequence_number);
                         return Ok(());
                     }
                 }
@@ -1090,6 +1096,27 @@ impl ChannelManager {
                 *counter += 1;
                 *counter
             })
+    }
+}
+
+/// Logs a share that is about to be dropped instead of forwarded upstream.
+///
+/// The SV1 server has already answered the miner `result: true` by this point, so
+/// neither a validation failure nor a missing channel may pass silently: the work
+/// is credited downstream and then discarded, and nothing else records it.
+fn warn_dropped_share(
+    value: &Option<Result<ShareValidationResult, ShareValidationError>>,
+    channel_id: u32,
+    sequence_number: u32,
+) {
+    match value {
+        Some(Err(e)) => warn!(
+            "SubmitSharesExtended: share rejected by local validation, dropping it | channel_id: {channel_id}, sequence_number: {sequence_number}, error: {e:?} ❌"
+        ),
+        None => warn!(
+            "SubmitSharesExtended: no channel for share, dropping it | channel_id: {channel_id}, sequence_number: {sequence_number} ❌"
+        ),
+        Some(Ok(_)) => {}
     }
 }
 
