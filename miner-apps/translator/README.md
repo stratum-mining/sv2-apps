@@ -95,8 +95,11 @@ Make sure the machine running the Translator Proxy has its clock synced with an 
   address as the username.
 
 #### **Solo/Donation Payout Verification**
-Payout verification is disabled by default. Set `verify_payout = true` for solo mining or
-donation configurations where `user_identity` intentionally encodes an on-chain payout address:
+Payout verification defaults to `false` for compatibility with standard pool mining. When payout
+verification is disabled, tProxy trusts the upstream server's coinbase payout policy and does not
+verify that jobs pay the miner.
+Set `verify_payout = true` for solo mining, or donation configurations where `user_identity`
+intentionally encodes an on-chain payout address:
 
 - `sri/solo/<payout_address>/<worker>`: tProxy verifies every upstream extended job pays 100% of spendable coinbase outputs to `<payout_address>`
 - `<payout_address>[.worker]`: legacy solo mode, verified by checking that at least 90% of spendable coinbase outputs go to `<payout_address>`
@@ -111,6 +114,14 @@ If verification fails, tProxy triggers upstream fallback instead of forwarding t
 - `enable_vardiff`: Enable/disable variable difficulty adjustment (set to false when using with JDC)
   - When `true`: Translator manages difficulty adjustments based on share submission rates
   - When `false`: Upstream manages difficulty, translator forwards SetTarget messages to miners
+
+- `job_keepalive_interval_secs`: Idle interval before a miner receives a keepalive
+  `mining.notify`; `0` disables keepalives. Only miners whose own interval has elapsed
+  receive one. In aggregated mode, tProxy generates at most one new shared keepalive
+  per interval. A miner becoming due between advances receives the existing
+  shared job. A late joiner also receives the current shared job without resetting
+  shared history or the keepalive schedule. Normal upstream jobs are forwarded
+  without waiting for keepalive deadlines.
 
 #### **Miner Telemetry**
 Translator Proxy can enrich the monitoring API with telemetry from the ASICs connected to its SV1
