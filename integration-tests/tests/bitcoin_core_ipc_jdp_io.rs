@@ -8,6 +8,9 @@
 //! - `DeclareMiningJob` does not retain client-supplied transactions when validation fails.
 //! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without tearing
 //!   down the IPC connection.
+//! - `DeclareMiningJob` rejects client-supplied transactions the declaration did not ask for.
+//! - `DeclareMiningJob` keeps asking for the transactions an incomplete response left out, without
+//!   retaining the ones it did supply.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -37,6 +40,7 @@ use stratum_apps::{
         },
         job_declaration_sv2::{
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
         },
     },
@@ -113,7 +117,15 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         .await;
     assert_jdp_success_scenario(&incoming_sender, coinbase_tx.clone()).await;
     assert_jdp_stale_chain_tip_scenario(&incoming_sender, next_height).await;
-    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx).await;
+    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx.clone())
+        .await;
+    assert_jdp_supplied_txs_must_match_declaration(
+        &incoming_sender,
+        coinbase_tx.clone(),
+        next_height,
+    )
+    .await;
+    assert_jdp_incomplete_missing_txs_response(&incoming_sender, coinbase_tx).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -223,7 +235,7 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
 ) {
-    let invalid_tx = build_invalid_declared_tx();
+    let invalid_tx = build_invalid_declared_tx(0x11);
     let invalid_wtxid = invalid_tx.compute_wtxid();
 
     let response = send_declare_mining_job_and_recv_response(
@@ -257,6 +269,104 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
         }
         response => panic!(
             "expected MissingTransactions (rejected tx must not be retained), got: {response:?}"
+        ),
+    }
+}
+
+/// Client-supplied transactions must belong to the declaration that asked for them.
+///
+/// Transactions the job never declared, repeats of a transaction declared once, and coinbases are
+/// all rejected before block assembly, so a client cannot attach arbitrary payload to a retry.
+async fn assert_jdp_supplied_txs_must_match_declaration(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+    next_height: u32,
+) {
+    let declared_tx = build_invalid_declared_tx(0x21);
+    let declared_wtxid = declared_tx.compute_wtxid();
+
+    let scenarios = [
+        (
+            "jdp/unsolicited-supplied-tx",
+            vec![declared_tx.clone(), build_invalid_declared_tx(0x22)],
+        ),
+        (
+            "jdp/duplicate-supplied-tx",
+            vec![declared_tx.clone(), declared_tx],
+        ),
+        (
+            "jdp/coinbase-supplied-tx",
+            vec![build_valid_coinbase_tx(next_height)],
+        ),
+    ];
+
+    for (path_name, missing_txs) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            vec![declared_wtxid],
+            missing_txs,
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job ({path_name})"
+            ),
+            response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
+        }
+    }
+}
+
+/// An answer that supplies only part of the declared transactions leaves the declaration pending.
+///
+/// The transactions it did supply were never validated, so they must not be served from the
+/// mempool mirror on a later declaration either.
+async fn assert_jdp_incomplete_missing_txs_response(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let supplied_tx = build_invalid_declared_tx(0x31);
+    let supplied_wtxid = supplied_tx.compute_wtxid();
+    let withheld_wtxid = build_invalid_declared_tx(0x32).compute_wtxid();
+
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx.clone(),
+        vec![supplied_wtxid, withheld_wtxid],
+        vec![supplied_tx],
+        "jdp/incomplete-missing-txs",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![withheld_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions for a partially answered declaration, got: {response:?}"
+        ),
+    }
+
+    // Declare only the transaction supplied above, this time supplying nothing: the incomplete
+    // response must not have left it behind in the mempool mirror.
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx,
+        vec![supplied_wtxid],
+        vec![],
+        "jdp/incomplete-missing-txs-retry",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![supplied_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions (unvalidated tx must not be retained), got: {response:?}"
         ),
     }
 }
@@ -319,7 +429,7 @@ fn build_zero_input_coinbase_tx() -> Transaction {
     }
 }
 
-fn build_invalid_declared_tx() -> Transaction {
+fn build_invalid_declared_tx(prevout_txid_byte: u8) -> Transaction {
     Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
@@ -327,7 +437,7 @@ fn build_invalid_declared_tx() -> Transaction {
             // deliberately not `OutPoint::null()`, which would make Bitcoin Core treat this as a
             // second coinbase instead of exercising the empty-outputs rejection
             previous_output: OutPoint {
-                txid: Txid::from_byte_array([0x11; 32]),
+                txid: Txid::from_byte_array([prevout_txid_byte; 32]),
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),

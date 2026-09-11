@@ -6,7 +6,7 @@ use crate::{
         BitcoinCoreSv2JDP, mempool::decode_bip34_height_from_coinbase_script_sig,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use stratum_core::{
     bitcoin::{
         Block, Transaction, TxMerkleNode, Txid, Wtxid,
@@ -27,14 +27,15 @@ use tracing::{debug, error, info, warn};
 impl BitcoinCoreSv2JDP {
     /// Validates a declared mining job by checking transaction availability and block structure.
     ///
-    /// Stages the client-supplied transactions locally, rejects a coinbase that does not carry
-    /// exactly one input, verifies all declared wtxids resolve against the mempool mirror plus
-    /// that staging area, assembles a test block, and uses Bitcoin Core's `checkBlock` to validate
-    /// the block structure. Staged transactions are only committed to the mempool mirror after
-    /// `checkBlock` succeeds and only if the chain tip did not move while `checkBlock` was in
-    /// flight, so a rejected declaration never grows shared state and stale transactions never
-    /// seed a freshly-cleared mirror. Returns success with current template parameters or an
-    /// error if validation fails.
+    /// Rejects a coinbase that does not carry exactly one input, stages the client-supplied
+    /// transactions locally after checking that every one of them is an ordinary transaction the
+    /// job declared and supplied only once, verifies all declared wtxids resolve against the
+    /// mempool mirror plus that staging area, assembles a test block, and uses Bitcoin Core's
+    /// `checkBlock` to validate the block structure. Staged transactions are only committed to the
+    /// mempool mirror after `checkBlock` succeeds and only if the chain tip did not move while
+    /// `checkBlock` was in flight, so a rejected declaration never grows shared state and stale
+    /// transactions never seed a freshly-cleared mirror. Returns success with current template
+    /// parameters or an error if validation fails.
     pub(crate) async fn handle_declare_mining_job(
         &self,
         version: Version,
@@ -67,15 +68,7 @@ impl BitcoinCoreSv2JDP {
             // stale-tip comparison signal.
             .unwrap_or_else(|| coinbase_tx.lock_time.to_consensus_u32());
 
-        // Client-supplied transactions are staged locally and only committed to the process-wide
-        // mempool mirror once Bitcoin Core has validated the assembled block, so rejected
-        // declarations cannot grow shared state.
-        let mut staged_txs: HashMap<Wtxid, Transaction> = missing_txs
-            .into_iter()
-            .map(|tx| (tx.compute_wtxid(), tx))
-            .collect();
-
-        let (initial_validation_context, initial_bip34_height, txdata) = {
+        let (initial_validation_context, initial_bip34_height, txdata, mut staged_txs) = {
             let mempool_mirror = self.mempool_mirror.borrow();
 
             let prev_hash = mempool_mirror
@@ -116,6 +109,21 @@ impl BitcoinCoreSv2JDP {
                 return;
             }
 
+            // Client-supplied transactions are staged locally and only committed to the
+            // process-wide mempool mirror once Bitcoin Core has validated the assembled block, so
+            // rejected declarations cannot grow shared state. They are also scoped to this
+            // declaration: a transaction it never declared, or one supplied more than once, is a
+            // protocol violation rather than something to silently drop.
+            let Some(staged_txs) = stage_missing_txs(&wtxid_list, missing_txs) else {
+                // deliberately ignore potential errors
+                // we don't care if the receiver dropped the channel
+                let _ = response_tx.send(JdResponse::Error {
+                    error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                    validation_context: initial_validation_context,
+                });
+                return;
+            };
+
             // Now verify that all wtxids from the declared job are available, either in the
             // mirror or among the staged (still unvalidated) transactions
             let txdata = match mempool_mirror.resolve_txdata(&wtxid_list, &staged_txs) {
@@ -139,7 +147,12 @@ impl BitcoinCoreSv2JDP {
                 initial_bip34_height
             );
 
-            (initial_validation_context, initial_bip34_height, txdata)
+            (
+                initial_validation_context,
+                initial_bip34_height,
+                txdata,
+                staged_txs,
+            )
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
         let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
@@ -298,9 +311,7 @@ impl BitcoinCoreSv2JDP {
         if valid_job {
             if latest_validation_context.prev_hash == initial_validation_context.prev_hash {
                 // checkBlock validated the assembled block, so the client-supplied transactions it
-                // contained are now safe to commit to the shared mempool mirror. Staged
-                // transactions that were not declared were never part of that block, so they are
-                // dropped.
+                // contained are now safe to commit to the shared mempool mirror.
                 let validated_txs: Vec<Transaction> = wtxid_list
                     .iter()
                     .filter_map(|wtxid| staged_txs.remove(wtxid))
@@ -373,4 +384,38 @@ impl BitcoinCoreSv2JDP {
     pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolutionOwned) {
         // todo
     }
+}
+
+/// Keys client-supplied transactions by wtxid, scoped to the job that declared them.
+///
+/// Every supplied transaction must be an ordinary transaction listed in `wtxid_list`, and must be
+/// supplied at most once. Wtxids are recomputed here, so a transaction can only ever be staged
+/// under the identifier it actually hashes to.
+///
+/// Returns `None` if any supplied transaction breaks those rules, logging which one and why.
+fn stage_missing_txs(
+    wtxid_list: &[Wtxid],
+    missing_txs: Vec<Transaction>,
+) -> Option<HashMap<Wtxid, Transaction>> {
+    let declared: HashSet<&Wtxid> = wtxid_list.iter().collect();
+    let mut staged = HashMap::with_capacity(missing_txs.len());
+
+    for tx in missing_txs {
+        let wtxid = tx.compute_wtxid();
+
+        if tx.is_coinbase() {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: supplied transaction is a coinbase");
+            return None;
+        }
+        if !declared.contains(&wtxid) {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: supplied transaction was not declared");
+            return None;
+        }
+        if staged.insert(wtxid, tx).is_some() {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: supplied transaction was repeated");
+            return None;
+        }
+    }
+
+    Some(staged)
 }
