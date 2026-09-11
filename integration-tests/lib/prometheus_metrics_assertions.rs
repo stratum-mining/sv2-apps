@@ -357,10 +357,7 @@ fn parse_label_block(block: &str) -> HashMap<String, String> {
 
 /// Parse a specific metric value from Prometheus text format.
 /// Returns `None` if no line matches the selector.
-pub(crate) fn parse_metric_value<'a, M: Into<Metric<'a>>>(
-    metrics_text: &str,
-    metric: M,
-) -> Option<f64> {
+pub fn parse_metric_value<'a, M: Into<Metric<'a>>>(metrics_text: &str, metric: M) -> Option<f64> {
     let metric = metric.into();
     for line in metrics_text.lines() {
         if line.starts_with('#') {

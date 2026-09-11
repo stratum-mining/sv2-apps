@@ -227,6 +227,24 @@ pub trait Sv2ClientsMonitoring: Send + Sync {
             total_hashrate: clients.iter().map(|c| c.total_hashrate()).sum(),
         }
     }
+
+    /// Cumulative blocks found. Override with a process-lifetime accumulator to
+    /// keep the count after the finding channel disconnects; the default sums
+    /// live channels and therefore decreases when one goes away.
+    ///
+    /// Takes the already-collected clients so callers need not re-acquire the
+    /// business-logic lock.
+    fn get_blocks_found_total(&self, clients: &[Sv2ClientInfo]) -> u64 {
+        clients
+            .iter()
+            .flat_map(|c| {
+                c.extended_channels
+                    .iter()
+                    .map(|ch| ch.blocks_found as u64)
+                    .chain(c.standard_channels.iter().map(|ch| ch.blocks_found as u64))
+            })
+            .sum()
+    }
 }
 
 #[cfg(test)]
