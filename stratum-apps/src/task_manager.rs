@@ -1,32 +1,13 @@
 use std::sync::Mutex as StdMutex;
 use tokio::task::JoinSet;
 
-/// Manages a collection of spawned tokio tasks.
+/// Spawns and tracks tokio tasks so they can be awaited or aborted at shutdown.
 ///
-/// This struct provides a centralized way to spawn, track, and manage the lifecycle
-/// of async tasks in the translator. Tasks are tracked in a [`tokio::task::JoinSet`],
-/// which can be used to wait for all tasks to complete or abort them during shutdown.
-///
-/// # Tracking cost
-///
-/// Tracking must stay cheap on the hot path, because callers spawn several tasks per
-/// downstream connection. A `Vec<JoinHandle<()>>` pruned with `retain(|h|
-/// !h.is_finished())` on every spawn costs a linear scan of every live handle per
-/// spawn, which makes reaching N concurrent connections quadratic in N and serializes
-/// that scan on one mutex.
-///
-/// A `JoinSet` inserts in constant time. Because a `JoinSet` only releases an entry
-/// when that entry is joined, and [`Self::join_all`] runs only at shutdown, spawn
-/// also drains already-finished tasks with the non-blocking
-/// [`tokio::task::JoinSet::try_join_next`]. That drain touches only tasks the runtime
-/// has already marked complete, never live ones, so it costs O(tasks finished since
-/// the previous spawn) — amortized constant per task — and keeps the set bounded to
-/// roughly the live task count. Without it the set would retain one task
-/// control-block per task ever spawned, growing with cumulative rather than
-/// concurrent tasks.
-///
-/// The mutex itself is retained, so spawns still serialize on it; what this removes
-/// is the per-spawn scan over all live handles.
+/// Tasks are held in a [`tokio::task::JoinSet`]. Because a `JoinSet` releases an entry
+/// only when that entry is joined, and [`Self::join_all`] runs only at shutdown,
+/// [`Self::spawn`] also drains already-finished entries with
+/// [`tokio::task::JoinSet::try_join_next`]. That drain is what keeps the set bounded to
+/// roughly the live task count rather than to every task ever spawned.
 pub struct TaskManager {
     tasks: StdMutex<JoinSet<()>>,
 }
@@ -68,18 +49,13 @@ impl TaskManager {
             column = location.column(),
         );
 
-        // Collect abnormal exits under the lock and report them after releasing it.
-        // Reporting while holding the lock would put subscriber work on the contended
-        // path, and would deadlock if a subscriber ever spawned through this manager,
-        // because the lock is not reentrant. `Vec::new` does not allocate, so the
-        // common case of no failures costs nothing.
+        // Collected under the lock, reported after releasing it: the lock is not
+        // reentrant, so reporting while held would deadlock if a subscriber ever spawned
+        // through this manager.
         let mut abnormal_exits = Vec::new();
 
         {
-            // `JoinSet::spawn` schedules the future on the current runtime, as the prior
-            // `tokio::spawn` did, and retains an abort handle internally. The lock is
-            // held for the insert and the drain and never across an `.await`, so `spawn`
-            // stays synchronous.
+            // Held across the insert and the drain, never across an `.await`.
             let mut tasks = self.tasks.lock().unwrap();
             tasks.spawn(fut.instrument(span));
 
