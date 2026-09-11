@@ -16,7 +16,7 @@ use stratum_apps::{
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         parsers_sv2::{AnyMessageOwned, Tlv},
     },
-    utils::types::{SUPPORTED_PROTOCOL_VERSION, Sv2Frame},
+    utils::types::{OutboundFrame, SUPPORTED_PROTOCOL_VERSION},
 };
 use tracing::{error, info};
 
@@ -76,8 +76,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                     .try_into()
                     .map_err(JDCError::shutdown)?,
             };
-            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
                 error!(
@@ -106,8 +105,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                     .try_into()
                     .map_err(JDCError::shutdown)?,
             };
-            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
                 error!(
@@ -131,8 +129,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
                     .try_into()
                     .map_err(JDCError::shutdown)?,
             };
-            let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-                .try_into()
+            let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
                 error!(
@@ -167,8 +164,7 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             used_version: SUPPORTED_PROTOCOL_VERSION,
             flags: 0, // !REQUIRES_FIXED_VERSION, !REQUIRES_EXTENDED_CHANNELS
         };
-        let frame: Sv2Frame = AnyMessageOwned::Common(response.into())
-            .try_into()
+        let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
             .map_err(JDCError::shutdown)?;
 
         if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
