@@ -1,18 +1,21 @@
 use crate::{
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
+    sv1::job_store::Sv1JobStore,
     utils::SubmitShareWithChannelId,
 };
 use async_channel::{Receiver, Sender};
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
-use std::{future::Future, sync::Arc, time::Instant};
+use std::{collections::VecDeque, future::Future, sync::Arc, time::Instant};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
     stratum_core::{
-        bitcoin::Target,
+        bitcoin::{BlockHash, Target},
+        channels_sv2::client::MAX_SEEN_SHARES,
         sv1_api::{
-            json_rpc::{self, Message},
+            json_rpc,
+            methods::Client2Server,
             server_to_client,
             utils::{Extranonce, HexU32Be},
         },
@@ -24,12 +27,29 @@ use stratum_apps::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+/// Work queued by the SV1 server for a single downstream task.
+///
+/// Setup completion is queued alongside notifications so that this task releases cached mining
+/// notifications in FIFO order after both setup responses have been queued to the miner.
+#[derive(Clone, Debug)]
+pub(super) enum Sv1ServerEvent {
+    Notify(Arc<server_to_client::Notify>),
+    SetDifficulty(json_rpc::Message),
+    SetExtranonce {
+        message: server_to_client::SetExtranonce,
+        /// Decided by the server in the same task that builds and records subscribe responses.
+        /// Otherwise the prefix is already included in the upcoming subscribe response.
+        notify_miner: bool,
+    },
+    SetupComplete,
+}
+
 #[derive(Clone, Debug)]
 pub struct DownstreamIo {
     pub downstream_sv1_sender: Sender<json_rpc::Message>,
     downstream_sv1_receiver: Receiver<json_rpc::Message>,
     sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
-    sv1_server_receiver: Receiver<json_rpc::Message>,
+    sv1_server_receiver: Receiver<Sv1ServerEvent>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -38,7 +58,7 @@ impl DownstreamIo {
         downstream_sv1_sender: Sender<json_rpc::Message>,
         downstream_sv1_receiver: Receiver<json_rpc::Message>,
         sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
-        sv1_server_receiver: Receiver<json_rpc::Message>,
+        sv1_server_receiver: Receiver<Sv1ServerEvent>,
     ) -> Self {
         Self {
             downstream_sv1_receiver,
@@ -57,14 +77,107 @@ impl DownstreamIo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Sv1HandshakeState {
-    /// The original authorize-triggered notification flush has not started.
-    Pending,
-    /// One caller is flushing cached mining notifications. New notifications stay cached until
-    /// that caller observes an empty notify cache under the same lock and enables forwarding.
-    Completing,
-    /// Cached mining notifications were delivered and normal forwarding is enabled.
-    Complete,
+pub(super) enum Sv1SessionState {
+    /// Setup responses are still pending, or cached notifications are still being delivered.
+    Starting { subscribed: bool, authorized: bool },
+    /// Setup is complete and job notifications can be forwarded normally.
+    Ready,
+}
+
+impl Default for Sv1SessionState {
+    fn default() -> Self {
+        Self::Starting {
+            subscribed: false,
+            authorized: false,
+        }
+    }
+}
+
+impl Sv1SessionState {
+    /// Records a queued setup response and returns `true` only when both required responses have
+    /// been queued for the first time.
+    pub(super) fn record_response(&mut self, request: Sv1SetupRequest) -> bool {
+        let Self::Starting {
+            subscribed,
+            authorized,
+        } = self
+        else {
+            return false;
+        };
+
+        let was_complete = *subscribed && *authorized;
+        match request {
+            Sv1SetupRequest::Subscribe => *subscribed = true,
+            Sv1SetupRequest::Authorize => *authorized = true,
+        }
+        !was_complete && *subscribed && *authorized
+    }
+
+    pub(super) fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+
+    pub(super) fn is_subscribed(self) -> bool {
+        match self {
+            Self::Starting { subscribed, .. } => subscribed,
+            Self::Ready => true,
+        }
+    }
+
+    pub(super) fn setup_complete(self) -> bool {
+        match self {
+            Self::Starting {
+                subscribed,
+                authorized,
+            } => subscribed && authorized,
+            Self::Ready => true,
+        }
+    }
+}
+
+/// Downstream-specific values needed to validate and translate a share for one advertised job.
+///
+/// Difficulty and extranonce assignments take effect on job boundaries, so late shares must use
+/// the values that accompanied their own job rather than the downstream's newest values.
+#[derive(Clone, Debug)]
+pub(super) struct Sv1JobValidationContext {
+    pub(super) extranonce: Extranonce,
+    pub(super) extranonce2_len: usize,
+    pub(super) target: Target,
+}
+
+/// Accepted SV1 share hashes retained for per-downstream duplicate detection.
+///
+/// This mirrors the client-channel policy in `channels_sv2`: the oldest hash is evicted once the
+/// shared `MAX_SEEN_SHARES` bound is reached, and the cache is cleared on a chain-tip transition.
+/// It remains separate from the SV2 channel cache because tProxy accepts shares at each miner's
+/// advertised target even when they do not meet the upstream channel target.
+#[derive(Debug, Default)]
+pub(super) struct Sv1AcceptedShareCache {
+    hashes: VecDeque<BlockHash>,
+}
+
+impl Sv1AcceptedShareCache {
+    /// Records a share hash and returns `false` when it was already present.
+    pub(super) fn insert_if_new(&mut self, hash: BlockHash) -> bool {
+        if self.hashes.contains(&hash) {
+            return false;
+        }
+        if self.hashes.len() == MAX_SEEN_SHARES {
+            self.hashes.pop_front();
+        }
+        self.hashes.push_back(hash);
+        true
+    }
+
+    fn clear(&mut self) {
+        self.hashes.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.hashes.len()
+    }
 }
 
 #[derive(Debug)]
@@ -80,32 +193,51 @@ pub struct DownstreamData {
     pub connection_ip: IpAddr,
     pub version_rolling_mask: Option<HexU32Be>,
     pub version_rolling_min_bit: Option<HexU32Be>,
-    pub last_job_version_field: Option<u32>,
     pub sv1_username: String,
     pub sv1_worker_name: String,
     pub cached_set_difficulty: Option<json_rpc::Message>,
-    pub cached_notify: Option<json_rpc::Message>,
-    pub(super) sv1_handshake_state: Sv1HandshakeState,
+    pub cached_notify: Option<Arc<server_to_client::Notify>>,
+    /// Prefix notification paired with the next deliverable job. Capability is checked only
+    /// when that job is sent, allowing the miner to announce support during setup.
+    pub(super) cached_set_extranonce: Option<server_to_client::SetExtranonce>,
+    pub(super) session_state: Sv1SessionState,
+    /// Per-job downstream state retained for late-share validation under the current chain tip.
+    pub(super) job_validation_contexts: Sv1JobStore<Sv1JobValidationContext>,
+    /// Bounded hashes of shares accepted from this miner under the current chain tip.
+    pub(super) accepted_share_hashes: Sv1AcceptedShareCache,
+    /// Number of queued `mining.set_extranonce` notifications not yet applied by this downstream.
+    pub(super) pending_set_extranonce_notifications: usize,
     // Next advertised SV1 target, applied when the corresponding
     // mining.set_difficulty is sent with a new mining.notify.
     pub pending_target: Option<Target>,
     pub pending_hashrate: Option<Hashrate>,
     pub stable_hashrate: bool,
     // Queue of Sv1 handshake messages received while waiting for SV2 channel to open
-    pub queued_sv1_handshake_messages: Vec<json_rpc::Message>,
+    pub queued_sv1_handshake_messages: Vec<Client2Server>,
     // Stores pending shares to be sent to the sv1_server
     pub pending_share: Option<SubmitShareWithChannelId>,
     // Exact target currently accepted upstream, used to decide whether a
     // stricter downstream difficulty must wait for a SetTarget response.
     pub upstream_target: Option<Target>,
-    // Timestamp of when the last job was received by this downstream, used for keepalive check
-    pub last_job_received_time: Option<Instant>,
+    /// Timestamp anchoring the next keepalive interval.
+    ///
+    /// `None` before the first job and while an extranonce change is waiting for the job that
+    /// activates it.
+    pub keepalive_timer_anchor: Option<Instant>,
+    pub(super) supports_set_extranonce: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Sv1SetupRequest {
+    Subscribe,
+    Authorize,
 }
 
 impl DownstreamData {
     pub fn new(
         hashrate: Option<Hashrate>,
         target: Target,
+        max_past_jobs: Option<usize>,
         #[cfg(feature = "monitoring")] connection_ip: IpAddr,
     ) -> Self {
         DownstreamData {
@@ -120,20 +252,44 @@ impl DownstreamData {
             connection_ip,
             version_rolling_mask: None,
             version_rolling_min_bit: None,
-            last_job_version_field: None,
             sv1_username: String::new(),
             sv1_worker_name: String::new(),
             cached_set_difficulty: None,
             cached_notify: None,
-            sv1_handshake_state: Sv1HandshakeState::Pending,
+            cached_set_extranonce: None,
+            session_state: Sv1SessionState::default(),
+            job_validation_contexts: Sv1JobStore::new(max_past_jobs),
+            accepted_share_hashes: Sv1AcceptedShareCache::default(),
+            pending_set_extranonce_notifications: 0,
             pending_target: None,
             pending_hashrate: None,
             stable_hashrate: false,
             queued_sv1_handshake_messages: Vec::new(),
             pending_share: None,
             upstream_target: None,
-            last_job_received_time: None,
+            keepalive_timer_anchor: None,
+            supports_set_extranonce: false,
         }
+    }
+
+    fn record_job_validation_context(&mut self, notify: &server_to_client::Notify) {
+        if notify.clean_jobs {
+            self.accepted_share_hashes.clear();
+        }
+        let context = Sv1JobValidationContext {
+            extranonce: self.extranonce1.clone(),
+            extranonce2_len: self.extranonce2_len,
+            target: self.target,
+        };
+        self.job_validation_contexts
+            .activate(notify.job_id.clone(), context, notify.clean_jobs);
+        if self.pending_set_extranonce_notifications == 0 {
+            self.keepalive_timer_anchor = Some(Instant::now());
+        }
+    }
+
+    pub(super) fn job_validation_context(&self, job_id: &str) -> Option<Sv1JobValidationContext> {
+        self.job_validation_contexts.get(job_id).cloned()
     }
 
     pub fn set_pending_target(&mut self, new_target: Target, downstream_id: DownstreamId) {
@@ -185,6 +341,17 @@ pub struct Downstream {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Downstream {
+    /// Stops this miner's connection. Its task cleanup callback removes the associated server and
+    /// channel-manager state.
+    pub(super) fn disconnect(&self) {
+        self.downstream_cancellation_token.cancel();
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_disconnected(&self) -> bool {
+        self.downstream_cancellation_token.is_cancelled()
+    }
+
     fn handle_error_action(
         &self,
         context: &str,
@@ -251,20 +418,22 @@ impl Downstream {
 
     /// Creates a new downstream connection instance.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(super) fn new(
         downstream_id: DownstreamId,
         downstream_sv1_sender: Sender<json_rpc::Message>,
         downstream_sv1_receiver: Receiver<json_rpc::Message>,
         sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
-        sv1_server_receiver: Receiver<json_rpc::Message>,
+        sv1_server_receiver: Receiver<Sv1ServerEvent>,
         target: Target,
         hashrate: Option<Hashrate>,
+        max_past_jobs: Option<usize>,
         #[cfg(feature = "monitoring")] connection_ip: IpAddr,
         downstream_cancellation_token: CancellationToken,
     ) -> Self {
         let downstream_data = SharedLock::new(DownstreamData::new(
             hashrate,
             target,
+            max_past_jobs,
             #[cfg(feature = "monitoring")]
             connection_ip,
         ));
@@ -323,7 +492,6 @@ impl Downstream {
                         info!("Downstream {downstream_id}: fallback triggered");
                         break;
                     }
-
                     // Handle downstream -> server message
                     res = self.handle_downstream_message() => {
                         if let Err(e) = res {
@@ -370,161 +538,62 @@ impl Downstream {
         });
     }
 
-    /// Handles messages received from the SV1 server.
+    /// Processes typed notifications in per-downstream FIFO order.
     ///
-    /// This method processes messages broadcast from the SV1 server to downstream
-    /// connections. Since `mining.notify` messages are guaranteed to never arrive
-    /// before their corresponding `mining.set_difficulty` message, the logic is
-    /// simplified to handle only handshake completion timing.
-    ///
-    /// Key behaviors:
-    /// - Filters messages by channel ID and downstream ID
-    /// - For `mining.set_difficulty`: Always caches the message (never sent immediately)
-    /// - For `mining.notify`: Sends any pending set_difficulty first, then forwards the notify
-    /// - For other messages: Forwards directly to the miner
-    /// - Caches both `mining.set_difficulty` and `mining.notify` messages if handshake is not yet
-    ///   complete
-    /// - On handshake completion: sends cached messages in correct order (set_difficulty first,
-    ///   then notify)
-    async fn handle_sv1_server_message(&self) -> TproxyResult<(), error::Downstream> {
-        match self.downstream_io.sv1_server_receiver.recv().await {
-            Ok(message) => {
-                let downstream_id = self.downstream_id;
-
-                if let Message::Notification(notification) = &message {
-                    match notification.method.as_str() {
-                        "mining.set_difficulty" => {
-                            // Difficulty changes are always paired with the next notify. Keeping
-                            // the handshake state and cache under the same lock prevents handshake
-                            // completion from draining a newly arrived difficulty by itself.
-                            let handshake_state = self
-                                .downstream_data
-                                .with(|data| {
-                                    data.cached_set_difficulty = Some(message);
-                                    data.sv1_handshake_state
-                                })
-                                .map_err(TproxyError::shutdown)?;
-                            debug!(
-                                ?handshake_state,
-                                "Down: Caching mining.set_difficulty to send before next mining.notify"
-                            );
-                            return Ok(());
+    /// Jobs wait for subscribe and authorize responses. Difficulty and extranonce changes are
+    /// sent with the next deliverable job; prefix support is required only at that boundary.
+    pub(super) async fn handle_sv1_server_message(&self) -> TproxyResult<(), error::Downstream> {
+        let event = self
+            .downstream_io
+            .sv1_server_receiver
+            .recv()
+            .await
+            .map_err(|error| TproxyError::disconnect(error, self.downstream_id))?;
+        match event {
+            Sv1ServerEvent::SetupComplete => self.enable_notification_forwarding().await?,
+            Sv1ServerEvent::SetDifficulty(message) => {
+                self.downstream_data
+                    .with(|data| data.cached_set_difficulty = Some(message))
+                    .map_err(TproxyError::shutdown)?;
+            }
+            Sv1ServerEvent::Notify(notify) => {
+                let ready = self
+                    .downstream_data
+                    .with(|data| {
+                        if data.session_state.is_ready() {
+                            true
+                        } else {
+                            data.cached_notify = Some(notify.clone());
+                            false
                         }
-                        "mining.notify" => {
-                            let messages_to_send = self
-                                .downstream_data
-                                .with(|data| {
-                                    if data.sv1_handshake_state != Sv1HandshakeState::Complete {
-                                        data.cached_notify = Some(message.clone());
-                                        let notify = server_to_client::Notify::try_from(
-                                            notification.clone(),
-                                        )
-                                        .expect("this must be a mining.notify");
-                                        data.last_job_version_field = Some(notify.version.0);
-                                        return None;
-                                    }
-
-                                    let cached_set_difficulty = data.cached_set_difficulty.take();
-                                    let mut notify =
-                                        server_to_client::Notify::try_from(notification.clone())
-                                            .expect("this must be a mining.notify");
-                                    if cached_set_difficulty.is_some() {
-                                        notify.clean_jobs = true;
-                                        if let Some(new_target) = data.pending_target.take() {
-                                            data.target = new_target;
-                                        }
-                                        if let Some(new_hashrate) = data.pending_hashrate.take() {
-                                            data.hashrate = Some(new_hashrate);
-                                        }
-                                    }
-                                    data.last_job_version_field = Some(notify.version.0);
-                                    data.last_job_received_time = Some(Instant::now());
-                                    Some((cached_set_difficulty, Message::from(notify)))
-                                })
-                                .map_err(TproxyError::shutdown)?;
-
-                            let Some((pending_set_difficulty, notify)) = messages_to_send else {
-                                debug!("Down: SV1 handshake not complete, caching mining.notify");
-                                return Ok(());
-                            };
-
-                            if let Some(set_difficulty) = pending_set_difficulty {
-                                debug!(
-                                    "Down: Sending pending mining.set_difficulty before mining.notify"
-                                );
-                                self.downstream_io
-                                    .downstream_sv1_sender
-                                    .send(set_difficulty)
-                                    .await
-                                    .map_err(|error| {
-                                        error!(
-                                            "Down: Failed to send mining.set_difficulty to downstream: {error:?}"
-                                        );
-                                        TproxyError::disconnect(
-                                            TproxyErrorKind::ChannelErrorSender,
-                                            downstream_id,
-                                        )
-                                    })?;
-                            }
-
-                            debug!("Down: Sending mining.notify");
-                            self.downstream_io
-                                .downstream_sv1_sender
-                                .send(notify)
-                                .await
-                                .map_err(|error| {
-                                    error!(
-                                        "Down: Failed to send mining.notify to downstream: {error:?}"
-                                    );
-                                    TproxyError::disconnect(
-                                        TproxyErrorKind::ChannelErrorSender,
-                                        downstream_id,
-                                    )
-                                })?;
-                            return Ok(());
-                        }
-                        _ => {
-                            let handshake_complete = self
-                                .downstream_data
-                                .with(|data| {
-                                    data.sv1_handshake_state == Sv1HandshakeState::Complete
-                                })
-                                .map_err(TproxyError::shutdown)?;
-                            if !handshake_complete {
-                                debug!(
-                                    "Down: SV1 handshake not complete, skipping other notification"
-                                );
-                                return Ok(());
-                            }
-
-                            self.downstream_io
-                                .downstream_sv1_sender
-                                .send(message)
-                                .await
-                                .map_err(|error| {
-                                    error!(
-                                        "Down: Failed to send notification to downstream: {error:?}"
-                                    );
-                                    TproxyError::disconnect(
-                                        TproxyErrorKind::ChannelErrorSender,
-                                        downstream_id,
-                                    )
-                                })?;
-                        }
-                    }
-                } else {
-                    debug!("Down: Skipping non-notification message from SV1 server");
+                    })
+                    .map_err(TproxyError::shutdown)?;
+                if ready {
+                    self.send_job(notify).await?;
                 }
             }
-            Err(e) => {
-                error!(
-                    "Sv1 message handler error for downstream {}: {:?}",
-                    self.downstream_id, e
-                );
-                return Err(TproxyError::disconnect(e, self.downstream_id));
+            Sv1ServerEvent::SetExtranonce {
+                message,
+                notify_miner,
+            } => {
+                self.downstream_data
+                    .with(|data| {
+                        data.pending_set_extranonce_notifications =
+                            data.pending_set_extranonce_notifications.saturating_sub(1);
+                        // Pre-subscribe updates were applied by the server before response
+                        // construction. Reapplying this event could overwrite a newer prefix
+                        // already included in that response.
+                        if notify_miner {
+                            data.extranonce1 = message.extra_nonce1.clone();
+                            data.extranonce2_len = message.extra_nonce2_size;
+                            data.cached_set_extranonce = Some(message);
+                        }
+                        // A cached job predates this transition and has not reached the miner.
+                        data.cached_notify = None;
+                    })
+                    .map_err(TproxyError::shutdown)?;
             }
         }
-
         Ok(())
     }
 
@@ -559,121 +628,83 @@ impl Downstream {
         Ok(())
     }
 
-    /// Handles SV1 handshake completion after mining.authorize.
-    ///
-    /// The server calls this after queuing an authorize response. The first call flushes cached
-    /// mining notifications (difficulty before notify); repeated calls do nothing. State and cache
-    /// transitions share a lock so normal forwarding cannot overtake the flush or leave work
-    /// stranded in the cache.
-    pub(super) async fn handle_sv1_handshake_completion(
-        &self,
-    ) -> TproxyResult<(), error::Downstream> {
-        let cached_messages = self
+    /// Releases the latest cached job once both setup responses have been queued.
+    /// Capability announcements may also arrive after setup, provided they are processed before
+    /// the first job delivery requiring a changed extranonce.
+    async fn enable_notification_forwarding(&self) -> TproxyResult<(), error::Downstream> {
+        let (enable, notify) = self
             .downstream_data
             .with(|data| {
-                if data.sv1_handshake_state != Sv1HandshakeState::Pending {
-                    return None;
+                if data.session_state.is_ready() || !data.session_state.setup_complete() {
+                    return (false, None);
                 }
-                data.sv1_handshake_state = Sv1HandshakeState::Completing;
-                Some((data.cached_set_difficulty.take(), data.cached_notify.take()))
+                (true, data.cached_notify.take())
             })
             .map_err(TproxyError::shutdown)?;
-        let Some((cached_set_difficulty, cached_notify)) = cached_messages else {
-            debug!(
-                "Down: Ignoring repeated SV1 handshake completion for downstream {}",
-                self.downstream_id
-            );
+        if !enable {
             return Ok(());
-        };
-
-        debug!("Down: SV1 handshake completed for downstream");
-
-        self.send_cached_mining_notifications(cached_set_difficulty, cached_notify)
-            .await?;
-
-        // Notifications can arrive while the initial cached pair is being sent. Keep the state
-        // in `Completing` until every cached notify has been flushed. A difficulty that arrives
-        // without a notify remains cached for the next normal notify instead of being sent bare.
-        loop {
-            let next_messages = self
-                .downstream_data
-                .with(|data| {
-                    let Some(notify) = data.cached_notify.take() else {
-                        data.sv1_handshake_state = Sv1HandshakeState::Complete;
-                        return None;
-                    };
-                    Some((data.cached_set_difficulty.take(), Some(notify)))
-                })
-                .map_err(TproxyError::shutdown)?;
-
-            let Some((set_difficulty, notify)) = next_messages else {
-                break;
-            };
-            self.send_cached_mining_notifications(set_difficulty, notify)
-                .await?;
         }
-
+        if let Some(notify) = notify {
+            self.send_job(notify).await?;
+        }
+        self.downstream_data
+            .with(|data| data.session_state = Sv1SessionState::Ready)
+            .map_err(TproxyError::shutdown)?;
         Ok(())
     }
 
-    /// Sends mining notifications already removed from the cache, not handshake responses.
-    /// Each call sends a new cached pair; a missing difficulty still permits notify delivery.
-    async fn send_cached_mining_notifications(
+    /// Sends pending difficulty, then the required extranonce immediately before its job.
+    /// A miner that has not announced prefix-update support is disconnected without advertising
+    /// work it would hash with the wrong extranonce. No capability timeout is introduced.
+    async fn send_job(
         &self,
-        set_difficulty: Option<json_rpc::Message>,
-        notify: Option<json_rpc::Message>,
+        notify: Arc<server_to_client::Notify>,
     ) -> TproxyResult<(), error::Downstream> {
-        let mut did_send_difficulty = false;
-        if let Some(set_difficulty) = set_difficulty {
-            debug!("Down: Sending cached mining.set_difficulty after handshake completion");
-            self.downstream_io
-                .downstream_sv1_sender
-                .send(set_difficulty)
-                .await
-                .map_err(|error| {
-                    error!(
-                        "Down: Failed to send cached mining.set_difficulty to downstream: {error:?}"
-                    );
-                    TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, self.downstream_id)
-                })?;
-
-            self.downstream_data
-                .with(|data| {
-                    if let Some(new_target) = data.pending_target.take() {
-                        data.target = new_target;
-                    }
-                    if let Some(new_hashrate) = data.pending_hashrate.take() {
-                        data.hashrate = Some(new_hashrate);
-                    }
-                })
-                .map_err(TproxyError::shutdown)?;
-            did_send_difficulty = true;
-        }
-
-        if let Some(notify_msg) = notify {
-            debug!("Down: Sending cached mining.notify after handshake completion");
-            let mut notify_msg = notify_msg;
-            if did_send_difficulty {
-                if let json_rpc::Message::Notification(notification) = &notify_msg {
-                    let mut parsed = server_to_client::Notify::try_from(notification.clone())
-                        .expect("mining.notify is always valid here");
-                    parsed.clean_jobs = true;
-                    notify_msg = parsed.into();
+        let messages = self
+            .downstream_data
+            .with(|data| {
+                if data.cached_set_extranonce.is_some() && !data.supports_set_extranonce {
+                    return None;
                 }
-            }
+                let difficulty = data.cached_set_difficulty.take();
+                if difficulty.is_some() {
+                    if let Some(target) = data.pending_target.take() {
+                        data.target = target;
+                    }
+                    if let Some(hashrate) = data.pending_hashrate.take() {
+                        data.hashrate = Some(hashrate);
+                    }
+                }
+                let extranonce = data.cached_set_extranonce.take();
+                data.record_job_validation_context(&notify);
+                Some((difficulty, extranonce))
+            })
+            .map_err(TproxyError::shutdown)?;
+        let Some((difficulty, extranonce)) = messages else {
+            warn!(
+                downstream_id = self.downstream_id,
+                "Disconnecting SV1 miner before a job requiring unannounced mining.set_extranonce support"
+            );
+            self.disconnect();
+            return Ok(());
+        };
+        for message in [
+            difficulty,
+            extranonce.map(json_rpc::Message::from),
+            Some(json_rpc::Message::from((*notify).clone())),
+        ]
+        .into_iter()
+        .flatten()
+        {
             self.downstream_io
                 .downstream_sv1_sender
-                .send(notify_msg)
+                .send(message)
                 .await
                 .map_err(|error| {
-                    error!("Down: Failed to send cached mining.notify to downstream: {error:?}");
+                    error!("Down: Failed to send mining job messages: {error:?}");
                     TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, self.downstream_id)
                 })?;
-            self.downstream_data
-                .with(|data| data.last_job_received_time = Some(Instant::now()))
-                .map_err(TproxyError::shutdown)?;
         }
-
         Ok(())
     }
 }
@@ -681,9 +712,52 @@ impl Downstream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_channel::{bounded, unbounded};
+    use async_channel::unbounded;
+    use stratum_apps::stratum_core::{bitcoin::hashes::Hash, sv1_api::json_rpc::Message};
 
-    fn notify(job_id: &str) -> Message {
+    // JSON fixtures exercise the same typed events as production, without parsing internal messages
+    // on the per-miner job delivery path.
+    impl From<json_rpc::Message> for Sv1ServerEvent {
+        fn from(message: json_rpc::Message) -> Self {
+            let json_rpc::Message::Notification(notification) = &message else {
+                panic!("expected a notification fixture");
+            };
+            match notification.method.as_str() {
+                "mining.notify" => Self::Notify(Arc::new(
+                    server_to_client::Notify::try_from(notification.clone()).unwrap(),
+                )),
+                "mining.set_difficulty" => Self::SetDifficulty(message),
+                "mining.set_extranonce" => Self::SetExtranonce {
+                    message: server_to_client::SetExtranonce::try_from(notification.clone())
+                        .unwrap(),
+                    notify_miner: true,
+                },
+                _ => panic!("unexpected notification fixture"),
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_share_cache_uses_channels_sv2_bound() {
+        let mut cache = Sv1AcceptedShareCache::default();
+        let mut first_hash = None;
+        let mut last_hash = None;
+
+        for value in 0..=MAX_SEEN_SHARES {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
+            let hash = BlockHash::from_byte_array(bytes);
+            first_hash.get_or_insert(hash);
+            last_hash = Some(hash);
+            assert!(cache.insert_if_new(hash));
+        }
+
+        assert_eq!(cache.len(), MAX_SEEN_SHARES);
+        assert!(cache.insert_if_new(first_hash.unwrap()));
+        assert!(!cache.insert_if_new(last_hash.unwrap()));
+    }
+
+    fn notify_with_clean_jobs(job_id: &str, clean_jobs: bool) -> Message {
         serde_json::from_value(serde_json::json!({
             "id": null,
             "method": "mining.notify",
@@ -696,10 +770,14 @@ mod tests {
                 "20000000",
                 "1d00ffff",
                 "00000001",
-                true
+                clean_jobs
             ]
         }))
         .unwrap()
+    }
+
+    fn notify(job_id: &str) -> Message {
+        notify_with_clean_jobs(job_id, true)
     }
 
     fn set_difficulty() -> Message {
@@ -734,6 +812,7 @@ mod tests {
             sv1_server_receiver,
             old_target,
             None,
+            None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
@@ -742,13 +821,13 @@ mod tests {
         downstream
             .downstream_data
             .with(|data| {
-                data.sv1_handshake_state = Sv1HandshakeState::Complete;
+                data.session_state = Sv1SessionState::Ready;
                 data.cached_set_difficulty = Some(set_difficulty());
                 data.pending_target = Some(new_target);
             })
             .unwrap();
 
-        downstream.handle_sv1_handshake_completion().await.unwrap();
+        downstream.enable_notification_forwarding().await.unwrap();
 
         assert!(downstream_sv1_receiver.try_recv().is_err());
         downstream
@@ -757,14 +836,14 @@ mod tests {
                 assert_eq!(data.target, old_target);
                 assert_eq!(data.pending_target, Some(new_target));
                 assert!(data.cached_set_difficulty.is_some());
-                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
             })
             .unwrap();
     }
 
     #[tokio::test]
-    async fn notify_arriving_during_handshake_completion_is_flushed() {
-        let (downstream_sv1_sender, downstream_sv1_receiver) = bounded(1);
+    async fn notify_queued_before_setup_completion_is_flushed() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
         let (_downstream_sender, downstream_receiver) = unbounded();
         let (sv1_server_sender, _sv1_server_receiver) = unbounded();
         let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
@@ -776,65 +855,51 @@ mod tests {
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
             None,
+            None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
         );
-        let initial_notify = notify("initial");
-        let concurrent_notify = notify("concurrent");
-        downstream
-            .downstream_data
-            .with(|data| data.cached_notify = Some(initial_notify.clone()))
-            .unwrap();
-
-        // Fill the outbound queue so completion pauses while sending its initial cached notify.
-        downstream_sv1_sender.try_send(set_difficulty()).unwrap();
-        let completing_downstream = downstream.clone();
-        let completion = tokio::spawn(async move {
-            completing_downstream
-                .handle_sv1_handshake_completion()
-                .await
-        });
-        loop {
-            if downstream
-                .downstream_data
-                .with(|data| data.sv1_handshake_state == Sv1HandshakeState::Completing)
-                .unwrap()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-
-        sv1_server_message_sender
-            .send(concurrent_notify.clone())
-            .await
-            .unwrap();
-        downstream.handle_sv1_server_message().await.unwrap();
-
-        // Unblock completion and verify it drains the notification that raced with it.
-        downstream_sv1_receiver.recv().await.unwrap();
-        assert_message_eq(
-            &downstream_sv1_receiver.recv().await.unwrap(),
-            &initial_notify,
-        );
-        assert_message_eq(
-            &downstream_sv1_receiver.recv().await.unwrap(),
-            &concurrent_notify,
-        );
-        completion.await.unwrap().unwrap();
+        let queued_notify = notify("queued");
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: true,
+                };
+            })
+            .unwrap();
+
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(queued_notify.clone()))
+            .await
+            .unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::SetupComplete)
+            .await
+            .unwrap();
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        assert_message_eq(
+            &downstream_sv1_receiver.recv().await.unwrap(),
+            &queued_notify,
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
                 assert!(data.cached_notify.is_none());
             })
             .unwrap();
     }
 
     #[tokio::test]
-    async fn difficulty_arriving_during_completion_waits_for_next_notify() {
-        let (downstream_sv1_sender, downstream_sv1_receiver) = bounded(1);
+    async fn difficulty_queued_before_setup_completion_waits_for_next_notify() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
         let (_downstream_sender, downstream_receiver) = unbounded();
         let (sv1_server_sender, _sv1_server_receiver) = unbounded();
         let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
@@ -846,57 +911,484 @@ mod tests {
             sv1_server_receiver,
             Target::from_le_bytes([0x11; 32]),
             None,
+            None,
             #[cfg(feature = "monitoring")]
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
         );
-        let initial_notify = notify("initial");
-        let concurrent_difficulty = set_difficulty();
+        let queued_difficulty = set_difficulty();
         downstream
             .downstream_data
-            .with(|data| data.cached_notify = Some(initial_notify.clone()))
+            .with(|data| {
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: true,
+                };
+            })
             .unwrap();
-
-        downstream_sv1_sender.try_send(set_difficulty()).unwrap();
-        let completing_downstream = downstream.clone();
-        let completion = tokio::spawn(async move {
-            completing_downstream
-                .handle_sv1_handshake_completion()
-                .await
-        });
-        loop {
-            if downstream
-                .downstream_data
-                .with(|data| data.sv1_handshake_state == Sv1HandshakeState::Completing)
-                .unwrap()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
 
         sv1_server_message_sender
-            .send(concurrent_difficulty.clone())
+            .send(Sv1ServerEvent::from(queued_difficulty.clone()))
             .await
             .unwrap();
-        downstream.handle_sv1_server_message().await.unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::SetupComplete)
+            .await
+            .unwrap();
 
-        downstream_sv1_receiver.recv().await.unwrap();
-        assert_message_eq(
-            &downstream_sv1_receiver.recv().await.unwrap(),
-            &initial_notify,
-        );
-        completion.await.unwrap().unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
         assert!(downstream_sv1_receiver.try_recv().is_err());
         downstream
             .downstream_data
             .with(|data| {
-                assert_eq!(data.sv1_handshake_state, Sv1HandshakeState::Complete);
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
                 assert_message_eq(
                     data.cached_set_difficulty.as_ref().unwrap(),
-                    &concurrent_difficulty,
+                    &queued_difficulty,
                 );
             })
             .unwrap();
+
+        let next_notify = notify_with_clean_jobs("next", false);
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(next_notify.clone()))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        assert_message_eq(
+            &downstream_sv1_receiver.recv().await.unwrap(),
+            &queued_difficulty,
+        );
+        let forwarded_notify = downstream_sv1_receiver.recv().await.unwrap();
+        let Message::Notification(notification) = &forwarded_notify else {
+            panic!("expected mining.notify");
+        };
+        let forwarded_notify = server_to_client::Notify::try_from(notification.clone()).unwrap();
+        assert_eq!(forwarded_notify.job_id, "next");
+        assert!(!forwarded_notify.clean_jobs);
+    }
+
+    #[tokio::test]
+    async fn difficulty_change_preserves_previous_job_validation_context() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let old_target = Target::from_le_bytes([0x22; 32]);
+        let new_target = Target::from_le_bytes([0x11; 32]);
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            old_target,
+            None,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| data.session_state = Sv1SessionState::Ready)
+            .unwrap();
+
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(notify("old")))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream_sv1_receiver.recv().await.unwrap();
+
+        downstream
+            .downstream_data
+            .with(|data| data.pending_target = Some(new_target))
+            .unwrap();
+        for message in [set_difficulty(), notify_with_clean_jobs("new", false)] {
+            sv1_server_message_sender
+                .send(Sv1ServerEvent::from(message))
+                .await
+                .unwrap();
+            downstream.handle_sv1_server_message().await.unwrap();
+        }
+        downstream_sv1_receiver.recv().await.unwrap();
+        let forwarded_notify = downstream_sv1_receiver.recv().await.unwrap();
+        let Message::Notification(notification) = forwarded_notify else {
+            panic!("expected mining.notify");
+        };
+        let forwarded_notify = server_to_client::Notify::try_from(notification).unwrap();
+        assert!(!forwarded_notify.clean_jobs);
+
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.target, new_target);
+                assert_eq!(
+                    data.job_validation_context("old")
+                        .map(|context| context.target),
+                    Some(old_target)
+                );
+                assert_eq!(
+                    data.job_validation_context("new")
+                        .map(|context| context.target),
+                    Some(new_target)
+                );
+                assert_eq!(data.job_validation_contexts.len(), 2);
+                assert!(
+                    data.accepted_share_hashes
+                        .insert_if_new(BlockHash::all_zeros())
+                );
+            })
+            .unwrap();
+
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(notify("new-tip")))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream_sv1_receiver.recv().await.unwrap();
+
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert!(data.job_validation_context("old").is_none());
+                assert!(data.job_validation_context("new").is_none());
+                assert!(data.job_validation_context("new-tip").is_some());
+                assert_eq!(data.job_validation_contexts.len(), 1);
+                assert_eq!(data.accepted_share_hashes.len(), 0);
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn extranonce_change_cannot_overtake_queued_setup_job() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender.clone(),
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        let old_extranonce = downstream
+            .downstream_data
+            .with(|data| data.extranonce1.clone())
+            .unwrap();
+        let new_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
+        let old_notify = notify("old");
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.supports_set_extranonce = true;
+                data.session_state = Sv1SessionState::Starting {
+                    subscribed: true,
+                    authorized: true,
+                };
+                data.pending_set_extranonce_notifications = 1;
+            })
+            .unwrap();
+
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(old_notify.clone()))
+            .await
+            .unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::SetupComplete)
+            .await
+            .unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(Message::from(
+                server_to_client::SetExtranonce {
+                    extra_nonce1: new_extranonce.clone(),
+                    extra_nonce2_size: 4,
+                },
+            )))
+            .await
+            .unwrap();
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        assert_message_eq(&downstream_sv1_receiver.recv().await.unwrap(), &old_notify);
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(
+                    data.job_validation_context("old")
+                        .map(|context| context.extranonce),
+                    Some(old_extranonce)
+                );
+                assert_eq!(data.extranonce1, new_extranonce);
+                assert!(data.cached_set_extranonce.is_some());
+                assert_eq!(data.session_state, Sv1SessionState::Ready);
+                assert!(data.keepalive_timer_anchor.is_none());
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn extranonce_change_is_applied_to_the_next_job() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.session_state = Sv1SessionState::Ready;
+                data.supports_set_extranonce = true;
+            })
+            .unwrap();
+
+        let old_extranonce = downstream
+            .downstream_data
+            .with(|data| data.extranonce1.clone())
+            .unwrap();
+        let new_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
+        let old_notify = notify("old");
+        let new_notify = notify_with_clean_jobs("new", false);
+
+        // The old job was queued before SetExtranoncePrefix, but the server installs the pending
+        // marker before this downstream task processes either message.
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(old_notify.clone()))
+            .await
+            .unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.pending_set_extranonce_notifications = 1;
+            })
+            .unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(Message::from(
+                server_to_client::SetExtranonce {
+                    extra_nonce1: new_extranonce.clone(),
+                    extra_nonce2_size: 6,
+                },
+            )))
+            .await
+            .unwrap();
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::from(new_notify.clone()))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        assert_message_eq(&downstream_sv1_receiver.recv().await.unwrap(), &old_notify);
+        assert!(matches!(
+            downstream_sv1_receiver.recv().await.unwrap(),
+            Message::Notification(notification)
+                if notification.method == "mining.set_extranonce"
+        ));
+        assert_message_eq(&downstream_sv1_receiver.recv().await.unwrap(), &new_notify);
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(
+                    data.job_validation_context("old")
+                        .map(|context| context.extranonce),
+                    Some(old_extranonce)
+                );
+                assert_eq!(
+                    data.job_validation_context("new")
+                        .map(|context| context.extranonce),
+                    Some(new_extranonce)
+                );
+                assert_eq!(
+                    data.job_validation_context("old")
+                        .map(|context| context.extranonce2_len),
+                    Some(4)
+                );
+                assert_eq!(
+                    data.job_validation_context("new")
+                        .map(|context| context.extranonce2_len),
+                    Some(6)
+                );
+                assert!(data.keepalive_timer_anchor.is_some());
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn consecutive_extranonce_changes_wait_for_the_latest_job() {
+        let (downstream_sv1_sender, _downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                data.supports_set_extranonce = true;
+                data.session_state = Sv1SessionState::Ready;
+                data.pending_set_extranonce_notifications = 2;
+            })
+            .unwrap();
+        let first_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
+        let second_extranonce: Extranonce = vec![5, 6, 7, 8].try_into().unwrap();
+        for message in [
+            Message::from(server_to_client::SetExtranonce {
+                extra_nonce1: first_extranonce.clone(),
+                extra_nonce2_size: 4,
+            }),
+            notify_with_clean_jobs("first", false),
+            Message::from(server_to_client::SetExtranonce {
+                extra_nonce1: second_extranonce.clone(),
+                extra_nonce2_size: 4,
+            }),
+            notify_with_clean_jobs("second", false),
+        ] {
+            sv1_server_message_sender
+                .send(Sv1ServerEvent::from(message))
+                .await
+                .unwrap();
+        }
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.pending_set_extranonce_notifications, 1);
+                assert!(data.keepalive_timer_anchor.is_none());
+                assert_eq!(
+                    data.job_validation_context("first")
+                        .map(|context| context.extranonce),
+                    Some(first_extranonce)
+                );
+            })
+            .unwrap();
+
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.pending_set_extranonce_notifications, 0);
+                assert!(data.keepalive_timer_anchor.is_some());
+                assert_eq!(
+                    data.job_validation_context("second")
+                        .map(|context| context.extranonce),
+                    Some(second_extranonce)
+                );
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn presubscribe_event_does_not_overwrite_a_newer_response_prefix() {
+        let (downstream_sv1_sender, downstream_sv1_receiver) = unbounded();
+        let (_downstream_sender, downstream_receiver) = unbounded();
+        let (sv1_server_sender, _sv1_server_receiver) = unbounded();
+        let (sv1_server_message_sender, sv1_server_receiver) = unbounded();
+        let downstream = Downstream::new(
+            1,
+            downstream_sv1_sender,
+            downstream_receiver,
+            sv1_server_sender,
+            sv1_server_receiver,
+            Target::from_le_bytes([0x11; 32]),
+            None,
+            None,
+            #[cfg(feature = "monitoring")]
+            "127.0.0.1".parse().unwrap(),
+            CancellationToken::new(),
+        );
+        let new_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
+        downstream
+            .downstream_data
+            .with(|data| {
+                let Sv1ServerEvent::Notify(notify) = Sv1ServerEvent::from(notify("old")) else {
+                    panic!("expected notify fixture");
+                };
+                data.cached_notify = Some(notify);
+                data.pending_set_extranonce_notifications = 1;
+                // The server has already applied the latest prefix for response construction.
+                data.extranonce1 = new_extranonce.clone();
+            })
+            .unwrap();
+        sv1_server_message_sender
+            .send(Sv1ServerEvent::SetExtranonce {
+                message: server_to_client::SetExtranonce {
+                    extra_nonce1: vec![9; 4].try_into().unwrap(),
+                    extra_nonce2_size: 4,
+                },
+                notify_miner: false,
+            })
+            .await
+            .unwrap();
+
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        assert!(downstream_sv1_receiver.try_recv().is_err());
+        assert!(!downstream.is_disconnected());
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(data.extranonce1, new_extranonce);
+                assert!(data.cached_notify.is_none());
+                assert!(data.cached_set_extranonce.is_none());
+                assert_eq!(data.pending_set_extranonce_notifications, 0);
+                assert!(data.keepalive_timer_anchor.is_none());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn session_setup_completes_once_in_either_request_order() {
+        for requests in [
+            [Sv1SetupRequest::Subscribe, Sv1SetupRequest::Authorize],
+            [Sv1SetupRequest::Authorize, Sv1SetupRequest::Subscribe],
+        ] {
+            let mut state = Sv1SessionState::default();
+
+            assert!(!state.record_response(requests[0]));
+            assert!(state.record_response(requests[1]));
+            assert!(!state.is_ready());
+            assert!(!state.record_response(requests[0]));
+            assert!(!state.record_response(requests[1]));
+        }
     }
 }

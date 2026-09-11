@@ -17,7 +17,10 @@ use std::{
 use stratum_apps::{
     stratum_core::{
         binary_sv2,
-        channels_sv2::client::error::GroupChannelError,
+        channels_sv2::{
+            client::error::{ExtendedChannelError, GroupChannelError},
+            extranonce_manager::ExtranonceAllocatorError,
+        },
         framing_sv2,
         handlers_sv2::HandlerErrorType,
         noise_sv2,
@@ -185,6 +188,8 @@ pub enum TproxyErrorKind {
     ChannelErrorSender,
     /// A downstream sent too many SV1 messages while waiting for its SV2 channel to open.
     Sv1HandshakeMessageQueueFull,
+    /// A downstream sent a request that is not permitted at this stage of SV1 setup.
+    Sv1RequestBeforeSetup,
     /// Operation timed out
     Timeout,
     /// Error converting SetDifficulty to Message
@@ -229,10 +234,26 @@ pub enum TproxyErrorKind {
     FailedToProcessNewExtendedMiningJob,
     /// Failed to process SetTarget message
     FailedToProcessSetTarget,
+    /// Upstream disabled version rolling after accepting it as a required connection feature
+    VersionRollingNotAllowed,
     /// Failed to add channel id to group channel
     FailedToAddChannelIdToGroupChannel(GroupChannelError),
     /// Aggregated channel was closed
     AggregatedChannelClosed,
+    /// Aggregated channel state is missing its extranonce allocator
+    MissingAggregatedExtranonceAllocator,
+    /// Updated prefix and existing rollable space cannot form a supported extranonce
+    InvalidExtranonceSize {
+        prefix_len: usize,
+        rollable_size: u16,
+    },
+    /// Failed to update the shared allocator with a new upstream prefix
+    AggregatedExtranonceAllocatorUpdateFailed(ExtranonceAllocatorError),
+    /// A channel rejected its updated upstream-owned extranonce prefix bytes
+    UpstreamExtranoncePrefixUpdateFailed {
+        channel_id: ChannelId,
+        error: ExtendedChannelError,
+    },
     /// Invalid key
     InvalidKey,
     /// Downstream not found with given downstream_id
@@ -260,6 +281,9 @@ impl fmt::Display for TproxyErrorKind {
             ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
             Sv1HandshakeMessageQueueFull => write!(f, "SV1 handshake message queue is full"),
+            Sv1RequestBeforeSetup => {
+                write!(f, "SV1 request is not permitted before setup completes")
+            }
             Timeout => write!(f, "Operation timed out"),
             SetDifficultyToMessage(e) => {
                 write!(f, "Error converting SetDifficulty to Message: `{e:?}`")
@@ -314,10 +338,31 @@ impl fmt::Display for TproxyErrorKind {
                 write!(f, "Failed to process NewExtendedMiningJob message")
             }
             FailedToProcessSetTarget => write!(f, "Failed to process SetTarget message"),
+            VersionRollingNotAllowed => write!(
+                f,
+                "Upstream sent a mining job that does not allow required version rolling"
+            ),
             FailedToAddChannelIdToGroupChannel(e) => {
                 write!(f, "Failed to add channel id to group channel: {e:?}")
             }
             AggregatedChannelClosed => write!(f, "Aggregated channel was closed"),
+            MissingAggregatedExtranonceAllocator => {
+                write!(f, "Aggregated channel has no extranonce allocator")
+            }
+            InvalidExtranonceSize {
+                prefix_len,
+                rollable_size,
+            } => write!(
+                f,
+                "Extranonce prefix length {prefix_len} plus rollable size {rollable_size} is unsupported"
+            ),
+            AggregatedExtranonceAllocatorUpdateFailed(e) => {
+                write!(f, "Failed to update aggregated extranonce allocator: {e}")
+            }
+            UpstreamExtranoncePrefixUpdateFailed { channel_id, error } => write!(
+                f,
+                "Channel {channel_id} rejected its updated upstream extranonce prefix: {error:?}"
+            ),
             InvalidKey => write!(f, "Invalid key used during noise handshake"),
             DownstreamNotPresent(downstream_id) => write!(
                 f,

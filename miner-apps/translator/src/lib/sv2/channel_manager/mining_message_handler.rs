@@ -1,5 +1,5 @@
 use crate::{
-    error::{self, TproxyError, TproxyErrorKind},
+    error::{self, TproxyError, TproxyErrorKind, TproxyResult},
     sv2::channel_manager::{
         AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES, AGGREGATED_TPROXY_MAX_CHANNELS, ChannelManager,
         NON_AGGREGATED_TPROXY_MAX_CHANNELS,
@@ -11,7 +11,9 @@ use stratum_apps::{
         bitcoin::Target,
         channels_sv2::{
             client::{extended::ExtendedChannel, group::GroupChannel},
-            extranonce_manager::{ExtranonceAllocator, ExtranoncePrefix, bytes_needed},
+            extranonce_manager::{
+                ExtranonceAllocator, ExtranoncePrefix, MAX_EXTRANONCE_LEN, bytes_needed,
+            },
         },
         handlers_sv2::{HandleMiningMessagesFromServerOwnedAsync, SupportedChannelTypes},
         mining_sv2::{
@@ -25,7 +27,7 @@ use stratum_apps::{
         },
         parsers_sv2::{MiningOwned, Tlv},
     },
-    utils::types::{ChannelId, DownstreamId, Hashrate},
+    utils::types::{ChannelId, DownstreamId},
 };
 use tracing::{error, info, warn};
 
@@ -282,12 +284,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     as usize)
                     == downstream_extranonce_len
                 {
-                    // No slack: forward upstream's prefix directly to the
-                    // downstream. No allocator is stored for this channel,
-                    // which the share-rewrite path treats as "no
-                    // rewriting needed" — `channel.upstream_prefix_len()`
-                    // returns `None` for a wire-sourced prefix and the
-                    // rewrite branch is skipped.
+                    // No slack: forward `upstream_prefix` directly to the
+                    // downstream. Its length equals the full prefix length,
+                    // leaving no `local_prefix | local_index` bytes for share
+                    // rewriting.
                     let prefix = ExtranoncePrefix::from_wire(upstream_prefix_bytes.clone())
                         .map_err(|e| {
                             error!("Upstream extranonce prefix rejected by from_wire: {:?}", e);
@@ -399,31 +399,15 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 error!("Failed to send OpenExtendedMiningChannelSuccess: {:?}", e);
                 TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
             })?;
+        self.sv1_advertised_extranonce_prefixes.insert(
+            success.channel_id,
+            success.extranonce_prefix.to_owned_bytes(),
+        );
 
-        // In aggregated mode, serve any downstream requests that were buffered in
-        // pending_channels while the upstream channel was being established (Pending state).
+        // In aggregated mode, serve downstream requests buffered while the upstream channel was
+        // being established. Prefix-transition requests remain pending until a matching job.
         if self.mode.is_aggregated() {
-            let mut pending_requests: Vec<(u32, String, Hashrate, usize)> = Vec::new();
-            self.pending_downstream_channels
-                .for_each(|request_id, request| {
-                    pending_requests.push((
-                        request_id as u32,
-                        request.0.clone(),
-                        request.1,
-                        request.2,
-                    ));
-                });
-            self.pending_downstream_channels.clear();
-
-            for (req_id, user_identity, hashrate, min_extranonce_size) in pending_requests {
-                self.handle_downstream_channel_request_in_aggregated_mode(
-                    req_id,
-                    user_identity,
-                    hashrate,
-                    min_extranonce_size,
-                )
-                .await?;
-            }
+            self.open_pending_aggregated_downstream_channels().await?;
         }
 
         Ok(())
@@ -469,16 +453,19 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         }
 
         let group_channel = self.group_channels.remove(&m.channel_id);
+        let closed_channel_ids;
 
         // we're not in aggregated mode
         // was the message sent to a group channel?
         if let Some((_, group_channel)) = group_channel {
-            for channel_id in group_channel.get_channel_ids() {
+            closed_channel_ids = group_channel.get_channel_ids().copied().collect::<Vec<_>>();
+            for channel_id in &closed_channel_ids {
                 self.extended_channels.remove(channel_id);
             }
         // if the message was not sent to a group channel, and we're not working in
         // aggregated mode,
         } else if self.extended_channels.remove(&m.channel_id).is_some() {
+            closed_channel_ids = vec![m.channel_id];
             // remove the channel from any group channels that contain it
             self.group_channels.for_each_mut(|_, group_channel| {
                 if group_channel.has_channel_id(m.channel_id) {
@@ -493,6 +480,26 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             return Err(TproxyError::log(TproxyErrorKind::ChannelNotFound));
         }
 
+        // SV1 has no channel-level close message. Forward one close per affected extended channel
+        // so Sv1Server can terminate the corresponding TCP connection instead of leaving a miner
+        // submitting shares for a channel that no longer exists upstream.
+        for channel_id in closed_channel_ids {
+            self.sv1_advertised_extranonce_prefixes.remove(&channel_id);
+            let mut close = m.clone();
+            close.channel_id = channel_id;
+            self.channel_manager_io
+                .sv1_server_sender
+                .send(MiningOwned::CloseChannel(close))
+                .await
+                .map_err(|error| {
+                    error!(
+                        channel_id,
+                        "Failed to forward upstream CloseChannel to SV1 server: {error:?}"
+                    );
+                    TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
+                })?;
+        }
+
         Ok(())
     }
 
@@ -503,9 +510,140 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", m);
-        warn!(
-            "⚠️ Cannot process SetExtranoncePrefix since set_extranonce is not supported for majority of sv1 clients. Ignoring."
-        );
+
+        let new_upstream_prefix = m.extranonce_prefix.to_owned_bytes();
+
+        if self.mode.is_aggregated() {
+            let (upstream_channel_id, upstream_rollable_extranonce_size) = self
+                .extended_channels
+                .with(&AGGREGATED_CHANNEL_ID, |channel| {
+                    (
+                        channel.get_channel_id(),
+                        channel.get_rollable_extranonce_size(),
+                    )
+                })
+                .ok_or_else(|| TproxyError::shutdown(TproxyErrorKind::ChannelNotFound))?;
+            if m.channel_id != upstream_channel_id {
+                warn!(
+                    channel_id = m.channel_id,
+                    upstream_channel_id,
+                    "Ignoring SetExtranoncePrefix for unknown aggregated channel"
+                );
+                return Err(TproxyError::log(TproxyErrorKind::ChannelNotFound));
+            }
+
+            let prefix_len = new_upstream_prefix.len();
+            // Validate the aggregate layout before mutating the shared allocator and channels.
+            // The wire prefix and u16 rollable size are bounded, so their sum cannot overflow.
+            let total_extranonce_len = prefix_len + upstream_rollable_extranonce_size as usize;
+            if total_extranonce_len > MAX_EXTRANONCE_LEN as usize {
+                return Err(TproxyError::fallback(
+                    TproxyErrorKind::InvalidExtranonceSize {
+                        prefix_len,
+                        rollable_size: upstream_rollable_extranonce_size,
+                    },
+                ));
+            }
+
+            self.aggregated_extranonce_allocator
+                .with(|allocator| {
+                    allocator
+                        .as_mut()
+                        .ok_or_else(|| {
+                            TproxyError::shutdown(
+                                TproxyErrorKind::MissingAggregatedExtranonceAllocator,
+                            )
+                        })?
+                        .set_upstream_prefix(new_upstream_prefix.clone())
+                        .map_err(|error| {
+                            TproxyError::fallback(
+                                TproxyErrorKind::AggregatedExtranonceAllocatorUpdateFailed(error),
+                            )
+                        })
+                })
+                .map_err(TproxyError::shutdown)??;
+
+            // This sentinel channel stores the upstream wire value directly, so updating its
+            // upstream-owned region replaces the whole prefix.
+            self.extended_channels
+                .with_mut(&AGGREGATED_CHANNEL_ID, |channel| {
+                    channel.set_upstream_extranonce_prefix(&new_upstream_prefix)
+                })
+                .ok_or_else(|| TproxyError::shutdown(TproxyErrorKind::ChannelNotFound))?
+                .map_err(|error| {
+                    TproxyError::fallback(TproxyErrorKind::UpstreamExtranoncePrefixUpdateFailed {
+                        channel_id: upstream_channel_id,
+                        error,
+                    })
+                })?;
+
+            let mut downstream_channel_ids = Vec::new();
+            self.extended_channels.for_each(|channel_id, _| {
+                if channel_id != AGGREGATED_CHANNEL_ID {
+                    downstream_channel_ids.push(channel_id);
+                }
+            });
+
+            for channel_id in downstream_channel_ids {
+                let Some(update_result) = self.extended_channels.with_mut(
+                    &channel_id,
+                    |channel| -> TproxyResult<(), error::ChannelManager> {
+                        // Allocated child channels keep `local_prefix | local_index` and their
+                        // bitmap reservation while replacing only `upstream_prefix`.
+                        channel
+                            .set_upstream_extranonce_prefix(&new_upstream_prefix)
+                            .map_err(|error| {
+                                TproxyError::shutdown(
+                                    TproxyErrorKind::UpstreamExtranoncePrefixUpdateFailed {
+                                        channel_id,
+                                        error,
+                                    },
+                                )
+                            })?;
+                        Ok(())
+                    },
+                ) else {
+                    continue;
+                };
+                update_result?;
+            }
+            // Existing jobs retain their captured prefixes. The corresponding SV1 notifications
+            // are emitted immediately before the first job that uses each new downstream prefix.
+            return Ok(());
+        }
+
+        let channel_id = m.channel_id;
+        let Some(update_result) = self.extended_channels.with_mut(
+            &channel_id,
+            |channel| -> TproxyResult<(), error::ChannelManager> {
+                // The setter validates the complete extranonce transactionally, including
+                // the preserved local suffix. No separate application-level size check is needed.
+                // channels_sv2 replaces `upstream_prefix` while preserving any
+                // `local_prefix | local_index` regions.
+                channel
+                    .set_upstream_extranonce_prefix(&new_upstream_prefix)
+                    .map_err(|error| {
+                        TproxyError::fallback(
+                            TproxyErrorKind::UpstreamExtranoncePrefixUpdateFailed {
+                                channel_id,
+                                error,
+                            },
+                        )
+                    })?;
+
+                Ok(())
+            },
+        ) else {
+            warn!(
+                channel_id,
+                "Ignoring SetExtranoncePrefix for unknown channel"
+            );
+            return Err(TproxyError::log(TproxyErrorKind::ChannelNotFound));
+        };
+
+        update_result?;
+        // Defer mining.set_extranonce until the exact job carrying this prefix is forwarded.
+
         Ok(())
     }
 
@@ -577,6 +715,20 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", m);
+
+        // tProxy declares version rolling as required in SetupConnection. Most SV1 miners need it
+        // to produce usable shares, so forwarding a job that disables it would make tProxy discard
+        // otherwise valid miner work during local validation. Treat the inconsistent upstream
+        // response as a connection failure before exposing the job to any downstream.
+        if !m.version_rolling_allowed {
+            error!(
+                "Upstream sent a NewExtendedMiningJob with version rolling disabled after accepting it as a required feature"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::VersionRollingNotAllowed,
+            ));
+        }
+
         let m_static = m.clone();
 
         // we update the channel states and keep track of the messages that need to be sent to the
@@ -745,14 +897,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
         // now we need to send the NewExtendedMiningJob message(s) to the SV1Server
         for message in new_extended_mining_job_messages_sv1_server {
-            self.channel_manager_io
-                .sv1_server_sender
-                .send(MiningOwned::NewExtendedMiningJob(message))
-                .await
-                .map_err(|e| {
-                    error!("Failed to send immediate NewExtendedMiningJob: {:?}", e);
-                    TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
-                })?;
+            self.forward_job_to_sv1_server(message).await?;
+        }
+        if self.mode.is_aggregated() {
+            self.open_pending_aggregated_downstream_channels().await?;
         }
         Ok(())
     }
@@ -957,14 +1105,11 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
         // we need to send the NewExtendedMiningJob message(s) to the SV1Server
         for message in new_extended_mining_job_messages_sv1_server {
-            self.channel_manager_io
-                .sv1_server_sender
-                .send(MiningOwned::NewExtendedMiningJob(message))
-                .await
-                .map_err(|e| {
-                    error!("Failed to send NewExtendedMiningJob: {:?}", e);
-                    TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
-                })?;
+            self.forward_job_to_sv1_server(message).await?;
+        }
+
+        if self.mode.is_aggregated() {
+            self.open_pending_aggregated_downstream_channels().await?;
         }
 
         Ok(())
