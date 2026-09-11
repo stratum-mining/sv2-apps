@@ -11,6 +11,8 @@
 //! - `DeclareMiningJob` rejects client-supplied transactions the declaration did not ask for.
 //! - `DeclareMiningJob` keeps asking for the transactions an incomplete response left out, without
 //!   retaining the ones it did supply.
+//! - `DeclareMiningJob` rejects a declaration that repeats a wtxid, lists more transactions than a
+//!   block can hold, or weighs more than a block.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -34,8 +36,8 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, Wtxid,
-            absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Weight, Witness,
+            Wtxid, absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
             transaction::Version as TxVersion,
         },
         job_declaration_sv2::{
@@ -125,7 +127,8 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         next_height,
     )
     .await;
-    assert_jdp_incomplete_missing_txs_response(&incoming_sender, coinbase_tx).await;
+    assert_jdp_incomplete_missing_txs_response(&incoming_sender, coinbase_tx.clone()).await;
+    assert_jdp_declaration_must_fit_in_a_block(&incoming_sender, coinbase_tx).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -371,6 +374,61 @@ async fn assert_jdp_incomplete_missing_txs_response(
     }
 }
 
+/// A declaration must be something that could be mined, before it is looked up or expanded.
+///
+/// A repeated wtxid would otherwise expand one cached transaction into as many copies as the list
+/// names it, and neither a list longer than a block can hold nor a set of transactions heavier
+/// than a block can ever validate.
+async fn assert_jdp_declaration_must_fit_in_a_block(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let repeated_wtxid = build_invalid_declared_tx(0x41).compute_wtxid();
+
+    // One more than the smallest transactions that could fit in a block.
+    let too_many_wtxids: Vec<Wtxid> = (0..=Weight::MAX_BLOCK.to_wu()
+        / Weight::MIN_TRANSACTION.to_wu())
+        .map(|index| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&index.to_le_bytes());
+            Wtxid::from_byte_array(bytes)
+        })
+        .collect();
+
+    // Two thirds of a block each, so declaring both weighs more than a block can hold.
+    let heavy_txs = vec![build_heavy_declared_tx(0x51), build_heavy_declared_tx(0x52)];
+    let heavy_wtxids: Vec<Wtxid> = heavy_txs.iter().map(|tx| tx.compute_wtxid()).collect();
+
+    let scenarios = [
+        (
+            "jdp/repeated-declared-wtxid",
+            vec![repeated_wtxid, repeated_wtxid],
+            vec![],
+        ),
+        ("jdp/too-many-declared-txs", too_many_wtxids, vec![]),
+        ("jdp/declaration-too-heavy", heavy_wtxids, heavy_txs),
+    ];
+
+    for (path_name, wtxid_list, missing_txs) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            wtxid_list,
+            missing_txs,
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job ({path_name})"
+            ),
+            response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
+        }
+    }
+}
+
 async fn send_declare_mining_job_and_recv_response(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
@@ -447,6 +505,16 @@ fn build_invalid_declared_tx(prevout_txid_byte: u8) -> Transaction {
         // no outputs, so Bitcoin Core's `checkBlock` rejects any block carrying this transaction
         output: vec![],
     }
+}
+
+fn build_heavy_declared_tx(prevout_txid_byte: u8) -> Transaction {
+    let mut tx = build_invalid_declared_tx(prevout_txid_byte);
+    // Weight is four times the size for a transaction carrying no witness.
+    tx.input[0].script_sig = ScriptBuf::from_bytes(vec![
+        prevout_txid_byte;
+        Weight::MAX_BLOCK.to_wu() as usize / 6
+    ]);
+    tx
 }
 
 fn build_valid_coinbase_tx(next_height: u32) -> Transaction {
