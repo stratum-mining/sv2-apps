@@ -306,7 +306,7 @@ impl Sv1Server {
         let update_channel = UpdateChannelOwned {
             channel_id: *channel_id,
             nominal_hash_rate: total_hashrate,
-            maximum_target: min_target.to_le_bytes().into(),
+            max_target: min_target.to_le_bytes().into(),
         };
 
         debug!(
@@ -335,7 +335,7 @@ impl Sv1Server {
             let update_channel = UpdateChannelOwned {
                 channel_id,
                 nominal_hash_rate: new_hashrate,
-                maximum_target: new_target.to_le_bytes().into(),
+                max_target: new_target.to_le_bytes().into(),
             };
 
             debug!(
@@ -431,7 +431,7 @@ impl Sv1Server {
         &self,
         set_target: SetTargetOwned,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let new_upstream_target = Target::from_le_bytes(set_target.maximum_target.to_array());
+        let new_upstream_target = Target::from_le_bytes(set_target.target.to_array());
         debug!(
             "Received SetTarget for channel {}: new_upstream_target = {}",
             set_target.channel_id, new_upstream_target
@@ -621,14 +621,14 @@ impl Sv1Server {
             } => UpdateChannelOwned {
                 channel_id: 0, // ChannelManager will rewrite to upstream extended channel id
                 nominal_hash_rate: total_hashrate,
-                maximum_target: min_target.to_le_bytes().into(),
+                max_target: min_target.to_le_bytes().into(),
             },
 
             // Connected-but-unopened miners deliberately count as zero hashrate upstream.
             AggregatedSnapshot::NoOpenChannels => UpdateChannelOwned {
                 channel_id: 0,
                 nominal_hash_rate: 0.0,
-                maximum_target: [0xFF; 32].into(),
+                max_target: [0xFF; 32].into(),
             },
             AggregatedSnapshot::NoValidTargets => {
                 warn!(

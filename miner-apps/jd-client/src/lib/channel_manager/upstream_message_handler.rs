@@ -768,7 +768,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 if let Some(upstream) = upstream_channel.as_mut() {
                     upstream
                         .set_target(Target::from_le_bytes(
-                            msg.maximum_target.clone().as_ref().try_into().unwrap(),
+                            msg.target.clone().as_ref().try_into().unwrap(),
                         ))
                         .map_err(|e| {
                             // an upstream that hands out a target no share can meet is

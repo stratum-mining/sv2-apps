@@ -590,7 +590,7 @@ impl Device {
         info!("Received SetTarget for channel id: {}", m.channel_id);
         debug!("SetTarget: {}", m);
         self.miner
-            .with(|miner| miner.new_target(m.maximum_target.to_owned_bytes()))
+            .with(|miner| miner.new_target(m.target.to_owned_bytes()))
             .unwrap();
         self.notify_changes_to_mining_thread.should_send = true;
     }
