@@ -31,10 +31,3 @@ const MAX_MONEY: i64 = 21_000_000 * 100_000_000;
 
 /// Max time a `waitNext` request is allowed to block before timing out (in milliseconds).
 const WAIT_NEXT_TIMEOUT_MS: f64 = 10_000.0;
-
-/// Max attempts for `force_update_mempool_mirror` retries on transient "thread busy" IPC
-/// contention.
-const FORCE_UPDATE_MAX_ATTEMPTS: usize = 3;
-
-/// Backoff between `force_update_mempool_mirror` retry attempts (in milliseconds).
-const FORCE_UPDATE_RETRY_BACKOFF_MS: u64 = 25;
