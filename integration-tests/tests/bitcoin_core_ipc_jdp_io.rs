@@ -3,9 +3,10 @@
 //! Flow covered per Bitcoin Core Sv2 runtime behavior and Sv2 JDP expectations:
 //! - `DeclareMiningJob` returns `MissingTransactions` when unknown wtxids are declared.
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
-//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
-//!   intentionally mismatched.
-//! - `DeclareMiningJob` does not retain client-supplied transactions when validation fails.
+//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when Bitcoin Core rejects a coinbase built
+//!   for another height, as obsolete (`bad-cb-height`) or as non-final (`bad-txns-nonfinal`).
+//! - `DeclareMiningJob` returns `Error(invalid-job)` for a declaration Bitcoin Core rejects on its
+//!   own merits, and does not retain its client-supplied transactions.
 //! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without tearing
 //!   down the IPC connection.
 //! - `DeclareMiningJob` rejects client-supplied transactions the declaration did not ask for.
@@ -182,27 +183,55 @@ async fn assert_jdp_success_scenario(
     }
 }
 
+/// A coinbase built for another height is rejected by Bitcoin Core in one of two ways, and the
+/// runtime answers `stale-chain-tip` to both straight from Core's reason, with no local height
+/// bookkeeping and no template refresh.
+///
+/// Templates give the coinbase a locktime of height minus one and a sequence that enforces it, and
+/// Core checks finality before the coinbase height, so a coinbase from ahead of the tip is a
+/// non-final transaction (`bad-txns-nonfinal`); one with a final locktime fails the height check
+/// instead (`bad-cb-height`).
 async fn assert_jdp_stale_chain_tip_scenario(
     incoming_sender: &Sender<JdRequest>,
     next_height: u32,
 ) {
-    let response = send_declare_mining_job_and_recv_response(
-        incoming_sender,
-        build_valid_coinbase_tx(next_height.saturating_add(10_000)),
-        vec![],
-        vec![],
-        "jdp/stale-chain-tip",
-    )
-    .await;
+    let height_ahead = next_height.saturating_add(10_000);
 
-    match response {
-        JdResponse::Error { error_code, .. } => {
-            assert_eq!(
+    let mut non_final_coinbase_tx = build_valid_coinbase_tx(height_ahead);
+    non_final_coinbase_tx.lock_time =
+        LockTime::from_height(height_ahead - 1).expect("height must fit a locktime");
+    non_final_coinbase_tx.input[0].sequence = Sequence::from_consensus(0xffff_fffe);
+
+    let scenarios = [
+        (
+            "jdp/stale-chain-tip/bad-cb-height",
+            build_valid_coinbase_tx(height_ahead),
+        ),
+        (
+            "jdp/stale-chain-tip/bad-txns-nonfinal",
+            non_final_coinbase_tx,
+        ),
+    ];
+
+    for (path_name, coinbase_tx) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx,
+            vec![],
+            vec![],
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
                 error_code, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-                "expected stale-chain-tip error for intentionally mismatched BIP34 height"
-            );
+                "expected stale-chain-tip ({path_name})"
+            ),
+            response => {
+                panic!("expected Error(stale-chain-tip) ({path_name}), got: {response:?}")
+            }
         }
-        response => panic!("expected Error(stale-chain-tip), got: {response:?}"),
     }
 }
 
@@ -232,8 +261,8 @@ async fn assert_jdp_invalid_coinbase_input_scenario(incoming_sender: &Sender<JdR
     }
 }
 
-/// A declaration rejected by `checkBlock` must not leave its client-supplied transactions behind
-/// in the mempool mirror.
+/// A declaration rejected by `checkBlock` on its own merits is answered `invalid-job`, and must
+/// not leave its client-supplied transactions behind in the mempool mirror.
 async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
@@ -250,10 +279,13 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     )
     .await;
 
-    assert!(
-        matches!(response, JdResponse::Error { .. }),
-        "expected Error for a declaration carrying an invalid transaction, got: {response:?}"
-    );
+    match response {
+        JdResponse::Error { error_code, .. } => assert_eq!(
+            error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+            "expected invalid-job for a declaration carrying an invalid transaction"
+        ),
+        response => panic!("expected Error(invalid-job), got: {response:?}"),
+    }
 
     // Same wtxid, this time supplying no transactions: the rejected transaction must not be
     // served from the mempool mirror.
