@@ -22,6 +22,14 @@ const WEIGHT_FACTOR: u64 = 4;
 /// the template data is retired.
 const STALE_TEMPLATE_GRACE_PERIOD_SECS: u64 = 10;
 
+/// Templates kept usable at one chain tip, beyond which the oldest are retired.
+///
+/// A fee refresh does not invalidate the template it supersedes, so these are retired by count
+/// rather than by timer: each one holds a Bitcoin Core `BlockTemplate` capability alive, and the
+/// count is what bounds memory while a chain tip does not move. Eight covers a job history of
+/// `min_interval` times eight seconds, far longer than a solution takes to come back.
+const MAX_SAME_TIP_TEMPLATES: usize = 8;
+
 /// Bitcoin Core's `MAX_MONEY` consensus constant, in satoshis (21,000,000 BTC).
 ///
 /// Used as a `fee_threshold` sentinel in `waitNext` requests: Bitcoin Core skips fee-based

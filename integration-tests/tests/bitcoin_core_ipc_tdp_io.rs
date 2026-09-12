@@ -5,6 +5,8 @@
 //! - `RequestTransactionData` succeeds for the current template id.
 //! - `RequestTransactionData` returns `template-id-not-found` for an unknown id.
 //! - after a chain-tip update, an old template id eventually returns `stale-template-id`.
+//! - fee refreshes at one chain tip retire the templates beyond the cap and keep the rest usable.
+//! - rotating coinbase output constraints stops the superseded templates from answering at once.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -31,6 +33,11 @@ use stratum_apps::{
     },
 };
 
+/// Templates kept usable at one chain tip.
+///
+/// Mirrors `MAX_SAME_TIP_TEMPLATES` in `bitcoin_core_sv2`, which is private to that crate.
+const MAX_SAME_TIP_TEMPLATES: usize = 8;
+
 #[tokio::test]
 async fn tdp_io_integration_v30x() {
     assert_tdp_io_integration(BitcoinCoreVersion::V30X).await;
@@ -47,6 +54,10 @@ async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
     // Start a real Bitcoin Core node for the selected runtime line.
     let bitcoin_core = start_bitcoin_core(DifficultyLevel::Low, version);
     let socket_path = bitcoin_core.ipc_socket_path();
+
+    // Funded before the runtime is driven, so the blocks this mines do not move the chain tip
+    // under a scenario. The coins pay for the mempool transactions that drive fee refreshes.
+    bitcoin_core.fund_wallet().expect("failed to fund wallet");
 
     // Incoming channel feeds TDP requests; outgoing channel receives TDP responses/events.
     let (incoming_sender, incoming_receiver) = async_channel::unbounded();
@@ -89,6 +100,10 @@ async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
         template_id,
     )
     .await;
+    assert_tdp_same_tip_templates_are_capped(&bitcoin_core, &incoming_sender, &outgoing_receiver)
+        .await;
+    assert_tdp_constraint_churn_retires_superseded_templates(&incoming_sender, &outgoing_receiver)
+        .await;
 
     cancellation_token.cancel();
     tdp_thread
@@ -232,6 +247,160 @@ async fn assert_tdp_old_template_eventually_stale(
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             _ => unreachable!("message kind already filtered"),
+        }
+    }
+}
+
+/// Fee refreshes at one chain tip must not accumulate templates without bound.
+///
+/// Each one publishes a template without invalidating the previous one, so they are retired by
+/// count: publishing beyond the cap retires the oldest, while everything still within it keeps
+/// answering.
+async fn assert_tdp_same_tip_templates_are_capped(
+    bitcoin_core: &BitcoinCore,
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
+) {
+    // A mempool transaction raises the fees of the next template, which the runtime publishes as
+    // a non-future template against the same chain tip. Two more than the cap, so the oldest two
+    // of the batch are guaranteed to be retired by the time the newest is published.
+    let mut template_ids = Vec::new();
+    while template_ids.len() < MAX_SAME_TIP_TEMPLATES + 2 {
+        bitcoin_core
+            .create_mempool_transaction()
+            .expect("failed to create mempool transaction");
+
+        let new_template = recv_tdp_message(outgoing_receiver, Duration::from_secs(30), |msg| {
+            matches!(
+                msg,
+                TemplateDistributionOwned::NewTemplate(message) if !message.future_template
+            )
+        })
+        .await;
+        match new_template {
+            TemplateDistributionOwned::NewTemplate(message) => {
+                template_ids.push(message.template_id)
+            }
+            _ => unreachable!("message kind already filtered"),
+        }
+    }
+
+    for template_id in &template_ids[..2] {
+        assert_tdp_template_is_retired(incoming_sender, outgoing_receiver, *template_id).await;
+    }
+
+    // The oldest template still within the cap is deliberately left out: one more fee refresh
+    // landing while these requests are made would retire exactly that one.
+    for template_id in &template_ids[template_ids.len() - (MAX_SAME_TIP_TEMPLATES - 1)..] {
+        assert_tdp_template_is_usable(incoming_sender, outgoing_receiver, *template_id).await;
+    }
+}
+
+/// Rotating coinbase output constraints must stop the superseded templates from answering at once.
+///
+/// Their data outlives the rotation by a grace period so requests already in flight can finish,
+/// but a request that arrives afterwards must not be served from them.
+async fn assert_tdp_constraint_churn_retires_superseded_templates(
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
+) {
+    let mut template_ids = Vec::new();
+
+    for coinbase_output_max_additional_size in 3..6 {
+        incoming_sender
+            .send(TemplateDistributionOwned::CoinbaseOutputConstraints(
+                CoinbaseOutputConstraintsOwned {
+                    coinbase_output_max_additional_size,
+                    coinbase_output_max_additional_sigops: 2,
+                },
+            ))
+            .await
+            .expect("failed to send CoinbaseOutputConstraints");
+
+        // Each rotation bootstraps a fresh template IPC client, published as a future template.
+        let new_template = recv_tdp_message(outgoing_receiver, Duration::from_secs(30), |msg| {
+            matches!(
+                msg,
+                TemplateDistributionOwned::NewTemplate(message) if message.future_template
+            )
+        })
+        .await;
+        match new_template {
+            TemplateDistributionOwned::NewTemplate(message) => {
+                template_ids.push(message.template_id)
+            }
+            _ => unreachable!("message kind already filtered"),
+        }
+    }
+
+    let (current_template_id, superseded_template_ids) = template_ids
+        .split_last()
+        .expect("every rotation published a template");
+
+    for template_id in superseded_template_ids {
+        assert_tdp_template_is_retired(incoming_sender, outgoing_receiver, *template_id).await;
+    }
+
+    // The rotations left the runtime serving the template published by the last one.
+    assert_tdp_template_is_usable(incoming_sender, outgoing_receiver, *current_template_id).await;
+}
+
+/// A retired template must not serve a request that arrives after its retirement.
+async fn assert_tdp_template_is_retired(
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
+    template_id: u64,
+) {
+    let response = request_tdp_tx_data_and_recv_response_for_template_id(
+        incoming_sender,
+        outgoing_receiver,
+        template_id,
+        Duration::from_secs(20),
+    )
+    .await;
+
+    match response {
+        TemplateDistributionOwned::RequestTransactionDataError(message) => {
+            let error_code = message.error_code.as_utf8_or_hex();
+            // stale-template-id while a retired template waits out its grace period, and
+            // template-id-not-found once it has been destroyed.
+            assert!(
+                error_code == ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
+                    || error_code == ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND,
+                "retired template {template_id} answered with error code: {error_code}",
+            );
+        }
+        response => panic!(
+            "retired template {template_id} must not answer a new request, got: {response:?}"
+        ),
+    }
+}
+
+/// A template that has not been retired must still serve transaction data.
+async fn assert_tdp_template_is_usable(
+    incoming_sender: &Sender<TemplateDistributionOwned>,
+    outgoing_receiver: &Receiver<TemplateDistributionOwned>,
+    template_id: u64,
+) {
+    let response = request_tdp_tx_data_and_recv_response_for_template_id(
+        incoming_sender,
+        outgoing_receiver,
+        template_id,
+        Duration::from_secs(20),
+    )
+    .await;
+
+    match response {
+        TemplateDistributionOwned::RequestTransactionDataSuccess(message) => {
+            assert_eq!(
+                message.template_id, template_id,
+                "RequestTransactionDataSuccess must reference the requested template",
+            );
+        }
+        response => {
+            panic!(
+                "retained template {template_id} must answer transaction data, got: {response:?}"
+            )
         }
     }
 }
