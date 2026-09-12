@@ -41,7 +41,6 @@ pub struct MempoolMirror {
     current_prev_hash: Option<BlockHash>,
     current_nbits: Option<CompactTarget>,
     current_min_ntime: Option<u32>,
-    current_bip34_height: Option<u32>,
 }
 
 impl MempoolMirror {
@@ -86,16 +85,6 @@ impl MempoolMirror {
         self.current_prev_hash = Some(prev_hash);
         self.current_nbits = Some(block.header.bits);
         self.current_min_ntime = Some(block.header.time);
-        self.current_bip34_height = block.txdata.first().map(|coinbase| {
-            coinbase
-                .input
-                .first()
-                .and_then(|input| {
-                    decode_bip34_height_from_coinbase_script_sig(input.script_sig.as_bytes())
-                })
-                // Fallback for non-canonical/missing BIP34 encoding in some templates.
-                .unwrap_or_else(|| coinbase.lock_time.to_consensus_u32())
-        });
     }
 
     /// Commits transactions into the mempool mirror.
@@ -168,36 +157,6 @@ impl MempoolMirror {
     pub fn get_current_min_ntime(&self) -> Option<u32> {
         self.current_min_ntime
     }
-
-    /// Returns the current template's BIP34 height decoded from coinbase scriptSig.
-    pub fn get_current_bip34_height(&self) -> Option<u32> {
-        self.current_bip34_height
-    }
-}
-
-/// Decodes BIP34 height from the first push in coinbase scriptSig.
-/// Returns None if scriptSig does not start with a canonical small push.
-/// Shared by JDP components that need to compare declared vs current chain context.
-pub(crate) fn decode_bip34_height_from_coinbase_script_sig(script_sig: &[u8]) -> Option<u32> {
-    let first = *script_sig.first()?;
-
-    // Support small-integer opcodes (OP_0, OP_1..OP_16) used by some templates.
-    if first == 0x00 {
-        return Some(0);
-    }
-    if (0x51..=0x60).contains(&first) {
-        return Some((first - 0x50) as u32);
-    }
-
-    // Canonical small push form: first byte is push length (1..=4).
-    let push_len = first as usize;
-    if push_len == 0 || push_len > 4 || script_sig.len() < 1 + push_len {
-        return None;
-    }
-
-    let mut height_bytes = [0u8; 4];
-    height_bytes[..push_len].copy_from_slice(&script_sig[1..1 + push_len]);
-    Some(u32::from_le_bytes(height_bytes))
 }
 
 #[cfg(test)]
