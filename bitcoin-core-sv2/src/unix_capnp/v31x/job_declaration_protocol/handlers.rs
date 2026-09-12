@@ -43,10 +43,11 @@ impl BitcoinCoreSv2JDP {
     /// job declared and supplied only once, resolves the declared wtxids against the mempool mirror
     /// plus that staging area within a block's weight budget, assembles a test block, sets IPC
     /// thread context, and uses Bitcoin Core's `checkBlock` to validate the block structure. Staged
-    /// transactions are only committed to the mempool mirror after `checkBlock` succeeds and only
-    /// if the chain tip did not move while `checkBlock` was in flight, so a rejected declaration
-    /// never grows shared state and stale transactions never seed a freshly-cleared mirror.
-    /// A rejection is classified from the reason Core gives, with no further IPC: `stale-chain-tip`
+    /// transactions are only committed to the mempool mirror after `checkBlock` succeeds, so a
+    /// rejected declaration never grows shared state. If the chain tip moved while `checkBlock` was
+    /// in flight, the declaration is answered with `stale-chain-tip` instead and its transactions
+    /// are dropped: they were only validated against a tip that no longer exists. A rejection
+    /// is classified from the reason Core gives, with no further IPC: `stale-chain-tip`
     /// when Core reports that the tip moved or that the coinbase height is obsolete, `invalid-job`
     /// otherwise. Returns success with current template parameters or an error if validation fails.
     pub(crate) async fn handle_declare_mining_job(
@@ -329,37 +330,43 @@ impl BitcoinCoreSv2JDP {
             }
         };
 
-        if check_block_outcome.is_ok() {
-            if latest_validation_context.prev_hash == initial_validation_context.prev_hash {
-                // checkBlock validated the assembled block, so the client-supplied transactions it
-                // contained are now safe to commit to the shared mempool mirror.
-                let validated_txs: Vec<Transaction> = wtxid_list
-                    .iter()
-                    .filter_map(|wtxid| staged_txs.remove(wtxid))
-                    .collect();
-                self.mempool_mirror
-                    .borrow_mut()
-                    .add_transactions(validated_txs);
-            } else {
-                // The chain tip moved while checkBlock was in flight: the template monitor
-                // already cleared the mirror for the new tip, and these transactions were only
-                // validated against the old one. Drop them instead of seeding the new-tip mirror
-                // with stale entries; the client will resend them if still relevant.
-                debug!(
-                    initial_prev_hash = ?initial_validation_context.prev_hash,
-                    latest_prev_hash = ?latest_validation_context.prev_hash,
-                    "Chain tip moved during checkBlock; discarding staged transactions instead of committing them to the mirror"
-                );
-            }
-        }
-
         let response = match check_block_outcome {
-            Ok(()) => JdResponse::Success {
-                prev_hash: initial_validation_context.prev_hash,
-                nbits: initial_validation_context.nbits,
-                min_ntime: initial_validation_context.min_ntime,
-                txid_list,
-            },
+            Ok(()) => {
+                if latest_validation_context.prev_hash == initial_validation_context.prev_hash {
+                    // checkBlock validated the assembled block, so the client-supplied
+                    // transactions it contained are now safe to commit to the shared mempool
+                    // mirror.
+                    let validated_txs: Vec<Transaction> = wtxid_list
+                        .iter()
+                        .filter_map(|wtxid| staged_txs.remove(wtxid))
+                        .collect();
+                    self.mempool_mirror
+                        .borrow_mut()
+                        .add_transactions(validated_txs);
+
+                    JdResponse::Success {
+                        prev_hash: initial_validation_context.prev_hash,
+                        nbits: initial_validation_context.nbits,
+                        min_ntime: initial_validation_context.min_ntime,
+                        txid_list,
+                    }
+                } else {
+                    // The chain tip moved while checkBlock was in flight, so the block was
+                    // validated against a tip that no longer exists: the pool would reject its
+                    // prev_hash, and committing its transactions would seed the freshly-cleared
+                    // mirror with entries validated against the old tip. Answer stale-chain-tip
+                    // and drop them; the client re-declares against the new tip.
+                    debug!(
+                        initial_prev_hash = ?initial_validation_context.prev_hash,
+                        latest_prev_hash = ?latest_validation_context.prev_hash,
+                        "Chain tip moved during checkBlock; answering stale-chain-tip instead of Success"
+                    );
+                    JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                        validation_context: latest_validation_context,
+                    }
+                }
+            }
             Err(reason) => {
                 // Core's TestBlockValidity compares the block's prev_hash against the chain tip
                 // before it looks at anything else and answers inconclusive-not-best-prevblk when
