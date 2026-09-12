@@ -1,14 +1,17 @@
 //! Template-data helpers for Bitcoin Core v30.x Sv2 Template Distribution Protocol via capnp over
 //! UNIX socket.
 
-use crate::unix_capnp::v30x::template_distribution_protocol::error::TemplateDataError;
+use crate::unix_capnp::{
+    STALE_TEMPLATE_GRACE_PERIOD_SECS,
+    v30x::template_distribution_protocol::error::TemplateDataError,
+};
 
 use bitcoin_capnp_types::{
     mining_capnp::block_template::Client as BlockTemplateIpcClient,
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
 use bitcoin_capnp_types_v30 as bitcoin_capnp_types;
-use std::{fs::File, io::Write, path::Path};
+use std::{fs::File, io::Write, path::Path, time::Instant};
 use stratum_core::bitcoin::{
     Target, Transaction, TxOut,
     amount::{Amount, CheckedSum},
@@ -33,6 +36,7 @@ pub struct TemplateData {
     coinbase_tx: Transaction,
     merkle_path: Vec<Vec<u8>>,
     template_ipc_client: BlockTemplateIpcClient,
+    retire_at: Option<Instant>,
 }
 
 // impl block for public methods
@@ -50,7 +54,28 @@ impl TemplateData {
             coinbase_tx,
             merkle_path,
             template_ipc_client,
+            retire_at: None,
         }
+    }
+
+    /// Marks the template unusable for new requests, and sets the instant it comes due.
+    ///
+    /// The marking takes effect at once, so a superseded template stops answering a new
+    /// `RequestTransactionData` immediately, while the template and the Bitcoin Core capability it
+    /// holds stay in place until the deadline, so a request already in flight still finds its data.
+    ///
+    /// A template already retired keeps the deadline it was given, so retirements that overlap in
+    /// time cannot push each other's destruction back.
+    pub fn retire(&mut self, retire_at: Instant) {
+        if self.retire_at.is_some() {
+            return;
+        }
+
+        self.retire_at = Some(retire_at);
+        debug!(
+            "Marked template {} stale, destroying it in {}s",
+            self.template_id, STALE_TEMPLATE_GRACE_PERIOD_SECS
+        );
     }
 
     /// Destroys the template IPC client, cleaning up the resources on the Bitcoin Core side
@@ -73,6 +98,10 @@ impl TemplateData {
 
     pub fn get_template_id(&self) -> u64 {
         self.template_id
+    }
+
+    pub fn get_retire_at(&self) -> Option<Instant> {
+        self.retire_at
     }
 
     pub fn get_new_template_message(
