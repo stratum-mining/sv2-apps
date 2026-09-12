@@ -182,8 +182,8 @@ impl BitcoinCoreSv2TDP {
                                     info!("⛓️ Chain Tip changed! New prev_hash: {}", new_prev_hash);
                                     debug!("CHAIN TIP CHANGE DETECTED - old: {}, new: {}", current_prev_hash, new_prev_hash);
 
-                                    if let Err(e) = self_clone.process_stale_template_data().await {
-                                        error!("Failed to collect stale template ids: {:?}", e);
+                                    if let Err(e) = self_clone.retire_all_templates() {
+                                        error!("Failed to retire the previous chain tip's templates: {:?}", e);
                                         warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                                         self_clone.global_cancellation_token.cancel();
                                         break;
@@ -301,6 +301,110 @@ impl BitcoinCoreSv2TDP {
                     }
                 }
             }
+        });
+    }
+
+    /// Spawns a new task to destroy retired templates
+    ///
+    /// This task is responsible for:
+    /// - Creating a dedicated thread_ipc_client for destroy requests
+    /// - Waiting out the grace period each retired template was queued with
+    /// - Removing it from the template data and dropping its authorization
+    /// - Destroying the Bitcoin Core capability it holds
+    pub(crate) fn monitor_template_retirement(&self) {
+        let self_clone = self.clone();
+
+        tokio::task::spawn_local(async move {
+            debug!("monitor_template_retirement() task started");
+            // one thread_ipc_client serves every destroy request, rather than one per retirement
+            debug!("Creating dedicated thread_ipc_client for destroy requests");
+            let thread_ipc_client = match self_clone.new_thread_ipc_client().await {
+                Ok(thread_ipc_client) => thread_ipc_client,
+                Err(e) => {
+                    error!("Failed to create thread IPC client: {:?}", e);
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self_clone.global_cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            loop {
+                let (template_id, retire_at) = tokio::select! {
+                    _ = self_clone.global_cancellation_token.cancelled() => {
+                        debug!("monitor_template_retirement() exiting due to cancellation");
+                        break;
+                    }
+                    queued_template = self_clone.template_retirement_receiver.recv() => {
+                        match queued_template {
+                            Ok(queued_template) => queued_template,
+                            Err(e) => {
+                                error!("Template retirement queue closed: {:?}", e);
+                                break;
+                            }
+                        }
+                    }
+                };
+
+                // Templates are queued with the instant they come due, so a backlog drains on the
+                // deadlines it was given instead of adding one grace period per entry.
+                tokio::select! {
+                    _ = self_clone.global_cancellation_token.cancelled() => {
+                        debug!("monitor_template_retirement() exiting due to cancellation");
+                        break;
+                    }
+                    _ = tokio::time::sleep_until(retire_at.into()) => {}
+                }
+
+                let retired_template_data = {
+                    let mut template_data_guard = match self_clone.template_data.write() {
+                        Ok(template_data_guard) => template_data_guard,
+                        Err(e) => {
+                            error!("Failed to acquire write lock on template_data: {:?}", e);
+                            warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                            self_clone.global_cancellation_token.cancel();
+                            break;
+                        }
+                    };
+                    template_data_guard.remove(&template_id)
+                };
+
+                // Nothing can answer for this template any more, so it no longer needs to be
+                // marked: keeping it would grow the set by one entry per template ever published.
+                // From here on requests for it are answered as an unknown template id.
+                {
+                    let mut stale_template_ids_guard = match self_clone.stale_template_ids.write() {
+                        Ok(stale_template_ids_guard) => stale_template_ids_guard,
+                        Err(e) => {
+                            error!(
+                                "Failed to acquire write lock on stale_template_ids: {:?}",
+                                e
+                            );
+                            warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                            self_clone.global_cancellation_token.cancel();
+                            break;
+                        }
+                    };
+                    stale_template_ids_guard.remove(&template_id);
+                }
+
+                let Some(retired_template_data) = retired_template_data else {
+                    continue;
+                };
+
+                if let Err(e) = retired_template_data
+                    .destroy_ipc_client(thread_ipc_client.clone())
+                    .await
+                {
+                    error!("Failed to destroy template IPC client: {:?}", e);
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self_clone.global_cancellation_token.cancel();
+                    break;
+                }
+
+                debug!("Retired template {}", template_id);
+            }
+
+            debug!("monitor_template_retirement() task exiting");
         });
     }
 }
