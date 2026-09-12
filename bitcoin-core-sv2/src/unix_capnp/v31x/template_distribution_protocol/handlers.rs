@@ -43,7 +43,7 @@ impl BitcoinCoreSv2TDP {
             }
         }
 
-        self.process_stale_template_data().await?;
+        self.retire_all_templates()?;
 
         self.template_ipc_client_cancellation_token = CancellationToken::new();
         debug!("Created new template_ipc_client_cancellation_token");
@@ -73,98 +73,64 @@ impl BitcoinCoreSv2TDP {
             request_transaction_data.template_id
         );
 
-        let is_stale = {
-            let stale_template_ids_guard = self.stale_template_ids.read().map_err(|e| {
-                error!("Failed to acquire read lock on stale_template_ids: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
-            })?;
-            stale_template_ids_guard.contains(&request_transaction_data.template_id)
-        };
-        if is_stale {
-            debug!(
-                "Template {} is stale, sending error response",
-                request_transaction_data.template_id
-            );
-            let request_transaction_data_error = RequestTransactionDataErrorOwned {
-                template_id: request_transaction_data.template_id,
-                error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
-                    .to_string()
-                    .try_into()
-                    .expect("error code must be valid string"),
-            };
-
-            if let Err(e) = self
-                .outgoing_messages
-                .send(TemplateDistributionOwned::RequestTransactionDataError(
-                    request_transaction_data_error.clone(),
-                ))
-                .await
-            {
-                error!(
-                    "Failed to send RequestTransactionDataError message: {:?}",
-                    e
-                );
-                return Err(
-                    BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage,
-                );
-            }
-
-            return Ok(());
-        }
-
+        // One scoped lookup decides the answer. A template the map no longer holds was destroyed
+        // or never published; one carrying a retirement deadline is superseded and must not answer
+        // a new request; anything else is current, and is cloned out so nothing is held across the
+        // await below.
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 error!("Failed to acquire read lock on template_data: {:?}", e);
                 BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
             })?;
 
-            // clone so we can drop the read lock and avoid holding it across the await
-            template_data_guard
-                .get(&request_transaction_data.template_id)
-                .cloned()
-        };
-
-        let response_message = {
-            match template_data {
-                Some(template_data) => {
-                    debug!(
-                        "Template {} found, sending success response",
-                        request_transaction_data.template_id
-                    );
-
-                    let request_transaction_data_success = match template_data
-                        .get_request_transaction_data_success_message(self.thread_map.clone())
-                        .await
-                    {
-                        Ok(request_transaction_data_success) => request_transaction_data_success,
-                        Err(e) => {
-                            error!("Failed to fetch template tx data: {:?}", e);
-                            return Err(BitcoinCoreSv2TDPError::FailedToFetchTemplateTxData);
-                        }
-                    };
-                    TemplateDistributionOwned::RequestTransactionDataSuccess(
-                        request_transaction_data_success,
-                    )
+            match template_data_guard.get(&request_transaction_data.template_id) {
+                None => Err(ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND),
+                Some(template_data) if template_data.get_retire_at().is_some() => {
+                    Err(ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID)
                 }
-                None => {
-                    debug!(
-                        "Template {} not found, sending error response",
-                        request_transaction_data.template_id
-                    );
-                    TemplateDistributionOwned::RequestTransactionDataError(
-                        RequestTransactionDataErrorOwned {
-                            template_id: request_transaction_data.template_id,
-                            error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND
-                                .to_string()
-                                .try_into()
-                                .expect("error code must be valid string"),
-                        },
-                    )
-                }
+                Some(template_data) => Ok(template_data.clone()),
             }
         };
 
-        if let Err(e) = self.outgoing_messages.send(response_message.clone()).await {
+        let response_message = match template_data {
+            Ok(template_data) => {
+                debug!(
+                    "Template {} found, sending success response",
+                    request_transaction_data.template_id
+                );
+
+                let request_transaction_data_success = match template_data
+                    .get_request_transaction_data_success_message(self.thread_map.clone())
+                    .await
+                {
+                    Ok(request_transaction_data_success) => request_transaction_data_success,
+                    Err(e) => {
+                        error!("Failed to fetch template tx data: {:?}", e);
+                        return Err(BitcoinCoreSv2TDPError::FailedToFetchTemplateTxData);
+                    }
+                };
+                TemplateDistributionOwned::RequestTransactionDataSuccess(
+                    request_transaction_data_success,
+                )
+            }
+            Err(error_code) => {
+                debug!(
+                    "Template {} answered with {}, sending error response",
+                    request_transaction_data.template_id, error_code
+                );
+                TemplateDistributionOwned::RequestTransactionDataError(
+                    RequestTransactionDataErrorOwned {
+                        template_id: request_transaction_data.template_id,
+                        error_code: error_code
+                            .to_string()
+                            .try_into()
+                            .expect("error code must be valid string"),
+                    },
+                )
+            }
+        };
+
+        if let Err(e) = self.outgoing_messages.send(response_message).await {
             error!("Failed to send message: {:?}", e);
             return Err(BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage);
         }
@@ -180,6 +146,9 @@ impl BitcoinCoreSv2TDP {
             "handle_submit_solution() called for template_id: {}",
             submit_solution.template_id
         );
+        // Deliberately not gated on retirement: a superseded template is still a valid block until
+        // it is destroyed, and a downstream a few jobs behind may yet find a solution on one.
+        // Whether the block is still worth anything is left to Bitcoin Core.
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 error!("Failed to acquire read lock on template_data: {:?}", e);

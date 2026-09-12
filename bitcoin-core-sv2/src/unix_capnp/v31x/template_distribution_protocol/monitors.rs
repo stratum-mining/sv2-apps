@@ -2,7 +2,8 @@
 //! UNIX socket.
 
 use super::{BitcoinCoreSv2TDP, bitcoin_capnp_types::capnp};
-use crate::unix_capnp::{MAX_MONEY, WAIT_NEXT_TIMEOUT_MS};
+use crate::unix_capnp::{MAX_MONEY, TEMPLATE_RETIREMENT_SWEEP_INTERVAL_SECS, WAIT_NEXT_TIMEOUT_MS};
+use std::time::{Duration, Instant};
 use stratum_core::parsers_sv2::TemplateDistributionOwned;
 use tracing::{debug, error, info, warn};
 
@@ -182,8 +183,8 @@ impl BitcoinCoreSv2TDP {
                                     info!("⛓️ Chain Tip changed! New prev_hash: {}", new_prev_hash);
                                     debug!("CHAIN TIP CHANGE DETECTED - old: {}, new: {}", current_prev_hash, new_prev_hash);
 
-                                    if let Err(e) = self_clone.process_stale_template_data().await {
-                                        error!("Failed to collect stale template ids: {:?}", e);
+                                    if let Err(e) = self_clone.retire_all_templates() {
+                                        error!("Failed to retire the previous chain tip's templates: {:?}", e);
                                         warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                                         self_clone.global_cancellation_token.cancel();
                                         break;
@@ -301,6 +302,84 @@ impl BitcoinCoreSv2TDP {
                     }
                 }
             }
+        });
+    }
+
+    /// Spawns a new task to destroy retired templates
+    ///
+    /// This task is responsible for:
+    /// - Creating a dedicated thread_ipc_client for destroy requests
+    /// - Sweeping for the retired templates whose grace period has passed
+    /// - Removing them from the template data and dropping their authorization
+    /// - Destroying the Bitcoin Core capability each one holds
+    pub(crate) fn monitor_template_retirement(&self) {
+        let self_clone = self.clone();
+
+        tokio::task::spawn_local(async move {
+            debug!("monitor_template_retirement() task started");
+            // one thread_ipc_client serves every destroy request, rather than one per retirement
+            debug!("Creating dedicated thread_ipc_client for destroy requests");
+            let thread_ipc_client = match self_clone.new_thread_ipc_client().await {
+                Ok(thread_ipc_client) => thread_ipc_client,
+                Err(e) => {
+                    error!("Failed to create thread IPC client: {:?}", e);
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self_clone.global_cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            'sweep: loop {
+                tokio::select! {
+                    _ = self_clone.global_cancellation_token.cancelled() => {
+                        debug!("monitor_template_retirement() exiting due to cancellation");
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(
+                        TEMPLATE_RETIREMENT_SWEEP_INTERVAL_SECS,
+                    )) => {}
+                }
+
+                // Taking a template out of the map is what ends its life: from here on a request
+                // naming it is answered as an unknown template id. They are taken while the lock
+                // is held and destroyed once it has been dropped, because destroying awaits.
+                let due_templates = {
+                    let mut template_data_guard = match self_clone.template_data.write() {
+                        Ok(template_data_guard) => template_data_guard,
+                        Err(e) => {
+                            error!("Failed to acquire write lock on template_data: {:?}", e);
+                            warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                            self_clone.global_cancellation_token.cancel();
+                            break;
+                        }
+                    };
+
+                    let now = Instant::now();
+                    template_data_guard
+                        .extract_if(|_, template_data| {
+                            template_data
+                                .get_retire_at()
+                                .is_some_and(|retire_at| retire_at <= now)
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                for (template_id, template_data) in due_templates {
+                    if let Err(e) = template_data
+                        .destroy_ipc_client(thread_ipc_client.clone())
+                        .await
+                    {
+                        error!("Failed to destroy template IPC client: {:?}", e);
+                        warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                        self_clone.global_cancellation_token.cancel();
+                        break 'sweep;
+                    }
+
+                    debug!("Retired template {}", template_id);
+                }
+            }
+
+            debug!("monitor_template_retirement() task exiting");
         });
     }
 }

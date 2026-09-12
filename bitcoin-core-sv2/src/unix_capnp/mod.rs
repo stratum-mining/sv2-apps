@@ -22,6 +22,29 @@ const WEIGHT_FACTOR: u64 = 4;
 /// the template data is retired.
 const STALE_TEMPLATE_GRACE_PERIOD_SECS: u64 = 10;
 
+/// Templates kept usable at one chain tip, beyond which the oldest are retired.
+///
+/// A fee refresh does not invalidate the template it supersedes, so these are retired by count
+/// rather than by timer: each one holds a Bitcoin Core `BlockTemplate` capability alive, and the
+/// count is what bounds memory while a chain tip does not move.
+///
+/// The cap must cover the job history a downstream may still submit a solution against: a
+/// `SubmitSolution` naming a template that has already been destroyed is dropped, and that is a
+/// lost block which shows up only in the logs. A channel accepts shares on its active job plus the
+/// past ones it retains, sixteen of them (`MAX_PAST_JOBS` in `channels_sv2`) when a pool does not
+/// override it, so seventeen is what covers them all. A pool that raises its own job history above
+/// that reopens the gap.
+const MAX_SAME_TIP_TEMPLATES: usize = 17;
+
+/// How often retired templates are swept for destruction, in seconds.
+///
+/// Destruction happens on a sweep rather than at the exact instant each template comes due, so a
+/// template outlives its grace period by up to one interval. The slack is deliberate: it keeps a
+/// template's whole retirement state on the template itself, with nothing on the side holding a
+/// per-template deadline, and it only ever widens the window in which a request already in flight
+/// still finds its data.
+const TEMPLATE_RETIREMENT_SWEEP_INTERVAL_SECS: u64 = 1;
+
 /// Bitcoin Core's `MAX_MONEY` consensus constant, in satoshis (21,000,000 BTC).
 ///
 /// Used as a `fee_threshold` sentinel in `waitNext` requests: Bitcoin Core skips fee-based
