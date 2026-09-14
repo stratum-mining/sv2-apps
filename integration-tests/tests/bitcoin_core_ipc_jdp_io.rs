@@ -3,11 +3,17 @@
 //! Flow covered per Bitcoin Core Sv2 runtime behavior and Sv2 JDP expectations:
 //! - `DeclareMiningJob` returns `MissingTransactions` when unknown wtxids are declared.
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
-//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
-//!   intentionally mismatched.
-//! - `DeclareMiningJob` does not retain client-supplied transactions when validation fails.
+//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when Bitcoin Core rejects the declared
+//!   coinbase height as obsolete (`bad-cb-height`).
+//! - `DeclareMiningJob` returns `Error(invalid-job)` for a declaration Bitcoin Core rejects on its
+//!   own merits, and does not retain its client-supplied transactions.
 //! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without tearing
 //!   down the IPC connection.
+//! - `DeclareMiningJob` rejects client-supplied transactions the declaration did not ask for.
+//! - `DeclareMiningJob` keeps asking for the transactions an incomplete response left out, without
+//!   retaining the ones it did supply.
+//! - `DeclareMiningJob` rejects a declaration that repeats a wtxid, lists more transactions than a
+//!   block can hold, or weighs more than a block.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -31,12 +37,13 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, Wtxid,
-            absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Weight, Witness,
+            Wtxid, absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
             transaction::Version as TxVersion,
         },
         job_declaration_sv2::{
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
         },
     },
@@ -113,7 +120,16 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         .await;
     assert_jdp_success_scenario(&incoming_sender, coinbase_tx.clone()).await;
     assert_jdp_stale_chain_tip_scenario(&incoming_sender, next_height).await;
-    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx).await;
+    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx.clone())
+        .await;
+    assert_jdp_supplied_txs_must_match_declaration(
+        &incoming_sender,
+        coinbase_tx.clone(),
+        next_height,
+    )
+    .await;
+    assert_jdp_incomplete_missing_txs_response(&incoming_sender, coinbase_tx.clone()).await;
+    assert_jdp_declaration_must_fit_in_a_block(&incoming_sender, coinbase_tx).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -167,6 +183,9 @@ async fn assert_jdp_success_scenario(
     }
 }
 
+/// A coinbase whose height Bitcoin Core no longer expects is rejected with `bad-cb-height`, which
+/// the runtime answers as `stale-chain-tip` straight from Core's reason: no local height
+/// bookkeeping and no template refresh are involved.
 async fn assert_jdp_stale_chain_tip_scenario(
     incoming_sender: &Sender<JdRequest>,
     next_height: u32,
@@ -184,7 +203,7 @@ async fn assert_jdp_stale_chain_tip_scenario(
         JdResponse::Error { error_code, .. } => {
             assert_eq!(
                 error_code, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-                "expected stale-chain-tip error for intentionally mismatched BIP34 height"
+                "expected stale-chain-tip for a coinbase height Core rejects as obsolete"
             );
         }
         response => panic!("expected Error(stale-chain-tip), got: {response:?}"),
@@ -217,13 +236,13 @@ async fn assert_jdp_invalid_coinbase_input_scenario(incoming_sender: &Sender<JdR
     }
 }
 
-/// A declaration rejected by `checkBlock` must not leave its client-supplied transactions behind
-/// in the mempool mirror.
+/// A declaration rejected by `checkBlock` on its own merits is answered `invalid-job`, and must
+/// not leave its client-supplied transactions behind in the mempool mirror.
 async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
 ) {
-    let invalid_tx = build_invalid_declared_tx();
+    let invalid_tx = build_invalid_declared_tx(0x11);
     let invalid_wtxid = invalid_tx.compute_wtxid();
 
     let response = send_declare_mining_job_and_recv_response(
@@ -235,10 +254,13 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     )
     .await;
 
-    assert!(
-        matches!(response, JdResponse::Error { .. }),
-        "expected Error for a declaration carrying an invalid transaction, got: {response:?}"
-    );
+    match response {
+        JdResponse::Error { error_code, .. } => assert_eq!(
+            error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+            "expected invalid-job for a declaration carrying an invalid transaction"
+        ),
+        response => panic!("expected Error(invalid-job), got: {response:?}"),
+    }
 
     // Same wtxid, this time supplying no transactions: the rejected transaction must not be
     // served from the mempool mirror.
@@ -258,6 +280,159 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
         response => panic!(
             "expected MissingTransactions (rejected tx must not be retained), got: {response:?}"
         ),
+    }
+}
+
+/// Client-supplied transactions must belong to the declaration that asked for them.
+///
+/// Transactions the job never declared, repeats of a transaction declared once, and coinbases are
+/// all rejected before block assembly, so a client cannot attach arbitrary payload to a retry.
+async fn assert_jdp_supplied_txs_must_match_declaration(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+    next_height: u32,
+) {
+    let declared_tx = build_invalid_declared_tx(0x21);
+    let declared_wtxid = declared_tx.compute_wtxid();
+
+    let scenarios = [
+        (
+            "jdp/unsolicited-supplied-tx",
+            vec![declared_tx.clone(), build_invalid_declared_tx(0x22)],
+        ),
+        (
+            "jdp/duplicate-supplied-tx",
+            vec![declared_tx.clone(), declared_tx],
+        ),
+        (
+            "jdp/coinbase-supplied-tx",
+            vec![build_valid_coinbase_tx(next_height)],
+        ),
+    ];
+
+    for (path_name, missing_txs) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            vec![declared_wtxid],
+            missing_txs,
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job ({path_name})"
+            ),
+            response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
+        }
+    }
+}
+
+/// An answer that supplies only part of the declared transactions leaves the declaration pending.
+///
+/// The transactions it did supply were never validated, so they must not be served from the
+/// mempool mirror on a later declaration either.
+async fn assert_jdp_incomplete_missing_txs_response(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let supplied_tx = build_invalid_declared_tx(0x31);
+    let supplied_wtxid = supplied_tx.compute_wtxid();
+    let withheld_wtxid = build_invalid_declared_tx(0x32).compute_wtxid();
+
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx.clone(),
+        vec![supplied_wtxid, withheld_wtxid],
+        vec![supplied_tx],
+        "jdp/incomplete-missing-txs",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![withheld_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions for a partially answered declaration, got: {response:?}"
+        ),
+    }
+
+    // Declare only the transaction supplied above, this time supplying nothing: the incomplete
+    // response must not have left it behind in the mempool mirror.
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx,
+        vec![supplied_wtxid],
+        vec![],
+        "jdp/incomplete-missing-txs-retry",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![supplied_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions (unvalidated tx must not be retained), got: {response:?}"
+        ),
+    }
+}
+
+/// A declaration must be something that could be mined, before it is looked up or expanded.
+///
+/// A repeated wtxid would otherwise expand one cached transaction into as many copies as the list
+/// names it, and neither a list longer than a block can hold nor a set of transactions heavier
+/// than a block can ever validate.
+async fn assert_jdp_declaration_must_fit_in_a_block(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let repeated_wtxid = build_invalid_declared_tx(0x41).compute_wtxid();
+
+    // One more than the smallest transactions that could fit in a block.
+    let too_many_wtxids: Vec<Wtxid> = (0..=Weight::MAX_BLOCK.to_wu()
+        / Weight::MIN_TRANSACTION.to_wu())
+        .map(|index| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&index.to_le_bytes());
+            Wtxid::from_byte_array(bytes)
+        })
+        .collect();
+
+    // Two thirds of a block each, so declaring both weighs more than a block can hold.
+    let heavy_txs = vec![build_heavy_declared_tx(0x51), build_heavy_declared_tx(0x52)];
+    let heavy_wtxids: Vec<Wtxid> = heavy_txs.iter().map(|tx| tx.compute_wtxid()).collect();
+
+    let scenarios = [
+        (
+            "jdp/repeated-declared-wtxid",
+            vec![repeated_wtxid, repeated_wtxid],
+            vec![],
+        ),
+        ("jdp/too-many-declared-txs", too_many_wtxids, vec![]),
+        ("jdp/declaration-too-heavy", heavy_wtxids, heavy_txs),
+    ];
+
+    for (path_name, wtxid_list, missing_txs) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            wtxid_list,
+            missing_txs,
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job ({path_name})"
+            ),
+            response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
+        }
     }
 }
 
@@ -319,7 +494,7 @@ fn build_zero_input_coinbase_tx() -> Transaction {
     }
 }
 
-fn build_invalid_declared_tx() -> Transaction {
+fn build_invalid_declared_tx(prevout_txid_byte: u8) -> Transaction {
     Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
@@ -327,7 +502,7 @@ fn build_invalid_declared_tx() -> Transaction {
             // deliberately not `OutPoint::null()`, which would make Bitcoin Core treat this as a
             // second coinbase instead of exercising the empty-outputs rejection
             previous_output: OutPoint {
-                txid: Txid::from_byte_array([0x11; 32]),
+                txid: Txid::from_byte_array([prevout_txid_byte; 32]),
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),
@@ -337,6 +512,16 @@ fn build_invalid_declared_tx() -> Transaction {
         // no outputs, so Bitcoin Core's `checkBlock` rejects any block carrying this transaction
         output: vec![],
     }
+}
+
+fn build_heavy_declared_tx(prevout_txid_byte: u8) -> Transaction {
+    let mut tx = build_invalid_declared_tx(prevout_txid_byte);
+    // Weight is four times the size for a transaction carrying no witness.
+    tx.input[0].script_sig = ScriptBuf::from_bytes(vec![
+        prevout_txid_byte;
+        Weight::MAX_BLOCK.to_wu() as usize / 6
+    ]);
+    tx
 }
 
 fn build_valid_coinbase_tx(next_height: u32) -> Transaction {

@@ -239,6 +239,7 @@ impl TemplateData {
         });
     }
 
+    /// Submits a solution to Bitcoin Core, and archives it once Bitcoin Core has accepted it.
     pub async fn submit_solution(
         &self,
         submit_solution: SubmitSolutionOwned,
@@ -253,17 +254,6 @@ impl TemplateData {
                 error!("SubmitSolution.coinbase_tx is invalid: {}", e);
                 TemplateDataError::InvalidCoinbaseTx(e)
             })?;
-
-        // spawn a task to dump the solution to disk
-        self.dump_solution_to_disk(
-            thread_map.clone(),
-            solution_coinbase_tx,
-            submit_solution.version,
-            submit_solution.header_timestamp,
-            submit_solution.header_nonce,
-            path_dir,
-        )
-        .await;
 
         let mut submit_solution_request = self.template_ipc_client.submit_solution_request();
         let mut submit_solution_request_params = submit_solution_request.get();
@@ -282,6 +272,20 @@ impl TemplateData {
         if !submit_solution_response.get()?.get_result() {
             return Err(TemplateDataError::FailedIpcSubmitSolution);
         }
+
+        // Bitcoin Core accepting the solution is what makes it worth archiving. The checks
+        // `dump_solution_to_disk` runs establish that a solution is well formed and carries the
+        // work it claims, not that the node took the block it belongs to, so archiving any earlier
+        // would keep blocks Bitcoin Core rejected.
+        self.dump_solution_to_disk(
+            thread_map,
+            solution_coinbase_tx,
+            submit_solution.version,
+            submit_solution.header_timestamp,
+            submit_solution.header_nonce,
+            path_dir,
+        )
+        .await;
 
         Ok(())
     }
