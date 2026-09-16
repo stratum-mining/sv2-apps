@@ -35,16 +35,18 @@ use stratum_apps::{
 use tracing::debug;
 
 /// Data associated with an allocated token.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AllocatedTokenData {
     /// The allocation timestamp.
     pub allocated_at: Instant,
     /// The downstream ID that allocated the token.
     pub owner: DownstreamId,
+    /// The identity the token was allocated under.
+    pub user_identity: String,
 }
 
 /// Data associated with an active token.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ActiveTokenData {
     /// The corresponding allocated token.
     pub allocated_token: JdToken,
@@ -52,6 +54,8 @@ pub struct ActiveTokenData {
     pub activated_at: Instant,
     /// The downstream ID that activated the token.
     pub owner: DownstreamId,
+    /// The identity the token was allocated under.
+    pub user_identity: String,
 }
 
 /// Manager for the tokens used in the Job Declaration process.
@@ -82,14 +86,16 @@ impl TokenManager {
         token_manager
     }
 
-    /// Allocates a new token and adds it to the allocated tokens set.
-    pub fn allocate(&self, downstream_id: DownstreamId) -> JdToken {
+    /// Allocates a new token and adds it to the allocated tokens set, bound to the given
+    /// identity.
+    pub fn allocate(&self, downstream_id: DownstreamId, user_identity: String) -> JdToken {
         let token = self.token_factory.fetch_add(1, Ordering::Relaxed);
         self.allocated_tokens.insert(
             token,
             AllocatedTokenData {
                 allocated_at: Instant::now(),
                 owner: downstream_id,
+                user_identity,
             },
         );
         token
@@ -119,7 +125,8 @@ impl TokenManager {
         allocated_token: JdToken,
         downstream_id: DownstreamId,
     ) -> Option<JdToken> {
-        self.allocated_tokens
+        let (_, allocated_data) = self
+            .allocated_tokens
             .remove_if(&allocated_token, |_, data| data.owner == downstream_id)?;
 
         let activated_token = self.token_factory.fetch_add(1, Ordering::Relaxed);
@@ -129,6 +136,7 @@ impl TokenManager {
                 allocated_token,
                 activated_at: Instant::now(),
                 owner: downstream_id,
+                user_identity: allocated_data.user_identity,
             },
         );
 
