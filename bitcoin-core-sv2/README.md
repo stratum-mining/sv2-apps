@@ -47,6 +47,18 @@ brew install capnproto
 
 Due to limitations in the `capnp-rpc` dependency (where some abstractions do not implement the `Send` trait), `BitcoinCoreSv2TDP` and `BitcoinCoreSv2JDP` must be run within a [`tokio::task::LocalSet`](https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html). The crate examples demonstrate the proper setup pattern.
 
+### Socket Trust
+
+The IPC transport has no authentication. The crate connects to whatever process listens at the socket path (`<data_dir>/node.sock`, or the network subdirectory for non-mainnet networks) and trusts its templates, mempool data and block validation results as if they came from Bitcoin Core. Anyone who can create or replace that socket file can therefore answer as Bitcoin Core.
+
+Bitcoin Core protects the socket through filesystem permissions alone, and so does this crate. Bitcoin Core's defaults already do the right thing: the data directory and `node.sock` are created with the node's umask, so only the user running Bitcoin Core can replace the socket or connect to it. Keep it that way:
+
+- The directory holding `node.sock` must be owned by the user running Bitcoin Core and must not be writable by other users. Do not point `-ipcbind` or `data_dir` at a shared directory such as `/tmp`.
+- Run the application as the user running Bitcoin Core, or as a user you explicitly trust with group access. The application writes a `solutions/` directory next to the socket, so it needs write access to that directory anyway.
+- A local user who can write to Bitcoin Core's data directory can already tamper with `settings.json`, wallets and the chainstate, so this requirement is no stricter than what running the node already demands.
+
+On connect, the crate logs the uid of the process serving the socket (`Bitcoin Core IPC socket is served by uid N`). Check it against the user running your node after deploying. In containerised setups the application usually runs as root while the node runs as another uid, so the two are expected to differ there.
+
 ### Fee Threshold
 
 The `fee_threshold` parameter (in satoshis) determines when a new template is distributed due to mempool changes. When the mempool fee delta exceeds this threshold, a new `NewTemplate` message is sent.
