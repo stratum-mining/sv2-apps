@@ -166,16 +166,19 @@ impl TokenManager {
         );
     }
 
-    /// Returns the allocated token and owning downstream that correspond to an active token.
-    /// Returns `None` if the active token is not found.
-    pub fn allocated_from_active(&self, active_token: JdToken) -> Option<(JdToken, DownstreamId)> {
-        let mapped = self
-            .active_tokens
-            .with(&active_token, |data| (data.allocated_token, data.owner));
+    /// Returns the allocated token, owning downstream, and bound identity that correspond to
+    /// an active token. Returns `None` if the active token is not found.
+    pub fn allocated_from_active(
+        &self,
+        active_token: JdToken,
+    ) -> Option<(JdToken, DownstreamId, String)> {
+        let mapped = self.active_tokens.with(&active_token, |data| {
+            (data.allocated_token, data.owner, data.user_identity.clone())
+        });
         debug!(
             active_token,
-            mapped_allocated_token = mapped.map(|(allocated, _)| allocated),
-            mapped_downstream_id = mapped.map(|(_, downstream_id)| downstream_id),
+            mapped_allocated_token = mapped.as_ref().map(|(allocated, _, _)| *allocated),
+            mapped_downstream_id = mapped.as_ref().map(|(_, downstream_id, _)| *downstream_id),
             found = mapped.is_some(),
             active_tokens_len = self.active_tokens.len(),
             allocated_tokens_len = self.allocated_tokens.len(),

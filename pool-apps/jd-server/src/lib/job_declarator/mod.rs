@@ -409,6 +409,7 @@ impl JobDeclarator {
     pub async fn handle_set_custom_mining_job(
         &mut self,
         set_custom_mining_job: SetCustomMiningJobOwned,
+        user_identity: Option<String>,
         _tlv_fields: Option<&[Tlv]>,
     ) -> JDSResult<SetCustomMiningJobResponse, error::JobDeclarator> {
         let request_id = set_custom_mining_job.request_id;
@@ -439,9 +440,9 @@ impl JobDeclarator {
         };
 
         // this allows JobValidationEngine to lookup the corresponding DeclareMiningJob
-        let (allocated_token, downstream_id) =
+        let (allocated_token, downstream_id, bound_identity) =
             match self.token_manager.allocated_from_active(active_token) {
-                Some((token, downstream_id)) => {
+                Some((token, downstream_id, bound_identity)) => {
                     debug!(
                         request_id,
                         channel_id,
@@ -450,7 +451,7 @@ impl JobDeclarator {
                         downstream_id,
                         "SetCustomMiningJob: active token mapped to allocated token"
                     );
-                    (token, downstream_id)
+                    (token, downstream_id, bound_identity)
                 }
                 None => {
                     debug!(
@@ -466,6 +467,21 @@ impl JobDeclarator {
                     ));
                 }
             };
+
+        // The identity bound to the token at allocation time must match the identity of the
+        // channel presenting it now. A mismatch leaves the token active so a retry from the
+        // correct channel can still succeed.
+        if user_identity.as_deref() != Some(bound_identity.as_str()) {
+            debug!(
+                request_id,
+                channel_id, active_token, "SetCustomMiningJob: user_identity mismatch"
+            );
+            return Ok(SetCustomMiningJobResponse::error(
+                request_id,
+                channel_id,
+                ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+            ));
+        }
 
         // Clean up TokenManager
         self.token_manager.deactivate(active_token);
