@@ -70,7 +70,7 @@ pub struct Downstream {
     pub channel_id_factory: Arc<AtomicU32>,
     /// Extensions that have been successfully negotiated with this client
     pub negotiated_extensions: SharedLock<Vec<u16>>,
-    /// Payout mode derived from user_identity (None until channel is opened)
+    /// Payout policy for this connection, derived from the first channel's user_identity.
     pub payout_mode: SharedLock<Option<PayoutMode>>,
     downstream_io: DownstreamIo,
     pub downstream_id: usize,

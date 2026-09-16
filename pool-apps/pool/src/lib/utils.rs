@@ -15,6 +15,19 @@ pub use stratum_apps::payout::{PayoutMode, PayoutModeError};
 
 pub(crate) type DownstreamMessage = (MiningOwned, Option<Vec<Tlv>>);
 
+pub(crate) const ERROR_CODE_OPEN_MINING_CHANNEL_INCOMPATIBLE_PAYOUT_MODE: &str =
+    "incompatible-payout-mode";
+
+/// Returns whether two payout modes produce the same group-channel coinbase policy.
+pub(crate) fn payout_modes_are_compatible(
+    first: &PayoutMode,
+    second: &PayoutMode,
+    pool_reward_script: &stratum_apps::config_helpers::CoinbaseRewardScript,
+) -> bool {
+    first.coinbase_outputs(100, pool_reward_script)
+        == second.coinbase_outputs(100, pool_reward_script)
+}
+
 /// Constructs a `SetupConnection` message for the mining protocol.
 #[allow(clippy::result_large_err)]
 pub fn get_setup_connection_message(
