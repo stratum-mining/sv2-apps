@@ -56,6 +56,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 return Ok(());
             }
 
+            let requires_standard_jobs = downstream.requires_standard_jobs.load(Ordering::SeqCst);
+            let mut downstream_messages = Vec::new();
+
             let downstream_coinbase_outputs = downstream
                 .payout_mode
                 .with(|payout_mode| match payout_mode.as_ref() {
@@ -67,17 +70,11 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 })
                 .map_err(PoolError::shutdown)?;
 
-            let requires_standard_jobs = downstream.requires_standard_jobs.load(Ordering::SeqCst);
-            let mut downstream_messages = Vec::new();
-
             let group_channel_job = downstream
                 .group_channel
                 .with(|group_channel| {
                     group_channel
-                        .on_new_template(
-                            msg.clone(),
-                            downstream_coinbase_outputs.clone(),
-                        )
+                        .on_new_template(msg.clone(), downstream_coinbase_outputs.clone())
                         .map_err(PoolError::shutdown)?;
                     let group_job = if msg.future_template {
                         let Some(future_job_id) =
@@ -102,7 +99,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                         downstream_messages.push(
                             (
                                 downstream_id,
-                                MiningOwned::NewExtendedMiningJob(group_job.get_job_message().clone()),
+                                MiningOwned::NewExtendedMiningJob(
+                                    group_job.get_job_message().clone(),
+                                ),
                             )
                                 .into(),
                         );
@@ -126,10 +125,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                         })?;
                 } else {
                     standard_channel
-                        .on_new_template(
-                            msg.clone(),
-                            downstream_coinbase_outputs.clone(),
-                        )
+                        .on_new_template(msg.clone(), downstream_coinbase_outputs.clone())
                         .map_err(|e| {
                             tracing::error!("Error while adding template to standard channel");
                             PoolError::shutdown(e)
