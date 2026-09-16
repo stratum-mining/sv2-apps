@@ -58,7 +58,9 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
 
-        let allocated_token = self.token_manager.allocate(client_id);
+        let user_identity = msg.user_identifier.as_utf8_or_hex();
+
+        let allocated_token = self.token_manager.allocate(client_id, user_identity);
 
         let coinbase_tx_output = TxOut {
             value: Amount::from_sat(0), // spec says we must set the value to 0
