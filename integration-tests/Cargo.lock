@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin_core_sv2"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-channel 1.9.0",
  "bitcoin-capnp-types 0.1.2",
