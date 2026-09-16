@@ -25,6 +25,7 @@ use integration_tests_sv2::{
     POOL_COINBASE_REWARD_ADDRESS,
     interceptor::MessageDirection,
     mock_roles::{MockDownstream, WithSetup},
+    sniffer::Sniffer,
     template_provider::DifficultyLevel,
     *,
 };
@@ -203,6 +204,315 @@ async fn pool_solo_mining_invalid_payout_address() {
         error_std.error_code.as_utf8_or_hex(),
         ERROR_CODE_OPEN_MINING_CHANNEL_INVALID_USER_IDENTITY
     );
+
+    shutdown_all!(pool);
+}
+
+fn next_extended_channel_success(sniffer: &Sniffer<'_>) -> OpenExtendedMiningChannelSuccessOwned {
+    loop {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(msg),
+                ),
+            )) => break msg,
+            _ => continue,
+        }
+    }
+}
+
+fn next_extended_job(sniffer: &Sniffer<'_>) -> NewExtendedMiningJobOwned {
+    loop {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
+            )) => break msg,
+            _ => continue,
+        }
+    }
+}
+
+fn next_open_channel_error(sniffer: &Sniffer<'_>) -> OpenMiningChannelErrorOwned {
+    loop {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
+            )) => break msg,
+            _ => continue,
+        }
+    }
+}
+
+fn next_standard_job(sniffer: &Sniffer<'_>) -> NewMiningJobOwned {
+    loop {
+        match sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewMiningJob(msg)))) => {
+                break msg;
+            }
+            _ => continue,
+        }
+    }
+}
+
+#[tokio::test]
+async fn pool_rejected_open_does_not_mutate_group_payout_policy() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    tp.fund_wallet().unwrap();
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("payout_isolation", pool_addr, false, vec![], None);
+    let mock_downstream = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    );
+    let send_to_pool = mock_downstream.start().await;
+
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 0,
+                user_identity: format!("sri/solo/{MINER_COINBASE_REWARD_ADDR}/worker.1")
+                    .try_into()
+                    .unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 8,
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        )
+        .await;
+    let channel_a = next_extended_channel_success(&sniffer);
+    let initial_job_a = next_extended_job(&sniffer);
+    assert_eq!(
+        extract_payout_info(&build_coinbase_tx(&channel_a, &initial_job_a)).addresses[0],
+        MINER_COINBASE_REWARD_ADDR
+    );
+
+    // This identity would resolve to FullDonation, but the invalid channel must
+    // not replace channel A's policy before the open is rejected.
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "sri/donate/worker.1".try_into().unwrap(),
+                nominal_hash_rate: -1.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 8,
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
+        )
+        .await;
+    let _rejected = next_open_channel_error(&sniffer);
+
+    tp.create_mempool_transaction().unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+        )
+        .await;
+    let refreshed_job_a = next_extended_job(&sniffer);
+    let refreshed_payout_a = extract_payout_info(&build_coinbase_tx(&channel_a, &refreshed_job_a));
+    assert_eq!(refreshed_payout_a.addresses[0], MINER_COINBASE_REWARD_ADDR);
+
+    shutdown_all!(pool);
+}
+
+#[tokio::test]
+async fn pool_rejects_incompatible_group_payout_policy() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    tp.fund_wallet().unwrap();
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) =
+        start_sniffer("payout_group_policy", pool_addr, false, vec![], None);
+    let mock_downstream = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    );
+    let send_to_pool = mock_downstream.start().await;
+
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 0,
+                user_identity: format!("sri/solo/{MINER_COINBASE_REWARD_ADDR}/worker.1")
+                    .try_into()
+                    .unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 8,
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        )
+        .await;
+    let channel_a = next_extended_channel_success(&sniffer);
+    let _initial_job_a = next_extended_job(&sniffer);
+
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "sri/donate/worker.1".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 8,
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
+        )
+        .await;
+    let error = next_open_channel_error(&sniffer);
+    assert_eq!(
+        error.error_code.as_utf8_or_hex(),
+        "incompatible-payout-mode"
+    );
+
+    tp.create_mempool_transaction().unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+        )
+        .await;
+    let refreshed_job_a = next_extended_job(&sniffer);
+    let refreshed_payout_a = extract_payout_info(&build_coinbase_tx(&channel_a, &refreshed_job_a));
+    assert_eq!(refreshed_payout_a.addresses[0], MINER_COINBASE_REWARD_ADDR);
+
+    shutdown_all!(pool);
+}
+
+#[tokio::test]
+async fn pool_rejects_incompatible_standard_channel_payout_policy() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    tp.fund_wallet().unwrap();
+    let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) =
+        start_sniffer("standard_payout_isolation", pool_addr, false, vec![], None);
+    let mock_downstream = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0b0001),
+    );
+    let send_to_pool = mock_downstream.start().await;
+
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenStandardMiningChannel(OpenStandardMiningChannelOwned {
+                request_id: 0,
+                user_identity: format!("sri/solo/{MINER_COINBASE_REWARD_ADDR}/worker.1")
+                    .try_into()
+                    .unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
+        )
+        .await;
+    let channel_a: OpenStandardMiningChannelSuccessOwned = loop {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenStandardMiningChannelSuccess(msg),
+                ),
+            )) => break msg,
+            _ => continue,
+        }
+    };
+    sniffer
+        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+        .await;
+    let _initial_job = next_standard_job(&sniffer);
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
+        )
+        .await;
+
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenStandardMiningChannel(OpenStandardMiningChannelOwned {
+                request_id: 1,
+                user_identity: "user_identity".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
+        )
+        .await;
+    let error = next_open_channel_error(&sniffer);
+    assert_eq!(
+        error.error_code.as_utf8_or_hex(),
+        "incompatible-payout-mode"
+    );
+
+    tp.create_mempool_transaction().unwrap();
+    sniffer
+        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+        .await;
+    let refreshed_job = next_standard_job(&sniffer);
+    assert_eq!(refreshed_job.channel_id, channel_a.channel_id);
 
     shutdown_all!(pool);
 }
