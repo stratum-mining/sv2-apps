@@ -595,8 +595,10 @@ async fn pool_rejects_reused_set_custom_mining_job_token() {
         )
         .await;
 
-    // Then, connect a separate mining downstream and replay the exact same SetCustomMiningJob.
-    // Expected result: JDS rejects it as invalid-mining-job-token (token already consumed).
+    // Then, connect a separate mining downstream, open a channel under the same identity JDC
+    // used, and replay the same SetCustomMiningJob on that channel. With a known channel and a
+    // matching identity, the only reason left to reject it is the already-consumed token.
+    // Expected result: JDS rejects it as invalid-mining-job-token.
     let (mock_pool_sniffer, mock_pool_sniffer_addr) =
         start_sniffer("mock-pool", pool_addr, false, vec![], None);
     let send_to_pool = MockDownstream::new(
@@ -619,9 +621,38 @@ async fn pool_rejects_reused_set_custom_mining_job_token() {
         )
         .await;
 
-    let replayed_set_custom_mining_job = AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(
-        first_set_custom_mining_job.clone(),
-    ));
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "IT_TEST".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await
+        .unwrap();
+    mock_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        )
+        .await;
+    let mock_channel_id = loop {
+        match mock_pool_sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(msg)),
+            )) => break msg.channel_id,
+            _ => continue,
+        }
+    };
+
+    let mut replayed = first_set_custom_mining_job.clone();
+    replayed.channel_id = mock_channel_id;
+    let replayed_set_custom_mining_job =
+        AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(replayed));
     send_to_pool
         .send(replayed_set_custom_mining_job)
         .await
