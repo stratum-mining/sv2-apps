@@ -1391,6 +1391,16 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
+        // The identity of the channel this job is being set on, so JDS can check it against
+        // the identity the token was allocated under.
+        let user_identity = self.with_registered_downstream(downstream_id, |downstream| {
+            Ok(downstream
+                .extended_channels
+                .with(&msg.channel_id, |channel| {
+                    channel.get_user_identity().to_string()
+                }))
+        })?;
+
         let Some(ref mut job_declarator) = self.job_declarator else {
             let error = SetCustomMiningJobErrorOwned {
                 request_id: msg.request_id,
@@ -1409,11 +1419,30 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             return Ok(());
         };
 
+        let Some(user_identity) = user_identity else {
+            error!("SetCustomMiningJobError: invalid-channel-id");
+            let error = SetCustomMiningJobErrorOwned {
+                request_id: msg.request_id,
+                channel_id: msg.channel_id,
+                error_code: ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_CHANNEL_ID
+                    .to_string()
+                    .try_into()
+                    .expect("error code must be valid string"),
+            };
+            let message: RouteMessageTo =
+                (downstream_id, MiningOwned::SetCustomMiningJobError(error)).into();
+            message
+                .forward(&self.channel_manager_io)
+                .await
+                .map_err(|e| PoolError::disconnect(e, downstream_id))?;
+            return Ok(());
+        };
+
         let msg_static = msg.clone();
 
         // Step 1: Validate the custom job via JDS (token + job validation).
         let jds_response = job_declarator
-            .handle_set_custom_mining_job(msg_static.clone(), _tlv_fields)
+            .handle_set_custom_mining_job(msg_static.clone(), user_identity, _tlv_fields)
             .await
             .map_err(|e| PoolError::shutdown(PoolErrorKind::Jds(e.into())))?;
 
