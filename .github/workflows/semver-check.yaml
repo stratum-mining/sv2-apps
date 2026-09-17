@@ -65,6 +65,9 @@ jobs:
         run: cargo semver-checks --workspace --all-features
 
   version-bump-check:
+    # Only pull requests have a base branch to diff against; the workflow
+    # also runs on pushes to main, where this check has nothing to compare.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
