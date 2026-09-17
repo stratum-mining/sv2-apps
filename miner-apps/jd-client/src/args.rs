@@ -40,6 +40,7 @@ pub fn process_cli_args() -> Result<JobDeclaratorClientConfig, JDCErrorKind> {
         load_config(&args.config_path, "JDC", LIST_KEYS, ENUM_KEYS)?;
 
     config.set_log_file(args.log_file);
+    config.validate()?;
 
     Ok(config)
 }
