@@ -1,7 +1,7 @@
 use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, JobDeclarationOwned, MiningOwned};
 // This file contains integration tests for the `JDC/S` module.
 use integration_tests_sv2::{
-    interceptor::{MessageDirection, ReplaceMessage},
+    interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
     mock_roles::{MockDownstream, WithSetup},
     start_jdc_with_user_identities,
     template_provider::DifficultyLevel,
@@ -550,6 +550,79 @@ async fn jds_reject_declare_mining_job_with_invalid_mining_job_token() {
     shutdown_all!(pool);
 }
 
+// This test verifies that a single JDP connection can allocate tokens under different
+// identities without being disconnected.
+#[tokio::test]
+async fn jds_accepts_multiple_identities_on_one_connection() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jds", jds_addr, false, vec![], None);
+    let send_to_jds = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 1,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 2,
+                user_identifier: "farm_02".try_into().unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let mut allocate_success_request_ids = Vec::new();
+    while allocate_success_request_ids.len() < 2 {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::JobDeclaration(
+                    parsers_sv2::JobDeclarationOwned::AllocateMiningJobTokenSuccess(msg),
+                ),
+            )) => allocate_success_request_ids.push(msg.request_id),
+            Some(_) => continue,
+            // Yield so the sniffer's own task gets a chance to run and populate the
+            // queue, instead of busy-spinning the executor while nothing has arrived yet.
+            None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    }
+    assert_eq!(
+        allocate_success_request_ids,
+        vec![1, 2],
+        "both AllocateMiningJobToken requests (different identities, same connection) \
+         should succeed, in order"
+    );
+
+    shutdown_all!(pool);
+}
+
 // This test verifies that a SetCustomMiningJob token cannot be reused after a successful
 // SetCustomMiningJob flow has already consumed it.
 #[tokio::test]
@@ -684,6 +757,224 @@ async fn pool_rejects_reused_set_custom_mining_job_token() {
     );
 
     shutdown_all!(translator, jdc, pool);
+}
+
+// This test verifies that Pool/JDS reject a SetCustomMiningJob when the requesting channel's
+// user_identity differs from the identity its token was allocated under, even though the token
+// itself is still active and the job is valid. Replaying the same job on a channel with the
+// matching identity then succeeds, proving the token survived and that the rejection was only
+// about identity.
+#[tokio::test]
+async fn pool_rejects_set_custom_mining_job_with_mismatched_user_identity() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    // JDC reaches the Pool through two chained sniffers: the first records JDC's
+    // SetCustomMiningJob, the second drops it, so the Pool never consumes the token.
+    let ignore_set_custom_mining_job = IgnoreMessage::new(
+        MessageDirection::ToUpstream,
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+    );
+    let (_jdc_pool_drop_sniffer, jdc_pool_drop_sniffer_addr) = start_sniffer(
+        "jdc-pool-drop",
+        pool_addr,
+        false,
+        vec![ignore_set_custom_mining_job.into()],
+        None,
+    );
+    let (jdc_pool_record_sniffer, jdc_pool_record_sniffer_addr) = start_sniffer(
+        "jdc-pool-record",
+        jdc_pool_drop_sniffer_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (jdc, jdc_addr, _) = start_jdc(
+        &[(jdc_pool_record_sniffer_addr, jds_addr)],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+
+    // A mock downstream opening a channel on JDC is enough to trigger job declaration, and
+    // unlike a real miner it never finds a block, so the recorded job stays valid.
+    let send_to_jdc = MockDownstream::new(
+        jdc_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    send_to_jdc
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "IT_TEST".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    jdc_pool_record_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+        )
+        .await;
+    let jdc_set_custom_mining_job = loop {
+        match jdc_pool_record_sniffer.next_message_from_downstream() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(msg)))) => break msg,
+            _ => continue,
+        }
+    };
+
+    // Present JDC's still-active token from a separate connection, on a channel opened under
+    // a different identity.
+    let (mock_pool_sniffer, mock_pool_sniffer_addr) =
+        start_sniffer("mock-pool", pool_addr, false, vec![], None);
+    let send_to_pool = MockDownstream::new(
+        mock_pool_sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+
+    mock_pool_sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "other_identity".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await
+        .unwrap();
+    mock_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        )
+        .await;
+    let mock_channel_id = loop {
+        match mock_pool_sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(msg)),
+            )) => break msg.channel_id,
+            _ => continue,
+        }
+    };
+
+    let mut mismatched = jdc_set_custom_mining_job.clone();
+    mismatched.channel_id = mock_channel_id;
+    send_to_pool
+        .send(AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(
+            mismatched,
+        )))
+        .await
+        .unwrap();
+
+    mock_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR,
+        )
+        .await;
+    let set_custom_mining_job_error = loop {
+        match mock_pool_sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobError(msg)))) => {
+                break msg;
+            }
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        set_custom_mining_job_error.request_id,
+        jdc_set_custom_mining_job.request_id
+    );
+    assert_eq!(
+        set_custom_mining_job_error.error_code.as_utf8_or_hex(),
+        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+        "SetCustomMiningJobError should use invalid-mining-job-token for a mismatched identity"
+    );
+
+    // Same token and job, only the channel identity changes.
+    send_to_pool
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 2,
+                user_identity: "IT_TEST".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await
+        .unwrap();
+    mock_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        )
+        .await;
+    let matching_channel_id = loop {
+        match mock_pool_sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(msg)),
+            )) => break msg.channel_id,
+            _ => continue,
+        }
+    };
+
+    let mut matching = jdc_set_custom_mining_job.clone();
+    matching.channel_id = matching_channel_id;
+    send_to_pool
+        .send(AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(
+            matching,
+        )))
+        .await
+        .unwrap();
+
+    mock_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
+        )
+        .await;
+    let set_custom_mining_job_success = loop {
+        match mock_pool_sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobSuccess(msg)))) => {
+                break msg;
+            }
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        set_custom_mining_job_success.request_id,
+        jdc_set_custom_mining_job.request_id
+    );
+    assert_eq!(
+        set_custom_mining_job_success.channel_id,
+        matching_channel_id
+    );
+
+    shutdown_all!(jdc, pool);
 }
 
 // This test verifies that JDS does not exit when it receives a `SubmitSolution`
