@@ -1,7 +1,7 @@
 [package]
 name = "bitcoin_core_sv2"
 description = "A library to get Stratum V2 Template Distribution Protocol from Bitcoin Core over IPC"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
