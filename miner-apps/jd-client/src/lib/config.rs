@@ -1,3 +1,4 @@
+use crate::error::JDCErrorKind;
 use serde::Deserialize;
 use std::{
     net::SocketAddr,
@@ -250,6 +251,15 @@ impl JobDeclaratorClientConfig {
     pub fn reserved_downstream_rollable_extranonce_size(&self) -> u8 {
         self.reserved_downstream_rollable_extranonce_size
     }
+
+    pub fn validate(&self) -> Result<(), JDCErrorKind> {
+        if self.upstreams.iter().any(|u| u.user_identity.is_empty()) {
+            return Err(JDCErrorKind::InvalidUserIdentity(
+                "user_identity must not be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -422,6 +432,73 @@ mod tests {
         );
         let upstream: Upstream = toml::from_str(&toml).unwrap();
         assert_eq!(upstream.user_identity, "");
+    }
+
+    fn test_config(upstreams: Vec<Upstream>) -> JobDeclaratorClientConfig {
+        JobDeclaratorClientConfig::new(
+            "0.0.0.0:34265".parse().unwrap(),
+            ProtocolConfig::new(
+                2,
+                2,
+                CoinbaseRewardScript::from_descriptor(
+                    "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)",
+                )
+                .unwrap(),
+            ),
+            6.0,
+            10,
+            PoolConfig::new(
+                Secp256k1PublicKey::try_from(TEST_PUBKEY.to_string()).unwrap(),
+                Secp256k1SecretKey::try_from(
+                    "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
+                )
+                .unwrap(),
+            ),
+            3600,
+            TemplateProviderType::Sv2Tp {
+                address: "127.0.0.1:8442".to_string(),
+                public_key: None,
+            },
+            upstreams,
+            "Sv2MinerSignature".to_string(),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn validate_rejects_empty_user_identity() {
+        let upstream = Upstream::new(
+            Secp256k1PublicKey::try_from(TEST_PUBKEY.to_string()).unwrap(),
+            "127.0.0.1".to_string(),
+            3333,
+            "127.0.0.1".to_string(),
+            3334,
+            "".to_string(),
+        );
+        let config = test_config(vec![upstream]);
+        assert!(matches!(
+            config.validate(),
+            Err(JDCErrorKind::InvalidUserIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_non_empty_user_identity() {
+        let upstream = Upstream::new(
+            Secp256k1PublicKey::try_from(TEST_PUBKEY.to_string()).unwrap(),
+            "127.0.0.1".to_string(),
+            3333,
+            "127.0.0.1".to_string(),
+            3334,
+            "bc1qfallback.worker".to_string(),
+        );
+        let config = test_config(vec![upstream]);
+        assert!(config.validate().is_ok());
     }
 }
 

@@ -53,12 +53,25 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         msg: AllocateMiningJobTokenOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        info!(
+            "Received AllocateMiningJobToken request_id: {}",
+            msg.request_id
+        );
         // Shutdown: client_id is always Some; None indicates a bug.
         let client_id =
             client_id.ok_or_else(|| JDSError::shutdown(error::JDSErrorKind::ClientNotFound(0)))?;
 
-        let allocated_token = self.token_manager.allocate(client_id);
+        let user_identity = msg.user_identifier.as_utf8_or_hex();
+        if user_identity.is_empty() {
+            return Err(JDSError::disconnect(
+                error::JDSErrorKind::InvalidUserIdentifier(
+                    "user_identifier cannot be empty".to_string(),
+                ),
+                client_id,
+            ));
+        }
+
+        let allocated_token = self.token_manager.allocate(client_id, user_identity);
 
         let coinbase_tx_output = TxOut {
             value: Amount::from_sat(0), // spec says we must set the value to 0

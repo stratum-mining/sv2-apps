@@ -1517,7 +1517,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jd_server_sv2"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "pool_sv2"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-channel",
  "clap",

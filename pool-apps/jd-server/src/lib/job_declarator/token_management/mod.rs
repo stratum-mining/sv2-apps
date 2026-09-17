@@ -35,14 +35,28 @@ use stratum_apps::{
 use tracing::debug;
 
 /// Data associated with an allocated token.
-/// - Instant is the allocation timestamp
-/// - DownstreamId is the downstream ID that allocated the token
-pub type AllocatedTokenData = (Instant, DownstreamId);
+#[derive(Clone)]
+pub struct AllocatedTokenData {
+    /// The allocation timestamp.
+    pub allocated_at: Instant,
+    /// The downstream ID that allocated the token.
+    pub owner: DownstreamId,
+    /// The identity the token was allocated under.
+    pub user_identity: String,
+}
+
 /// Data associated with an active token.
-/// - JdToken is the corresponding allocated token
-/// - Instant is the activation timestamp
-/// - DownstreamId is the downstream ID that activated the token
-pub type ActiveTokenData = (JdToken, Instant, DownstreamId);
+#[derive(Clone)]
+pub struct ActiveTokenData {
+    /// The corresponding allocated token.
+    pub allocated_token: JdToken,
+    /// The activation timestamp.
+    pub activated_at: Instant,
+    /// The downstream ID that activated the token.
+    pub owner: DownstreamId,
+    /// The identity the token was allocated under.
+    pub user_identity: String,
+}
 
 /// Manager for the tokens used in the Job Declaration process.
 #[derive(Clone)]
@@ -72,11 +86,18 @@ impl TokenManager {
         token_manager
     }
 
-    /// Allocates a new token and adds it to the allocated tokens set.
-    pub fn allocate(&self, downstream_id: DownstreamId) -> JdToken {
+    /// Allocates a new token and adds it to the allocated tokens set, bound to the given
+    /// identity.
+    pub fn allocate(&self, downstream_id: DownstreamId, user_identity: String) -> JdToken {
         let token = self.token_factory.fetch_add(1, Ordering::Relaxed);
-        self.allocated_tokens
-            .insert(token, (Instant::now(), downstream_id));
+        self.allocated_tokens.insert(
+            token,
+            AllocatedTokenData {
+                allocated_at: Instant::now(),
+                owner: downstream_id,
+                user_identity,
+            },
+        );
         token
     }
 
@@ -88,7 +109,7 @@ impl TokenManager {
     /// Checks if a token is allocated.
     pub fn is_allocated(&self, token: JdToken, downstream_id: DownstreamId) -> bool {
         self.allocated_tokens
-            .with(&token, |(_, owner)| *owner == downstream_id)
+            .with(&token, |data| data.owner == downstream_id)
             .unwrap_or(false)
     }
 
@@ -104,13 +125,19 @@ impl TokenManager {
         allocated_token: JdToken,
         downstream_id: DownstreamId,
     ) -> Option<JdToken> {
-        self.allocated_tokens
-            .remove_if(&allocated_token, |_, (_, owner)| *owner == downstream_id)?;
+        let (_, allocated_data) = self
+            .allocated_tokens
+            .remove_if(&allocated_token, |_, data| data.owner == downstream_id)?;
 
         let activated_token = self.token_factory.fetch_add(1, Ordering::Relaxed);
         self.active_tokens.insert(
             activated_token,
-            (allocated_token, Instant::now(), downstream_id),
+            ActiveTokenData {
+                allocated_token,
+                activated_at: Instant::now(),
+                owner: downstream_id,
+                user_identity: allocated_data.user_identity,
+            },
         );
 
         debug!(
@@ -132,27 +159,26 @@ impl TokenManager {
         debug!(
             active_token,
             removed = removed.is_some(),
-            mapped_allocated_token = removed.as_ref().map(|(_, (allocated, _, _))| *allocated),
-            mapped_downstream_id = removed
-                .as_ref()
-                .map(|(_, (_, _, downstream_id))| *downstream_id),
+            mapped_allocated_token = removed.as_ref().map(|(_, data)| data.allocated_token),
+            mapped_downstream_id = removed.as_ref().map(|(_, data)| data.owner),
             active_tokens_len = self.active_tokens.len(),
             "TokenManager::deactivate"
         );
     }
 
-    /// Returns the allocated token and owning downstream that correspond to an active token.
-    /// Returns `None` if the active token is not found.
-    pub fn allocated_from_active(&self, active_token: JdToken) -> Option<(JdToken, DownstreamId)> {
-        let mapped = self
-            .active_tokens
-            .with(&active_token, |(allocated, _, downstream_id)| {
-                (*allocated, *downstream_id)
-            });
+    /// Returns the allocated token, owning downstream, and bound identity that correspond to
+    /// an active token. Returns `None` if the active token is not found.
+    pub fn allocated_from_active(
+        &self,
+        active_token: JdToken,
+    ) -> Option<(JdToken, DownstreamId, String)> {
+        let mapped = self.active_tokens.with(&active_token, |data| {
+            (data.allocated_token, data.owner, data.user_identity.clone())
+        });
         debug!(
             active_token,
-            mapped_allocated_token = mapped.map(|(allocated, _)| allocated),
-            mapped_downstream_id = mapped.map(|(_, downstream_id)| downstream_id),
+            mapped_allocated_token = mapped.as_ref().map(|(allocated, _, _)| *allocated),
+            mapped_downstream_id = mapped.as_ref().map(|(_, downstream_id, _)| *downstream_id),
             found = mapped.is_some(),
             active_tokens_len = self.active_tokens.len(),
             allocated_tokens_len = self.allocated_tokens.len(),
@@ -174,9 +200,9 @@ impl TokenManager {
         let active_tokens_before = self.active_tokens.len();
 
         self.allocated_tokens
-            .retain(|_, (_, owner)| *owner != downstream_id);
+            .retain(|_, data| data.owner != downstream_id);
         self.active_tokens
-            .retain(|_, (_, _, owner)| *owner != downstream_id);
+            .retain(|_, data| data.owner != downstream_id);
 
         let allocated_tokens_after = self.allocated_tokens.len();
         let active_tokens_after = self.active_tokens.len();
@@ -216,11 +242,11 @@ impl TokenManager {
                         let allocated_before = allocated_tokens.len();
                         let active_before = active_tokens.len();
 
-                        allocated_tokens.retain(|_, (timestamp, _)| {
-                            now.duration_since(*timestamp) <= allocated_token_timeout
+                        allocated_tokens.retain(|_, data| {
+                            now.duration_since(data.allocated_at) <= allocated_token_timeout
                         });
-                        active_tokens.retain(|_, (_, timestamp, _)| {
-                            now.duration_since(*timestamp) <= active_token_timeout
+                        active_tokens.retain(|_, data| {
+                            now.duration_since(data.activated_at) <= active_token_timeout
                         });
 
                         let allocated_after = allocated_tokens.len();

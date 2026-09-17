@@ -1,6 +1,6 @@
 [package]
 name = "pool_sv2"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["The Stratum V2 Developers"]
 edition = "2024"
 rust-version = "1.88"
@@ -24,7 +24,7 @@ serde = { version = "1.0.89", features = ["derive", "alloc"], default-features =
 tokio = { version = "1.44.1", features = ["full"] }
 tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
-jd_server_sv2 = { version = "0.6.0", path = "../jd-server" }
+jd_server_sv2 = { version = "0.7.0", path = "../jd-server" }
 hex = "0.4.3"
 hotpath = "0.14.0"
 

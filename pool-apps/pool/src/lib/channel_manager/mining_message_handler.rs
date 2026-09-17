@@ -1338,6 +1338,19 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
+        // The identity of the channel this job is being set on, so JDS can check it against
+        // the identity the token was allocated under.
+        let user_identity = self
+            .with_registered_downstream(downstream_id, |downstream| {
+                Ok(downstream
+                    .extended_channels
+                    .with(&msg.channel_id, |channel| {
+                        channel.get_user_identity().to_string()
+                    }))
+            })
+            .ok()
+            .flatten();
+
         let Some(ref mut job_declarator) = self.job_declarator else {
             let error = SetCustomMiningJobErrorOwned {
                 request_id: msg.request_id,
@@ -1360,7 +1373,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
 
         // Step 1: Validate the custom job via JDS (token + job validation).
         let jds_response = job_declarator
-            .handle_set_custom_mining_job(msg_static.clone(), _tlv_fields)
+            .handle_set_custom_mining_job(msg_static.clone(), user_identity, _tlv_fields)
             .await
             .map_err(|e| PoolError::shutdown(PoolErrorKind::Jds(e.into())))?;
 
