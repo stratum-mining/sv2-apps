@@ -1,12 +1,15 @@
 # bitcoin_core_sv2
 
-A Rust library that integrates [Bitcoin Core](https://bitcoin.org/en/bitcoin-core/) with the [Stratum V2 Template Distribution Protocol](https://github.com/stratum-mining/sv2-spec/blob/main/07-Template-Distribution-Protocol.md) via IPC over a UNIX socket.
+A Rust library that integrates [Bitcoin Core](https://bitcoin.org/en/bitcoin-core/) with the following Stratum V2 protocols, via IPC over a UNIX socket:
+- [Template Distribution Protocol](https://github.com/stratum-mining/sv2-spec/blob/main/07-Template-Distribution-Protocol.md) (TDP)
+- [Job Declaration Protocol](https://github.com/stratum-mining/sv2-spec/blob/main/08-Job-Declaration-Protocol.md) (JDP)
 
 ## Overview
 
 `bitcoin_core_sv2` allows for the official Bitcoin Core distribution to be leveraged for the following use-cases:
 - building Sv2 applications that act as a Client under the Template Distribution Protocol (e.g.: Pool or JDC) while connecting directly to the Bitcoin Core node.
 - building a Sv2 Template Provider application that acts as a Template Distribution Protocol Server while creating templates from a Bitcoin Core node.
+- building Sv2 applications that act as a Server under the Job Declaration Protocol (e.g.: Pool or JDS) while validating declared jobs against a Bitcoin Core node.
 
 `bitcoin_core_sv2::runtime_api` is the main interface of the crate. Downstream implementations should use the factories:
 - `bitcoin_core_sv2::runtime_api::template_distribution_protocol::new(version: BitcoinCoreVersion, ...) -> Result<BitcoinCoreSv2TDP, BitcoinCoreSv2TDPError>`
@@ -47,11 +50,11 @@ brew install capnproto
 
 Due to limitations in the `capnp-rpc` dependency (where some abstractions do not implement the `Send` trait), `BitcoinCoreSv2TDP` and `BitcoinCoreSv2JDP` must be run within a [`tokio::task::LocalSet`](https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html). The crate examples demonstrate the proper setup pattern.
 
-### Fee Threshold
+### Fee Threshold (TDP)
 
 The `fee_threshold` parameter (in satoshis) determines when a new template is distributed due to mempool changes. When the mempool fee delta exceeds this threshold, a new `NewTemplate` message is sent.
 
-## Minimum Interval
+### Minimum Interval (TDP)
 
 The `min_interval` parameter (in seconds) determines the minimum amount of time between two consecutive `NewTemplate` messages (with exception to Chain Tip updates, which are always sent immediately, followed by `SetNewPrevHash`).
 
