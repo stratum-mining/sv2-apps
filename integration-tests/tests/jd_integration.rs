@@ -550,6 +550,198 @@ async fn jds_reject_declare_mining_job_with_invalid_mining_job_token() {
     shutdown_all!(pool);
 }
 
+// This test verifies that JDS disconnects a downstream that attempts to allocate a
+// mining job token with an empty user_identifier.
+#[tokio::test]
+async fn jds_reject_allocate_mining_job_token_with_empty_user_identifier() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let send_to_jds = MockDownstream::new(
+        jds_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    // Give the SetupConnection handshake time to complete before sending the payload.
+    // There's no sniffer here to synchronize on a message type: this test needs to see
+    // JDS actually close the raw connection, which a sniffer sitting in between would
+    // obscure.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let empty_identity_allocate = AnyMessageOwned::JobDeclaration(
+        parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+            request_id: 1,
+            user_identifier: "".try_into().unwrap(),
+        }),
+    );
+    send_to_jds.send(empty_identity_allocate).await.unwrap();
+
+    // JDS tears down the connection asynchronously; probe with a couple of follow-up
+    // sends rather than asserting on the very first one after the violation.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 2,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let res = send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 3,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "JDS should have disconnected the client after an empty user_identifier"
+    );
+
+    shutdown_all!(pool);
+}
+
+// This test verifies that a single JDP connection can allocate tokens under different
+// identities without being disconnected. Identity is bound to the token, not the
+// connection, so a connection is free to request tokens for more than one identity.
+#[tokio::test]
+async fn jds_accepts_multiple_identities_on_one_connection() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jds", jds_addr, false, vec![], None);
+    let send_to_jds = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 1,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id: 2,
+                user_identifier: "farm_02".try_into().unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let mut allocate_success_request_ids = Vec::new();
+    while allocate_success_request_ids.len() < 2 {
+        match sniffer.next_message_from_upstream() {
+            Some((
+                _,
+                AnyMessageOwned::JobDeclaration(
+                    parsers_sv2::JobDeclarationOwned::AllocateMiningJobTokenSuccess(msg),
+                ),
+            )) => allocate_success_request_ids.push(msg.request_id),
+            Some(_) => continue,
+            // Yield so the sniffer's own task gets a chance to run and populate the
+            // queue, instead of busy-spinning the executor while nothing has arrived yet.
+            None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    }
+    assert_eq!(
+        allocate_success_request_ids,
+        vec![1, 2],
+        "both AllocateMiningJobToken requests (different identities, same connection) \
+         should succeed, in order"
+    );
+
+    shutdown_all!(pool);
+}
+
+// This test verifies that Pool/JDS accept a SetCustomMiningJob when the requesting
+// channel's user_identity matches the identity its token was allocated under.
+#[tokio::test]
+async fn pool_accepts_set_custom_mining_job_with_matching_user_identity() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    let (jdc_pool_sniffer, jdc_pool_sniffer_addr) =
+        start_sniffer("jdc-pool", pool_addr, false, vec![], None);
+    let (jdc, jdc_addr, _) = start_jdc(
+        &[(jdc_pool_sniffer_addr, jds_addr)],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[jdc_addr], false, vec![], vec![], None, false).await;
+    let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
+
+    jdc_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+        )
+        .await;
+
+    let set_custom_mining_job = loop {
+        match jdc_pool_sniffer.next_message_from_downstream() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(msg)))) => break msg,
+            _ => continue,
+        }
+    };
+
+    jdc_pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
+        )
+        .await;
+
+    let set_custom_mining_job_success = loop {
+        match jdc_pool_sniffer.next_message_from_upstream() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobSuccess(msg)))) => {
+                break msg;
+            }
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        set_custom_mining_job_success.request_id, set_custom_mining_job.request_id,
+        "SetCustomMiningJobSuccess should acknowledge the request JDC sent"
+    );
+
+    shutdown_all!(translator, jdc, pool);
+}
+
 // This test verifies that a SetCustomMiningJob token cannot be reused after a successful
 // SetCustomMiningJob flow has already consumed it.
 #[tokio::test]

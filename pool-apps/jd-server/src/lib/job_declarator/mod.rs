@@ -504,3 +504,160 @@ impl JobDeclarator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use job_validation::DeclareMiningJobResult;
+    use std::sync::atomic::AtomicUsize;
+    use stratum_apps::stratum_core::job_declaration_sv2::{
+        DeclareMiningJobOwned, ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
+    };
+
+    /// Counts calls to `handle_set_custom_mining_job` so tests can tell "correctly rejected
+    /// by the identity check" apart from "coincidentally failed for an unrelated reason" —
+    /// e.g. a token that's never found returns the same error code via a different, earlier
+    /// branch, without the identity comparison ever running.
+    #[derive(Default)]
+    struct CountingEngine {
+        handle_set_custom_mining_job_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl JobValidationEngine for CountingEngine {
+        async fn handle_declare_mining_job(
+            &self,
+            _downstream_id: DownstreamId,
+            _declare_mining_job: DeclareMiningJobOwned,
+            _provide_missing_transactions_success: Option<ProvideMissingTransactionsSuccessOwned>,
+        ) -> DeclareMiningJobResult {
+            DeclareMiningJobResult::Success
+        }
+
+        async fn handle_push_solution(
+            &self,
+            _downstream_id: DownstreamId,
+            _push_solution: PushSolutionOwned,
+        ) {
+        }
+
+        async fn handle_set_custom_mining_job(
+            &self,
+            _downstream_id: DownstreamId,
+            _set_custom_mining_job: SetCustomMiningJobOwned,
+            _allocated_token: JdToken,
+        ) -> SetCustomMiningJobResult {
+            self.handle_set_custom_mining_job_calls
+                .fetch_add(1, Ordering::SeqCst);
+            SetCustomMiningJobResult::Success
+        }
+
+        fn cleanup_downstream(&self, _downstream_id: DownstreamId) {}
+    }
+
+    fn dummy_set_custom_mining_job(
+        channel_id: u32,
+        request_id: u32,
+        token: JdToken,
+    ) -> SetCustomMiningJobOwned {
+        SetCustomMiningJobOwned {
+            channel_id,
+            request_id,
+            token: token.to_le_bytes().to_vec().try_into().unwrap(),
+            version: 0,
+            prev_hash: [0; 32].into(),
+            min_ntime: 0,
+            nbits: 0,
+            coinbase_tx_version: 0,
+            coinbase_prefix: vec![].try_into().unwrap(),
+            coinbase_tx_input_n_sequence: 0,
+            coinbase_tx_outputs: vec![].try_into().unwrap(),
+            coinbase_tx_locktime: 0,
+            merkle_path: vec![].try_into().unwrap(),
+        }
+    }
+
+    async fn new_test_job_declarator(engine: Arc<CountingEngine>) -> JobDeclarator {
+        JobDeclarator::new(
+            engine,
+            CancellationToken::new(),
+            CoinbaseRewardScript::from_descriptor(
+                "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)",
+            )
+            .unwrap(),
+            Arc::new(TaskManager::new()),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn set_custom_mining_job_rejects_mismatched_identity() {
+        let engine = Arc::new(CountingEngine::default());
+        let mut jd = new_test_job_declarator(engine.clone()).await;
+
+        let allocated_token = jd.token_manager.allocate(0, "farm_01".to_string());
+        let active_token = jd
+            .token_manager
+            .activate(allocated_token, 0)
+            .expect("allocated token should activate for its own owner");
+
+        let msg = dummy_set_custom_mining_job(1, 1, active_token);
+
+        let response = jd
+            .handle_set_custom_mining_job(msg, Some("farm_02".to_string()), None)
+            .await
+            .expect("handle_set_custom_mining_job should not error at the transport layer");
+
+        match response {
+            SetCustomMiningJobResponse::Error(err) => {
+                assert_eq!(
+                    err.error_code.as_utf8_or_hex(),
+                    ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MINING_JOB_TOKEN,
+                    "mismatched identity should be rejected as invalid-mining-job-token"
+                );
+            }
+            SetCustomMiningJobResponse::Ok(_) => {
+                panic!("expected identity mismatch to be rejected, got success")
+            }
+        }
+        assert_eq!(
+            engine
+                .handle_set_custom_mining_job_calls
+                .load(Ordering::SeqCst),
+            0,
+            "a mismatched identity must be rejected before the validator is ever called"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_custom_mining_job_accepts_matching_identity() {
+        let engine = Arc::new(CountingEngine::default());
+        let mut jd = new_test_job_declarator(engine.clone()).await;
+
+        let allocated_token = jd.token_manager.allocate(0, "farm_01".to_string());
+        let active_token = jd
+            .token_manager
+            .activate(allocated_token, 0)
+            .expect("allocated token should activate for its own owner");
+
+        let msg = dummy_set_custom_mining_job(1, 1, active_token);
+
+        let response = jd
+            .handle_set_custom_mining_job(msg, Some("farm_01".to_string()), None)
+            .await
+            .expect("handle_set_custom_mining_job should not error at the transport layer");
+
+        assert!(
+            matches!(response, SetCustomMiningJobResponse::Ok(_)),
+            "a matching identity should be accepted, got {response:?}"
+        );
+        assert_eq!(
+            engine
+                .handle_set_custom_mining_job_calls
+                .load(Ordering::SeqCst),
+            1,
+            "a matching identity must reach the validator exactly once"
+        );
+    }
+}
