@@ -425,6 +425,10 @@ impl SnapshotCache {
                         m.with_label_values(&[&client_id, &channel_id, user])
                             .set(channel.nominal_hashrate as f64);
                     }
+                    if let Some(ref m) = metrics.sv2_client_channel_share_work_total {
+                        m.with_label_values(&[&client_id, &channel_id, user])
+                            .set(channel.share_work_sum);
+                    }
                     current_client_labels.insert(labels);
                     client_blocks_total += channel.blocks_found as u64;
                 }
@@ -465,6 +469,10 @@ impl SnapshotCache {
                     if let Some(ref m) = metrics.sv2_client_channel_hashrate {
                         m.with_label_values(&[&client_id, &channel_id, user])
                             .set(channel.nominal_hashrate as f64);
+                    }
+                    if let Some(ref m) = metrics.sv2_client_channel_share_work_total {
+                        m.with_label_values(&[&client_id, &channel_id, user])
+                            .set(channel.share_work_sum);
                     }
                     current_client_labels.insert(labels);
                     client_blocks_total += channel.blocks_found as u64;
@@ -534,6 +542,11 @@ impl SnapshotCache {
             if let Some(ref m) = metrics.sv2_client_channel_hashrate {
                 if let Err(e) = m.remove_label_values(&label_refs) {
                     debug!(labels = ?label_refs, error = %e, "failed to remove stale client hashrate label");
+                }
+            }
+            if let Some(ref m) = metrics.sv2_client_channel_share_work_total {
+                if let Err(e) = m.remove_label_values(&label_refs) {
+                    debug!(labels = ?label_refs, error = %e, "failed to remove stale client share work label");
                 }
             }
         }
@@ -739,6 +752,104 @@ mod tests {
         assert!(
             total_cache_requests > 2,
             "Cache should have processed requests",
+        );
+    }
+
+    // ── per-channel share work ───────────────────────────────────────
+
+    use super::super::client::ExtendedChannelInfo;
+
+    /// Deliberately distinct `nominal_hashrate` and `share_work_sum` so wiring the
+    /// wrong field fails rather than coincidentally passing.
+    fn channel_with_work(channel_id: u32, nominal: f32, work: f64) -> ExtendedChannelInfo {
+        ExtendedChannelInfo {
+            channel_id,
+            user_identity: format!("worker-{channel_id}"),
+            nominal_hashrate: nominal,
+            stable_hashrate: false,
+            target_hex: "00ff".to_string(),
+            requested_max_target_hex: "00ff".to_string(),
+            extranonce_prefix_hex: "aa".to_string(),
+            full_extranonce_size: 16,
+            rollable_extranonce_size: 4,
+            expected_shares_per_minute: 1.0,
+            shares_accepted: 1,
+            shares_rejected: 0,
+            shares_rejected_by_reason: std::collections::HashMap::new(),
+            share_work_sum: work,
+            last_share_sequence_number: 1,
+            best_diff: 1.0,
+            last_batch_accepted: 0,
+            last_batch_work_sum: 0,
+            share_batch_size: 1,
+            blocks_found: 0,
+        }
+    }
+
+    struct MutableClients(Mutex<Vec<Sv2ClientInfo>>);
+
+    impl Sv2ClientsMonitoring for MutableClients {
+        fn get_sv2_clients(&self) -> Vec<Sv2ClientInfo> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// All `sv2_client_channel_share_work_total` series, as (user_identity, value).
+    fn share_work_series(metrics: &PrometheusMetrics) -> Vec<(String, f64)> {
+        metrics
+            .registry
+            .gather()
+            .iter()
+            .find(|f| f.get_name() == "sv2_client_channel_share_work_total")
+            .map(|f| {
+                f.get_metric()
+                    .iter()
+                    .map(|m| {
+                        let user = m
+                            .get_label()
+                            .iter()
+                            .find(|l| l.get_name() == "user_identity")
+                            .map(|l| l.get_value().to_string())
+                            .unwrap_or_default();
+                        (user, m.get_gauge().get_value())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn share_work_is_emitted_per_channel_and_reaped_on_disconnect() {
+        let clients = Arc::new(MutableClients(Mutex::new(vec![Sv2ClientInfo::new(
+            1,
+            vec![
+                channel_with_work(1, 100.0, 4242.0),
+                channel_with_work(2, 100.0, 7.5),
+            ],
+            vec![],
+        )])));
+        let metrics = PrometheusMetrics::new(false, true, false).expect("metrics");
+        let cache = SnapshotCache::new(Duration::from_secs(5), None, Some(clients.clone()))
+            .with_metrics(metrics.clone());
+
+        cache.refresh();
+        let mut series = share_work_series(&metrics);
+        series.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            series,
+            vec![
+                ("worker-1".to_string(), 4242.0),
+                ("worker-2".to_string(), 7.5)
+            ],
+            "share work must come from share_work_sum, not nominal_hashrate"
+        );
+
+        // Client disconnects; its per-channel series must not linger.
+        clients.0.lock().unwrap().clear();
+        cache.refresh();
+        assert!(
+            share_work_series(&metrics).is_empty(),
+            "share work series for a departed client were not removed"
         );
     }
 }
