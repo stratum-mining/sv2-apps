@@ -28,9 +28,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: "false"
-          # Hash every Cargo workspace without registering the shared target more than once.
-          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          workspaces: integration-tests -> ../target
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake
@@ -48,21 +46,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-semver-checks@0.44.0
 
-      - name: Run semver checks for bitcoin-core-sv2
-        working-directory: bitcoin-core-sv2
-        run: cargo semver-checks
-
-      - name: Run semver checks for stratum-apps workspace
-        working-directory: stratum-apps
-        run: cargo semver-checks --all-features
-
-      - name: Run semver checks for pool applications workspace
-        working-directory: pool-apps
-        run: cargo semver-checks  --workspace --all-features
-
-      - name: Run semver checks for miner applications workspace
-        working-directory: miner-apps
-        run: cargo semver-checks --workspace --all-features
+      - name: Run semver checks
+        run: cargo semver-checks --workspace --all-features --exclude integration_tests_sv2
 
   version-bump-check:
     # Only pull requests have a base branch to diff against; the workflow

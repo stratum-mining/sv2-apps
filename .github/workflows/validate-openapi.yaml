@@ -16,17 +16,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
 
       - name: Generate fresh OpenAPI JSON
-        working-directory: stratum-apps
         # The committed OpenAPI schema is the telemetry-enabled superset used by
         # downstream consumers such as sv2-ui. Apps built without
         # asic-rs-telemetry expose a narrower runtime schema at
         # /api-docs/openapi.json.
-        run: cargo run --bin generate-openapi --features monitoring,asic-rs-telemetry > fresh.json
+        run: cargo run -p stratum-apps --bin generate-openapi --features monitoring,asic-rs-telemetry > stratum-apps/fresh.json
 
       - name: Check openapi.json exists
         run: |
           if [ ! -f stratum-apps/src/monitoring/openapi.json ]; then
-            echo "No openapi.json committed - run: cargo run --bin generate-openapi --features monitoring,asic-rs-telemetry > stratum-apps/src/monitoring/openapi.json"
+            echo "No openapi.json committed - run: cargo run -p stratum-apps --bin generate-openapi --features monitoring,asic-rs-telemetry > stratum-apps/src/monitoring/openapi.json"
             exit 1
           fi
 

@@ -27,16 +27,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: "false"
-          # Hash every Cargo workspace without registering the shared target more than once.
-          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          workspaces: integration-tests -> ../target
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
 
       - name: Build with locked dependencies
         run: |
-          cargo build --manifest-path=stratum-apps/Cargo.toml --all-features --locked
-          cargo build --manifest-path=pool-apps/Cargo.toml --locked
-          cargo build --manifest-path=miner-apps/Cargo.toml --locked
-          cargo build --manifest-path=integration-tests/Cargo.toml --locked
+          cargo build --workspace --locked
+          cargo build -p stratum-apps --all-features --locked
 
-          # while bitcoin-core-sv2 crate is still a lib crate, no need to lock it so we skip it here
-          # whenever we implement a binary executable for bitcoin-core-sv2, we will need to cover it here
+      # `--workspace` unifies `stratum-apps` features across every member, while
+      # releases, Docker images and `cargo publish` build one app at a time.
+      # Checking each app alone verifies it declares every feature it relies on.
+      - name: Check each app with only its own features
+        run: |
+          for app in pool_sv2 jd_server_sv2 jd_client_sv2 translator_sv2; do
+            cargo check -p "$app" --locked
+          done
