@@ -26,7 +26,7 @@ To run pre defined integration tests, use the following command:
 
 ```bash
 $ git clone git@github.com:stratum-mining/stratum.git
-$ cargo test --manifest-path=integration-tests/Cargo.toml --verbose --test '*' -- --nocapture
+$ cargo test -p integration_tests_sv2 --verbose --test '*' -- --nocapture
 ```
 
 Note: during the execution of the tests, the `template-provider` directory holds the downloaded
@@ -41,15 +41,15 @@ binary again.
 To build it:
 
 ```bash
-cargo build --manifest-path=integration-tests/Cargo.toml --release --bin mining_device
+cargo build -p integration_tests_sv2 --release --bin mining_device
 ```
 
-The executable will be available at `integration-tests/target/release/mining_device`.
+The executable will be available at `target/release/mining_device`, relative to the repository root.
 
 To run it directly through Cargo:
 
 ```bash
-cargo run --manifest-path=integration-tests/Cargo.toml --release --bin mining_device -- \
+cargo run -p integration_tests_sv2 --release --bin mining_device -- \
   --address-pool 127.0.0.1:3333 \
   --id-device test
 ```

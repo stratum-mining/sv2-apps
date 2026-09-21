@@ -71,9 +71,11 @@ Our dev calls are scheduled every Tuesday at 16:00 UTC. You can see them in the 
 ### Project Structure
 This repository is part of the broader SRI ecosystem. You can contribute to different aspects of Stratum V2:
   - [SV2 Applications](https://github.com/stratum-mining/sv2-apps) (this repository)
-    - This repo contains production-ready pool and miner applications built on top of SRI, organized in workspaces:
+    - This repo contains production-ready pool and miner applications built on top of SRI. All crates belong to a single Cargo workspace rooted at the repository root:
       - `pool-apps/` - Pool server and Job Declarator Server for pool operators
       - `miner-apps/` - Job Declarator Client, Translator Proxy, and test utilities for miners
+      - `stratum-apps/` - Shared application-level library used by the roles
+      - `bitcoin-core-sv2/` - Bitcoin Core IPC bindings
       - `integration-tests/` - End-to-end testing suite
   - [Stratum V2 Reference Implementation](https://github.com/stratum-mining/stratum)
     - This repo contains the core SV2 protocol implementation, libraries, and primitives written in Rust.
@@ -95,7 +97,7 @@ The SRI project follows an open contributor model, where anyone is welcome to co
     These guidelines should be kept in mind:
     - When touching Rust code, make sure the changes have corresponding Rustdocs. Be concise and avoid unnecessary verbosity.
     - When adding or modifying features, check whether some corresponding documentation on .md files needs to be updated accordingly.
-    - Make sure to run `./scripts/build-all-workspaces.sh` (builds all workspaces: pool-apps, miner-apps, integration-tests) and `./scripts/clippy-fmt-and-test.sh` (runs clippy, tests and formatting across all workspaces) on your changes. The equivalent `cargo build`, `cargo test`, `cargo clippy` and `cargo fmt` commands can also be run individually in each workspace.
+    - Make sure to run `./scripts/build-all.sh` (builds and formats the workspace) and `./scripts/clippy-fmt-and-test.sh` (runs clippy, tests and formatting on every crate) on your changes. Individual crates can be checked from the repository root with `cargo test -p <crate>` or `cargo clippy -p <crate>`. Prefer `-p` over `--workspace` for clippy and tests: `--workspace` unifies `stratum-apps` features across every crate, so a missing feature in one app would only show up once that app is built alone.
 
 4. **Commit Your Changes**
 
@@ -131,8 +133,7 @@ The `monitoring` module of `stratum-apps` exposes an HTTP API documented with Op
 If you modify the monitoring HTTP server (endpoints, response types, etc.), you must regenerate the schema:
 
 ```bash
-cd stratum-apps
-cargo run --bin generate-openapi --features monitoring > src/monitoring/openapi.json
+cargo run -p stratum-apps --bin generate-openapi --features monitoring > stratum-apps/src/monitoring/openapi.json
 ```
 
 Then commit the updated file along with your code changes.
