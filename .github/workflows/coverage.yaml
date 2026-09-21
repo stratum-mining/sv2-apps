@@ -36,8 +36,8 @@ jobs:
       - name: Upload stratum-apps coverage to codecov.io
         uses: codecov/codecov-action@v4
         with:
-          directory: ./stratum-apps/target/tarpaulin-reports/stratum-apps-coverage
-          file: ./stratum-apps/target/tarpaulin-reports/stratum-apps-coverage/cobertura.xml
+          directory: ./target/tarpaulin-reports/stratum-apps-coverage
+          file: ./target/tarpaulin-reports/stratum-apps-coverage/cobertura.xml
           flags: stratum_apps
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
@@ -45,8 +45,8 @@ jobs:
       - name: Upload pool apps coverage to codecov.io
         uses: codecov/codecov-action@v4
         with:
-          directory: ./pool-apps/target/tarpaulin-reports/pool-apps-coverage
-          file: ./pool-apps/target/tarpaulin-reports/pool-apps-coverage/cobertura.xml
+          directory: ./target/tarpaulin-reports/pool-apps-coverage
+          file: ./target/tarpaulin-reports/pool-apps-coverage/cobertura.xml
           flags: pool_apps
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
@@ -54,8 +54,8 @@ jobs:
       - name: Upload miner apps coverage to codecov.io
         uses: codecov/codecov-action@v4
         with:
-          directory: ./miner-apps/target/tarpaulin-reports/miner-apps-coverage
-          file: ./miner-apps/target/tarpaulin-reports/miner-apps-coverage/cobertura.xml
+          directory: ./target/tarpaulin-reports/miner-apps-coverage
+          file: ./target/tarpaulin-reports/miner-apps-coverage/cobertura.xml
           flags: miner_apps
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
@@ -63,8 +63,8 @@ jobs:
       - name: Upload bitcoin-core-sv2 coverage to codecov.io
         uses: codecov/codecov-action@v4
         with:
-          directory: ./bitcoin-core-sv2/target/tarpaulin-reports/bitcoin-core-sv2-coverage
-          file: ./bitcoin-core-sv2/target/tarpaulin-reports/bitcoin-core-sv2-coverage/cobertura.xml
+          directory: ./target/tarpaulin-reports/bitcoin-core-sv2-coverage
+          file: ./target/tarpaulin-reports/bitcoin-core-sv2-coverage/cobertura.xml
           flags: bitcoin_core_sv2
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
@@ -74,7 +74,5 @@ jobs:
         with:
           name: coverage-reports
           path: |
-            stratum-apps/target/tarpaulin-reports/
-            pool-apps/target/tarpaulin-reports/
-            miner-apps/target/tarpaulin-reports/
+            target/tarpaulin-reports/
         if: always()
