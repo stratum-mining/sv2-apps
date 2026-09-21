@@ -1,3 +1,5 @@
+# Nextest reads this file relative to the workspace root. Only the integration
+# tests are run through nextest in CI, so these settings are tuned for them.
 [profile.default]
 
 # SRI has flaky integration tests, which we are ok to live with for now

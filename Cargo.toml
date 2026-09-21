@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+
+members = [
+    "bitcoin-core-sv2",
+    "stratum-apps",
+    "pool-apps/pool",
+    "pool-apps/jd-server",
+    "miner-apps/jd-client",
+    "miner-apps/translator",
+    "integration-tests",
+]
+
+# The integration tests drive real `bitcoind` and template provider binaries, so
+# they are run explicitly with `-p integration_tests_sv2` rather than being
+# picked up by a bare `cargo build`/`cargo test` at the repository root.
+default-members = [
+    "bitcoin-core-sv2",
+    "stratum-apps",
+    "pool-apps/pool",
+    "pool-apps/jd-server",
+    "miner-apps/jd-client",
+    "miner-apps/translator",
+]
