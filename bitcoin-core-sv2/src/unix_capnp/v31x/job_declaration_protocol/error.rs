@@ -18,6 +18,8 @@ pub enum BitcoinCoreSv2JDPError {
     FailedToDeserializeBlock(consensus::encode::Error),
     /// Readiness signal receiver was dropped before bootstrap completed.
     ReadinessSignalFailed,
+    /// The cancellation token fired before bootstrap completed.
+    BootstrapCancelled,
 }
 
 impl BitcoinCoreSv2JDPError {
