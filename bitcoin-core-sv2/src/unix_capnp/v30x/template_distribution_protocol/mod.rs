@@ -456,7 +456,7 @@ impl BitcoinCoreSv2TDP {
         if future_template {
             let mut future_template_guard = self.future_template.write().map_err(|e| {
                 error!("Failed to acquire write lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
             })?;
 
             *future_template_guard = Some(template_data.clone());
@@ -470,7 +470,7 @@ impl BitcoinCoreSv2TDP {
 
         let mut retained_templates_guard = self.retained_templates.write().map_err(|e| {
             error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         retained_templates_guard.insert(template_data.get_template_id(), template_data.clone());
@@ -493,7 +493,7 @@ impl BitcoinCoreSv2TDP {
     ) -> Result<Option<TemplateData>, BitcoinCoreSv2TDPError> {
         let future_template_guard = self.future_template.read().map_err(|e| {
             error!("Failed to acquire read lock on future_template: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("future_template")
         })?;
         if let Some(future_template) = future_template_guard.as_ref() {
             if future_template.get_template_id() == template_id {
@@ -504,7 +504,7 @@ impl BitcoinCoreSv2TDP {
 
         let retained_templates_guard = self.retained_templates.read().map_err(|e| {
             error!("Failed to acquire read lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         Ok(retained_templates_guard.get(&template_id).cloned())
@@ -730,7 +730,7 @@ impl BitcoinCoreSv2TDP {
 
         let mut retained_templates_guard = self.retained_templates.write().map_err(|e| {
             error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         for template_data in retained_templates_guard.values_mut() {
@@ -742,7 +742,7 @@ impl BitcoinCoreSv2TDP {
         // capability is released, and the field only ever holds the current tip's.
         let mut future_template_guard = self.future_template.write().map_err(|e| {
             error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         if let Some(mut future_template) = future_template_guard.take() {
@@ -764,7 +764,7 @@ impl BitcoinCoreSv2TDP {
 
         let mut retained_templates_guard = self.retained_templates.write().map_err(|e| {
             error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         let mut live_template_ids: Vec<u64> = retained_templates_guard
