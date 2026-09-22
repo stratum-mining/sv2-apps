@@ -33,6 +33,7 @@ pub enum BitcoinCoreSv2TDPError {
     FailedToSendInterruptWaitRequest,
     FailedToWaitForMonitorIpcTemplatesTask,
     FailedToCreateSolutionDir,
+    BootstrapCancelled,
     InvalidBlockRewardRemaining(i64),
 }
 

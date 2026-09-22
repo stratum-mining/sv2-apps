@@ -7,6 +7,7 @@
 //! - after a chain-tip update, an old template id eventually returns `stale-template-id`.
 //! - fee refreshes at one chain tip retire the templates beyond the cap and keep the rest usable.
 //! - rotating coinbase output constraints stops the superseded templates from answering at once.
+//! - bootstrap gives way to cancellation while a peer that accepted the connection never answers.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -46,6 +47,16 @@ async fn tdp_io_integration_v30x() {
 #[tokio::test]
 async fn tdp_io_integration_v31x() {
     assert_tdp_io_integration(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+async fn tdp_bootstrap_gives_way_to_cancellation_v30x() {
+    assert_tdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
+}
+
+#[tokio::test]
+async fn tdp_bootstrap_gives_way_to_cancellation_v31x() {
+    assert_tdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
 }
 
 async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
@@ -403,6 +414,65 @@ async fn assert_tdp_template_is_usable(
             )
         }
     }
+}
+
+/// A peer that accepts the IPC connection and never answers must not hold bootstrap past
+/// cancellation.
+///
+/// No Bitcoin Core is involved: a bare Unix listener stands in for one that stalled, which is all
+/// bootstrap needs to be kept waiting.
+async fn assert_tdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVersion) {
+    let socket_path = std::env::temp_dir().join(format!(
+        "tdp-stalled-peer-{}-{version:?}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener =
+        tokio::net::UnixListener::bind(&socket_path).expect("failed to bind the stalled peer");
+
+    // The runtime spawns its RPC system with `spawn_local`, so it needs a LocalSet, as in
+    // production.
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let stalled_peer = tokio::task::spawn_local(async move {
+                let (_connection, _) = listener.accept().await.expect("failed to accept");
+                std::future::pending::<()>().await;
+            });
+
+            let cancellation_token = CancellationToken::new();
+            let canceller = cancellation_token.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                canceller.cancel();
+            });
+
+            let (_incoming_sender, incoming_receiver) = async_channel::unbounded();
+            let (outgoing_sender, _outgoing_receiver) = async_channel::unbounded();
+
+            let bootstrap = tokio::time::timeout(
+                Duration::from_secs(10),
+                template_distribution_protocol::new(
+                    version,
+                    &socket_path,
+                    0,
+                    1,
+                    incoming_receiver,
+                    outgoing_sender,
+                    cancellation_token,
+                ),
+            )
+            .await
+            .expect("bootstrap must give way to cancellation rather than wait on a silent peer");
+
+            assert!(
+                bootstrap.is_err(),
+                "a cancelled bootstrap must not produce a runtime"
+            );
+            stalled_peer.abort();
+        })
+        .await;
+
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 async fn recv_tdp_message<F>(
