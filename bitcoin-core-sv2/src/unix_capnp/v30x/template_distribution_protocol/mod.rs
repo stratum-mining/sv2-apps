@@ -447,7 +447,7 @@ impl BitcoinCoreSv2TDP {
     ) -> Result<(), BitcoinCoreSv2TDPError> {
         let mut template_data_guard = self.template_data.write().map_err(|e| {
             error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         template_data_guard.insert(template_data.get_template_id(), template_data.clone());
@@ -462,7 +462,7 @@ impl BitcoinCoreSv2TDP {
     fn current_template_ids(&self) -> Result<HashSet<u64>, BitcoinCoreSv2TDPError> {
         let template_data_guard = self.template_data.read().map_err(|e| {
             error!("Failed to acquire read lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
         })?;
 
         Ok(template_data_guard.keys().copied().collect())
@@ -692,7 +692,7 @@ impl BitcoinCoreSv2TDP {
         let mut live_template_ids: Vec<u64> = {
             let stale_template_ids_guard = self.stale_template_ids.read().map_err(|e| {
                 error!("Failed to acquire read lock on stale_template_ids: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+                BitcoinCoreSv2TDPError::LockPoisoned("stale_template_ids")
             })?;
 
             template_ids
@@ -741,7 +741,7 @@ impl BitcoinCoreSv2TDP {
                 "Failed to acquire write lock on stale_template_ids: {:?}",
                 e
             );
-            BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            BitcoinCoreSv2TDPError::LockPoisoned("stale_template_ids")
         })?;
 
         for template_id in template_ids {
