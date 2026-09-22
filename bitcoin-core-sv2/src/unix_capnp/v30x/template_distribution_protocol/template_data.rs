@@ -137,104 +137,105 @@ impl TemplateData {
         let self_clone = self.clone();
         let path_dir = path_dir.to_path_buf();
         tokio::task::spawn_local(async move {
-            debug!("Creating a dedicated thread IPC client for getBlock request");
-
-            // validate the solution
-            let solution_header = {
-                if solution_coinbase_tx.version != self_clone.coinbase_tx.version
-                    || solution_coinbase_tx.lock_time != self_clone.coinbase_tx.lock_time
-                    || solution_coinbase_tx.input.len() != 1
-                    || solution_coinbase_tx.input[0].sequence
-                        != self_clone.coinbase_tx.input[0].sequence
-                    || solution_coinbase_tx.input[0].witness
-                        != self_clone.coinbase_tx.input[0].witness
-                    || solution_coinbase_tx.input[0].previous_output
-                        != self_clone.coinbase_tx.input[0].previous_output
-                {
-                    error!("Solution coinbase tx is not congruent with original coinbase tx");
-                    return;
-                }
-
-                // Compute merkle root from coinbase transaction and merkle path
-                let coinbase_txid = solution_coinbase_tx.compute_txid();
-                let mut current_hash = *coinbase_txid.as_byte_array();
-
-                // Combine with each sibling hash in the merkle path
-                for sibling_hash_bytes in &self_clone.merkle_path {
-                    // Combine current hash with sibling hash and double SHA256
-                    let mut hasher = sha256d::Hash::engine();
-                    HashEngine::input(&mut hasher, &current_hash);
-                    HashEngine::input(&mut hasher, sibling_hash_bytes);
-                    current_hash = *sha256d::Hash::from_engine(hasher).as_byte_array();
-                }
-
-                let solution_header = Header {
-                    version: Version::from_consensus(solution_header_version as i32),
-                    prev_blockhash: self_clone.header.prev_blockhash,
-                    merkle_root: sha256d::Hash::from_byte_array(current_hash).into(),
-                    time: solution_header_timestamp,
-                    nonce: solution_header_nonce,
-                    bits: self_clone.header.bits,
-                };
-
-                if let Err(e) = solution_header.validate_pow(solution_header.target()) {
-                    error!("Solution header is not valid: {}", e);
-                    return;
-                }
-
-                solution_header
-            };
-
-            let thread_ipc_client = thread_map
-                .make_thread_request()
-                .send()
-                .promise
+            if let Err(e) = self_clone
+                .archive_solution(
+                    thread_map,
+                    solution_coinbase_tx,
+                    solution_header_version,
+                    solution_header_timestamp,
+                    solution_header_nonce,
+                    &path_dir,
+                )
                 .await
-                .expect("Failed to send thread IPC client request")
-                .get()
-                .expect("Failed to get thread IPC client reader")
-                .get_result()
-                .expect("Failed to get thread IPC client result");
-
-            let mut template_block_request = self_clone.template_ipc_client.get_block_request();
-            let mut template_block_request_context = template_block_request
-                .get()
-                .get_context()
-                .expect("Failed to get template block request context");
-            template_block_request_context.set_thread(thread_ipc_client.clone());
-
-            let template_block_response = template_block_request
-                .send()
-                .promise
-                .await
-                .expect("Failed to send template block request");
-            let template_block_reader = template_block_response
-                .get()
-                .expect("Failed to get template block response");
-            let template_block_bytes = template_block_reader
-                .get_result()
-                .expect("Failed to get template block result");
-
-            // Deserialize the complete block template from Bitcoin Core's serialization format
-            let mut solution_block: Block =
-                deserialize(template_block_bytes).expect("Failed to deserialize block template");
-
-            solution_block.txdata[0] = solution_coinbase_tx;
-            solution_block.header = solution_header;
-
-            let solution_block_bytes = serialize(&solution_block);
-            let solution_block_hash = solution_block.block_hash().to_string();
-            let solution_block_path = path_dir.join(format!("{solution_block_hash}.dat"));
-
-            let mut file =
-                File::create(&solution_block_path).expect("Failed to create solution block file");
-            file.write_all(&solution_block_bytes)
-                .expect("Failed to write solution block to file");
-            info!(
-                "Solution block dumped to: {}",
-                solution_block_path.display()
-            );
+            {
+                error!("Not archiving solution: {e}");
+            }
         });
+    }
+
+    async fn archive_solution(
+        &self,
+        thread_map: ThreadMapIpcClient,
+        solution_coinbase_tx: Transaction,
+        solution_header_version: u32,
+        solution_header_timestamp: u32,
+        solution_header_nonce: u32,
+        path_dir: &Path,
+    ) -> Result<(), TemplateDataError> {
+        // validate the solution
+        if solution_coinbase_tx.version != self.coinbase_tx.version
+            || solution_coinbase_tx.lock_time != self.coinbase_tx.lock_time
+            || solution_coinbase_tx.input.len() != 1
+            || solution_coinbase_tx.input[0].sequence != self.coinbase_tx.input[0].sequence
+            || solution_coinbase_tx.input[0].witness != self.coinbase_tx.input[0].witness
+            || solution_coinbase_tx.input[0].previous_output
+                != self.coinbase_tx.input[0].previous_output
+        {
+            return Err(TemplateDataError::InvalidSolution);
+        }
+
+        // Compute merkle root from coinbase transaction and merkle path
+        let coinbase_txid = solution_coinbase_tx.compute_txid();
+        let mut current_hash = *coinbase_txid.as_byte_array();
+
+        // Combine with each sibling hash in the merkle path
+        for sibling_hash_bytes in &self.merkle_path {
+            // Combine current hash with sibling hash and double SHA256
+            let mut hasher = sha256d::Hash::engine();
+            HashEngine::input(&mut hasher, &current_hash);
+            HashEngine::input(&mut hasher, sibling_hash_bytes);
+            current_hash = *sha256d::Hash::from_engine(hasher).as_byte_array();
+        }
+
+        let solution_header = Header {
+            version: Version::from_consensus(solution_header_version as i32),
+            prev_blockhash: self.header.prev_blockhash,
+            merkle_root: sha256d::Hash::from_byte_array(current_hash).into(),
+            time: solution_header_timestamp,
+            nonce: solution_header_nonce,
+            bits: self.header.bits,
+        };
+
+        solution_header
+            .validate_pow(solution_header.target())
+            .map_err(TemplateDataError::InvalidSolutionPoW)?;
+
+        debug!("Creating a dedicated thread IPC client for getBlock request");
+        let thread_ipc_client = thread_map
+            .make_thread_request()
+            .send()
+            .promise
+            .await?
+            .get()?
+            .get_result()?;
+
+        let mut template_block_request = self.template_ipc_client.get_block_request();
+        template_block_request
+            .get()
+            .get_context()?
+            .set_thread(thread_ipc_client);
+        let template_block_response = template_block_request.send().promise.await?;
+
+        // Deserialize the complete block template from Bitcoin Core's serialization format
+        let mut solution_block: Block = deserialize(template_block_response.get()?.get_result()?)
+            .map_err(TemplateDataError::InvalidTemplateBlock)?;
+
+        solution_block.txdata[0] = solution_coinbase_tx;
+        solution_block.header = solution_header;
+
+        let solution_block_bytes = serialize(&solution_block);
+        let solution_block_hash = solution_block.block_hash().to_string();
+        let solution_block_path = path_dir.join(format!("{solution_block_hash}.dat"));
+
+        File::create(&solution_block_path)
+            .and_then(|mut file| file.write_all(&solution_block_bytes))
+            .map_err(TemplateDataError::FailedToWriteSolution)?;
+        info!(
+            "Solution block dumped to: {}",
+            solution_block_path.display()
+        );
+
+        Ok(())
     }
 
     /// Submits a solution to Bitcoin Core, and archives it once Bitcoin Core has accepted it.
