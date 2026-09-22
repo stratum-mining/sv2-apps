@@ -76,7 +76,7 @@ impl BitcoinCoreSv2TDP {
         let is_stale = {
             let stale_template_ids_guard = self.stale_template_ids.read().map_err(|e| {
                 error!("Failed to acquire read lock on stale_template_ids: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
+                BitcoinCoreSv2TDPError::LockPoisoned("stale_template_ids")
             })?;
             stale_template_ids_guard.contains(&request_transaction_data.template_id)
         };
@@ -115,7 +115,7 @@ impl BitcoinCoreSv2TDP {
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
+                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
             })?;
 
             // clone so we can drop the read lock and avoid holding it across the await
@@ -186,7 +186,7 @@ impl BitcoinCoreSv2TDP {
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::TemplateNotFound
+                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
             })?;
 
             let Some(template_data) = template_data_guard.get(&submit_solution.template_id) else {

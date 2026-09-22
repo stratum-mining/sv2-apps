@@ -14,17 +14,13 @@ pub enum BitcoinCoreSv2TDPError {
     CapnpError(capnp::Error),
     CannotConnectToUnixSocket(Box<Path>, String),
     InvalidTemplateHeader(consensus::encode::Error),
-    InvalidTemplateHeaderLength,
-    FailedToSerializeCoinbasePrefix,
-    FailedToSerializeCoinbaseOutputs,
     TemplateNotFound,
+    LockPoisoned(&'static str),
     TemplateIpcClientNotFound,
     FailedToSendNewTemplateMessage,
     FailedToSendSetNewPrevHashMessage,
     FailedToFetchTemplateTxData,
     FailedToSendRequestTransactionDataResponseMessage,
-    FailedToRecvTemplateDistributionMessage,
-    FailedToSendTemplateDistributionMessage,
     FailedToSubmitSolution,
     FailedToSetThread,
     FailedToGetWaitNextRequestOptions,
@@ -52,7 +48,6 @@ pub enum TemplateDataError {
     InvalidTemplateBlock(ConsensusEncodeError),
     InvalidSolution,
     InvalidSolutionPoW(ValidationError),
-    InvalidMerkleRoot,
     InvalidBlockVersion,
     InvalidCoinbaseTxVersion,
     InvalidCoinbaseScriptSig,
@@ -98,7 +93,6 @@ impl std::fmt::Display for TemplateDataError {
                 )
             }
             TemplateDataError::InvalidSolutionPoW(e) => write!(f, "Invalid solution: {e}"),
-            TemplateDataError::InvalidMerkleRoot => write!(f, "Invalid merkle root"),
             TemplateDataError::InvalidBlockVersion => write!(f, "Invalid block version"),
             TemplateDataError::InvalidCoinbaseTxVersion => {
                 write!(f, "Invalid coinbase transaction version")
