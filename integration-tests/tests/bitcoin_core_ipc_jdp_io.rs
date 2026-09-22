@@ -14,6 +14,7 @@
 //!   retaining the ones it did supply.
 //! - `DeclareMiningJob` rejects a declaration that repeats a wtxid, lists more transactions than a
 //!   block can hold, or weighs more than a block.
+//! - bootstrap gives way to cancellation while a peer that accepted the connection never answers.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -57,6 +58,16 @@ async fn jdp_io_integration_v30x() {
 #[tokio::test]
 async fn jdp_io_integration_v31x() {
     assert_jdp_io_integration_for_version(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+async fn jdp_bootstrap_gives_way_to_cancellation_v30x() {
+    assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
+}
+
+#[tokio::test]
+async fn jdp_bootstrap_gives_way_to_cancellation_v31x() {
+    assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
 }
 
 async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
@@ -459,6 +470,63 @@ async fn assert_jdp_declaration_must_fit_in_a_block(
             response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
         }
     }
+}
+
+/// A peer that accepts the IPC connection and never answers must not hold bootstrap past
+/// cancellation.
+///
+/// No Bitcoin Core is involved: a bare Unix listener stands in for one that stalled, which is all
+/// bootstrap needs to be kept waiting.
+async fn assert_jdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVersion) {
+    let socket_path = std::env::temp_dir().join(format!(
+        "jdp-stalled-peer-{}-{version:?}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener =
+        tokio::net::UnixListener::bind(&socket_path).expect("failed to bind the stalled peer");
+
+    // The runtime spawns its RPC system with `spawn_local`, so it needs a LocalSet, as in
+    // production.
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let stalled_peer = tokio::task::spawn_local(async move {
+                let (_connection, _) = listener.accept().await.expect("failed to accept");
+                std::future::pending::<()>().await;
+            });
+
+            let cancellation_token = CancellationToken::new();
+            let canceller = cancellation_token.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                canceller.cancel();
+            });
+
+            let (_incoming_sender, incoming_receiver) = async_channel::unbounded::<JdRequest>();
+            let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+            let bootstrap = tokio::time::timeout(
+                Duration::from_secs(10),
+                job_declaration_protocol::new(
+                    version,
+                    &socket_path,
+                    incoming_receiver,
+                    cancellation_token,
+                    ready_tx,
+                ),
+            )
+            .await
+            .expect("bootstrap must give way to cancellation rather than wait on a silent peer");
+
+            assert!(
+                bootstrap.is_err(),
+                "a cancelled bootstrap must not produce a runtime"
+            );
+            stalled_peer.abort();
+        })
+        .await;
+
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 async fn send_declare_mining_job_and_recv_response(
