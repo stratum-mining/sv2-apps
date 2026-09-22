@@ -113,6 +113,9 @@ pub struct BitcoinCoreSv2TDP {
 
 impl BitcoinCoreSv2TDP {
     /// Creates a new [`BitcoinCoreSv2TDP`] instance.
+    ///
+    /// Every bootstrap request gives way to `global_cancellation_token`, so a peer that stops
+    /// answering cannot hold it.
     #[allow(clippy::too_many_arguments)]
     pub async fn new<P>(
         bitcoin_core_unix_socket_path: P,
@@ -156,11 +159,20 @@ impl BitcoinCoreSv2TDP {
 
         tokio::task::spawn_local(rpc_system);
 
-        let construct_response = bootstrap_client.construct_request().send().promise.await?;
+        // Stop waiting once cancelled, so a silent peer can't block shutdown: `None` means
+        // cancelled, the second `?` is the request's own error.
+        let construct_response = global_cancellation_token
+            .run_until_cancelled(bootstrap_client.construct_request().send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)??;
 
         let thread_map: ThreadMapIpcClient = construct_response.get()?.get_thread_map()?;
         let thread_request = thread_map.make_thread_request();
-        let thread_response = thread_request.send().promise.await?;
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let thread_response = global_cancellation_token
+            .run_until_cancelled(thread_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)??;
 
         let thread_ipc_client: ThreadIpcClient = thread_response.get()?.get_result()?;
 
@@ -171,7 +183,11 @@ impl BitcoinCoreSv2TDP {
             .get()
             .get_context()?
             .set_thread(thread_ipc_client.clone());
-        let mining_client_response = mining_client_request.send().promise.await?;
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let mining_client_response = global_cancellation_token
+            .run_until_cancelled(mining_client_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)??;
         let mining_ipc_client: MiningIpcClient = mining_client_response.get()?.get_result()?;
 
         info!("IPC mining client successfully created.");
@@ -246,6 +262,12 @@ impl BitcoinCoreSv2TDP {
                                         "Successfully bootstrapped initial template IPC client"
                                     );
                                     break;
+                                }
+                                Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted) => {
+                                    debug!(
+                                        "Initial createNewBlock request interrupted during shutdown"
+                                    );
+                                    return;
                                 }
                                 Err(e) => {
                                     error!(
@@ -558,10 +580,13 @@ impl BitcoinCoreSv2TDP {
         template_ipc_client_request_options.set_use_mempool(true);
 
         debug!("Sending createNewBlock request to Bitcoin Core");
-        let template_ipc_client_response = template_ipc_client_request
-            .send()
-            .promise
+        // Stop waiting once cancelled (`None`); this can take long during IBD. v30 has no Mining
+        // interrupt, so the request stays pending in Bitcoin Core until the connection closes.
+        let template_ipc_client_response = self
+            .global_cancellation_token
+            .run_until_cancelled(template_ipc_client_request.send().promise)
             .await
+            .ok_or(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted)?
             .map_err(|e| {
                 error!("Failed to send template IPC client request: {}", e);
                 e

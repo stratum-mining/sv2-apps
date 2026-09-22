@@ -28,9 +28,11 @@ pub enum BitcoinCoreSv2TDPError {
     FailedToSubmitSolution,
     FailedToSetThread,
     FailedToGetWaitNextRequestOptions,
+    CreateNewBlockRequestInterrupted,
     FailedToSendInterruptWaitRequest,
     FailedToWaitForMonitorIpcTemplatesTask,
     FailedToCreateSolutionDir,
+    BootstrapCancelled,
 }
 
 impl From<capnp::Error> for BitcoinCoreSv2TDPError {
