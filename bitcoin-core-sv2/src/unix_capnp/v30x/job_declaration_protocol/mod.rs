@@ -3,8 +3,9 @@
 
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
-    unix_capnp::v30x::job_declaration_protocol::{
-        error::BitcoinCoreSv2JDPError, mempool::MempoolMirror,
+    unix_capnp::{
+        INTERRUPT_REPLY_TIMEOUT_MS,
+        v30x::job_declaration_protocol::{error::BitcoinCoreSv2JDPError, mempool::MempoolMirror},
     },
 };
 use async_channel::Receiver;
@@ -17,7 +18,7 @@ use bitcoin_capnp_types::{
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
 use bitcoin_capnp_types_v30 as bitcoin_capnp_types;
-use std::{cell::RefCell, path::Path, rc::Rc};
+use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
 use stratum_core::bitcoin::{Block, consensus::deserialize};
 use tokio::net::UnixStream;
 use tokio_util::compat::*;
@@ -212,6 +213,8 @@ impl BitcoinCoreSv2JDP {
     /// Main event loop - runs in a LocalSet on dedicated thread.
     ///
     /// Spawns the monitor task and processes incoming job declaration requests until shutdown.
+    /// Every request to Bitcoin Core gives way to `cancellation_token`, so a node that stops
+    /// answering cannot hold shutdown.
     pub async fn run(&self) {
         // spawn mempool mirror monitor task
         let monitor_handle = self.monitor_and_update_mempool_mirror();
@@ -236,7 +239,17 @@ impl BitcoinCoreSv2JDP {
                 request = self.incoming_requests.recv() => {
                     match request {
                         Ok(request) => {
-                            self.process_request(request).await;
+                            // Stop waiting once cancelled (`None`), so a request Bitcoin Core
+                            // never answers cannot hold shutdown.
+                            if self
+                                .cancellation_token
+                                .run_until_cancelled(self.process_request(request))
+                                .await
+                                .is_none()
+                            {
+                                info!("BitcoinCoreSv2JDP shutting down");
+                                break;
+                            }
                         }
                         Err(_) => {
                             info!("Incoming requests channel closed");
@@ -319,15 +332,23 @@ impl BitcoinCoreSv2JDP {
     }
 
     /// Interrupts the current `waitNext` request to Bitcoin Core for graceful shutdown.
-    async fn interrupt_wait_request(&self) -> Result<(), BitcoinCoreSv2JDPError> {
+    ///
+    /// Awaiting the reply is what delivers the interrupt: `send()` only queues it, and the bytes
+    /// reach Bitcoin Core when the `RpcSystem` task next runs. The wait is bounded by
+    /// `INTERRUPT_REPLY_TIMEOUT_MS` so a node that has stopped answering cannot hold shutdown.
+    async fn interrupt_wait_request(&self) {
         let template_ipc_client = self.current_template_ipc_client.borrow().clone();
 
-        let interrupt_wait_request = template_ipc_client.interrupt_wait_request();
-        if let Err(e) = interrupt_wait_request.send().promise.await {
-            error!("Failed to send interrupt wait request: {}", e);
-            return Err(BitcoinCoreSv2JDPError::CapnpError(e));
+        let interrupt_wait_promise = template_ipc_client.interrupt_wait_request().send().promise;
+        match tokio::time::timeout(
+            Duration::from_millis(INTERRUPT_REPLY_TIMEOUT_MS),
+            interrupt_wait_promise,
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => error!("Failed to send interrupt wait request: {}", e),
+            Err(_) => error!("Bitcoin Core did not answer the waitNext interrupt in time"),
         }
-
-        Ok(())
     }
 }

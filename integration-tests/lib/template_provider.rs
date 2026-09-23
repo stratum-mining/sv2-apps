@@ -411,8 +411,40 @@ impl BitcoinCore {
 
     /// Return the IPC socket path for connecting to this node.
     pub fn ipc_socket_path(&self) -> PathBuf {
+        self.network_dir().join("node.sock")
+    }
+
+    /// Freezes the node with `SIGSTOP`: connections stay open, but every IPC request it still
+    /// owes an answer to, and every one issued from here on, waits until [`Self::resume`].
+    pub fn pause(&self) {
+        self.signal(libc::SIGSTOP)
+            .expect("failed to pause bitcoind");
+    }
+
+    /// Undoes [`Self::pause`].
+    pub fn resume(&self) {
+        self.signal(libc::SIGCONT)
+            .expect("failed to resume bitcoind");
+    }
+
+    fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+        // `corepc_node` keeps the child handle private, so the pid comes from the pid file
+        // Bitcoin Core writes in its datadir.
+        let pid = std::fs::read_to_string(self.network_dir().join("bitcoind.pid"))?
+            .trim()
+            .parse::<libc::pid_t>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // SAFETY: `kill` only delivers a signal; it has no memory-safety preconditions.
+        if unsafe { libc::kill(pid, signal) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn network_dir(&self) -> PathBuf {
         let network_dir = if self.is_signet { "signet" } else { "regtest" };
-        self.data_dir.join(network_dir).join("node.sock")
+        self.data_dir.join(network_dir)
     }
 
     /// Return the data directory (without network subdirectory).
@@ -444,6 +476,10 @@ impl Drop for BitcoinCore {
             );
             return;
         }
+
+        // A paused node cannot answer the `stop` RPC below; resume it in case the test that
+        // paused it did not get as far as resuming it.
+        let _ = self.signal(libc::SIGCONT);
 
         // The node must be stopped before its files are removed. `Drop` for this struct runs
         // *before* its fields are dropped, so `bitcoind` is still live here; `Node::drop` would

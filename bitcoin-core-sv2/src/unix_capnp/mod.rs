@@ -31,3 +31,11 @@ const MAX_MONEY: i64 = 21_000_000 * 100_000_000;
 
 /// Max time a `waitNext` request is allowed to block before timing out (in milliseconds).
 const WAIT_NEXT_TIMEOUT_MS: f64 = 10_000.0;
+
+/// Max time an interrupt sent during shutdown may wait for Bitcoin Core's reply.
+///
+/// `send()` only queues the request: it reaches Bitcoin Core when the Cap'n Proto `RpcSystem`
+/// task next runs, which needs something on this `LocalSet` to still be awaiting. The reply is
+/// therefore awaited rather than left on a task of its own, and the wait is bounded so a node that
+/// has stopped answering cannot hold shutdown either.
+const INTERRUPT_REPLY_TIMEOUT_MS: u64 = 1_000;
