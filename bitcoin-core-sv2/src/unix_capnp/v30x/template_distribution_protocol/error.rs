@@ -29,7 +29,6 @@ pub enum BitcoinCoreSv2TDPError {
     FailedToSetThread,
     FailedToGetWaitNextRequestOptions,
     CreateNewBlockRequestInterrupted,
-    FailedToSendInterruptWaitRequest,
     FailedToWaitForMonitorIpcTemplatesTask,
     FailedToCreateSolutionDir,
     BootstrapCancelled,
