@@ -225,6 +225,7 @@ impl BitcoinCoreSv2TDP {
                 self.thread_ipc_client.clone(),
                 self.thread_map.clone(),
                 &solutions_dir,
+                self.global_cancellation_token.clone(),
             )
             .await
         {

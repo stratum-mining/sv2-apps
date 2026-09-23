@@ -23,6 +23,7 @@ use stratum_core::{
         SubmitSolutionOwned,
     },
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 #[derive(Clone)]
@@ -127,6 +128,7 @@ impl TemplateData {
         self.header.prev_blockhash.to_byte_array().into()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn dump_solution_to_disk(
         &self,
         thread_map: ThreadMapIpcClient,
@@ -135,19 +137,22 @@ impl TemplateData {
         solution_header_timestamp: u32,
         solution_header_nonce: u32,
         path_dir: &Path,
+        cancellation_token: CancellationToken,
     ) {
         let self_clone = self.clone();
         let path_dir = path_dir.to_path_buf();
         tokio::task::spawn_local(async move {
-            if let Err(e) = self_clone
-                .archive_solution(
+            // Stop waiting once cancelled (`None`): this task runs detached, so nothing else
+            // would notice a node that stops answering it.
+            if let Some(Err(e)) = cancellation_token
+                .run_until_cancelled(self_clone.archive_solution(
                     thread_map,
                     solution_coinbase_tx,
                     solution_header_version,
                     solution_header_timestamp,
                     solution_header_nonce,
                     &path_dir,
-                )
+                ))
                 .await
             {
                 error!("Not archiving solution: {e}");
@@ -247,6 +252,7 @@ impl TemplateData {
         thread_ipc_client: ThreadIpcClient,
         thread_map: ThreadMapIpcClient,
         path_dir: &Path,
+        cancellation_token: CancellationToken,
     ) -> Result<(), TemplateDataError> {
         let solution_coinbase_tx_bytes = submit_solution.coinbase_tx.to_owned_bytes();
 
@@ -285,6 +291,7 @@ impl TemplateData {
             submit_solution.header_timestamp,
             submit_solution.header_nonce,
             path_dir,
+            cancellation_token,
         )
         .await;
 
