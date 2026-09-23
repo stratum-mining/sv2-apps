@@ -17,6 +17,7 @@ use async_channel::{Receiver, Sender};
 use integration_tests_sv2::{
     start_bitcoin_core, start_tracing,
     template_provider::{BitcoinCore, DifficultyLevel},
+    utils::join_within,
 };
 use std::time::{Duration, Instant};
 use stratum_apps::{
@@ -59,6 +60,16 @@ async fn tdp_bootstrap_gives_way_to_cancellation_v31x() {
     assert_tdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+async fn tdp_runtime_gives_way_to_cancellation_v30x() {
+    assert_tdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
+}
+
+#[tokio::test]
+async fn tdp_runtime_gives_way_to_cancellation_v31x() {
+    assert_tdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
+}
+
 async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
     start_tracing();
 
@@ -75,30 +86,13 @@ async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {
     let (outgoing_sender, outgoing_receiver) = async_channel::unbounded();
 
     let cancellation_token = CancellationToken::new();
-    let cancellation_token_clone = cancellation_token.clone();
-    let socket_path_clone = socket_path.clone();
-
-    // Run TDP on a dedicated thread + LocalSet so we exercise the same async model as runtime.
-    let tdp_thread = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
-        let local_set = tokio::task::LocalSet::new();
-
-        local_set.block_on(&runtime, async move {
-            let mut tdp = template_distribution_protocol::new(
-                version,
-                socket_path_clone,
-                0,
-                1,
-                incoming_receiver,
-                outgoing_sender,
-                cancellation_token_clone,
-            )
-            .await
-            .expect("failed to initialize BitcoinCoreSv2TDP");
-
-            tdp.run().await;
-        });
-    });
+    let tdp_thread = spawn_tdp_thread(
+        version,
+        socket_path,
+        incoming_receiver,
+        outgoing_sender,
+        cancellation_token.clone(),
+    );
 
     // Drive scenarios in protocol order: bootstrap, happy path, not-found, then stale path.
     let template_id = bootstrap_tdp_and_get_template_id(&incoming_sender, &outgoing_receiver).await;
@@ -421,6 +415,74 @@ async fn assert_tdp_template_is_usable(
 ///
 /// No Bitcoin Core is involved: a bare Unix listener stands in for one that stalled, which is all
 /// bootstrap needs to be kept waiting.
+/// Runs the TDP runtime on a dedicated thread + LocalSet so tests exercise the same async model
+/// as production.
+fn spawn_tdp_thread(
+    version: BitcoinCoreVersion,
+    socket_path: std::path::PathBuf,
+    incoming_receiver: Receiver<TemplateDistributionOwned>,
+    outgoing_sender: Sender<TemplateDistributionOwned>,
+    cancellation_token: CancellationToken,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
+        let local_set = tokio::task::LocalSet::new();
+
+        local_set.block_on(&runtime, async move {
+            let mut tdp = template_distribution_protocol::new(
+                version,
+                socket_path,
+                0,
+                1,
+                incoming_receiver,
+                outgoing_sender,
+                cancellation_token,
+            )
+            .await
+            .expect("failed to initialize BitcoinCoreSv2TDP");
+
+            tdp.run().await;
+        });
+    })
+}
+
+async fn assert_tdp_runtime_gives_way_to_cancellation(version: BitcoinCoreVersion) {
+    start_tracing();
+
+    let bitcoin_core = start_bitcoin_core(DifficultyLevel::Low, version);
+
+    let (incoming_sender, incoming_receiver) = async_channel::unbounded();
+    let (outgoing_sender, outgoing_receiver) = async_channel::unbounded();
+    let cancellation_token = CancellationToken::new();
+    let tdp_thread = spawn_tdp_thread(
+        version,
+        bitcoin_core.ipc_socket_path(),
+        incoming_receiver,
+        outgoing_sender,
+        cancellation_token.clone(),
+    );
+    let template_id = bootstrap_tdp_and_get_template_id(&incoming_sender, &outgoing_receiver).await;
+
+    // From here on Bitcoin Core answers nothing: the monitor's `waitNext` stays pending, and so
+    // does the `getBlock` behind the transaction data requested next.
+    bitcoin_core.pause();
+    incoming_sender
+        .send(TemplateDistributionOwned::RequestTransactionData(
+            RequestTransactionDataOwned { template_id },
+        ))
+        .await
+        .expect("failed to send RequestTransactionData");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !tdp_thread.is_finished(),
+        "the runtime must outlive a node that merely stops answering"
+    );
+
+    cancellation_token.cancel();
+    join_within(tdp_thread, Duration::from_secs(10)).await;
+    bitcoin_core.resume();
+}
+
 async fn assert_tdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVersion) {
     let socket_path = std::env::temp_dir().join(format!(
         "tdp-stalled-peer-{}-{version:?}.sock",

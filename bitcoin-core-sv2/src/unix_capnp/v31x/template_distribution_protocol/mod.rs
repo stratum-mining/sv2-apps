@@ -237,7 +237,8 @@ impl BitcoinCoreSv2TDP {
     /// - incoming [`CoinbaseOutputConstraints`] messages, for which it will update the coinbase
     ///   output constraints
     ///
-    /// Blocks until the cancellation token is activated.
+    /// Blocks until the cancellation token is activated. Every request to Bitcoin Core gives way
+    /// to it, so a node that stops answering cannot hold shutdown.
     pub async fn run(&mut self) {
         // wait for first CoinbaseOutputConstraints message
         info!("Waiting for first CoinbaseOutputConstraints message");
@@ -270,10 +271,11 @@ impl BitcoinCoreSv2TDP {
                                     );
                                     break;
                                 }
-                                Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted) => {
-                                    debug!(
-                                        "Initial createNewBlock request interrupted during shutdown"
-                                    );
+                                Err(
+                                    BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted
+                                    | BitcoinCoreSv2TDPError::BootstrapCancelled,
+                                ) => {
+                                    debug!("Initial template bootstrap interrupted during shutdown");
                                     return;
                                 }
                                 Err(e) => {
@@ -601,7 +603,7 @@ impl BitcoinCoreSv2TDP {
             }
             _ = self.global_cancellation_token.cancelled() => {
                 debug!("Interrupting createNewBlock request");
-                self.interrupt_create_new_block_request().await?;
+                self.interrupt_create_new_block_request();
                 return Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted);
             }
         };
@@ -617,13 +619,19 @@ impl BitcoinCoreSv2TDP {
         })?;
 
         debug!("Fetching template data from bootstrapped template IPC client");
-        let template_data = self
-            .fetch_template_data(template_ipc_client.clone(), self.thread_ipc_client.clone())
-            .await
-            .map_err(|e| {
-                error!("Failed to fetch template data: {:?}", e);
-                e
-            })?;
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let template_data =
+            self.global_cancellation_token
+                .run_until_cancelled(self.fetch_template_data(
+                    template_ipc_client.clone(),
+                    self.thread_ipc_client.clone(),
+                ))
+                .await
+                .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)?
+                .map_err(|e| {
+                    error!("Failed to fetch template data: {:?}", e);
+                    e
+                })?;
 
         self.publish_template(template_data, true, true, true)
             .await?;
@@ -632,27 +640,30 @@ impl BitcoinCoreSv2TDP {
         Ok(())
     }
 
-    async fn interrupt_wait_request(
-        &self,
-        template_ipc_client: &BlockTemplateIpcClient,
-    ) -> Result<(), BitcoinCoreSv2TDPError> {
-        let interrupt_wait_request = template_ipc_client.interrupt_wait_request();
-        if let Err(e) = interrupt_wait_request.send().promise.await {
-            error!("Failed to send interrupt wait request: {}", e);
-            return Err(BitcoinCoreSv2TDPError::FailedToSendInterruptWaitRequest);
-        }
-
-        Ok(())
+    /// Interrupts the in-flight `waitNext` request on `template_ipc_client`.
+    ///
+    /// The reply is awaited on a task of its own, so a node that has stopped answering cannot
+    /// hold the caller.
+    fn interrupt_wait_request(&self, template_ipc_client: &BlockTemplateIpcClient) {
+        let interrupt_wait_promise = template_ipc_client.interrupt_wait_request().send().promise;
+        tokio::task::spawn_local(async move {
+            if let Err(e) = interrupt_wait_promise.await {
+                error!("Failed to send interrupt wait request: {}", e);
+            }
+        });
     }
 
-    async fn interrupt_create_new_block_request(&self) -> Result<(), BitcoinCoreSv2TDPError> {
-        let interrupt_request = self.mining_ipc_client.interrupt_request();
-        if let Err(e) = interrupt_request.send().promise.await {
-            error!("Failed to send interrupt createNewBlock request: {}", e);
-            return Err(BitcoinCoreSv2TDPError::FailedToSendInterruptCreateNewBlockRequest);
-        }
-
-        Ok(())
+    /// Interrupts the in-flight `createNewBlock` request.
+    ///
+    /// The reply is awaited on a task of its own, so a node that has stopped answering cannot
+    /// hold the caller.
+    fn interrupt_create_new_block_request(&self) {
+        let interrupt_promise = self.mining_ipc_client.interrupt_request().send().promise;
+        tokio::task::spawn_local(async move {
+            if let Err(e) = interrupt_promise.await {
+                error!("Failed to send interrupt createNewBlock request: {}", e);
+            }
+        });
     }
 
     async fn new_wait_next_request(

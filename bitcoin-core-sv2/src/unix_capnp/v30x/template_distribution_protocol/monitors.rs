@@ -27,7 +27,16 @@ impl BitcoinCoreSv2TDP {
             // as soon as this task is cancelled, the blocking_thread_ipc_client is dropped,
             // which cleans up the thread on the Bitcoin Core side
             debug!("Creating dedicated blocking_thread_ipc_client for waitNext requests");
-            let blocking_thread_ipc_client = match self_clone.new_thread_ipc_client().await {
+            // Stop waiting once cancelled (`None`).
+            let Some(blocking_thread_ipc_client) = self_clone
+                .global_cancellation_token
+                .run_until_cancelled(self_clone.new_thread_ipc_client())
+                .await
+            else {
+                debug!("monitor_ipc_templates() exiting due to cancellation");
+                return;
+            };
+            let blocking_thread_ipc_client = match blocking_thread_ipc_client {
                 Ok(blocking_thread_ipc_client) => blocking_thread_ipc_client,
                 Err(e) => {
                     error!("Failed to create blocking thread IPC client: {:?}", e);
@@ -101,20 +110,13 @@ impl BitcoinCoreSv2TDP {
                 tokio::select! {
                     _ = self_clone.global_cancellation_token.cancelled() => {
                         debug!("Interrupting waitNext request");
-                        if let Err(e) = self_clone.interrupt_wait_request(&template_ipc_client).await {
-                            error!("Failed to interrupt waitNext request during shutdown: {:?}", e);
-                        }
+                        self_clone.interrupt_wait_request(&template_ipc_client);
                         warn!("Exiting mempool change monitoring loop");
                         break;
                     }
                     _ = self_clone.template_ipc_client_cancellation_token.cancelled() => {
                         debug!("Interrupting waitNext request");
-                        if let Err(e) = self_clone.interrupt_wait_request(&template_ipc_client).await {
-                            error!("Failed to interrupt waitNext request: {:?}", e);
-                            warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                            self_clone.global_cancellation_token.cancel();
-                            break;
-                        }
+                        self_clone.interrupt_wait_request(&template_ipc_client);
                         warn!("Exiting mempool change monitoring loop");
                         break;
                     }
@@ -154,10 +156,19 @@ impl BitcoinCoreSv2TDP {
                                 };
 
                                 debug!("Fetching new template data...");
-                                let new_template_data = match self_clone.fetch_template_data(
-                                    new_template_ipc_client.clone(),
-                                    blocking_thread_ipc_client.clone(),
-                                ).await {
+                                // Stop waiting once cancelled (`None`).
+                                let Some(new_template_data) = self_clone
+                                    .global_cancellation_token
+                                    .run_until_cancelled(self_clone.fetch_template_data(
+                                        new_template_ipc_client.clone(),
+                                        blocking_thread_ipc_client.clone(),
+                                    ))
+                                    .await
+                                else {
+                                    debug!("monitor_ipc_templates() exiting due to cancellation");
+                                    break;
+                                };
+                                let new_template_data = match new_template_data {
                                     Ok(new_template_data) => new_template_data,
                                     Err(e) => {
                                         error!("Failed to fetch template data: {:?}", e);
@@ -278,7 +289,17 @@ impl BitcoinCoreSv2TDP {
                             }
                             TemplateDistributionOwned::RequestTransactionData(request_transaction_data) => {
                                 debug!("Received RequestTransactionData for template_id: {}", request_transaction_data.template_id);
-                                if let Err(e) = self_clone.handle_request_transaction_data(request_transaction_data).await {
+                                let handling = self_clone.handle_request_transaction_data(request_transaction_data);
+                                // Stop waiting once cancelled (`None`).
+                                let Some(handled) = self_clone
+                                    .global_cancellation_token
+                                    .run_until_cancelled(handling)
+                                    .await
+                                else {
+                                    debug!("monitor_incoming_messages() exiting due to cancellation");
+                                    break;
+                                };
+                                if let Err(e) = handled {
                                     error!("Failed to handle request transaction data: {:?}", e);
                                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                                     self_clone.global_cancellation_token.cancel();
@@ -287,7 +308,17 @@ impl BitcoinCoreSv2TDP {
                             }
                             TemplateDistributionOwned::SubmitSolution(submit_solution) => {
                                 debug!("Received SubmitSolution for template_id: {}", submit_solution.template_id);
-                                if let Err(e) = self_clone.handle_submit_solution(submit_solution).await {
+                                let handling = self_clone.handle_submit_solution(submit_solution);
+                                // Stop waiting once cancelled (`None`).
+                                let Some(handled) = self_clone
+                                    .global_cancellation_token
+                                    .run_until_cancelled(handling)
+                                    .await
+                                else {
+                                    debug!("monitor_incoming_messages() exiting due to cancellation");
+                                    break;
+                                };
+                                if let Err(e) = handled {
                                     error!("Failed to handle submit solution: {:?}", e);
                                     // no need to activate the global cancellation token here
                                 }
@@ -318,7 +349,16 @@ impl BitcoinCoreSv2TDP {
             debug!("monitor_template_retirement() task started");
             // one thread_ipc_client serves every destroy request, rather than one per retirement
             debug!("Creating dedicated thread_ipc_client for destroy requests");
-            let thread_ipc_client = match self_clone.new_thread_ipc_client().await {
+            // Stop waiting once cancelled (`None`).
+            let Some(thread_ipc_client) = self_clone
+                .global_cancellation_token
+                .run_until_cancelled(self_clone.new_thread_ipc_client())
+                .await
+            else {
+                debug!("monitor_template_retirement() exiting due to cancellation");
+                return;
+            };
+            let thread_ipc_client = match thread_ipc_client {
                 Ok(thread_ipc_client) => thread_ipc_client,
                 Err(e) => {
                     error!("Failed to create thread IPC client: {:?}", e);
@@ -391,10 +431,18 @@ impl BitcoinCoreSv2TDP {
                     continue;
                 };
 
-                if let Err(e) = retired_template_data
-                    .destroy_ipc_client(thread_ipc_client.clone())
+                // Stop waiting once cancelled (`None`).
+                let Some(destroyed) = self_clone
+                    .global_cancellation_token
+                    .run_until_cancelled(
+                        retired_template_data.destroy_ipc_client(thread_ipc_client.clone()),
+                    )
                     .await
-                {
+                else {
+                    debug!("monitor_template_retirement() exiting due to cancellation");
+                    break;
+                };
+                if let Err(e) = destroyed {
                     error!("Failed to destroy template IPC client: {:?}", e);
                     warn!("Terminating Sv2 Bitcoin Core IPC Connection");
                     self_clone.global_cancellation_token.cancel();
