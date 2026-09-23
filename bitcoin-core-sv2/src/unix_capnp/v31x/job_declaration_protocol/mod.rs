@@ -170,7 +170,7 @@ impl BitcoinCoreSv2JDP {
             }
             _ = cancellation_token.cancelled() => {
                 debug!("Interrupting initial createNewBlock request");
-                Self::interrupt_create_new_block_request(&mining_ipc_client).await?;
+                Self::interrupt_create_new_block_request(&mining_ipc_client);
                 return Err(BitcoinCoreSv2JDPError::BootstrapCancelled);
             }
         };
@@ -248,21 +248,23 @@ impl BitcoinCoreSv2JDP {
     }
 
     /// Interrupts an in-flight `createNewBlock` request during startup shutdown.
-    async fn interrupt_create_new_block_request(
-        mining_ipc_client: &MiningIpcClient,
-    ) -> Result<(), BitcoinCoreSv2JDPError> {
-        let interrupt_request = mining_ipc_client.interrupt_request();
-        if let Err(e) = interrupt_request.send().promise.await {
-            error!("Failed to send interrupt createNewBlock request: {}", e);
-            return Err(BitcoinCoreSv2JDPError::CapnpError(e));
-        }
-
-        Ok(())
+    ///
+    /// The reply is awaited on a task of its own, so a node that has stopped answering cannot
+    /// hold the caller.
+    fn interrupt_create_new_block_request(mining_ipc_client: &MiningIpcClient) {
+        let interrupt_promise = mining_ipc_client.interrupt_request().send().promise;
+        tokio::task::spawn_local(async move {
+            if let Err(e) = interrupt_promise.await {
+                error!("Failed to send interrupt createNewBlock request: {}", e);
+            }
+        });
     }
 
     /// Main event loop - runs in a LocalSet on dedicated thread.
     ///
     /// Spawns the monitor task and processes incoming job declaration requests until shutdown.
+    /// Every request to Bitcoin Core gives way to `cancellation_token`, so a node that stops
+    /// answering cannot hold shutdown.
     pub async fn run(&self) {
         // spawn mempool mirror monitor task
         let monitor_handle = self.monitor_and_update_mempool_mirror();
@@ -283,7 +285,17 @@ impl BitcoinCoreSv2JDP {
                 request = self.incoming_requests.recv() => {
                     match request {
                         Ok(request) => {
-                            self.process_request(request).await;
+                            // Stop waiting once cancelled (`None`), so a request Bitcoin Core
+                            // never answers cannot hold shutdown.
+                            if self
+                                .cancellation_token
+                                .run_until_cancelled(self.process_request(request))
+                                .await
+                                .is_none()
+                            {
+                                info!("BitcoinCoreSv2JDP shutting down");
+                                break;
+                            }
                         }
                         Err(_) => {
                             info!("Incoming requests channel closed");
@@ -366,15 +378,17 @@ impl BitcoinCoreSv2JDP {
     }
 
     /// Interrupts the current `waitNext` request to Bitcoin Core for graceful shutdown.
-    async fn interrupt_wait_request(&self) -> Result<(), BitcoinCoreSv2JDPError> {
+    ///
+    /// The reply is awaited on a task of its own, so a node that has stopped answering cannot
+    /// hold the caller.
+    fn interrupt_wait_request(&self) {
         let template_ipc_client = self.current_template_ipc_client.borrow().clone();
 
-        let interrupt_wait_request = template_ipc_client.interrupt_wait_request();
-        if let Err(e) = interrupt_wait_request.send().promise.await {
-            error!("Failed to send interrupt wait request: {}", e);
-            return Err(BitcoinCoreSv2JDPError::CapnpError(e));
-        }
-
-        Ok(())
+        let interrupt_wait_promise = template_ipc_client.interrupt_wait_request().send().promise;
+        tokio::task::spawn_local(async move {
+            if let Err(e) = interrupt_wait_promise.await {
+                error!("Failed to send interrupt wait request: {}", e);
+            }
+        });
     }
 }

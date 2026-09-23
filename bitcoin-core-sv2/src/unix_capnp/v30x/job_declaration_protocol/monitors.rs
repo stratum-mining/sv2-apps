@@ -53,9 +53,7 @@ impl BitcoinCoreSv2JDP {
                 tokio::select! {
                     _ = self_clone.cancellation_token.cancelled() => {
                         debug!("Interrupting waitNext request");
-                        if let Err(e) = self_clone.interrupt_wait_request().await {
-                            error!("Failed to interrupt waitNext request: {:?}", e);
-                        }
+                        self_clone.interrupt_wait_request();
                         warn!("Exiting mempool mirror loop");
                         debug!("monitor_mempool_mirror() exiting due to cancellation");
                         break;
@@ -103,7 +101,16 @@ impl BitcoinCoreSv2JDP {
                                 }
 
                                 // update the mempool mirror
-                                if let Err(e) = self_clone.update_mempool_mirror().await {
+                                // Stop waiting once cancelled (`None`).
+                                let Some(updated) = self_clone
+                                    .cancellation_token
+                                    .run_until_cancelled(self_clone.update_mempool_mirror())
+                                    .await
+                                else {
+                                    debug!("monitor_mempool_mirror() exiting due to cancellation");
+                                    break;
+                                };
+                                if let Err(e) = updated {
                                     if e.is_thread_busy() {
                                         warn!(
                                             error = ?e,

@@ -22,7 +22,7 @@
 
 use async_channel::Sender;
 use integration_tests_sv2::{
-    start_bitcoin_core, start_tracing, template_provider::DifficultyLevel,
+    start_bitcoin_core, start_tracing, template_provider::DifficultyLevel, utils::join_within,
 };
 use std::time::Duration;
 use stratum_apps::{
@@ -70,6 +70,16 @@ async fn jdp_bootstrap_gives_way_to_cancellation_v31x() {
     assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+async fn jdp_runtime_gives_way_to_cancellation_v30x() {
+    assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
+}
+
+#[tokio::test]
+async fn jdp_runtime_gives_way_to_cancellation_v31x() {
+    assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
+}
+
 async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     start_tracing();
 
@@ -92,34 +102,15 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
 
     let cancellation_token = CancellationToken::new();
-    let cancellation_token_clone = cancellation_token.clone();
-    let socket_path_clone = socket_path.clone();
-
-    // Run the JDP runtime on a dedicated thread + LocalSet to match production usage.
-    let jdp_thread = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
-        let local_set = tokio::task::LocalSet::new();
-
-        local_set.block_on(&runtime, async move {
-            let jdp = job_declaration_protocol::new(
-                version,
-                socket_path_clone,
-                incoming_receiver,
-                cancellation_token_clone,
-                ready_tx,
-            )
-            .await
-            .expect("failed to initialize BitcoinCoreSv2JDP");
-
-            jdp.run().await;
-        });
-    });
-
-    // Wait until the JDP runtime has fully bootstrapped and can serve requests.
-    tokio::time::timeout(Duration::from_secs(30), ready_rx)
-        .await
-        .expect("timed out waiting for JDP readiness")
-        .expect("JDP readiness channel dropped unexpectedly");
+    let jdp_thread = spawn_jdp_thread(
+        version,
+        socket_path,
+        incoming_receiver,
+        cancellation_token.clone(),
+        ready_tx,
+        ready_rx,
+    )
+    .await;
 
     // Execute all JDP paths against the same live runtime to keep this test fully end-to-end.
     // The malformed-coinbase path runs first on purpose: every scenario after it doubles as
@@ -477,6 +468,92 @@ async fn assert_jdp_declaration_must_fit_in_a_block(
 ///
 /// No Bitcoin Core is involved: a bare Unix listener stands in for one that stalled, which is all
 /// bootstrap needs to be kept waiting.
+/// Runs the JDP runtime on a dedicated thread + LocalSet to match production usage, returning
+/// once it has bootstrapped and can serve requests.
+async fn spawn_jdp_thread(
+    version: BitcoinCoreVersion,
+    socket_path: std::path::PathBuf,
+    incoming_receiver: async_channel::Receiver<JdRequest>,
+    cancellation_token: CancellationToken,
+    ready_tx: tokio::sync::oneshot::Sender<()>,
+    ready_rx: tokio::sync::oneshot::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
+    let jdp_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
+        let local_set = tokio::task::LocalSet::new();
+
+        local_set.block_on(&runtime, async move {
+            let jdp = job_declaration_protocol::new(
+                version,
+                socket_path,
+                incoming_receiver,
+                cancellation_token,
+                ready_tx,
+            )
+            .await
+            .expect("failed to initialize BitcoinCoreSv2JDP");
+
+            jdp.run().await;
+        });
+    });
+
+    tokio::time::timeout(Duration::from_secs(30), ready_rx)
+        .await
+        .expect("timed out waiting for JDP readiness")
+        .expect("JDP readiness channel dropped unexpectedly");
+
+    jdp_thread
+}
+
+async fn assert_jdp_runtime_gives_way_to_cancellation(version: BitcoinCoreVersion) {
+    start_tracing();
+
+    let bitcoin_core = start_bitcoin_core(DifficultyLevel::Low, version);
+    let next_height = bitcoin_core
+        .get_blockchain_info()
+        .expect("failed to get blockchain info")
+        .blocks
+        + 1;
+    let next_height = u32::try_from(next_height).expect("next height should fit in u32");
+
+    let (incoming_sender, incoming_receiver) = async_channel::unbounded::<JdRequest>();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let cancellation_token = CancellationToken::new();
+    let jdp_thread = spawn_jdp_thread(
+        version,
+        bitcoin_core.ipc_socket_path(),
+        incoming_receiver,
+        cancellation_token.clone(),
+        ready_tx,
+        ready_rx,
+    )
+    .await;
+
+    // From here on Bitcoin Core answers nothing: the monitor's `waitNext` stays pending, and so
+    // does the `checkBlock` behind the declaration sent next.
+    bitcoin_core.pause();
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    incoming_sender
+        .send(JdRequest::DeclareMiningJob {
+            version: BlockVersion::from_consensus(0x2000_0000),
+            coinbase_tx: build_valid_coinbase_tx(next_height),
+            wtxid_list: vec![],
+            missing_txs: vec![],
+            response_tx,
+        })
+        .await
+        .expect("failed to send DeclareMiningJob request");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !jdp_thread.is_finished(),
+        "the runtime must outlive a node that merely stops answering"
+    );
+
+    cancellation_token.cancel();
+    join_within(jdp_thread, Duration::from_secs(10)).await;
+    bitcoin_core.resume();
+}
+
 async fn assert_jdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVersion) {
     let socket_path = std::env::temp_dir().join(format!(
         "jdp-stalled-peer-{}-{version:?}.sock",
