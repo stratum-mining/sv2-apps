@@ -2,8 +2,9 @@
 //! capnp over UNIX socket.
 
 use crate::unix_capnp::{
-    MAX_SAME_TIP_TEMPLATES, MIN_BLOCK_RESERVED_WEIGHT, STALE_TEMPLATE_GRACE_PERIOD_SECS,
-    WEIGHT_FACTOR, v30x::template_distribution_protocol::template_data::TemplateData,
+    INTERRUPT_REPLY_TIMEOUT_MS, MAX_SAME_TIP_TEMPLATES, MIN_BLOCK_RESERVED_WEIGHT,
+    STALE_TEMPLATE_GRACE_PERIOD_SECS, WEIGHT_FACTOR,
+    v30x::template_distribution_protocol::template_data::TemplateData,
 };
 use async_channel::{Receiver, Sender};
 use bitcoin_capnp_types::{
@@ -230,7 +231,8 @@ impl BitcoinCoreSv2TDP {
     /// - incoming [`CoinbaseOutputConstraints`] messages, for which it will update the coinbase
     ///   output constraints
     ///
-    /// Blocks until the cancellation token is activated.
+    /// Blocks until the cancellation token is activated. Every request to Bitcoin Core gives way
+    /// to it, so a node that stops answering cannot hold shutdown.
     pub async fn run(&mut self) {
         // wait for first CoinbaseOutputConstraints message
         info!("Waiting for first CoinbaseOutputConstraints message");
@@ -263,10 +265,11 @@ impl BitcoinCoreSv2TDP {
                                     );
                                     break;
                                 }
-                                Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted) => {
-                                    debug!(
-                                        "Initial createNewBlock request interrupted during shutdown"
-                                    );
+                                Err(
+                                    BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted
+                                    | BitcoinCoreSv2TDPError::BootstrapCancelled,
+                                ) => {
+                                    debug!("Initial template bootstrap interrupted during shutdown");
                                     return;
                                 }
                                 Err(e) => {
@@ -603,13 +606,19 @@ impl BitcoinCoreSv2TDP {
         })?;
 
         debug!("Fetching template data from bootstrapped template IPC client");
-        let template_data = self
-            .fetch_template_data(template_ipc_client.clone(), self.thread_ipc_client.clone())
-            .await
-            .map_err(|e| {
-                error!("Failed to fetch template data: {:?}", e);
-                e
-            })?;
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let template_data =
+            self.global_cancellation_token
+                .run_until_cancelled(self.fetch_template_data(
+                    template_ipc_client.clone(),
+                    self.thread_ipc_client.clone(),
+                ))
+                .await
+                .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)?
+                .map_err(|e| {
+                    error!("Failed to fetch template data: {:?}", e);
+                    e
+                })?;
 
         self.publish_template(template_data, true, true, true)
             .await?;
@@ -618,17 +627,23 @@ impl BitcoinCoreSv2TDP {
         Ok(())
     }
 
-    async fn interrupt_wait_request(
-        &self,
-        template_ipc_client: &BlockTemplateIpcClient,
-    ) -> Result<(), BitcoinCoreSv2TDPError> {
-        let interrupt_wait_request = template_ipc_client.interrupt_wait_request();
-        if let Err(e) = interrupt_wait_request.send().promise.await {
-            error!("Failed to send interrupt wait request: {}", e);
-            return Err(BitcoinCoreSv2TDPError::FailedToSendInterruptWaitRequest);
+    /// Interrupts the in-flight `waitNext` request on `template_ipc_client`.
+    ///
+    /// Awaiting the reply is what delivers the interrupt: `send()` only queues it, and the bytes
+    /// reach Bitcoin Core when the `RpcSystem` task next runs. The wait is bounded by
+    /// `INTERRUPT_REPLY_TIMEOUT_MS` so a node that has stopped answering cannot hold shutdown.
+    async fn interrupt_wait_request(&self, template_ipc_client: &BlockTemplateIpcClient) {
+        let interrupt_wait_promise = template_ipc_client.interrupt_wait_request().send().promise;
+        match tokio::time::timeout(
+            Duration::from_millis(INTERRUPT_REPLY_TIMEOUT_MS),
+            interrupt_wait_promise,
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => error!("Failed to send interrupt wait request: {}", e),
+            Err(_) => error!("Bitcoin Core did not answer the waitNext interrupt in time"),
         }
-
-        Ok(())
     }
 
     async fn new_wait_next_request(
