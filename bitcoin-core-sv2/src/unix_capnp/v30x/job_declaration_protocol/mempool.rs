@@ -42,7 +42,7 @@ pub enum ResolveError {
 /// Local cache of mempool transactions and current template parameters.
 ///
 /// Tracks transactions by wtxid and maintains the current prev_hash, nbits,
-/// and min_ntime from the most recent block template.
+/// and ntime from the most recent block template.
 ///
 /// The transactions are Bitcoin Core's current template plus a bounded carry-over of what Core
 /// vouched for earlier at the same chain tip, whether in a previous template or by accepting a
@@ -52,7 +52,7 @@ pub struct MempoolMirror {
     txdata: HashMap<Wtxid, Transaction>,
     current_prev_hash: Option<BlockHash>,
     current_nbits: Option<CompactTarget>,
-    current_min_ntime: Option<u32>,
+    current_ntime: Option<u32>,
 }
 
 impl MempoolMirror {
@@ -96,7 +96,7 @@ impl MempoolMirror {
 
         self.current_prev_hash = Some(prev_hash);
         self.current_nbits = Some(block.header.bits);
-        self.current_min_ntime = Some(block.header.time);
+        self.current_ntime = Some(block.header.time);
     }
 
     /// Commits transactions into the mempool mirror, up to [`MAX_MIRROR_WEIGHT`].
@@ -188,9 +188,9 @@ impl MempoolMirror {
         self.current_nbits
     }
 
-    /// Returns the current template's minimum timestamp (min_ntime).
-    pub fn get_current_min_ntime(&self) -> Option<u32> {
-        self.current_min_ntime
+    /// Returns the current template's ntime.
+    pub fn get_current_ntime(&self) -> Option<u32> {
+        self.current_ntime
     }
 }
 
