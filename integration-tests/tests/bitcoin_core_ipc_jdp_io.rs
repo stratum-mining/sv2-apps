@@ -62,6 +62,12 @@ async fn jdp_io_integration_v31x() {
 }
 
 #[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_io_integration_v32x() {
+    assert_jdp_io_integration_for_version(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
 async fn jdp_bootstrap_gives_way_to_cancellation_v30x() {
     assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
 }
@@ -72,6 +78,12 @@ async fn jdp_bootstrap_gives_way_to_cancellation_v31x() {
 }
 
 #[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_bootstrap_gives_way_to_cancellation_v32x() {
+    assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
 async fn jdp_runtime_gives_way_to_cancellation_v30x() {
     assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
 }
@@ -79,6 +91,12 @@ async fn jdp_runtime_gives_way_to_cancellation_v30x() {
 #[tokio::test]
 async fn jdp_runtime_gives_way_to_cancellation_v31x() {
     assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_runtime_gives_way_to_cancellation_v32x() {
+    assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
 }
 
 async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
