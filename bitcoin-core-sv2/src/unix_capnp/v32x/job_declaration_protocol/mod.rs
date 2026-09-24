@@ -59,6 +59,7 @@ mod monitors;
 pub struct BitcoinCoreSv2JDP {
     thread_map: ThreadMapIpcClient,
     thread_ipc_client: ThreadIpcClient,
+    submit_block_thread_ipc_client: ThreadIpcClient,
     mining_ipc_client: MiningIpcClient,
     current_template_ipc_client: Rc<RefCell<BlockTemplateIpcClient>>,
     cancellation_token: CancellationToken,
@@ -136,6 +137,20 @@ impl BitcoinCoreSv2JDP {
 
         info!("IPC execution thread client successfully created.");
 
+        // A dedicated IPC execution thread for `submitBlock`, so a solved block never queues
+        // behind the chain-tip monitor's header refresh, the one request on the shared thread
+        // that can be in flight alongside it.
+        let submit_block_thread_request = thread_map.make_thread_request();
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let submit_block_thread_response = cancellation_token
+            .run_until_cancelled(submit_block_thread_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)??;
+        let submit_block_thread_ipc_client: ThreadIpcClient =
+            submit_block_thread_response.get()?.get_result()?;
+
+        info!("IPC submitBlock thread client successfully created.");
+
         let mut mining_client_request = bootstrap_client.make_mining_request();
         mining_client_request
             .get()
@@ -195,6 +210,7 @@ impl BitcoinCoreSv2JDP {
         let self_ = Self {
             thread_map,
             thread_ipc_client,
+            submit_block_thread_ipc_client,
             mining_ipc_client,
             current_template_ipc_client: Rc::new(RefCell::new(template_ipc_client)),
             cancellation_token,
@@ -292,7 +308,7 @@ impl BitcoinCoreSv2JDP {
 
                 // Process incoming requests.
                 // Requests are handled sequentially because this loop awaits each request before
-                // reading the next one.
+                // reading the next one, so a PushSolution waits for every request ahead of it.
                 // Pending requests are unboundedly buffered in the async_channel.
                 request = self.incoming_requests.recv() => {
                     match request {
@@ -383,8 +399,8 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { push_solution } => {
-                self.handle_push_solution(push_solution).await;
+            JdRequest::PushSolution { block } => {
+                self.handle_push_solution(block).await;
             }
         }
     }
