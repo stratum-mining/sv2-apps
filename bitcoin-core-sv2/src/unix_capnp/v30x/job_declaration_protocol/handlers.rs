@@ -353,7 +353,7 @@ impl BitcoinCoreSv2JDP {
                 // ahead of the tip is a non-final transaction: bad-txns-nonfinal. One from behind
                 // the tip is final and fails the height check instead: bad-cb-height. All three
                 // are stale-chain-tip; every other reason is the declaration's own fault. The
-                // strings are the same across the 30.x and 31.x lines this crate supports.
+                // strings are the same across the 30.x through 32.x lines this crate supports.
                 //
                 // bad-txns-nonfinal is not specific to the coinbase: Core checks finality for
                 // every transaction in the block. A mempool holds no non-final transaction, and a
