@@ -23,8 +23,8 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            self, BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
-            block::Version,
+            self, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
+            block::{Header, Version},
             consensus::{Decodable, Encodable},
             hashes::Hash,
         },
@@ -56,6 +56,10 @@ use stratum_apps::{
     utils::types::{DownstreamId, JdToken, RequestId},
 };
 
+// Accept version rolling in PushSolution by ignoring these bits when comparing with the
+// declared job version.
+const PUSH_SOLUTION_VERSION_ROLLING_MASK: u32 = 0x1fff_ffe0;
+
 /// Snapshot of a previously declared mining job, stored after a `DeclareMiningJob` is
 /// successfully validated (or while waiting for missing transactions).
 ///
@@ -80,6 +84,9 @@ struct AllocatedTokenEntry {
 struct DownstreamState {
     declared_custom_jobs: HashMap<RequestId, DeclaredCustomJob>,
     allocated_token_entries: HashMap<JdToken, AllocatedTokenEntry>,
+    /// Latest job accepted via `SetCustomMiningJob`, kept so a later `PushSolution` can
+    /// rebuild the solved block from it.
+    active_custom_job: Option<DeclaredCustomJob>,
 }
 
 impl DownstreamState {
@@ -159,14 +166,15 @@ impl DeclaredCustomJob {
         self.validation_context.prev_hash
     }
 
-    /// Reconstructs the declared coinbase transaction by concatenating prefix, extranonce (zeros),
-    /// and suffix.
+    /// Reconstructs the declared coinbase transaction by concatenating prefix, extranonce, and
+    /// suffix. Validation call sites pass `None` to fill the extranonce with zeros; a
+    /// `PushSolution` passes the solved extranonce.
     ///
     /// The extranonce size is calculated from the scriptSig size in the coinbase_tx_prefix
     ///
     /// Error type is () because we don't need extra granularity for error_code =
     /// "invalid-coinbase-tx"
-    fn get_coinbase_tx(&self) -> Result<Transaction, ()> {
+    fn get_coinbase_tx(&self, extranonce: Option<&[u8]>) -> Result<Transaction, ()> {
         let declared_coinbase_tx_prefix: Vec<u8> =
             self.declare_mining_job.coinbase_tx_prefix.to_owned_bytes();
         let declared_coinbase_tx_suffix: Vec<u8> =
@@ -199,10 +207,24 @@ impl DeclaredCustomJob {
         // The full extranonce fills the remaining space in scriptSig
         let full_extranonce_size: usize = script_sig_size - script_sig_bytes_in_prefix;
 
-        // Concatenate prefix + full extranonce (zeros) + suffix to form the complete transaction
-        // bytes
+        let extranonce_bytes = match extranonce {
+            Some(bytes) => {
+                if bytes.len() != full_extranonce_size {
+                    tracing::error!(
+                        "PushSolution extranonce size mismatch: expected {}, got {}",
+                        full_extranonce_size,
+                        bytes.len()
+                    );
+                    return Err(());
+                }
+                bytes.to_vec()
+            }
+            None => vec![0; full_extranonce_size],
+        };
+
+        // Concatenate prefix + extranonce + suffix to form the complete transaction bytes.
         let mut declared_coinbase_tx = declared_coinbase_tx_prefix;
-        declared_coinbase_tx.extend_from_slice(&vec![0; full_extranonce_size]);
+        declared_coinbase_tx.extend_from_slice(&extranonce_bytes);
         declared_coinbase_tx.extend_from_slice(&declared_coinbase_tx_suffix);
 
         // Deserialize the transaction
@@ -234,7 +256,7 @@ impl DeclaredCustomJob {
         let txdata = self.txdata.as_ref().ok_or(())?;
 
         let coinbase_tx = self
-            .get_coinbase_tx()
+            .get_coinbase_tx(None)
             .expect("coinbase tx already validated");
         let coinbase_txid: TxMerkleNode = coinbase_tx.compute_txid().into();
 
@@ -525,7 +547,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 validated: false, // irrelevant for coinbase tx validation
             };
 
-            match temp_job.get_coinbase_tx() {
+            match temp_job.get_coinbase_tx(None) {
                 Ok(tx) => {
                     tracing::debug!("Declared coinbase transaction validated successfully");
                     tx
@@ -721,13 +743,106 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         downstream_id: DownstreamId,
         push_solution: PushSolutionOwned,
     ) {
-        // Convert to static lifetime for channel transfer
-        let push_solution_static = push_solution;
+        let prev_hash = BlockHash::from_byte_array(push_solution.prev_hash.to_array());
 
-        // Send request to BitcoinCoreSv2JDP (fire-and-forget)
-        let request = JdRequest::PushSolution {
-            push_solution: push_solution_static,
+        // Validate PushSolution fields and consume the matching active custom job atomically.
+        // prev_hash and nbits must match exactly; version is matched on non-rollable bits only.
+        let active_job = self
+            .downstream_states
+            .with_mut(&downstream_id, |state| {
+                let (declared_prev_hash, declared_nbits, declared_version) =
+                    match state.active_custom_job.as_ref() {
+                        Some(active_job) => (
+                            active_job.get_prev_hash(),
+                            active_job.get_nbits(),
+                            active_job.get_version(),
+                        ),
+                        None => {
+                            tracing::error!(
+                                downstream_id,
+                                "No active custom job found for PushSolution"
+                            );
+                            return None;
+                        }
+                    };
+
+                let declared_fixed_version_bits =
+                    declared_version & !PUSH_SOLUTION_VERSION_ROLLING_MASK;
+                let solved_fixed_version_bits =
+                    push_solution.version & !PUSH_SOLUTION_VERSION_ROLLING_MASK;
+
+                if prev_hash != declared_prev_hash
+                    || push_solution.nbits != declared_nbits
+                    || solved_fixed_version_bits != declared_fixed_version_bits
+                {
+                    tracing::error!(
+                        downstream_id,
+                        expected_prev_hash = ?declared_prev_hash,
+                        expected_nbits = declared_nbits,
+                        expected_fixed_version_bits = declared_fixed_version_bits,
+                        got_prev_hash = ?prev_hash,
+                        got_nbits = push_solution.nbits,
+                        got_fixed_version_bits = solved_fixed_version_bits,
+                        "Ignoring PushSolution that does not match the latest declared custom job"
+                    );
+                    return None;
+                }
+
+                state.active_custom_job.take()
+            })
+            .flatten();
+
+        let Some(active_job) = active_job else {
+            return;
         };
+
+        let mut txdata = match active_job.txdata.clone() {
+            Some(txdata) => txdata,
+            None => {
+                tracing::error!(
+                    downstream_id,
+                    "Active custom job is missing transaction data"
+                );
+                return;
+            }
+        };
+
+        let coinbase_tx = match active_job.get_coinbase_tx(Some(push_solution.extranonce.as_ref()))
+        {
+            Ok(coinbase_tx) => coinbase_tx,
+            Err(_) => {
+                tracing::error!(
+                    downstream_id,
+                    "Failed to reconstruct solved coinbase transaction"
+                );
+                return;
+            }
+        };
+
+        txdata.insert(0, coinbase_tx);
+
+        let mut block = Block {
+            header: Header {
+                version: Version::from_consensus(push_solution.version as i32),
+                prev_blockhash: active_job.get_prev_hash(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: push_solution.ntime,
+                bits: CompactTarget::from_consensus(push_solution.nbits),
+                nonce: push_solution.nonce,
+            },
+            txdata,
+        };
+
+        let Some(merkle_root) = block.compute_merkle_root() else {
+            tracing::error!(
+                downstream_id,
+                "Failed to compute merkle root for PushSolution block"
+            );
+            return;
+        };
+        block.header.merkle_root = merkle_root;
+
+        let request = JdRequest::PushSolution { block };
 
         if let Err(e) = self.request_sender.send(request).await {
             tracing::error!(downstream_id, "Failed to send PushSolution request: {}", e);
@@ -836,7 +951,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
         // validate coinbase tx
         {
-            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx() {
+            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx(None) {
                 Ok(tx) => tx,
                 Err(_) => {
                     return SetCustomMiningJobResult::Error(
@@ -928,6 +1043,28 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MERKLE_PATH,
                 );
             }
+        }
+
+        // The validated job survives as the downstream's active custom job, so a later
+        // PushSolution can rebuild the solved block from it. `with_mut` only: if the
+        // downstream state was cleaned up by a disconnect while validating, do not recreate it.
+        let stored = self.downstream_states.with_mut(&downstream_id, |state| {
+            if state
+                .active_custom_job
+                .replace(declared_custom_job.clone())
+                .is_some()
+            {
+                tracing::debug!(
+                    downstream_id,
+                    "Replaced previous active custom job with newer SetCustomMiningJob"
+                );
+            }
+        });
+        if stored.is_none() {
+            tracing::debug!(
+                downstream_id,
+                "Downstream state gone before SetCustomMiningJob could store the active job"
+            );
         }
 
         SetCustomMiningJobResult::Success

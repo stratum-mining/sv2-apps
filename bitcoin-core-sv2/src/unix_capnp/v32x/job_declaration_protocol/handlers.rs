@@ -2,7 +2,9 @@
 
 use crate::{
     runtime_api::job_declaration_protocol::io::{JdResponse, ValidationContext},
-    unix_capnp::v32x::job_declaration_protocol::{BitcoinCoreSv2JDP, mempool::ResolveError},
+    unix_capnp::v32x::job_declaration_protocol::{
+        BitcoinCoreSv2JDP, error::BitcoinCoreSv2JDPError, mempool::ResolveError,
+    },
 };
 use std::collections::{HashMap, HashSet};
 use stratum_core::{
@@ -16,7 +18,6 @@ use stratum_core::{
         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-        PushSolutionOwned,
     },
 };
 use tokio::sync::oneshot;
@@ -27,6 +28,12 @@ use tracing::{debug, error, info, warn};
 /// A declared job that weighs more than this can never be mined, so it is rejected before the
 /// block is even assembled.
 const MAX_BLOCK_WEIGHT: u64 = Weight::MAX_BLOCK.to_wu();
+
+/// Max attempts for `submitBlock` retries on transient "thread busy" IPC contention.
+const MAX_SUBMIT_BLOCK_ATTEMPTS: usize = 3;
+
+/// Backoff between `submitBlock` retry attempts (in milliseconds).
+const SUBMIT_BLOCK_RETRY_BACKOFF_MS: u64 = 15;
 
 /// The most transactions a declared job can list.
 ///
@@ -392,11 +399,103 @@ impl BitcoinCoreSv2JDP {
         let _ = response_tx.send(response);
     }
 
-    /// Submits a mining solution to Bitcoin Core.
+    /// Submits a solved block to Bitcoin Core via `submitBlock`.
     ///
-    /// Not yet implemented — deliberately left as a stub for future work.
-    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolutionOwned) {
-        // todo
+    /// The request runs on a dedicated IPC execution thread, so a solved block is never queued
+    /// behind mempool monitoring; transient "thread busy" contention is retried a few times
+    /// before the connection is torn down.
+    pub(crate) async fn handle_push_solution(&self, block: Block) {
+        let block_bytes: Vec<u8> = serialize(&block);
+        debug!(
+            block_bytes_len = block_bytes.len(),
+            tx_count = block.txdata.len(),
+            "Submitting solved block via submitBlock"
+        );
+
+        for attempt in 1..=MAX_SUBMIT_BLOCK_ATTEMPTS {
+            let mut submit_block_request = self.mining_ipc_client.submit_block_request();
+
+            match submit_block_request.get().get_context() {
+                Ok(mut context) => context.set_thread(self.submit_block_thread_ipc_client.clone()),
+                Err(e) => {
+                    error!("Failed to set submitBlock request thread context: {e}");
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            }
+
+            submit_block_request.get().set_block(&block_bytes);
+
+            let submit_block_response = match submit_block_request.send().promise.await {
+                Ok(response) => response,
+                Err(e) => {
+                    let err: BitcoinCoreSv2JDPError = e.into();
+                    if err.is_thread_busy() && attempt < MAX_SUBMIT_BLOCK_ATTEMPTS {
+                        warn!(
+                            attempt,
+                            max_attempts = MAX_SUBMIT_BLOCK_ATTEMPTS,
+                            "Transient IPC contention during submitBlock (thread busy); retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            SUBMIT_BLOCK_RETRY_BACKOFF_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+
+                    error!("Failed to send submitBlock request: {err:?}");
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            let submit_block_result = match submit_block_response.get() {
+                Ok(result) => result,
+                Err(e) => {
+                    let err: BitcoinCoreSv2JDPError = e.into();
+                    if err.is_thread_busy() && attempt < MAX_SUBMIT_BLOCK_ATTEMPTS {
+                        warn!(
+                            attempt,
+                            max_attempts = MAX_SUBMIT_BLOCK_ATTEMPTS,
+                            "Transient IPC contention while reading submitBlock response \
+                             (thread busy); retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            SUBMIT_BLOCK_RETRY_BACKOFF_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+
+                    error!("Failed to get submitBlock result: {err:?}");
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            let accepted = submit_block_result.get_result();
+            let reason = submit_block_result.get_reason();
+            let debug_msg = submit_block_result.get_debug();
+
+            if accepted {
+                info!(
+                    reason = ?reason,
+                    debug = ?debug_msg,
+                    "Bitcoin Core accepted block via submitBlock"
+                );
+            } else {
+                warn!(
+                    reason = ?reason,
+                    debug = ?debug_msg,
+                    "Bitcoin Core rejected block via submitBlock"
+                );
+            }
+
+            return;
+        }
     }
 }
 

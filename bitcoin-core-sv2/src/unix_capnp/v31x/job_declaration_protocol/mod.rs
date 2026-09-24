@@ -52,8 +52,8 @@ mod monitors;
 /// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::Success`] response with current
 /// template parameters is sent.
 ///
-/// Incoming [`JdRequest::PushSolution`] requests are used to submit mining solutions to Bitcoin
-/// Core.
+/// Incoming [`JdRequest::PushSolution`] requests are logged and discarded: propagating them
+/// requires the `submitBlock` IPC method, which Bitcoin Core only exposes from v32 on.
 #[derive(Clone)]
 pub struct BitcoinCoreSv2JDP {
     thread_map: ThreadMapIpcClient,
@@ -372,8 +372,8 @@ impl BitcoinCoreSv2JDP {
             }
 
             // Handle PushSolution requests (no response needed)
-            JdRequest::PushSolution { push_solution } => {
-                self.handle_push_solution(push_solution).await;
+            JdRequest::PushSolution { block } => {
+                self.handle_push_solution(block).await;
             }
         }
     }

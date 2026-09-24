@@ -16,7 +16,6 @@ use stratum_core::{
         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-        PushSolutionOwned,
     },
 };
 use tokio::sync::oneshot;
@@ -392,11 +391,16 @@ impl BitcoinCoreSv2JDP {
         let _ = response_tx.send(response);
     }
 
-    /// Submits a mining solution to Bitcoin Core.
+    /// Logs and discards a solved block.
     ///
-    /// Not yet implemented — deliberately left as a stub for future work.
-    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolutionOwned) {
-        // todo
+    /// Propagating it requires the `submitBlock` IPC method, which Bitcoin Core only exposes
+    /// from v32 on.
+    pub(crate) async fn handle_push_solution(&self, block: Block) {
+        warn!(
+            block_hash = %block.block_hash(),
+            "Discarding PushSolution block: Bitcoin Core v31.x IPC has no submitBlock \
+             method; run a v32.x node to propagate solutions declared through jd-server"
+        );
     }
 }
 
