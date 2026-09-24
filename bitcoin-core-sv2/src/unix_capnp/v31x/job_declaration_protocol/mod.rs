@@ -95,6 +95,7 @@ impl BitcoinCoreSv2JDP {
                     e.to_string(),
                 )
             })?;
+        crate::unix_capnp::log_peer_uid(&stream);
         let (reader, writer) = stream.into_split();
         let reader_compat = reader.compat();
         let writer_compat = writer.compat_write();
