@@ -1,0 +1,890 @@
+//! Module for interacting with Bitcoin Core v32.x via Sv2 Template Distribution Protocol via
+//! capnp over UNIX socket.
+
+use crate::unix_capnp::{
+    MAX_SAME_TIP_TEMPLATES, MIN_BLOCK_RESERVED_WEIGHT, STALE_TEMPLATE_GRACE_PERIOD_SECS,
+    WEIGHT_FACTOR, v32x::template_distribution_protocol::template_data::TemplateData,
+};
+use async_channel::{Receiver, Sender};
+use bitcoin_capnp_types::{
+    capnp,
+    capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty},
+    init_capnp::init::Client as InitIpcClient,
+    mining_capnp::{
+        block_template::{
+            Client as BlockTemplateIpcClient, wait_next_params::Owned as WaitNextParams,
+            wait_next_results::Owned as WaitNextResults,
+        },
+        coinbase_tx,
+        mining::Client as MiningIpcClient,
+    },
+    proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
+};
+use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
+use capnp::capability::Request;
+use error::BitcoinCoreSv2TDPError;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
+use stratum_core::{
+    binary_sv2::U256Owned,
+    bitcoin::{
+        OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+        absolute::LockTime,
+        block::Header,
+        consensus::{Decodable, deserialize},
+        transaction::Version as TransactionVersion,
+    },
+    parsers_sv2::TemplateDistributionOwned,
+    template_distribution_sv2::CoinbaseOutputConstraintsOwned,
+};
+
+use std::sync::RwLock;
+use tokio::{net::UnixStream, task::JoinHandle};
+use tokio_util::compat::*;
+pub use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
+
+pub mod error;
+mod handlers;
+mod monitors;
+mod template_data;
+
+/// The main abstraction for interacting with Bitcoin Core via Sv2 Template Distribution Protocol.
+///
+/// It is instantiated with:
+/// - A `&`[`std::path::Path`] to the Bitcoin Core UNIX socket
+/// - A `u64` for the fee delta threshold in satoshis
+/// - A `u8` for the minimum interval in seconds between mempool-driven template updates (chain tip
+///   updates are never throttled)
+/// - A [`async_channel::Receiver`] for incoming [`TemplateDistribution`] messages (handles
+///   [`CoinbaseOutputConstraints`],
+///   [`stratum_core::template_distribution_sv2::RequestTransactionData`], and
+///   [`stratum_core::template_distribution_sv2::SubmitSolution`])
+/// - A [`async_channel::Sender`] for outgoing [`TemplateDistribution`] messages
+/// - A [`tokio_util::sync::CancellationToken`] to stop the internally spawned tasks
+///
+/// The instance waits for the first [`CoinbaseOutputConstraints`] message to be received via the
+/// incoming channel before initializing the template IPC client. Upon receiving this message and
+/// successfully initializing, the [`BitcoinCoreSv2TDP`] instance sends a `NewTemplate` followed by
+/// a corresponding `SetNewPrevHash` message over the outgoing channel.
+///
+/// As configured via `fee_threshold`, the [`BitcoinCoreSv2TDP`] instance will monitor the mempool
+/// for changes and send a `NewTemplate` message if the fee delta is greater than the configured
+/// threshold.
+///
+/// When there's a new Chain Tip, the [`BitcoinCoreSv2TDP`] instance will send a `NewTemplate`
+/// followed by a corresponding `SetNewPrevHash` message over the outgoing channel.
+///
+/// Incoming [`stratum_core::template_distribution_sv2::RequestTransactionData`] messages are used
+/// to request transactions relative to a specific template, for which a corresponding
+/// `RequestTransactionDataSuccess` or `RequestTransactionDataError` message is sent over the
+/// outgoing channel.
+///
+/// Incoming [`stratum_core::template_distribution_sv2::SubmitSolution`] messages are used to submit
+/// solutions to a specific template.
+///
+/// Templates are retired as they are superseded. A new Chain Tip, or a new
+/// [`CoinbaseOutputConstraints`], retires every template that came before it, while at an
+/// unchanged Chain Tip only a bounded number of the most recent ones is kept. A retired template
+/// answers `RequestTransactionDataError` with `stale-template-id` from the moment it is
+/// superseded, and is destroyed after a grace period. Until then it still completes requests
+/// already in flight, and still accepts solutions, which Bitcoin Core judges on its own terms.
+#[derive(Clone)]
+pub struct BitcoinCoreSv2TDP {
+    fee_threshold: u64,
+    min_interval: u8,
+    thread_map: ThreadMapIpcClient,
+    thread_ipc_client: ThreadIpcClient,
+    mining_ipc_client: MiningIpcClient,
+    monitor_ipc_templates_handle: Rc<RefCell<Option<JoinHandle<()>>>>,
+    current_template_ipc_client: Rc<RefCell<Option<BlockTemplateIpcClient>>>,
+    current_prev_hash: Rc<RefCell<Option<U256Owned>>>,
+    template_data: Rc<RwLock<HashMap<u64, TemplateData>>>,
+    stale_template_ids: Rc<RwLock<HashSet<u64>>>,
+    template_retirement_sender: Sender<(u64, Instant)>,
+    template_retirement_receiver: Receiver<(u64, Instant)>,
+    template_id_factory: Rc<AtomicU64>,
+    incoming_messages: Receiver<TemplateDistributionOwned>,
+    outgoing_messages: Sender<TemplateDistributionOwned>,
+    global_cancellation_token: CancellationToken,
+    template_ipc_client_cancellation_token: CancellationToken,
+    last_sent_template_instant: Option<Instant>,
+    unix_socket_path: PathBuf,
+}
+
+impl BitcoinCoreSv2TDP {
+    /// Creates a new [`BitcoinCoreSv2TDP`] instance.
+    ///
+    /// Every bootstrap request gives way to `global_cancellation_token`, so a peer that stops
+    /// answering cannot hold it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new<P>(
+        bitcoin_core_unix_socket_path: P,
+        fee_threshold: u64,
+        min_interval: u8,
+        incoming_messages: Receiver<TemplateDistributionOwned>,
+        outgoing_messages: Sender<TemplateDistributionOwned>,
+        global_cancellation_token: CancellationToken,
+    ) -> Result<Self, BitcoinCoreSv2TDPError>
+    where
+        P: AsRef<Path>,
+    {
+        let bitcoin_core_unix_socket_path = bitcoin_core_unix_socket_path.as_ref();
+        info!(
+            "Creating new BitcoinCoreSv2TDP via IPC over UNIX socket: {}",
+            bitcoin_core_unix_socket_path.display()
+        );
+
+        let stream = UnixStream::connect(bitcoin_core_unix_socket_path)
+            .await
+            .map_err(|e| {
+                BitcoinCoreSv2TDPError::CannotConnectToUnixSocket(
+                    bitcoin_core_unix_socket_path.into(),
+                    e.to_string(),
+                )
+            })?;
+        crate::unix_capnp::log_peer_uid(&stream);
+        let (reader, writer) = stream.into_split();
+        let reader_compat = reader.compat();
+        let writer_compat = writer.compat_write();
+
+        let rpc_network = Box::new(twoparty::VatNetwork::new(
+            reader_compat,
+            writer_compat,
+            rpc_twoparty_capnp::Side::Client,
+            Default::default(),
+        ));
+
+        let mut rpc_system = RpcSystem::new(rpc_network, None);
+        let bootstrap_client: InitIpcClient =
+            rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
+
+        tokio::task::spawn_local(rpc_system);
+
+        // Stop waiting once cancelled, so a silent peer can't block shutdown: `None` means
+        // cancelled, the second `?` is the request's own error.
+        let construct_response = global_cancellation_token
+            .run_until_cancelled(bootstrap_client.construct_request().send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)??;
+
+        let thread_map: ThreadMapIpcClient = construct_response.get()?.get_thread_map()?;
+        let thread_request = thread_map.make_thread_request();
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let thread_response = global_cancellation_token
+            .run_until_cancelled(thread_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)??;
+
+        let thread_ipc_client: ThreadIpcClient = thread_response.get()?.get_result()?;
+
+        info!("IPC execution thread client successfully created.");
+
+        let mut mining_client_request = bootstrap_client.make_mining_request();
+        mining_client_request
+            .get()
+            .get_context()?
+            .set_thread(thread_ipc_client.clone());
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let mining_client_response = global_cancellation_token
+            .run_until_cancelled(mining_client_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)??;
+        let mining_ipc_client: MiningIpcClient = mining_client_response.get()?.get_result()?;
+
+        info!("IPC mining client successfully created.");
+
+        let template_ipc_client_cancellation_token = CancellationToken::new();
+
+        let (template_retirement_sender, template_retirement_receiver) = async_channel::unbounded();
+
+        Ok(Self {
+            fee_threshold,
+            min_interval,
+            thread_map,
+            thread_ipc_client,
+            mining_ipc_client,
+            monitor_ipc_templates_handle: Rc::new(RefCell::new(None)),
+            template_id_factory: Rc::new(AtomicU64::new(0)),
+            current_template_ipc_client: Rc::new(RefCell::new(None)),
+            current_prev_hash: Rc::new(RefCell::new(None)),
+            template_data: Rc::new(RwLock::new(HashMap::new())),
+            stale_template_ids: Rc::new(RwLock::new(HashSet::new())),
+            template_retirement_sender,
+            template_retirement_receiver,
+            global_cancellation_token,
+            incoming_messages,
+            outgoing_messages,
+            template_ipc_client_cancellation_token,
+            last_sent_template_instant: None,
+            unix_socket_path: bitcoin_core_unix_socket_path.to_path_buf(),
+        })
+    }
+
+    /// Runs the [`BitcoinCoreSv2TDP`] instance, monitoring for:
+    /// - Chain Tip changes, for which it will send a `NewTemplate` message, followed by a
+    ///   `SetNewPrevHash` message
+    /// - incoming [`stratum_core::template_distribution_sv2::RequestTransactionData`] messages, for
+    ///   which it will send a `RequestTransactionDataSuccess` or `RequestTransactionDataError`
+    ///   message as a response
+    /// - incoming [`stratum_core::template_distribution_sv2::SubmitSolution`] messages, for which
+    ///   it will submit the solution to the Bitcoin Core IPC client
+    /// - incoming [`CoinbaseOutputConstraints`] messages, for which it will update the coinbase
+    ///   output constraints
+    ///
+    /// Blocks until the cancellation token is activated. Every request to Bitcoin Core gives way
+    /// to it, so a node that stops answering cannot hold shutdown.
+    pub async fn run(&mut self) {
+        // wait for first CoinbaseOutputConstraints message
+        info!("Waiting for first CoinbaseOutputConstraints message");
+        debug!("run() started, waiting for initial CoinbaseOutputConstraints");
+        loop {
+            tokio::select! {
+                _ = self.global_cancellation_token.cancelled() => {
+                    warn!("Exiting run");
+                    debug!("run() early exit - global cancellation token activated before first CoinbaseOutputConstraints");
+                    return;
+                }
+                Ok(message) = self.incoming_messages.recv() => {
+                    debug!("run() received message during initial loop: {:?}", message);
+                    match message {
+                        TemplateDistributionOwned::CoinbaseOutputConstraints(coinbase_output_constraints) => {
+                            info!("Received: {:?}", coinbase_output_constraints);
+                            debug!("First CoinbaseOutputConstraints received - max_additional_size: {}, max_additional_sigops: {}",
+                                coinbase_output_constraints.coinbase_output_max_additional_size,
+                                coinbase_output_constraints.coinbase_output_max_additional_sigops);
+
+                            match self
+                                .bootstrap_template_ipc_client_from_coinbase_output_constraints(
+                                    coinbase_output_constraints,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    debug!(
+                                        "Successfully bootstrapped initial template IPC client"
+                                    );
+                                    break;
+                                }
+                                Err(
+                                    BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted
+                                    | BitcoinCoreSv2TDPError::BootstrapCancelled,
+                                ) => {
+                                    debug!("Initial template bootstrap interrupted during shutdown");
+                                    return;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to bootstrap initial template IPC client: {:?}",
+                                        e
+                                    );
+                                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                                    self.global_cancellation_token.cancel();
+                                    return;
+                                }
+                            }
+                        }
+                        _ => {
+                            warn!("Received unexpected message: {:?}", message);
+                            warn!("Ignoring...");
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // spawn the monitoring tasks
+        debug!("Spawning monitoring tasks...");
+        self.monitor_ipc_templates();
+        debug!("monitor_ipc_templates() spawned");
+        self.monitor_incoming_messages();
+        debug!("monitor_incoming_messages() spawned");
+        self.monitor_template_retirement();
+        debug!("monitor_template_retirement() spawned");
+
+        // block until the global cancellation token is activated
+        debug!("run() entering main blocking wait for global_cancellation_token");
+        self.global_cancellation_token.cancelled().await;
+        debug!("global_cancellation_token cancelled - beginning shutdown sequence");
+
+        // Wait for the monitor_ipc_templates task to finish gracefully
+        debug!("Waiting for monitor_ipc_templates() task to finish");
+        let handle = self.monitor_ipc_templates_handle.borrow_mut().take();
+        if let Some(handle) = handle {
+            match handle.await {
+                Ok(()) => {
+                    debug!("monitor_ipc_templates() task finished successfully");
+                }
+                Err(e) => {
+                    error!(
+                        "error waiting for monitor_ipc_templates task to finish: {:?}",
+                        e
+                    );
+                }
+            }
+        }
+
+        debug!("run() exiting");
+    }
+
+    async fn fetch_template_data(
+        &self,
+        template_ipc_client: BlockTemplateIpcClient,
+        thread_ipc_client: ThreadIpcClient,
+    ) -> Result<TemplateData, BitcoinCoreSv2TDPError> {
+        debug!("Fetching template data over IPC");
+        let template_id = self.template_id_factory.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            "fetch_template_data() - assigned template_id: {}",
+            template_id
+        );
+
+        let mut template_header_request = template_ipc_client.get_block_header_request();
+        template_header_request
+            .get()
+            .get_context()?
+            .set_thread(thread_ipc_client.clone());
+
+        let template_header_bytes = template_header_request
+            .send()
+            .promise
+            .await?
+            .get()?
+            .get_result()?
+            .to_vec();
+
+        // Deserialize the template header from Bitcoin Core's serialization format
+        debug!(
+            "Deserializing template header ({} bytes)",
+            template_header_bytes.len()
+        );
+        let header: Header = deserialize(&template_header_bytes)?;
+        debug!(
+            "Template header deserialized - prev_hash: {:?}",
+            header.prev_blockhash
+        );
+
+        let mut coinbase_tx_request = template_ipc_client.get_coinbase_tx_request();
+        coinbase_tx_request
+            .get()
+            .get_context()?
+            .set_thread(thread_ipc_client.clone());
+
+        let coinbase_tx_response = coinbase_tx_request.send().promise.await?;
+        let coinbase_tx_result = coinbase_tx_response.get()?;
+        let coinbase_tx_reader = coinbase_tx_result.get_result()?;
+        let (coinbase_tx, block_reward_remaining) = coinbase_tx_from_ipc(coinbase_tx_reader)?;
+        debug!(
+            "Coinbase tx built from getCoinbaseTx result: {:?}",
+            coinbase_tx
+        );
+
+        let mut merkle_path_request = template_ipc_client.get_coinbase_merkle_path_request();
+        merkle_path_request
+            .get()
+            .get_context()?
+            .set_thread(thread_ipc_client.clone());
+
+        let merkle_path: Vec<Vec<u8>> = merkle_path_request
+            .send()
+            .promise
+            .await?
+            .get()?
+            .get_result()?
+            .iter()
+            .map(|x| x.map(|slice| slice.to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Create the template data structure
+        let template_data = TemplateData::new(
+            template_id,
+            header,
+            coinbase_tx,
+            block_reward_remaining,
+            merkle_path,
+            template_ipc_client,
+        );
+        debug!("TemplateData created successfully");
+
+        Ok(template_data)
+    }
+
+    async fn new_thread_ipc_client(&self) -> Result<ThreadIpcClient, BitcoinCoreSv2TDPError> {
+        debug!("Creating new thread IPC client");
+        let thread_ipc_client_request = self.thread_map.make_thread_request();
+        let thread_ipc_client_response = thread_ipc_client_request.send().promise.await?;
+        let thread_ipc_client = thread_ipc_client_response.get()?.get_result()?;
+
+        Ok(thread_ipc_client)
+    }
+
+    fn set_current_template_ipc_client(&self, template_ipc_client: BlockTemplateIpcClient) {
+        let mut current_template_ipc_client_guard = self.current_template_ipc_client.borrow_mut();
+        *current_template_ipc_client_guard = Some(template_ipc_client);
+        debug!("Updated current_template_ipc_client");
+    }
+
+    fn current_template_ipc_client(
+        &self,
+    ) -> Result<BlockTemplateIpcClient, BitcoinCoreSv2TDPError> {
+        match self.current_template_ipc_client.borrow().clone() {
+            Some(template_ipc_client) => Ok(template_ipc_client),
+            None => {
+                error!("Template IPC client not found");
+                Err(BitcoinCoreSv2TDPError::TemplateIpcClientNotFound)
+            }
+        }
+    }
+
+    fn store_template_data(
+        &self,
+        template_data: &TemplateData,
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
+        let mut template_data_guard = self.template_data.write().map_err(|e| {
+            error!("Failed to acquire write lock on template_data: {:?}", e);
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
+        })?;
+
+        template_data_guard.insert(template_data.get_template_id(), template_data.clone());
+        debug!(
+            "Saved template data with template_id: {}",
+            template_data.get_template_id()
+        );
+
+        Ok(())
+    }
+
+    fn current_template_ids(&self) -> Result<HashSet<u64>, BitcoinCoreSv2TDPError> {
+        let template_data_guard = self.template_data.read().map_err(|e| {
+            error!("Failed to acquire read lock on template_data: {:?}", e);
+            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
+        })?;
+
+        Ok(template_data_guard.keys().copied().collect())
+    }
+
+    async fn publish_template(
+        &mut self,
+        template_data: TemplateData,
+        future_template: bool,
+        send_set_new_prev_hash: bool,
+        update_last_sent_template_instant: bool,
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
+        let new_template = template_data
+            .get_new_template_message(future_template)
+            .map_err(|e| {
+                error!("Failed to get NewTemplate message: {:?}", e);
+                BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            })?;
+        let set_new_prev_hash = if send_set_new_prev_hash {
+            Some(template_data.get_set_new_prev_hash_message())
+        } else {
+            None
+        };
+
+        self.store_template_data(&template_data)?;
+
+        // Publishing at a tip that did not move supersedes the oldest templates once there are
+        // more of them than the cap allows. A chain tip change or a constraint rotation has
+        // already retired everything older by the time it gets here, so this is a no-op for them.
+        self.retire_templates_beyond_cap()?;
+
+        if send_set_new_prev_hash {
+            self.current_prev_hash
+                .replace(Some(template_data.get_prev_hash()));
+            debug!(
+                "Set current_prev_hash to: {}",
+                template_data.get_prev_hash()
+            );
+        }
+
+        debug!(
+            "Sending NewTemplate (future={}) with template_id: {}",
+            future_template,
+            template_data.get_template_id()
+        );
+        self.outgoing_messages
+            .send(TemplateDistributionOwned::NewTemplate(new_template))
+            .await
+            .map_err(|e| {
+                error!("Failed to send NewTemplate message: {:?}", e);
+                BitcoinCoreSv2TDPError::FailedToSendNewTemplateMessage
+            })?;
+        debug!("Successfully sent NewTemplate message");
+
+        if let Some(set_new_prev_hash) = set_new_prev_hash {
+            debug!(
+                "Sending SetNewPrevHash with prev_hash: {}",
+                template_data.get_prev_hash()
+            );
+            self.outgoing_messages
+                .send(TemplateDistributionOwned::SetNewPrevHash(set_new_prev_hash))
+                .await
+                .map_err(|e| {
+                    error!("Failed to send SetNewPrevHash message: {:?}", e);
+                    BitcoinCoreSv2TDPError::FailedToSendSetNewPrevHashMessage
+                })?;
+            debug!("Successfully sent SetNewPrevHash message");
+        }
+
+        if update_last_sent_template_instant {
+            self.last_sent_template_instant = Some(Instant::now());
+        }
+
+        Ok(())
+    }
+
+    /// Creates a fresh Bitcoin Core Template IPC client from the given
+    /// [`CoinbaseOutputConstraints`] and immediately sends a `NewTemplate` + `SetNewPrevHash`.
+    ///
+    /// This method intentionally couples these operations because every constraints update should
+    /// make a newly constrained template visible to the Sv2 side right away. On success, it:
+    ///
+    /// - creates a new `BlockTemplateIpcClient` configured with the provided constraints
+    /// - fetches the corresponding `TemplateData`
+    /// - stores the fetched `TemplateData`
+    /// - sends `NewTemplate(future_template = true)`
+    /// - sends the matching `SetNewPrevHash`
+    /// - updates `current_prev_hash` and `last_sent_template_instant`
+    /// - stores the client as `current_template_ipc_client`
+    async fn bootstrap_template_ipc_client_from_coinbase_output_constraints(
+        &mut self,
+        coinbase_output_constraints: CoinbaseOutputConstraintsOwned,
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
+        debug!(
+            "bootstrap_template_ipc_client_from_coinbase_output_constraints() called - max_size: {}, max_sigops: {}",
+            coinbase_output_constraints.coinbase_output_max_additional_size,
+            coinbase_output_constraints.coinbase_output_max_additional_sigops
+        );
+
+        let mut template_ipc_client_request = self.mining_ipc_client.create_new_block_request();
+
+        template_ipc_client_request
+            .get()
+            .get_context()
+            .map_err(|e| {
+                error!("Failed to get template IPC client request context: {e}");
+                e
+            })?
+            .set_thread(self.thread_ipc_client.clone());
+
+        let mut template_ipc_client_request_options = template_ipc_client_request
+            .get()
+            .get_options()
+            .map_err(|e| {
+                error!("Failed to get template IPC client request options: {e}");
+                e
+            })?;
+
+        let coinbase_weight =
+            coinbase_output_constraints.coinbase_output_max_additional_size as u64 * WEIGHT_FACTOR;
+        let block_reserved_weight = coinbase_weight.max(MIN_BLOCK_RESERVED_WEIGHT); // 2000 is the minimum block reserved weight
+        debug!("Setting block_reserved_weight: {block_reserved_weight}");
+        template_ipc_client_request_options.set_block_reserved_weight(block_reserved_weight);
+        template_ipc_client_request_options.set_coinbase_output_max_additional_sigops(
+            coinbase_output_constraints.coinbase_output_max_additional_sigops as u64,
+        );
+        template_ipc_client_request_options.set_use_mempool(true);
+
+        debug!("Sending createNewBlock request to Bitcoin Core");
+        let create_new_block_promise = template_ipc_client_request.send().promise;
+        let template_ipc_client_response = tokio::select! {
+            template_ipc_client_response = create_new_block_promise => {
+                template_ipc_client_response.map_err(|e| {
+                    error!("Failed to send template IPC client request: {}", e);
+                    e
+                })?
+            }
+            _ = self.global_cancellation_token.cancelled() => {
+                debug!("Interrupting createNewBlock request");
+                self.interrupt_create_new_block_request();
+                return Err(BitcoinCoreSv2TDPError::CreateNewBlockRequestInterrupted);
+            }
+        };
+
+        let template_ipc_client_result = template_ipc_client_response.get().map_err(|e| {
+            error!("Failed to get template IPC client result: {}", e);
+            e
+        })?;
+
+        let template_ipc_client = template_ipc_client_result.get_result().map_err(|e| {
+            error!("Failed to get template IPC client result: {}", e);
+            e
+        })?;
+
+        debug!("Fetching template data from bootstrapped template IPC client");
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let template_data =
+            self.global_cancellation_token
+                .run_until_cancelled(self.fetch_template_data(
+                    template_ipc_client.clone(),
+                    self.thread_ipc_client.clone(),
+                ))
+                .await
+                .ok_or(BitcoinCoreSv2TDPError::BootstrapCancelled)?
+                .map_err(|e| {
+                    error!("Failed to fetch template data: {:?}", e);
+                    e
+                })?;
+
+        self.publish_template(template_data, true, true, true)
+            .await?;
+        self.set_current_template_ipc_client(template_ipc_client);
+
+        Ok(())
+    }
+
+    /// Interrupts the in-flight `waitNext` request on `template_ipc_client`.
+    ///
+    /// The reply is awaited on a task of its own, so a node that has stopped answering cannot
+    /// hold the caller.
+    fn interrupt_wait_request(&self, template_ipc_client: &BlockTemplateIpcClient) {
+        let interrupt_wait_promise = template_ipc_client.interrupt_wait_request().send().promise;
+        tokio::task::spawn_local(async move {
+            if let Err(e) = interrupt_wait_promise.await {
+                error!("Failed to send interrupt wait request: {}", e);
+            }
+        });
+    }
+
+    /// Interrupts the in-flight `createNewBlock` request.
+    ///
+    /// The reply is awaited on a task of its own, so a node that has stopped answering cannot
+    /// hold the caller.
+    fn interrupt_create_new_block_request(&self) {
+        let interrupt_promise = self.mining_ipc_client.interrupt_request().send().promise;
+        tokio::task::spawn_local(async move {
+            if let Err(e) = interrupt_promise.await {
+                error!("Failed to send interrupt createNewBlock request: {}", e);
+            }
+        });
+    }
+
+    async fn new_wait_next_request(
+        &self,
+        template_ipc_client: &BlockTemplateIpcClient,
+        thread_ipc_client: ThreadIpcClient,
+        fee_threshold: i64,
+        timeout_ms: f64,
+    ) -> Result<Request<WaitNextParams, WaitNextResults>, BitcoinCoreSv2TDPError> {
+        let mut wait_next_request = template_ipc_client.wait_next_request();
+
+        match wait_next_request.get().get_context() {
+            Ok(mut context) => context.set_thread(thread_ipc_client.clone()),
+            Err(e) => {
+                error!("Failed to set thread: {}", e);
+                return Err(BitcoinCoreSv2TDPError::FailedToSetThread);
+            }
+        }
+
+        let mut wait_next_request_options = match wait_next_request.get().get_options() {
+            Ok(options) => options,
+            Err(e) => {
+                error!("Failed to get waitNext request options: {}", e);
+                return Err(BitcoinCoreSv2TDPError::FailedToGetWaitNextRequestOptions);
+            }
+        };
+
+        wait_next_request_options.set_fee_threshold(fee_threshold);
+
+        // the timeout is NOT how often we expect to get new templates
+        // it's just the max time we'll wait for the current waitNext request to complete
+        wait_next_request_options.set_timeout(timeout_ms);
+
+        Ok(wait_next_request)
+    }
+
+    // Retires every template published so far.
+    //
+    // A new chain tip, or a new set of coinbase output constraints, supersedes all of them at
+    // once: nothing built on the previous epoch can be mined any more.
+    fn retire_all_templates(&self) -> Result<(), BitcoinCoreSv2TDPError> {
+        self.retire_templates(self.current_template_ids()?)
+    }
+
+    // Retires the oldest templates beyond `MAX_SAME_TIP_TEMPLATES`.
+    //
+    // Template ids are handed out in order, so the live ones sort oldest first. Everything still
+    // within the cap stays fully usable, for solutions as much as for transaction data: a
+    // superseded fee template is still a valid block.
+    fn retire_templates_beyond_cap(&self) -> Result<(), BitcoinCoreSv2TDPError> {
+        let template_ids = self.current_template_ids()?;
+
+        let mut live_template_ids: Vec<u64> = {
+            let stale_template_ids_guard = self.stale_template_ids.read().map_err(|e| {
+                error!("Failed to acquire read lock on stale_template_ids: {:?}", e);
+                BitcoinCoreSv2TDPError::LockPoisoned("stale_template_ids")
+            })?;
+
+            template_ids
+                .into_iter()
+                .filter(|template_id| !stale_template_ids_guard.contains(template_id))
+                .collect()
+        };
+
+        if live_template_ids.len() <= MAX_SAME_TIP_TEMPLATES {
+            return Ok(());
+        }
+
+        // Sorting puts the oldest first, so the newest `MAX_SAME_TIP_TEMPLATES` are the tail that
+        // stays and everything before them is what goes.
+        live_template_ids.sort_unstable();
+        let template_ids_beyond_cap =
+            &live_template_ids[..live_template_ids.len() - MAX_SAME_TIP_TEMPLATES];
+
+        debug!(
+            "Retiring {} template(s) beyond the {} kept at the current chain tip",
+            template_ids_beyond_cap.len(),
+            MAX_SAME_TIP_TEMPLATES
+        );
+
+        self.retire_templates(template_ids_beyond_cap.iter().copied())
+    }
+
+    // Marks `template_ids` unusable for new requests, and queues them for destruction once their
+    // grace period has passed.
+    //
+    // The two halves are deliberately separate. A superseded template must not answer a new
+    // `RequestTransactionData`, which is what the marking does, immediately. A request that is
+    // already in flight still needs its data, so the `TemplateData` and the Bitcoin Core
+    // capability it holds outlive the marking by `STALE_TEMPLATE_GRACE_PERIOD_SECS`.
+    //
+    // Marking is a union, so retirements that overlap in time cannot erase each other's ids, and
+    // an id that is already marked is not queued a second time.
+    fn retire_templates(
+        &self,
+        template_ids: impl IntoIterator<Item = u64>,
+    ) -> Result<(), BitcoinCoreSv2TDPError> {
+        let retire_at = Instant::now() + Duration::from_secs(STALE_TEMPLATE_GRACE_PERIOD_SECS);
+
+        let mut stale_template_ids_guard = self.stale_template_ids.write().map_err(|e| {
+            error!(
+                "Failed to acquire write lock on stale_template_ids: {:?}",
+                e
+            );
+            BitcoinCoreSv2TDPError::LockPoisoned("stale_template_ids")
+        })?;
+
+        for template_id in template_ids {
+            if !stale_template_ids_guard.insert(template_id) {
+                continue;
+            }
+
+            debug!(
+                "Marked template {} stale, destroying it in {}s",
+                template_id, STALE_TEMPLATE_GRACE_PERIOD_SECS
+            );
+
+            // The queue is unbounded and this instance holds its receiving end, so a send can
+            // only fail once the runtime is being torn down, where Bitcoin Core releases the
+            // capability with the IPC connection anyway.
+            if let Err(e) = self
+                .template_retirement_sender
+                .try_send((template_id, retire_at))
+            {
+                error!(
+                    "Failed to queue template {} for destruction: {:?}",
+                    template_id, e
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn coinbase_tx_from_ipc(
+    coinbase_tx: coinbase_tx::Reader<'_>,
+) -> Result<(Transaction, u64), BitcoinCoreSv2TDPError> {
+    let block_reward_remaining: i64 = coinbase_tx.get_block_reward_remaining();
+    let block_reward_remaining: u64 = block_reward_remaining
+        .try_into()
+        .map_err(|_| BitcoinCoreSv2TDPError::InvalidBlockRewardRemaining(block_reward_remaining))?;
+
+    let witness = {
+        let witness_bytes = coinbase_tx.get_witness()?;
+        let mut witness = Witness::new();
+        if !witness_bytes.is_empty() {
+            witness.push(witness_bytes);
+        }
+        witness
+    };
+
+    let mut required_outputs = Vec::new();
+    for output_bytes in coinbase_tx.get_required_outputs()?.iter() {
+        let output_bytes = output_bytes?;
+        required_outputs.push(TxOut::consensus_decode(&mut &output_bytes[..])?);
+    }
+
+    let transaction = Transaction {
+        version: TransactionVersion::non_standard(coinbase_tx.get_version() as i32),
+        lock_time: LockTime::from_consensus(coinbase_tx.get_lock_time()),
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(coinbase_tx.get_script_sig_prefix()?.to_vec()),
+            sequence: Sequence::from_consensus(coinbase_tx.get_sequence()),
+            witness,
+        }],
+        output: required_outputs,
+    };
+
+    Ok((transaction, block_reward_remaining))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_core::bitcoin::{Amount, consensus::serialize};
+
+    #[test]
+    fn coinbase_tx_from_ipc_builds_transaction_from_struct_fields() {
+        let required_output = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x6a, 0x24]),
+        };
+        let required_output_bytes = serialize(&required_output);
+
+        let mut message = capnp::message::Builder::new_default();
+        let mut coinbase_tx_builder: coinbase_tx::Builder<'_> = message.init_root();
+        coinbase_tx_builder.set_version(2);
+        coinbase_tx_builder.set_sequence(0xffff_fffe);
+        coinbase_tx_builder.set_script_sig_prefix(&[0x03, 0xaa, 0xbb, 0xcc]);
+        coinbase_tx_builder.set_witness(&[0x42; 32]);
+        coinbase_tx_builder.set_block_reward_remaining(5_000_000_000);
+        coinbase_tx_builder.set_lock_time(840_000);
+        {
+            let mut required_outputs = coinbase_tx_builder.reborrow().init_required_outputs(1);
+            required_outputs.set(0, &required_output_bytes);
+        }
+
+        let coinbase_tx_reader = coinbase_tx_builder.into_reader();
+        let (coinbase_tx, value_remaining) =
+            coinbase_tx_from_ipc(coinbase_tx_reader).expect("coinbase tx should convert");
+
+        println!("coinbase_tx: {:?}", coinbase_tx);
+
+        assert_eq!(value_remaining, 5_000_000_000);
+        assert_eq!(coinbase_tx.version, TransactionVersion::TWO);
+        assert_eq!(coinbase_tx.lock_time.to_consensus_u32(), 840_000);
+        assert_eq!(coinbase_tx.input.len(), 1);
+        assert_eq!(coinbase_tx.input[0].previous_output, OutPoint::null());
+        assert_eq!(
+            coinbase_tx.input[0].sequence,
+            Sequence::from_consensus(0xffff_fffe)
+        );
+        assert_eq!(
+            coinbase_tx.input[0].script_sig.as_bytes(),
+            &[0x03, 0xaa, 0xbb, 0xcc]
+        );
+        assert_eq!(coinbase_tx.input[0].witness.len(), 1);
+        assert_eq!(&coinbase_tx.input[0].witness[0], &[0x42; 32]);
+        assert_eq!(coinbase_tx.output, vec![required_output]);
+    }
+}

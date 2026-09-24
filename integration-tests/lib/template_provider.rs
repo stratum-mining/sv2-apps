@@ -20,6 +20,7 @@ use crate::utils::{
 const VERSION_SV2_TP: &str = "1.1.0";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
+const BITCOIN_CORE_V32X: &str = "32.0";
 /// Allow static signet fixtures to leave IBD without freezing Bitcoin Core's
 /// clock, so mined blocks still use wall-clock timestamps.
 ///
@@ -68,6 +69,7 @@ fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {
         BitcoinCoreVersion::V30X => BITCOIN_CORE_V30X,
         BitcoinCoreVersion::V31X => BITCOIN_CORE_V31X,
+        BitcoinCoreVersion::V32X => BITCOIN_CORE_V32X,
     }
 }
 
