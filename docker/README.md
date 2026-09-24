@@ -47,7 +47,7 @@ For this to work, Bitcoin Core must be started with IPC enabled. Whatever networ
 Example: starting a **testnet4** node with IPC bindings:
 
 ```bash
-./bitcoin-30.0/bin/bitcoin -m node -testnet4 -ipcbind=unix
+./bitcoin-31.0/bin/bitcoin -m node -testnet4 -ipcbind=unix
 ```
 
 You'll also need to wait for the node to complete Initial Block Download (IBD).
