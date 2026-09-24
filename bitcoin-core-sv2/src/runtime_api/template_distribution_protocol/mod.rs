@@ -16,7 +16,7 @@
 
 use crate::{
     runtime_api::{BitcoinCoreSv2Error, BitcoinCoreSv2Protocol, BitcoinCoreVersion},
-    unix_capnp::{v30x, v31x},
+    unix_capnp::{v30x, v31x, v32x},
 };
 use async_channel::{Receiver, Sender};
 use std::path::Path;
@@ -30,6 +30,7 @@ pub use tokio_util::sync::CancellationToken;
 pub enum BitcoinCoreSv2TDP {
     V30X(v30x::template_distribution_protocol::BitcoinCoreSv2TDP),
     V31X(v31x::template_distribution_protocol::BitcoinCoreSv2TDP),
+    V32X(v32x::template_distribution_protocol::BitcoinCoreSv2TDP),
 }
 
 impl BitcoinCoreSv2TDP {
@@ -37,6 +38,7 @@ impl BitcoinCoreSv2TDP {
         match self {
             Self::V30X(runtime) => runtime.run().await,
             Self::V31X(runtime) => runtime.run().await,
+            Self::V32X(runtime) => runtime.run().await,
         }
     }
 }
@@ -87,6 +89,23 @@ where
         .map(BitcoinCoreSv2TDP::V31X)
         .map_err(|error| match error {
             v31x::template_distribution_protocol::error::BitcoinCoreSv2TDPError::BootstrapCancelled => BitcoinCoreSv2TDPError::Cancelled {
+                version,
+                protocol: BitcoinCoreSv2Protocol::TDP,
+            },
+            error => BitcoinCoreSv2TDPError::initialization(version, BitcoinCoreSv2Protocol::TDP, error),
+        }),
+        BitcoinCoreVersion::V32X => v32x::template_distribution_protocol::BitcoinCoreSv2TDP::new(
+            bitcoin_core_unix_socket_path,
+            fee_threshold,
+            min_interval,
+            incoming_messages,
+            outgoing_messages,
+            global_cancellation_token,
+        )
+        .await
+        .map(BitcoinCoreSv2TDP::V32X)
+        .map_err(|error| match error {
+            v32x::template_distribution_protocol::error::BitcoinCoreSv2TDPError::BootstrapCancelled => BitcoinCoreSv2TDPError::Cancelled {
                 version,
                 protocol: BitcoinCoreSv2Protocol::TDP,
             },

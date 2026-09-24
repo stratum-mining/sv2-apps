@@ -1,0 +1,458 @@
+//! Handlers for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
+
+use crate::{
+    runtime_api::job_declaration_protocol::io::{JdResponse, ValidationContext},
+    unix_capnp::v32x::job_declaration_protocol::{BitcoinCoreSv2JDP, mempool::ResolveError},
+};
+use std::collections::{HashMap, HashSet};
+use stratum_core::{
+    bitcoin::{
+        Block, Transaction, TxMerkleNode, Txid, Weight, Wtxid,
+        block::{Header, Version},
+        consensus::serialize,
+        hashes::Hash,
+    },
+    job_declaration_sv2::{
+        ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+        PushSolutionOwned,
+    },
+};
+use tokio::sync::oneshot;
+use tracing::{debug, error, info, warn};
+
+/// Consensus block weight limit, in weight units.
+///
+/// A declared job that weighs more than this can never be mined, so it is rejected before the
+/// block is even assembled.
+const MAX_BLOCK_WEIGHT: u64 = Weight::MAX_BLOCK.to_wu();
+
+/// The most transactions a declared job can list.
+///
+/// Derived from the smallest transaction that can appear in a block, so it sits well above any
+/// list a real template produces and only ever catches lists that could not fit in a block.
+const MAX_DECLARED_TXS: usize = (MAX_BLOCK_WEIGHT / Weight::MIN_TRANSACTION.to_wu()) as usize;
+
+impl BitcoinCoreSv2JDP {
+    /// Validates a declared mining job by checking transaction availability and block structure.
+    ///
+    /// Rejects a coinbase that does not carry exactly one input, rejects a declared wtxid list
+    /// that repeats an entry or is longer than a block can hold, stages the client-supplied
+    /// transactions locally after checking that every one of them is an ordinary transaction the
+    /// job declared and supplied only once, resolves the declared wtxids against the mempool mirror
+    /// plus that staging area within a block's weight budget, assembles a test block, sets IPC
+    /// thread context, and uses Bitcoin Core's `checkBlock` to validate the block structure. Staged
+    /// transactions are only committed to the mempool mirror after `checkBlock` succeeds, so a
+    /// rejected declaration never grows shared state. If the chain tip moved while `checkBlock` was
+    /// in flight, the declaration is answered with `stale-chain-tip` instead and its transactions
+    /// are dropped: they were only validated against a tip that no longer exists. A rejection
+    /// is classified from the reason Core gives, with no further IPC: `stale-chain-tip`
+    /// when Core reports that the tip moved or that the coinbase height is obsolete, `invalid-job`
+    /// otherwise. Returns success with current template parameters or an error if validation fails.
+    pub(crate) async fn handle_declare_mining_job(
+        &self,
+        version: Version,
+        coinbase_tx: Transaction,
+        wtxid_list: Vec<Wtxid>,
+        missing_txs: Vec<Transaction>,
+        response_tx: oneshot::Sender<JdResponse>,
+    ) {
+        info!(
+            "Validating DeclareMiningJob - version: {:?}, coinbase inputs: {}, outputs: {}, locktime: {}",
+            version,
+            coinbase_tx.input.len(),
+            coinbase_tx.output.len(),
+            coinbase_tx.lock_time.to_consensus_u32()
+        );
+        debug!(
+            "Declared coinbase scriptSig: {:?}",
+            coinbase_tx.input.first().map(|input| &input.script_sig)
+        );
+
+        let (initial_validation_context, ntime, txdata, mut staged_txs) = {
+            let mempool_mirror = self.mempool_mirror.borrow();
+
+            let prev_hash = mempool_mirror
+                .get_current_prev_hash()
+                .expect("current_prev_hash must be set");
+            let nbits = mempool_mirror
+                .get_current_nbits()
+                .expect("current_nbits must be set");
+            let ntime = mempool_mirror
+                .get_current_ntime()
+                .expect("current_ntime must be set");
+
+            let initial_validation_context = ValidationContext { prev_hash, nbits };
+
+            // A coinbase must carry exactly one input. Reject anything else before assembling
+            // the block: a zero-input coinbase re-serializes into bytes Bitcoin Core's
+            // deserializer reads as a SegWit marker ("Superfluous witness record"), which comes
+            // back as a capnp remote exception and tears down the whole IPC connection.
+            if coinbase_tx.input.len() != 1 {
+                warn!(
+                    "Rejecting DeclareMiningJob: declared coinbase has {} inputs, expected exactly 1",
+                    coinbase_tx.input.len()
+                );
+                // deliberately ignore potential errors
+                // we don't care if the receiver dropped the channel
+                let _ = response_tx.send(JdResponse::Error {
+                    error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+                    validation_context: initial_validation_context,
+                });
+                return;
+            }
+
+            // Client-supplied transactions are staged locally and only committed to the
+            // process-wide mempool mirror once Bitcoin Core has validated the assembled block, so
+            // rejected declarations cannot grow shared state. They are also scoped to this
+            // declaration: a transaction it never declared, or one supplied more than once, is a
+            // protocol violation rather than something to silently drop. The declared list itself
+            // is checked first, before anything is looked up: it must not repeat a wtxid and must
+            // be short enough to fit in a block.
+            let Some(staged_txs) = stage_missing_txs(&wtxid_list, missing_txs) else {
+                // deliberately ignore potential errors
+                // we don't care if the receiver dropped the channel
+                let _ = response_tx.send(JdResponse::Error {
+                    error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                    validation_context: initial_validation_context,
+                });
+                return;
+            };
+
+            // A declaration heavier than a block can never be mined, so resolution stops once
+            // what it resolved outweighs one, before it clones any further. Bitcoin Core weighs
+            // the block itself, header and transaction count included, so its own number is
+            // slightly larger than this budget: the difference only makes this the more permissive
+            // of the two.
+            let weight_budget = MAX_BLOCK_WEIGHT.saturating_sub(coinbase_tx.weight().to_wu());
+
+            // Now verify that all wtxids from the declared job are available, either in the
+            // mirror or among the staged (still unvalidated) transactions
+            let txdata = match mempool_mirror.resolve_txdata(
+                &wtxid_list,
+                &staged_txs,
+                weight_budget,
+            ) {
+                Ok(txdata) => txdata,
+                Err(ResolveError::Missing(missing_wtxids)) => {
+                    // deliberately ignore potential errors
+                    // we don't care if the receiver dropped the channel
+                    let _ = response_tx.send(JdResponse::MissingTransactions {
+                        missing_wtxids,
+                        validation_context: initial_validation_context,
+                    });
+                    return;
+                }
+                Err(ResolveError::TooHeavy) => {
+                    warn!(
+                        weight_budget,
+                        "Rejecting DeclareMiningJob: declared job weighs more than a block can hold"
+                    );
+                    // deliberately ignore potential errors
+                    // we don't care if the receiver dropped the channel
+                    let _ = response_tx.send(JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                        validation_context: initial_validation_context,
+                    });
+                    return;
+                }
+            };
+
+            info!(
+                "Using prevhash: {:?}, nbits: {:?}, ntime: {} from mempool mirror",
+                initial_validation_context.prev_hash, initial_validation_context.nbits, ntime,
+            );
+
+            (initial_validation_context, ntime, txdata, staged_txs)
+        }; // mempool_mirror dropped here, we don't want to hold it across await points
+
+        let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
+
+        // `Err` carries the reason Bitcoin Core gave for rejecting the block.
+        let check_block_outcome: Result<(), String> = {
+            let mut all_transactions = Vec::with_capacity(1 + txdata.len());
+            all_transactions.push(coinbase_tx.clone());
+            all_transactions.extend(txdata);
+
+            let num_transactions = all_transactions.len();
+
+            // Use the template ntime as the block timestamp
+            // This ensures we meet Bitcoin Core's timestamp validation rules
+            let block_time = ntime;
+
+            let header = Header {
+                version,
+                prev_blockhash: initial_validation_context.prev_hash,
+                merkle_root: TxMerkleNode::all_zeros(), // doesn't matter
+                time: block_time,
+                bits: initial_validation_context.nbits,
+                nonce: 0, // doesn't matter
+            };
+
+            let block = Block {
+                header,
+                txdata: all_transactions,
+            };
+
+            let block_bytes: Vec<u8> = serialize(&block);
+
+            debug!(
+                "Assembled block for checkBlock: {} bytes, {} transactions",
+                block_bytes.len(),
+                num_transactions
+            );
+
+            let mut check_block_request = self.mining_ipc_client.check_block_request();
+
+            match check_block_request.get().get_context() {
+                Ok(mut context) => context.set_thread(self.thread_ipc_client.clone()),
+                Err(e) => {
+                    error!("Failed to set check block request thread context: {e}");
+                    // send error response to the client
+                    // deliberately ignore potential send errors
+                    let _ = response_tx.send(JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+                        validation_context: initial_validation_context,
+                    });
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            }
+
+            check_block_request.get().set_block(&block_bytes);
+
+            let mut options = match check_block_request.get().get_options() {
+                Ok(options) => options,
+                Err(e) => {
+                    error!("Failed to get check block options: {e}");
+                    // send error response to the client
+                    // deliberately ignore potential send errors
+                    let _ = response_tx.send(JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+                        validation_context: initial_validation_context,
+                    });
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+            options.set_check_merkle_root(false);
+            options.set_check_pow(false);
+
+            let check_block_response = match check_block_request.send().promise.await {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("Failed to send check block request: {e}");
+                    // send error response to the client
+                    // deliberately ignore potential send errors
+                    let _ = response_tx.send(JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+                        validation_context: initial_validation_context,
+                    });
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+            let check_block_result = match check_block_response.get() {
+                Ok(result) => result,
+                Err(e) => {
+                    error!("Failed to get check block result: {e}");
+                    // send error response to the client
+                    // deliberately ignore potential send errors
+                    let _ = response_tx.send(JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+                        validation_context: initial_validation_context,
+                    });
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            let result = check_block_result.get_result();
+
+            debug!("checkBlock returned: {}", result);
+            if result {
+                Ok(())
+            } else {
+                let reason = check_block_result
+                    .get_reason()
+                    .ok()
+                    .and_then(|reason| reason.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                error!(
+                    reason = %reason,
+                    debug = ?check_block_result.get_debug(),
+                    "Bitcoin Core rejected the block via checkBlock"
+                );
+                debug!(
+                    "Block details - version: {:?}, prev_blockhash: {:?}, bits: {:?}, num_txs: {}",
+                    version,
+                    initial_validation_context.prev_hash,
+                    initial_validation_context.nbits,
+                    num_transactions
+                );
+                debug!(
+                    "Coinbase tx inputs: {}, outputs: {}",
+                    coinbase_tx.input.len(),
+                    coinbase_tx.output.len()
+                );
+                debug!(
+                    "Block header time: {}, merkle_root: {:?}",
+                    header.time, header.merkle_root
+                );
+                Err(reason)
+            }
+        };
+
+        let latest_validation_context = {
+            let mempool_mirror = self.mempool_mirror.borrow();
+            ValidationContext {
+                prev_hash: mempool_mirror
+                    .get_current_prev_hash()
+                    .expect("current_prev_hash must be set"),
+                nbits: mempool_mirror
+                    .get_current_nbits()
+                    .expect("current_nbits must be set"),
+            }
+        };
+
+        let response = match check_block_outcome {
+            Ok(()) => {
+                if latest_validation_context.prev_hash == initial_validation_context.prev_hash {
+                    // checkBlock validated the assembled block, so the client-supplied
+                    // transactions it contained are now safe to commit to the shared mempool
+                    // mirror.
+                    let validated_txs: Vec<Transaction> = wtxid_list
+                        .iter()
+                        .filter_map(|wtxid| staged_txs.remove(wtxid))
+                        .collect();
+                    self.mempool_mirror
+                        .borrow_mut()
+                        .add_transactions(validated_txs);
+
+                    JdResponse::Success {
+                        prev_hash: initial_validation_context.prev_hash,
+                        nbits: initial_validation_context.nbits,
+                        txid_list,
+                    }
+                } else {
+                    // The chain tip moved while checkBlock was in flight, so the block was
+                    // validated against a tip that no longer exists: the pool would reject its
+                    // prev_hash, and committing its transactions would seed the freshly-cleared
+                    // mirror with entries validated against the old tip. Answer stale-chain-tip
+                    // and drop them; the client re-declares against the new tip.
+                    debug!(
+                        initial_prev_hash = ?initial_validation_context.prev_hash,
+                        latest_prev_hash = ?latest_validation_context.prev_hash,
+                        "Chain tip moved during checkBlock; answering stale-chain-tip instead of Success"
+                    );
+                    JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                        validation_context: latest_validation_context,
+                    }
+                }
+            }
+            Err(reason) => {
+                // Core's TestBlockValidity compares the block's prev_hash against the chain tip
+                // before it looks at anything else and answers inconclusive-not-best-prevblk when
+                // they differ, which is what a declaration validated while the tip moved looks
+                // like. A coinbase built for another height fails one of two later checks,
+                // depending on which side of the tip that height lies. Templates give the
+                // coinbase a locktime of height minus one and a sequence that enforces it, and
+                // Core checks finality before it checks the coinbase height, so a coinbase from
+                // ahead of the tip is a non-final transaction: bad-txns-nonfinal. One from behind
+                // the tip is final and fails the height check instead: bad-cb-height. All three
+                // are stale-chain-tip; every other reason is the declaration's own fault. The
+                // strings are the same across the 30.x and 32.x lines this crate supports.
+                let error_code = match reason.as_str() {
+                    "inconclusive-not-best-prevblk" | "bad-txns-nonfinal" | "bad-cb-height" => {
+                        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
+                    }
+                    _ => ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                };
+                debug!(
+                    reason = %reason,
+                    error_code,
+                    initial_prev_hash = ?initial_validation_context.prev_hash,
+                    latest_prev_hash = ?latest_validation_context.prev_hash,
+                    "Classified the checkBlock rejection"
+                );
+                JdResponse::Error {
+                    error_code,
+                    validation_context: latest_validation_context,
+                }
+            }
+        };
+
+        // deliberately ignore potential send errors
+        // we don't care if the receiver dropped the channel
+        let _ = response_tx.send(response);
+    }
+
+    /// Submits a mining solution to Bitcoin Core.
+    ///
+    /// Not yet implemented — deliberately left as a stub for future work.
+    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolutionOwned) {
+        // todo
+    }
+}
+
+/// Checks a declared wtxid list and keys the transactions a client supplied to complete it.
+///
+/// The list must be short enough to fit in a block and must not name the same transaction twice,
+/// which is what keeps a 32-byte identifier from expanding into repeated copies of one cached
+/// transaction. Every supplied transaction must in turn be an ordinary transaction the list names,
+/// and must be supplied at most once. Wtxids are recomputed here, so a transaction can only ever
+/// be staged under the identifier it actually hashes to.
+///
+/// Returns `None` if the declaration breaks any of those rules, logging what broke and why. Both
+/// checks run before the caller looks anything up, so a rejected declaration never clones a cached
+/// transaction.
+fn stage_missing_txs(
+    wtxid_list: &[Wtxid],
+    missing_txs: Vec<Transaction>,
+) -> Option<HashMap<Wtxid, Transaction>> {
+    if wtxid_list.len() > MAX_DECLARED_TXS {
+        warn!(
+            declared_txs = wtxid_list.len(),
+            "Rejecting DeclareMiningJob: more transactions declared than a block can hold"
+        );
+        return None;
+    }
+
+    let mut declared = HashSet::with_capacity(wtxid_list.len());
+    for wtxid in wtxid_list {
+        if !declared.insert(wtxid) {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: wtxid declared more than once");
+            return None;
+        }
+    }
+
+    // A supplied transaction is only staged once, and only if it was declared, so the declaration
+    // itself bounds how many of them there can be.
+    let mut staged = HashMap::with_capacity(missing_txs.len().min(wtxid_list.len()));
+
+    for tx in missing_txs {
+        let wtxid = tx.compute_wtxid();
+
+        if tx.is_coinbase() {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: supplied transaction is a coinbase");
+            return None;
+        }
+        if !declared.contains(&wtxid) {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: supplied transaction was not declared");
+            return None;
+        }
+        if staged.insert(wtxid, tx).is_some() {
+            warn!(%wtxid, "Rejecting DeclareMiningJob: supplied transaction was repeated");
+            return None;
+        }
+    }
+
+    Some(staged)
+}
