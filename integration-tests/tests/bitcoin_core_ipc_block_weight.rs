@@ -229,7 +229,12 @@ async fn assert_full_template_block_passes_check_block(version: BitcoinCoreVersi
         .await;
     }
     match response {
-        JdResponse::Success { .. } => {}
+        // jd-server rebuilds a solved block from these, so they must be exactly what was
+        // declared, in declaration order and without the coinbase.
+        JdResponse::Success { txdata, .. } => assert_eq!(
+            txdata, txs,
+            "JdResponse::Success must carry the declared transactions"
+        ),
         response => panic!(
             "Bitcoin Core must accept a block built on a full template with the declared \
              coinbase, got: {response:?}"

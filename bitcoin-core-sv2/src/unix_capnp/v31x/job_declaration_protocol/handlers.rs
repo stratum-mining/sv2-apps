@@ -7,7 +7,7 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use stratum_core::{
     bitcoin::{
-        Block, Transaction, TxMerkleNode, Txid, Weight, Wtxid,
+        Block, Transaction, TxMerkleNode, Weight, Wtxid,
         block::{Header, Version},
         consensus::serialize,
         hashes::Hash,
@@ -70,7 +70,7 @@ impl BitcoinCoreSv2JDP {
             coinbase_tx.input.first().map(|input| &input.script_sig)
         );
 
-        let (initial_validation_context, ntime, txdata, mut staged_txs) = {
+        let (initial_validation_context, ntime, mut txdata, mut staged_txs) = {
             let mempool_mirror = self.mempool_mirror.borrow();
 
             let prev_hash = mempool_mirror
@@ -167,13 +167,11 @@ impl BitcoinCoreSv2JDP {
             (initial_validation_context, ntime, txdata, staged_txs)
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
-        let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
-
         // `Err` carries the reason Bitcoin Core gave for rejecting the block.
         let check_block_outcome: Result<(), String> = {
             let mut all_transactions = Vec::with_capacity(1 + txdata.len());
             all_transactions.push(coinbase_tx.clone());
-            all_transactions.extend(txdata);
+            all_transactions.extend(std::mem::take(&mut txdata));
 
             let num_transactions = all_transactions.len();
 
@@ -196,6 +194,9 @@ impl BitcoinCoreSv2JDP {
             };
 
             let block_bytes: Vec<u8> = serialize(&block);
+            // The transactions go back to answer `JdResponse::Success` with, minus the coinbase.
+            txdata = block.txdata;
+            txdata.remove(0);
 
             debug!(
                 "Assembled block for checkBlock: {} bytes, {} transactions",
@@ -338,7 +339,7 @@ impl BitcoinCoreSv2JDP {
                     JdResponse::Success {
                         prev_hash: initial_validation_context.prev_hash,
                         nbits: initial_validation_context.nbits,
-                        txid_list,
+                        txdata,
                     }
                 } else {
                     // The chain tip moved while checkBlock was in flight, so the block was
