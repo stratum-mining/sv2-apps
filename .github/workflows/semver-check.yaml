@@ -47,7 +47,7 @@ jobs:
         run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-semver-checks@0.44.0
 
       - name: Run semver checks
-        run: cargo semver-checks --workspace --all-features --exclude integration_tests_sv2
+        run: cargo semver-checks --workspace --all-features
 
   version-bump-check:
     # Only pull requests have a base branch to diff against; the workflow
