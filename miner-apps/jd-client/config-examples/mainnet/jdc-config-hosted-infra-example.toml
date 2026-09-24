@@ -34,7 +34,8 @@ jdc_signature = "Sv2MinerSignature"
 #     https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki#appendix-b-index-of-script-expressions
 # Although the `musig` descriptor is not yet supported and the legacy `combo` descriptor never
 # will be. If you have an address, embed it in a descriptor like `addr(<address here>)`.
-coinbase_reward_script = "addr(bc1q9f9vj7spn8h7qda6pn8d4g4j99f0mn9lhwz55j)"
+# This address belongs to the SRI community multisig wallet.
+coinbase_reward_script = "addr(bc1qxyeh39c8n7fv0kq80qrdk7rccnvttmczj4spg5jzg2dq3sydwahs7ema5e)"
 
 # Enable this option to set a predefined log file path.
 # When enabled, logs will always be written to this file.
