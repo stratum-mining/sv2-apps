@@ -70,7 +70,7 @@ impl BitcoinCoreSv2JDP {
             coinbase_tx.input.first().map(|input| &input.script_sig)
         );
 
-        let (initial_validation_context, txdata, mut staged_txs) = {
+        let (initial_validation_context, ntime, txdata, mut staged_txs) = {
             let mempool_mirror = self.mempool_mirror.borrow();
 
             let prev_hash = mempool_mirror
@@ -79,15 +79,11 @@ impl BitcoinCoreSv2JDP {
             let nbits = mempool_mirror
                 .get_current_nbits()
                 .expect("current_nbits must be set");
-            let min_ntime = mempool_mirror
-                .get_current_min_ntime()
-                .expect("current_min_ntime must be set");
+            let ntime = mempool_mirror
+                .get_current_ntime()
+                .expect("current_ntime must be set");
 
-            let initial_validation_context = ValidationContext {
-                prev_hash,
-                nbits,
-                min_ntime,
-            };
+            let initial_validation_context = ValidationContext { prev_hash, nbits };
 
             // A coinbase must carry exactly one input. Reject anything else before assembling
             // the block: a zero-input coinbase re-serializes into bytes Bitcoin Core's
@@ -164,13 +160,11 @@ impl BitcoinCoreSv2JDP {
             };
 
             info!(
-                "Using prevhash: {:?}, nbits: {:?}, min_ntime: {} from mempool mirror",
-                initial_validation_context.prev_hash,
-                initial_validation_context.nbits,
-                initial_validation_context.min_ntime,
+                "Using prevhash: {:?}, nbits: {:?}, ntime: {} from mempool mirror",
+                initial_validation_context.prev_hash, initial_validation_context.nbits, ntime,
             );
 
-            (initial_validation_context, txdata, staged_txs)
+            (initial_validation_context, ntime, txdata, staged_txs)
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
         let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
@@ -183,9 +177,9 @@ impl BitcoinCoreSv2JDP {
 
             let num_transactions = all_transactions.len();
 
-            // Use the min_ntime from the template as the block timestamp
+            // Use the template ntime as the block timestamp
             // This ensures we meet Bitcoin Core's timestamp validation rules
-            let block_time = initial_validation_context.min_ntime;
+            let block_time = ntime;
 
             let header = Header {
                 version,
@@ -324,9 +318,6 @@ impl BitcoinCoreSv2JDP {
                 nbits: mempool_mirror
                     .get_current_nbits()
                     .expect("current_nbits must be set"),
-                min_ntime: mempool_mirror
-                    .get_current_min_ntime()
-                    .expect("current_min_ntime must be set"),
             }
         };
 
@@ -347,7 +338,6 @@ impl BitcoinCoreSv2JDP {
                     JdResponse::Success {
                         prev_hash: initial_validation_context.prev_hash,
                         nbits: initial_validation_context.nbits,
-                        min_ntime: initial_validation_context.min_ntime,
                         txid_list,
                     }
                 } else {
