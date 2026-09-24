@@ -15,6 +15,7 @@
 
 pub mod v30x;
 pub mod v31x;
+pub mod v32x;
 
 use tokio::net::UnixStream;
 use tracing::{info, warn};
