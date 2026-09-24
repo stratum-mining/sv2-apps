@@ -291,9 +291,9 @@ impl BitcoinCoreIPCEngine {
     /// Spawns a dedicated thread running BitcoinCoreSv2JDP in a LocalSet for handling
     /// the !Send Cap'n Proto client.
     ///
-    /// `version` selects the Bitcoin Core IPC schema family (v30.x or v31.x).
+    /// `version` selects the Bitcoin Core IPC schema family (v30.x, v31.x or v32.x).
     ///
-    /// Blocks until the mempool mirror is bootstrapped and ready to process requests.
+    /// Blocks until the JDP runtime has bootstrapped and is ready to process requests.
     pub async fn new(
         version: BitcoinCoreVersion,
         network: BitcoinNetwork,
@@ -381,7 +381,7 @@ impl BitcoinCoreIPCEngine {
             });
         });
 
-        // Wait for BitcoinCoreSv2JDP to complete mempool bootstrap, mirroring the
+        // Wait for BitcoinCoreSv2JDP to complete its bootstrap, mirroring the
         // pool's Template Provider startup behavior during IBD.
         // Until `new()` succeeds, this function is still the only owner of the spawned JDP
         // thread handle, so cancellation/bootstrap failure must join here rather than detach it.
@@ -397,18 +397,18 @@ impl BitcoinCoreIPCEngine {
                             }
 
                             return Err(JDSErrorKind::BitcoinCoreIPC(
-                                "Mempool bootstrap did not complete".to_string(),
+                                "JDP bootstrap did not complete".to_string(),
                             ));
                         }
                     }
                 }
                 _ = cancellation_token.cancelled() => {
-                    tracing::info!("BitcoinCoreIPCEngine stopped before mempool bootstrap completed");
+                    tracing::info!("BitcoinCoreIPCEngine stopped before JDP bootstrap completed");
                     if let Err(e) = jdp_thread_handle.join() {
                         tracing::warn!("BitcoinCoreSv2JDP thread join failed during startup cancellation: {e:?}");
                     }
                     return Err(JDSErrorKind::BitcoinCoreIPC(
-                        "Mempool bootstrap did not complete".to_string(),
+                        "JDP bootstrap did not complete".to_string(),
                     ));
                 }
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
