@@ -83,6 +83,12 @@ async fn full_template_block_passes_check_block_v31x() {
     assert_full_template_block_passes_check_block(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn full_template_block_passes_check_block_v32x() {
+    assert_full_template_block_passes_check_block(BitcoinCoreVersion::V32X).await;
+}
+
 /// Runs the scenario in the module docs against a live node of the given line. Everything that
 /// mines happens before either runtime starts, so the tip never moves under the template.
 async fn assert_full_template_block_passes_check_block(version: BitcoinCoreVersion) {
