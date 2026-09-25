@@ -32,16 +32,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: "false"
-          # Hash every Cargo workspace without registering the shared target more than once.
-          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          workspaces: integration-tests -> ../target
-      - name: Test stratum-apps workspace
-        run: cargo test --manifest-path=stratum-apps/Cargo.toml --all-features
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+      # Each crate is tested on its own: `--workspace` would unify `stratum-apps`
+      # features across every member, so an app would be tested against features
+      # it does not enable when it is released or published.
+      #
+      # The integration tests need external binaries and run in their own workflow.
+      - name: Test stratum-apps with all features
+        run: cargo test -p stratum-apps --all-features
       - name: Test pool
-        run: cargo test --manifest-path=pool-apps/pool/Cargo.toml
-      - name: Test jd-server (separate workspace)
-        run: cargo test --manifest-path=pool-apps/jd-server/Cargo.toml
-      - name: Test miner applications workspace
-        run: cargo test --manifest-path=miner-apps/Cargo.toml
+        run: cargo test -p pool_sv2
+      - name: Test jd-server
+        run: cargo test -p jd_server_sv2
+      - name: Test jd-client
+        run: cargo test -p jd_client_sv2
+      - name: Test translator
+        run: cargo test -p translator_sv2
       - name: Test bitcoin-core-sv2 crate
-        run: cargo test --manifest-path=bitcoin-core-sv2/Cargo.toml
+        run: cargo test -p bitcoin_core_sv2

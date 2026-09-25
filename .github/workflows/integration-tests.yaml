@@ -34,9 +34,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: "false"
-          # Hash every Cargo workspace without registering the shared target more than once.
-          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          workspaces: integration-tests -> ../target
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
 
       - name: Install capnp dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -60,8 +58,8 @@ jobs:
         run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-nextest@0.9.100
 
       # Failure triage: re-run a single test with captured logs shown live:
-      #   RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml \
+      #   RUST_LOG=debug cargo nextest run -p integration_tests_sv2 \
       #     -E 'test(<name>)' --no-capture
       - name: Integration Tests
         run: |
-          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run --manifest-path=integration-tests/Cargo.toml
+          RUST_BACKTRACE=1 RUST_LOG=debug cargo nextest run -p integration_tests_sv2

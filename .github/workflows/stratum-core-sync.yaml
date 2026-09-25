@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sync-stratum-core-lockfiles:
+  sync-stratum-core-lockfile:
     runs-on: ubuntu-latest
 
     steps:
@@ -48,10 +48,10 @@ jobs:
             exit 1
           fi
 
-          # Current pinned SHA from pool-apps lockfile (same source URL pattern used in previous freshness check).
-          PINNED_SHA="$(grep -oP 'git\+https://github\.com/stratum-mining/stratum\?branch=main#\K[0-9a-f]+' pool-apps/Cargo.lock | head -1 || true)"
+          # Current pinned SHA from the workspace lockfile.
+          PINNED_SHA="$(grep -oP 'git\+https://github\.com/stratum-mining/stratum\?branch=main#\K[0-9a-f]+' Cargo.lock | head -1 || true)"
           if [ -z "${PINNED_SHA}" ]; then
-            echo "Could not determine pinned stratum SHA from pool-apps/Cargo.lock."
+            echo "Could not determine pinned stratum SHA from Cargo.lock."
             exit 1
           fi
 
@@ -69,48 +69,34 @@ jobs:
           echo "pinned_sha=${PINNED_SHA}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Update all workspace lockfiles to latest stratum-core
+      - name: Update the workspace lockfile to latest stratum-core
         if: steps.detect.outputs.update_needed == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          # Update lockfiles in all relevant workspaces in one run.
-          cargo update -p stratum-core --manifest-path stratum-apps/Cargo.toml
-          cargo update -p stratum-core --manifest-path pool-apps/Cargo.toml
-          cargo update -p stratum-core --manifest-path miner-apps/Cargo.toml
-          cargo update -p stratum-core --manifest-path integration-tests/Cargo.toml
+          cargo update -p stratum-core
 
-      - name: Verify lockfiles pin latest stratum SHA
+      - name: Verify the lockfile pins latest stratum SHA
         if: steps.detect.outputs.update_needed == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           LATEST_SHA="${{ steps.detect.outputs.latest_sha }}"
-          FAILED=0
+          PINNED_SHA="$(grep -oP 'git\+https://github\.com/stratum-mining/stratum\?branch=main#\K[0-9a-f]+' Cargo.lock | head -1 || true)"
 
-          for lockfile in stratum-apps/Cargo.lock pool-apps/Cargo.lock miner-apps/Cargo.lock integration-tests/Cargo.lock; do
-            PINNED_SHA="$(grep -oP 'git\+https://github\.com/stratum-mining/stratum\?branch=main#\K[0-9a-f]+' "$lockfile" | head -1 || true)"
-
-            if [ -z "${PINNED_SHA}" ]; then
-              echo "FAIL: No stratum SHA pin found in ${lockfile}"
-              FAILED=1
-              continue
-            fi
-
-            if [ "${PINNED_SHA}" != "${LATEST_SHA}" ]; then
-              echo "FAIL: ${lockfile} pins ${PINNED_SHA}, expected ${LATEST_SHA}"
-              FAILED=1
-            else
-              echo "OK: ${lockfile} updated to ${PINNED_SHA}"
-            fi
-          done
-
-          if [ "${FAILED}" -eq 1 ]; then
-            echo "One or more lockfiles failed to pin latest stratum main SHA."
+          if [ -z "${PINNED_SHA}" ]; then
+            echo "FAIL: No stratum SHA pin found in Cargo.lock"
             exit 1
           fi
+
+          if [ "${PINNED_SHA}" != "${LATEST_SHA}" ]; then
+            echo "FAIL: Cargo.lock pins ${PINNED_SHA}, expected ${LATEST_SHA}"
+            exit 1
+          fi
+
+          echo "OK: Cargo.lock updated to ${PINNED_SHA}"
 
       - name: Create PR with all lockfile updates
         if: steps.detect.outputs.update_needed == 'true'
@@ -121,14 +107,11 @@ jobs:
           branch: "ci/update-stratum-core-${{ steps.detect.outputs.short_sha }}"
           title: "chore(deps): update stratum-core to ${{ steps.detect.outputs.short_sha }}"
           body: |
-            This PR updates all workspace lockfiles to the latest `stratum` main commit.
+            This PR updates the workspace lockfile to the latest `stratum` main commit.
 
             - Latest upstream SHA: `${{ steps.detect.outputs.latest_sha }}`
             - Previously pinned SHA: `${{ steps.detect.outputs.pinned_sha }}`
 
-            Updated lockfiles:
-            - `stratum-apps/Cargo.lock`
-            - `pool-apps/Cargo.lock`
-            - `miner-apps/Cargo.lock`
-            - `integration-tests/Cargo.lock`
+            Updated lockfile:
+            - `Cargo.lock`
           delete-branch: true

@@ -22,25 +22,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: "false"
-          # Hash every Cargo workspace without registering the shared target more than once.
-          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          workspaces: integration-tests -> ../target
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
 
       - name: Install capnp dependencies
         run: sudo apt-get install -y capnproto libcapnp-dev
 
-      # Check test compilation without running tests
-      - name: Check test compilation for stratum-apps workspace
-        run: cargo test --manifest-path=stratum-apps/Cargo.toml --all-features --no-run
-
-      - name: Check test compilation for pool
-        run: cargo test --manifest-path=pool-apps/Cargo.toml --all-features --no-run
-
-      - name: Check test compilation for miner applications workspace
-        run: cargo test --manifest-path=miner-apps/Cargo.toml --all-features --no-run
-
-      - name: Check test compilation for integration tests workspace
-        run: cargo test --manifest-path=integration-tests/Cargo.toml --no-run
-
-      - name: Check test compilation for bitcoin-core-sv2 crate
-        run: cargo test --manifest-path=bitcoin-core-sv2/Cargo.toml --no-run
+      # Check test compilation without running tests.
+      #
+      # Each crate is compiled on its own: `--workspace` would unify `stratum-apps`
+      # features across every member, so an app would be checked against features
+      # it does not enable when it is compiled alone for a release.
+      - name: Check test compilation for each crate
+        run: |
+          for crate in stratum-apps pool_sv2 jd_server_sv2 jd_client_sv2 translator_sv2; do
+            cargo test -p "$crate" --all-features --no-run
+          done
+          cargo test -p integration_tests_sv2 --no-run
+          cargo test -p bitcoin_core_sv2 --no-run

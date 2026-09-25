@@ -6,52 +6,51 @@ This directory contains utility scripts for building, testing, and publishing th
 
 ### 🚀 Publishing Scripts
 
-#### `publish-apps.sh`
+#### `publish.sh`
 **Main publishing script for this repository**
-- Publishes Pool Apps: `pool_sv2` and `jd_server` crates to crates.io
-- Publishes Miner Apps: `jd_client` and `translator_sv2` crates to crates.io
+- Publishes Pool Apps: `pool_sv2` and `jd_server_sv2` crates to crates.io
+- Publishes Miner Apps: `jd_client_sv2` and `translator_sv2` crates to crates.io
 - Includes safety checks and confirmations
 - Interactive confirmation before publishing
 
 **Usage:**
 ```bash
 # Dry run (recommended first)
-./scripts/publish-apps.sh --dry-run
+./scripts/publish.sh --dry-run
 
 # Actual publish (requires crates.io login)
-./scripts/publish-apps.sh
+./scripts/publish.sh
 ```
 
 ### 🔧 Development Scripts
 
 #### `clippy-fmt-and-test.sh`
 **Complete code quality check**
-- Runs clippy linting on all three workspaces
-- Runs all tests across all applications
+- Runs clippy linting on each crate, with the features that crate enables itself
+- Runs all tests across every crate, including the integration tests
 - Formats code with rustfmt
-- Works on Pool Apps workspace (`pool`, `jd-server`), Miner Apps workspace (`jd-client`, `translator`, `test-utils`), and Integration Tests workspace
 
 **Usage:**
 ```bash
 ./scripts/clippy-fmt-and-test.sh
 ```
 
-#### `build-all-workspaces.sh`
-**Build and format all three workspaces**
-- Builds Pool Apps workspace, Miner Apps workspace, and Integration Tests workspace
-- Formats code across all workspaces
+#### `build-all.sh`
+**Build and format the workspace**
+- Builds every crate in the workspace
+- Formats code with rustfmt
 - Good for CI/CD pipelines
 
 **Usage:**
 ```bash
-./scripts/build-all-workspaces.sh
+./scripts/build-all.sh
 ```
 
 #### `cross-repo.sh`
 **Local development against a stratum checkout**
 - Must be *sourced*, not executed, since it defines shell functions
-- `patch-cargo-toml` points `stratum-core` at a local `stratum` checkout, across all workspace manifests
-- `restore-cargo-toml` drops the patch sections and refreshes the lockfiles
+- `patch-cargo-toml` points `stratum-core` at a local `stratum` checkout, via `[patch]` in the workspace root manifest
+- `restore-cargo-toml` drops the patch section and refreshes the lockfile
 - `get-stratum-core-path` resolves the checkout and keeps the `stratum` symlink at the repository root pointed at it
 
 **Usage:**
@@ -65,11 +64,11 @@ restore-cargo-toml
 
 ### 📊 Testing & Coverage Scripts
 
-#### `coverage-apps.sh`
+#### `coverage.sh`
 **Generate test coverage reports**
 - Uses cargo-tarpaulin for coverage analysis
-- Generates XML reports for all three workspaces
-- Covers Pool Apps workspace, Miner Apps workspace, and Integration Tests workspace
+- Generates one XML report per crate group, so each keeps its own codecov flag
+- Writes everything under `target/tarpaulin-reports/`
 
 **Prerequisites:**
 ```bash
@@ -78,7 +77,7 @@ cargo install cargo-tarpaulin
 
 **Usage:**
 ```bash
-./scripts/coverage-apps.sh
+./scripts/coverage.sh
 ```
 
 ## Prerequisites
@@ -105,18 +104,25 @@ cargo install cargo-tarpaulin
 
 ## Current Repository Structure
 
-This repository contains multiple SV2 applications organized in **three main workspaces**:
+This repository is a **single Cargo workspace** rooted at the repository root, holding
+every SV2 application:
 
-**Pool Applications Workspace (`pool-apps/`):**
+**Pool Applications (`pool-apps/`):**
 - **`pool/`** - SV2 Pool implementation (`pool_sv2` crate)
-- **`jd-server/`** - Job Declarator Server implementation (`jd_server` crate)
+- **`jd-server/`** - Job Declarator Server implementation (`jd_server_sv2` crate)
 
-**Miner Applications Workspace (`miner-apps/`):**
-- **`jd-client/`** - Job Declarator Client implementation (`jd_client` crate)
+**Miner Applications (`miner-apps/`):**
+- **`jd-client/`** - Job Declarator Client implementation (`jd_client_sv2` crate)
 - **`translator/`** - SV1 to SV2 Translator implementation (`translator_sv2` crate)
 
-**Integration Tests Workspace (`integration-tests/`):**
-- **`integration-tests/`** - End-to-end integration tests
+**Shared libraries:**
+- **`stratum-apps/`** - Application-level helpers shared by the roles (`stratum-apps` crate)
+- **`bitcoin-core-sv2/`** - Bitcoin Core IPC bindings (`bitcoin_core_sv2` crate)
+
+**Integration Tests (`integration-tests/`):**
+- End-to-end integration tests, kept out of `default-members` because they drive
+  real `bitcoind` and template provider binaries. Run them with
+  `cargo test -p integration_tests_sv2`.
 
 All crates depend on external SV2 protocol libraries that should be available on crates.io.
 
@@ -130,7 +136,7 @@ All crates depend on external SV2 protocol libraries that should be available on
 
 2. **Test publishing (dry run):**
    ```bash
-   ./scripts/publish-apps.sh --dry-run
+   ./scripts/publish.sh --dry-run
    ```
 
 3. **Actual publishing:**
@@ -139,7 +145,7 @@ All crates depend on external SV2 protocol libraries that should be available on
    cargo login <your-token>
    
    # Publish
-   ./scripts/publish-apps.sh
+   ./scripts/publish.sh
    ```
 
 ## Notes

@@ -18,12 +18,10 @@ _CROSS_REPO_SCRIPT_DIR=$(cd "$(dirname "$_CROSS_REPO_SCRIPT_PATH")" 2>/dev/null 
 : "${CROSS_REPO_ROOT:=$(dirname "$_CROSS_REPO_SCRIPT_DIR")}"
 : "${CROSS_REPO_STRATUM_SYMLINK:=stratum}"
 
+# `[patch]` is only honoured in the workspace root manifest, and every crate in
+# the repository belongs to that one workspace.
 _cross_repo_cargo_tomls=(
-  "stratum-apps/Cargo.toml"
-  "pool-apps/Cargo.toml"
-  "miner-apps/Cargo.toml"
-  "integration-tests/Cargo.toml"
-  "bitcoin-core-sv2/Cargo.toml"
+  "Cargo.toml"
 )
 
 _cross_repo_realpath() {
@@ -218,7 +216,7 @@ patch-cargo-toml() {
     _cross_repo_upsert_patch_section "$cargo_toml" "$stratum_core_abs" || return 1
   done
 
-  echo "Patched all Cargo.toml files to use local stratum-core at: $stratum_core_abs" >&2
+  echo "Patched the workspace Cargo.toml to use local stratum-core at: $stratum_core_abs" >&2
 }
 
 _cross_repo_remove_patch_section() {

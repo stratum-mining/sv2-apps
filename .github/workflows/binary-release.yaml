@@ -42,10 +42,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            miner-apps/target
-            pool-apps/target
-            pool-apps/jd-server/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -72,23 +70,23 @@ jobs:
       - name: Build (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          cargo build --release --locked --manifest-path=miner-apps/jd-client/Cargo.toml --target ${{ matrix.target }}
-          cargo build --release --locked --manifest-path=pool-apps/pool/Cargo.toml --target ${{ matrix.target }}
-          cargo build --release --locked --manifest-path=miner-apps/translator/Cargo.toml --target ${{ matrix.target }}
+          cargo build --release --locked -p jd_client_sv2 --target ${{ matrix.target }}
+          cargo build --release --locked -p pool_sv2 --target ${{ matrix.target }}
+          cargo build --release --locked -p translator_sv2 --target ${{ matrix.target }}
 
       - name: Build (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          cargo build --release --locked --manifest-path=miner-apps/jd-client/Cargo.toml
-          cargo build --release --locked --manifest-path=pool-apps/pool/Cargo.toml
-          cargo build --release --locked --manifest-path=miner-apps/translator/Cargo.toml
+          cargo build --release --locked -p jd_client_sv2
+          cargo build --release --locked -p pool_sv2
+          cargo build --release --locked -p translator_sv2
 
       - name: Package Miner Apps (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           mkdir -p miner-apps-release/jd-client miner-apps-release/translator
-          cp miner-apps/target/${{ matrix.target }}/release/jd_client_sv2 miner-apps-release/jd-client/
-          cp miner-apps/target/${{ matrix.target }}/release/translator_sv2 miner-apps-release/translator/
+          cp target/${{ matrix.target }}/release/jd_client_sv2 miner-apps-release/jd-client/
+          cp target/${{ matrix.target }}/release/translator_sv2 miner-apps-release/translator/
           cp -r miner-apps/jd-client/config-examples/mainnet/jdc-config-bitcoin-core-ipc-local-infra-example.toml miner-apps-release/jd-client/jdc-config.toml
           cp -r miner-apps/translator/config-examples/mainnet/tproxy-config-local-jdc-example.toml miner-apps-release/translator/translator-config.toml
           tar -czvf miner-apps-${{ matrix.target }}.tar.gz -C miner-apps-release .
@@ -97,7 +95,7 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           mkdir -p pool-apps-release/pool
-          cp pool-apps/target/${{ matrix.target }}/release/pool_sv2 pool-apps-release/pool/
+          cp target/${{ matrix.target }}/release/pool_sv2 pool-apps-release/pool/
           cp -r pool-apps/pool/config-examples/mainnet/pool-config-bitcoin-core-ipc-example.toml pool-apps-release/pool/pool-config.toml
           tar -czvf pool-apps-${{ matrix.target }}.tar.gz -C pool-apps-release .
 
@@ -105,8 +103,8 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: |
           mkdir -p miner-apps-release/jd-client miner-apps-release/translator
-          cp miner-apps/target/release/jd_client_sv2 miner-apps-release/jd-client/
-          cp miner-apps/target/release/translator_sv2 miner-apps-release/translator/
+          cp target/release/jd_client_sv2 miner-apps-release/jd-client/
+          cp target/release/translator_sv2 miner-apps-release/translator/
           cp -r miner-apps/jd-client/config-examples/mainnet/jdc-config-bitcoin-core-ipc-local-infra-example.toml miner-apps-release/jd-client/jdc-config.toml
           cp -r miner-apps/translator/config-examples/mainnet/tproxy-config-local-jdc-example.toml miner-apps-release/translator/translator-config.toml
 
@@ -116,7 +114,7 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: |
           mkdir -p pool-apps-release/pool
-          cp pool-apps/target/release/pool_sv2 pool-apps-release/pool/
+          cp target/release/pool_sv2 pool-apps-release/pool/
           cp -r pool-apps/pool/config-examples/mainnet/pool-config-bitcoin-core-ipc-example.toml pool-apps-release/pool/pool-config.toml
           tar -czvf pool-apps-${{ matrix.target }}.tar.gz -C pool-apps-release .
 

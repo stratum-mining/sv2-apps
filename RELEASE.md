@@ -27,18 +27,20 @@ release branch is ready, create a new tag and initiate any publishing tasks.
 Usually the release process is as follows:
 
 1. **Update Dependencies:** Ensure all SRI dependencies are updated to the latest stable versions from the main repository.
-2. **Run Tests:** Execute `./scripts/clippy-fmt-and-test.sh` to ensure all workspaces pass tests, linting, and formatting.
+2. **Run Tests:** Execute `./scripts/clippy-fmt-and-test.sh` to ensure the workspace passes tests, linting, and formatting.
 3. **Create Release Branch:** Create a new release branch from the `main` branch.
 4. **Update Versions:** Update version numbers in relevant `Cargo.toml` files.
 5. **Create Tag:** Create a new tag for the release branch.
-6. **Publish Release:** Use `./scripts/publish-apps.sh` to publish applications to crates.io (if applicable).
+6. **Publish Release:** Use `./scripts/publish.sh` to publish applications to crates.io (if applicable).
 7. **Create GitHub Release:** Create a GitHub release with changelog and release notes.
 
 ## Versioning
 
-This repository contains alpha-stage applications organized in workspaces:
+This repository contains alpha-stage applications, all belonging to a single Cargo workspace rooted at the repository root:
 - `pool-apps/` - Pool server and Job Declarator Server
-- `miner-apps/` - Job Declarator Client, Translator Proxy, and test utilities  
+- `miner-apps/` - Job Declarator Client, Translator Proxy, and test utilities
+- `stratum-apps/` - Shared application-level library used by the roles
+- `bitcoin-core-sv2/` - Bitcoin Core IPC bindings
 - `integration-tests/` - End-to-end testing suite
 
 ### Application Versioning

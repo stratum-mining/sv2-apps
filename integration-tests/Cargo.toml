@@ -61,14 +61,21 @@ path = "bin/mining_device.rs"
 
 # Bench targets preserved from the former standalone `mining_device` crate.
 # Remove these entries when the embedded `mining_device` module is deprecated.
+#
+# Paths are explicit because cargo only checks inferred target paths while
+# parsing a manifest. The Docker images load this manifest as a workspace
+# member without copying the sources of this crate.
 [[bench]]
 name = "mining_device_hasher_bench"
+path = "benches/mining_device_hasher_bench.rs"
 harness = false
 
 [[bench]]
 name = "mining_device_microbatch_bench"
+path = "benches/mining_device_microbatch_bench.rs"
 harness = false
 
 [[bench]]
 name = "mining_device_scaling_bench"
+path = "benches/mining_device_scaling_bench.rs"
 harness = false
