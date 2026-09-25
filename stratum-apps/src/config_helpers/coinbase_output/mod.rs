@@ -11,6 +11,9 @@ pub use errors::Error;
 /// Coinbase output transaction.
 ///
 /// Typically used for parsing coinbase outputs defined in SRI role configuration files.
+///
+/// The script must encode a spending condition the operator intends. The empty script
+/// encodes none, so every constructor rejects it with [`Error::EmptyScript`].
 #[derive(Debug, serde::Deserialize, Clone)]
 #[serde(try_from = "serde_types::SerdeCoinbaseOutput")]
 pub struct CoinbaseRewardScript {
@@ -19,6 +22,17 @@ pub struct CoinbaseRewardScript {
 }
 
 impl CoinbaseRewardScript {
+    /// Every constructor goes through here, so none can produce an empty script.
+    fn new(script_pubkey: ScriptBuf, ok_for_mainnet: bool) -> Result<Self, Error> {
+        if script_pubkey.is_empty() {
+            return Err(Error::EmptyScript);
+        }
+        Ok(Self {
+            script_pubkey,
+            ok_for_mainnet,
+        })
+    }
+
     /// Creates a new [`CoinbaseRewardScript`] from a descriptor string.
     pub fn from_descriptor(s: &str) -> Result<Self, Error> {
         // Taproot descriptors cannot be parsed with `expression::Tree::from_str` and
@@ -26,12 +40,9 @@ impl CoinbaseRewardScript {
         // rust-miniscript. In Miniscript 13 we will not need to do this.
         if s.starts_with("tr") {
             let desc = s.parse::<Descriptor<DefiniteDescriptorKey>>()?;
-            return Ok(Self {
-                script_pubkey: desc.script_pubkey(),
-                // Descriptors don't have a way to specify a network, so we assume
-                // they are OK to be used on mainnet.
-                ok_for_mainnet: true,
-            });
+            // Descriptors don't have a way to specify a network, so we assume
+            // they are OK to be used on mainnet.
+            return Self::new(desc.script_pubkey(), true);
         }
 
         let tree = miniscript::expression::Tree::from_str(s)?;
@@ -42,10 +53,10 @@ impl CoinbaseRewardScript {
                     .verify_terminal_parent("addr", "a valid Bitcoin address")
                     .map_err(miniscript::Error::Parse)?;
 
-                Ok(Self {
-                    script_pubkey: addr.assume_checked_ref().script_pubkey(),
-                    ok_for_mainnet: addr.is_valid_for_network(Network::Bitcoin),
-                })
+                Self::new(
+                    addr.assume_checked_ref().script_pubkey(),
+                    addr.is_valid_for_network(Network::Bitcoin),
+                )
             }
             "raw" => {
                 let script_hex: String = root
@@ -55,22 +66,16 @@ impl CoinbaseRewardScript {
                     )
                     .map_err(miniscript::Error::Parse)?;
 
-                Ok(Self {
-                    script_pubkey: ScriptBuf::from_hex(&script_hex)?,
-                    // Users of hex scriptpubkeys are on their own.
-                    ok_for_mainnet: true,
-                })
+                // Users of hex scriptpubkeys are on their own.
+                Self::new(ScriptBuf::from_hex(&script_hex)?, true)
             }
             _ => {
                 use miniscript::expression::FromTree as _;
 
                 let desc = Descriptor::<DefiniteDescriptorKey>::from_tree(root)?;
-                Ok(Self {
-                    script_pubkey: desc.script_pubkey(),
-                    // Descriptors don't have a way to specify a network, so we assume
-                    // they are OK to be used on mainnet.
-                    ok_for_mainnet: true,
-                })
+                // Descriptors don't have a way to specify a network, so we assume
+                // they are OK to be used on mainnet.
+                Self::new(desc.script_pubkey(), true)
             }
         }
     }
@@ -246,14 +251,16 @@ mod tests {
 
     #[test]
     fn fixed_vector_raw() {
-        // Empty raw descriptors are OK; correspond to the empty script.
-        assert_eq!(
-            CoinbaseRewardScript::from_descriptor("raw()")
-                .unwrap()
-                .script_pubkey()
-                .to_hex_string(),
-            "",
-        );
+        // The empty script carries no spending condition, so it is rejected, with or
+        // without a checksum.
+        for empty in ["raw()", "raw()#58lrscpx"] {
+            assert_eq!(
+                CoinbaseRewardScript::from_descriptor(empty)
+                    .unwrap_err()
+                    .to_string(),
+                "Empty script: a coinbase reward script must encode a spending condition",
+            );
+        }
         assert_eq!(
             CoinbaseRewardScript::from_descriptor("raw(deadbeef)")
                 .unwrap()

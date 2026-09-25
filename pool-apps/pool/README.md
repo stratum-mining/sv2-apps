@@ -52,7 +52,7 @@ The configuration file contains the following information:
 1. The SRI Pool information which includes the SRI Pool authority public key
    (`authority_public_key`), the SRI Pool authority secret key (`authority_secret_key`).
 2. The address which it will use to listen to new connection from downstream roles (`listen_address`)
-3. The coinbase reward script specified as a descriptor (`coinbase_reward_script`)
+3. The coinbase reward script specified as a descriptor (`coinbase_reward_script`). It must encode a spending condition, so an empty script such as `raw()` fails startup.
 4. A string that serves as signature on the coinbase tx (`pool_signature`).
 5. The `template_provider_type` section, which determines how the pool obtains block templates. There are two options:
    - `[template_provider_type.Sv2Tp]` - Connects to an SV2 Template Provider, with the following parameters:

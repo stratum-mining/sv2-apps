@@ -120,4 +120,41 @@ mod tests {
             unsafe { std::env::remove_var(key) };
         }
     }
+
+    /// Loads a shipped example with only its reward script replaced by the empty one.
+    /// The prefix is unused so the `JDC__*` variables set by other tests can't leak in.
+    #[test]
+    fn empty_coinbase_reward_script_is_rejected() {
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config-examples/signet/jdc-config-local-infra-example.toml");
+        let valid =
+            r#"coinbase_reward_script = "addr(tb1qpusf5256yxv50qt0pm0tue8k952fsu5lzsphft)""#;
+        let toml = std::fs::read_to_string(example).expect("read example config");
+        assert!(
+            toml.contains(valid),
+            "example no longer has the expected script"
+        );
+
+        let path = std::env::temp_dir().join("jdc-config-empty-script.toml");
+        std::fs::write(
+            &path,
+            toml.replace(valid, r#"coinbase_reward_script = "raw()""#),
+        )
+        .expect("write temp config");
+        let result = load_config::<JobDeclaratorClientConfig>(
+            &path,
+            "JDC_TEST_UNUSED",
+            LIST_KEYS,
+            ENUM_KEYS,
+        );
+        let _ = std::fs::remove_file(&path);
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "Empty script: a coinbase reward script must encode a spending condition"
+            ),
+            "unexpected error: {err}"
+        );
+    }
 }

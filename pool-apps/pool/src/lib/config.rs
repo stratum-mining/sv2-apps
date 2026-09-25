@@ -64,10 +64,6 @@ pub struct PoolConfig {
 
 impl PoolConfig {
     /// Creates a new instance of the [`PoolConfig`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `coinbase_reward_script` is empty.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool_connection: ConnectionConfig,
@@ -265,13 +261,28 @@ impl ConnectionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stratum_apps::config_helpers::load_config;
+    use stratum_apps::config_helpers::{ConfigError, load_config};
 
     /// Writes a minimal pool config with `extra` spliced in, so each test varies exactly
     /// one thing, and loads it through the SAME loader the binary uses — not a bare
     /// `toml::from_str`. That way the test covers serde attributes, the env-override layer
     /// and the enum handling, rather than just the struct definition.
     fn load_with(extra: &str, name: &str) -> PoolConfig {
+        try_load(
+            "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)",
+            extra,
+            name,
+        )
+        .expect("config loads")
+    }
+
+    /// Like [`load_with`], but with the given `coinbase_reward_script` and without
+    /// expecting the load to succeed.
+    fn try_load(
+        coinbase_reward_script: &str,
+        extra: &str,
+        name: &str,
+    ) -> Result<PoolConfig, ConfigError> {
         let path = std::env::temp_dir().join(format!("pool-config-{name}.toml"));
         std::fs::write(
             &path,
@@ -281,7 +292,7 @@ listen_address = "0.0.0.0:34254"
 authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
 authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
 cert_validity_sec = 3600
-coinbase_reward_script = "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)"
+coinbase_reward_script = "{coinbase_reward_script}"
 pool_signature = "test"
 shares_per_minute = 6.0
 share_batch_size = 10
@@ -293,10 +304,30 @@ address = "127.0.0.1:8442"
             ),
         )
         .expect("write temp config");
-        let cfg = load_config(&path, "POOL_TEST_UNUSED", &[], &["template_provider_type"])
-            .expect("config loads");
+        let cfg = load_config(&path, "POOL_TEST_UNUSED", &[], &["template_provider_type"]);
         let _ = std::fs::remove_file(&path);
         cfg
+    }
+
+    #[test]
+    fn empty_coinbase_reward_script_is_rejected() {
+        // The embedded JDS inherits the pool's script, so a pool with a `[jds]` table
+        // must refuse the empty script too.
+        for (extra, name) in [
+            ("", "empty-script"),
+            (
+                "[jds]\nlisten_address = \"0.0.0.0:34264\"",
+                "empty-script-jds",
+            ),
+        ] {
+            let err = try_load("raw()", extra, name).unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    "Empty script: a coinbase reward script must encode a spending condition"
+                ),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[test]

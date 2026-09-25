@@ -15,6 +15,8 @@ pub enum Error {
     UnknownOutputScriptType,
     /// Error from the `miniscript` crate.
     Miniscript(miniscript::Error),
+    /// The script is empty, so the output would carry no spending condition.
+    EmptyScript,
 }
 
 impl fmt::Display for Error {
@@ -29,6 +31,10 @@ impl fmt::Display for Error {
                 "Invalid output_script_value for your script type. It must be a valid public key/script"
             ),
             Miniscript(e) => write!(f, "Miniscript: {e}"),
+            EmptyScript => write!(
+                f,
+                "Empty script: a coinbase reward script must encode a spending condition"
+            ),
         }
     }
 }
