@@ -87,3 +87,44 @@ impl fmt::Display for BitcoinCoreSv2Error {
 }
 
 impl std::error::Error for BitcoinCoreSv2Error {}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::CancellationToken;
+
+    #[tokio::test]
+    async fn ipc_factories_report_unsupported_platform() {
+        for version in [BitcoinCoreVersion::V30X, BitcoinCoreVersion::V31X] {
+            let (_, incoming) = async_channel::unbounded();
+            let (outgoing, _) = async_channel::unbounded();
+            let error = template_distribution_protocol::new(
+                version,
+                "node.sock",
+                0,
+                1,
+                incoming,
+                outgoing,
+                CancellationToken::new(),
+            )
+            .await
+            .err()
+            .expect("Windows TDP initialization must return an error");
+            assert!(error.to_string().contains("not supported on Windows"));
+
+            let (_, incoming) = async_channel::unbounded();
+            let (ready, _) = tokio::sync::oneshot::channel();
+            let error = job_declaration_protocol::new(
+                version,
+                "node.sock",
+                incoming,
+                CancellationToken::new(),
+                ready,
+            )
+            .await
+            .err()
+            .expect("Windows JDP initialization must return an error");
+            assert!(error.to_string().contains("not supported on Windows"));
+        }
+    }
+}
