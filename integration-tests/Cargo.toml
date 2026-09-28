@@ -43,6 +43,9 @@ sha2 = { version = "0.10.6", features = ["compress", "asm"] }
 primitive-types = "0.13.1"
 num-format = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
+
 [dev-dependencies]
 # Dev-only dependencies kept only for `mining_device` test/bench coverage.
 # Remove together with the `mining_device` benches/test listed below.
