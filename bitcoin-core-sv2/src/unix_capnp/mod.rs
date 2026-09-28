@@ -1,6 +1,8 @@
 //! Bitcoin Core IPC-backed protocol runtimes.
 //!
 //! This backend uses UNIX-socket Cap'n Proto RPC clients to communicate with Bitcoin Core.
+//! Direct IPC is unsupported on Windows. Applications can still use a TCP SV2 template
+//! provider; selecting this backend returns an unsupported-operation error.
 //!
 //! ## Runtime constraint
 //!
@@ -38,3 +40,22 @@ const FORCE_UPDATE_MAX_ATTEMPTS: usize = 3;
 
 /// Backoff between `force_update_mempool_mirror` retry attempts (in milliseconds).
 const FORCE_UPDATE_RETRY_BACKOFF_MS: u64 = 25;
+
+/// Connect and split the IPC socket into independently owned read and write halves.
+#[cfg(unix)]
+async fn connect(
+    path: &std::path::Path,
+) -> std::io::Result<(
+    tokio::net::unix::OwnedReadHalf,
+    tokio::net::unix::OwnedWriteHalf,
+)> {
+    Ok(tokio::net::UnixStream::connect(path).await?.into_split())
+}
+
+#[cfg(windows)]
+async fn connect(_path: &std::path::Path) -> std::io::Result<(tokio::io::Empty, tokio::io::Sink)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "direct Bitcoin Core IPC is not supported on Windows; use an SV2 template provider",
+    ))
+}
