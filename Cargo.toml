@@ -22,3 +22,8 @@ default-members = [
     "miner-apps/jd-client",
     "miner-apps/translator",
 ]
+
+# Override dependencies with local paths
+# Temporary: builds against the companion stratum PR's branch until it lands upstream.
+[patch."https://github.com/stratum-mining/stratum"]
+stratum-core = { git = "https://github.com/bit-aloo/stratum", branch = "2026-09-29-buffer-sv2-refactor" }
