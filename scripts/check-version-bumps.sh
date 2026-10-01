@@ -51,10 +51,25 @@ for manifest in $MANIFESTS; do
     *) echo "::error::crates.io returned HTTP $status for $name"; exit 1 ;;
   esac
   # Yanked versions count too: their numbers can never be published again.
-  published=$(jq -r '.versions[].num' "$RESPONSE" | sort -V | tail -n1)
+  comparison=$(jq -r --arg current "$current" '
+    # Numeric identifiers sort by length, then digits, without losing precision.
+    # Releases outrank prereleases; build metadata does not affect precedence.
+    def semver_key:
+      split("+")[0]
+      | capture("^(?<core>[0-9]+\\.[0-9]+\\.[0-9]+)(?:-(?<pre>[0-9A-Za-z.-]+))?$")
+      | (.core | split(".") | map([length, .])) + [
+          if .pre == null then [1]
+          else [0, (.pre | split(".") | map(
+            if test("^[0-9]+$") then [0, length, .] else [1, .] end
+          ))]
+          end
+        ];
+    .versions | max_by(.num | semver_key) | .num as $published
+    | "\($published) \(($current | semver_key) > ($published | semver_key))"
+  ' "$RESPONSE")
+  published=${comparison% *}
 
-  newest=$(printf '%s\n%s\n' "$published" "$current" | sort -V | tail -n1)
-  if [ "$current" = "$published" ] || [ "$newest" != "$current" ]; then
+  if [ "${comparison##* }" != true ]; then
     echo "::error::$name has changes but its version ($current) is not above the latest published on crates.io ($published)"
     FAILED=1
   else
