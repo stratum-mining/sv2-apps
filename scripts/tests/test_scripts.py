@@ -141,5 +141,24 @@ class VersionBumpTests(ScriptTests):
                 self.check_version(lower, [(higher, False)], 1)
 
 
+class CrossRepoTests(ScriptTests):
+    def test_literal_home_and_absolute_paths(self):
+        home = self.root / "home with spaces"
+        self.env.update(HOME=str(home), CROSS_REPO_ROOT=str(self.root))
+        for relative in ["stratum", "stratum with spaces"]:
+            repo = home / relative
+            (repo / "stratum-core").mkdir(parents=True)
+            for path in [f"~/{relative}", str(repo)]:
+                with self.subTest(path=path):
+                    result = subprocess.run(
+                        ["bash", "-c", 'source "$1"; get-stratum-core-path "$2"',
+                         "bash", str(SCRIPTS / "cross-repo.sh"), path],
+                        cwd=self.root, env=self.env, text=True, capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(result.stdout.strip(), str(repo / "stratum-core"))
+                    self.assertEqual((self.root / "stratum").resolve(), repo)
+
+
 if __name__ == "__main__":
     unittest.main()
