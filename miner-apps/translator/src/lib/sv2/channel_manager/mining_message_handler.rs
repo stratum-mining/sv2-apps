@@ -485,6 +485,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         // submitting shares for a channel that no longer exists upstream.
         for channel_id in closed_channel_ids {
             self.sv1_advertised_extranonce_prefixes.remove(&channel_id);
+            // Each non-aggregated channel owns the share sequence counter keyed by its ID.
+            self.share_sequence_counters.remove(&channel_id);
             let mut close = m.clone();
             close.channel_id = channel_id;
             self.channel_manager_io

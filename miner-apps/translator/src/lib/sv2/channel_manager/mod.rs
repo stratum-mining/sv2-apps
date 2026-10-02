@@ -1000,6 +1000,14 @@ impl ChannelManager {
                 self.sv1_advertised_extranonce_prefixes
                     .remove(&m.channel_id);
 
+                // In non-aggregated mode each channel owns the share sequence counter keyed by
+                // its ID. In aggregated mode the only counter belongs to the shared upstream
+                // channel and is keyed by its upstream channel ID, which can equal a local
+                // channel ID, so closing a local channel must not touch it.
+                if !self.mode.is_aggregated() {
+                    self.share_sequence_counters.remove(&m.channel_id);
+                }
+
                 // Remove from any group channels that contain it
                 self.group_channels.for_each_mut(|_, group_channel| {
                     if group_channel.has_channel_id(m.channel_id) {
@@ -1297,7 +1305,8 @@ impl ChannelManager {
     ///
     /// The counter_key determines which counter to use:
     /// - In aggregated mode: use upstream channel ID (single counter for all shares)
-    /// - In non-aggregated mode: use downstream channel ID (one counter per channel)
+    /// - In non-aggregated mode: use downstream channel ID (one counter per channel, removed when
+    ///   the channel closes)
     fn next_share_sequence_number(&self, counter_key: u32) -> u32 {
         self.share_sequence_counters
             .with_mut_or_default(counter_key, |counter| {
@@ -1632,6 +1641,148 @@ mod tests {
             sv1_server_receiver_for_test.try_recv(),
             Ok(MiningOwned::CloseChannel(close)) if close.channel_id == 42
         ));
+    }
+
+    /// Channel endpoints a test uses to feed a channel manager and observe what it sends.
+    struct TestIo {
+        downstream_sender: Sender<(MiningOwned, Option<String>)>,
+        upstream_receiver: Receiver<OutboundFrame>,
+        sv1_server_receiver: Receiver<MiningOwned>,
+    }
+
+    fn channel_manager_with_test_io(mode: TproxyMode) -> (ChannelManager, TestIo) {
+        let (upstream_sender, upstream_receiver) = unbounded();
+        let (_upstream_inbound_sender, upstream_inbound_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver) = unbounded();
+        let (downstream_sender, downstream_receiver) = unbounded();
+        let manager = ChannelManager::new(
+            upstream_sender,
+            upstream_inbound_receiver,
+            sv1_server_sender,
+            downstream_receiver,
+            vec![],
+            vec![],
+            mode,
+            None,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+        (
+            manager,
+            TestIo {
+                downstream_sender,
+                upstream_receiver,
+                sv1_server_receiver,
+            },
+        )
+    }
+
+    fn test_extended_channel(channel_id: ChannelId) -> ExtendedChannel {
+        ExtendedChannel::new(
+            channel_id,
+            "miner".to_string(),
+            ExtranoncePrefix::from_wire(vec![0; 4]).unwrap(),
+            Target::from_le_bytes([0xff; 32]),
+            1.0,
+            true,
+            8,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn close_channel(channel_id: ChannelId) -> CloseChannelOwned {
+        CloseChannelOwned {
+            channel_id,
+            reason_code: Str0255Owned::try_from("closed".to_string()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_close_removes_share_sequence_counters_of_closed_channels() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        let mut group = GroupChannel::new(100);
+        for channel_id in [7, 8, 9] {
+            manager
+                .extended_channels
+                .insert(channel_id, test_extended_channel(channel_id));
+            manager.next_share_sequence_number(channel_id);
+        }
+        for channel_id in [8, 9] {
+            group.add_channel_id(channel_id, 12).unwrap();
+        }
+        manager.group_channels.insert(100, group);
+
+        // One close addressed to a channel, one addressed to the group of the other two.
+        for close in [close_channel(7), close_channel(100)] {
+            manager
+                .handle_close_channel(None, close, None)
+                .await
+                .unwrap();
+        }
+
+        let mut forwarded = Vec::new();
+        while let Ok(MiningOwned::CloseChannel(close)) = io.sv1_server_receiver.try_recv() {
+            forwarded.push(close.channel_id);
+        }
+        forwarded.sort();
+        assert_eq!(forwarded, vec![7, 8, 9]);
+        for channel_id in [7, 8, 9] {
+            assert!(!manager.share_sequence_counters.contains_key(&channel_id));
+        }
+
+        // Closing an already closed channel is only logged.
+        let repeated = manager
+            .handle_close_channel(None, close_channel(7), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(repeated.action, Action::Log));
+
+        // A reused channel ID starts a fresh sequence.
+        assert_eq!(manager.next_share_sequence_number(7), 1);
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_downstream_close_removes_the_share_sequence_counter() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        manager
+            .extended_channels
+            .insert(7, test_extended_channel(7));
+        manager.next_share_sequence_number(7);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(7)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+
+        assert!(io.upstream_receiver.try_recv().is_ok());
+        assert!(!manager.share_sequence_counters.contains_key(&7));
+        assert_eq!(manager.next_share_sequence_number(7), 1);
+    }
+
+    #[tokio::test]
+    async fn aggregated_downstream_close_preserves_the_shared_share_sequence_counter() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        // The shared upstream channel's ID equals the local ID of the channel being closed.
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, test_extended_channel(42));
+        manager
+            .extended_channels
+            .insert(42, test_extended_channel(42));
+        manager.next_share_sequence_number(42);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(42)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+
+        assert!(!manager.extended_channels.contains_key(&42));
+        assert_eq!(manager.next_share_sequence_number(42), 2);
     }
 
     #[tokio::test]
