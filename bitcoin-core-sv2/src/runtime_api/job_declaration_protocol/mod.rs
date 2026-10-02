@@ -61,8 +61,16 @@ where
         )
         .await
         .map(BitcoinCoreSv2JDP::V30X)
-        .map_err(|error| {
-            BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
+        .map_err(|error| match error {
+            v30x::job_declaration_protocol::error::BitcoinCoreSv2JDPError::BootstrapCancelled => {
+                BitcoinCoreSv2JDPError::Cancelled {
+                    version,
+                    protocol: BitcoinCoreSv2Protocol::JDP,
+                }
+            }
+            error => {
+                BitcoinCoreSv2JDPError::initialization(version, BitcoinCoreSv2Protocol::JDP, error)
+            }
         }),
         BitcoinCoreVersion::V31X => v31x::job_declaration_protocol::BitcoinCoreSv2JDP::new(
             bitcoin_core_unix_socket_path,
@@ -72,8 +80,16 @@ where
         )
         .await
         .map(BitcoinCoreSv2JDP::V31X)
-        .map_err(|error| {
-            BitcoinCoreSv2JDPError::from_debug(version, BitcoinCoreSv2Protocol::JDP, error)
+        .map_err(|error| match error {
+            v31x::job_declaration_protocol::error::BitcoinCoreSv2JDPError::BootstrapCancelled => {
+                BitcoinCoreSv2JDPError::Cancelled {
+                    version,
+                    protocol: BitcoinCoreSv2Protocol::JDP,
+                }
+            }
+            error => {
+                BitcoinCoreSv2JDPError::initialization(version, BitcoinCoreSv2Protocol::JDP, error)
+            }
         }),
     }
 }

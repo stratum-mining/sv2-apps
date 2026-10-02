@@ -363,7 +363,11 @@ impl BitcoinCoreIPCEngine {
                         {
                             Ok(client) => client,
                             Err(e) => {
-                                if !cancellation_token_clone.is_cancelled() {
+                                if e.is_cancelled() {
+                                    tracing::debug!(
+                                        "BitcoinCoreSv2JDP bootstrap gave way to cancellation"
+                                    );
+                                } else {
                                     tracing::error!("Failed to create BitcoinCoreSv2JDP: {:?}", e);
                                 }
                                 // ready_tx dropped here, signaling failure to ready_rx

@@ -71,8 +71,12 @@ pub async fn connect_to_bitcoin_core(
             {
                 Ok(sv2_bitcoin_core) => sv2_bitcoin_core,
                 Err(e) => {
-                    tracing::error!("Failed to create BitcoinCoreToSv2: {:?}", e);
-                    bitcoin_core_config.cancellation_token.cancel();
+                    if e.is_cancelled() {
+                        tracing::debug!("BitcoinCoreSv2TDP bootstrap gave way to cancellation");
+                    } else {
+                        tracing::error!("Failed to create BitcoinCoreToSv2: {:?}", e);
+                        bitcoin_core_config.cancellation_token.cancel();
+                    }
                     return;
                 }
             };

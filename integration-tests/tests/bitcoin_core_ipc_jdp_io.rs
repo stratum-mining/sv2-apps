@@ -599,10 +599,13 @@ async fn assert_jdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVers
             .await
             .expect("bootstrap must give way to cancellation rather than wait on a silent peer");
 
-            assert!(
-                bootstrap.is_err(),
-                "a cancelled bootstrap must not produce a runtime"
-            );
+            match bootstrap {
+                Ok(_) => panic!("a cancelled bootstrap must not produce a runtime"),
+                Err(error) => assert!(
+                    error.is_cancelled(),
+                    "bootstrap must fail because it was cancelled, got: {error}"
+                ),
+            }
             stalled_peer.abort();
         })
         .await;

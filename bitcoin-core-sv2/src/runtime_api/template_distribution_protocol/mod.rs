@@ -68,8 +68,12 @@ where
         )
         .await
         .map(BitcoinCoreSv2TDP::V30X)
-        .map_err(|error| {
-            BitcoinCoreSv2TDPError::from_debug(version, BitcoinCoreSv2Protocol::TDP, error)
+        .map_err(|error| match error {
+            v30x::template_distribution_protocol::error::BitcoinCoreSv2TDPError::BootstrapCancelled => BitcoinCoreSv2TDPError::Cancelled {
+                version,
+                protocol: BitcoinCoreSv2Protocol::TDP,
+            },
+            error => BitcoinCoreSv2TDPError::initialization(version, BitcoinCoreSv2Protocol::TDP, error),
         }),
         BitcoinCoreVersion::V31X => v31x::template_distribution_protocol::BitcoinCoreSv2TDP::new(
             bitcoin_core_unix_socket_path,
@@ -81,8 +85,12 @@ where
         )
         .await
         .map(BitcoinCoreSv2TDP::V31X)
-        .map_err(|error| {
-            BitcoinCoreSv2TDPError::from_debug(version, BitcoinCoreSv2Protocol::TDP, error)
+        .map_err(|error| match error {
+            v31x::template_distribution_protocol::error::BitcoinCoreSv2TDPError::BootstrapCancelled => BitcoinCoreSv2TDPError::Cancelled {
+                version,
+                protocol: BitcoinCoreSv2Protocol::TDP,
+            },
+            error => BitcoinCoreSv2TDPError::initialization(version, BitcoinCoreSv2Protocol::TDP, error),
         }),
     }
 }
