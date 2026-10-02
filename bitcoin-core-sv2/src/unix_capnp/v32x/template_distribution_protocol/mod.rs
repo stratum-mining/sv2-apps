@@ -1,9 +1,9 @@
-//! Module for interacting with Bitcoin Core v31.x via Sv2 Template Distribution Protocol via
+//! Module for interacting with Bitcoin Core v32.x via Sv2 Template Distribution Protocol via
 //! capnp over UNIX socket.
 
 use crate::unix_capnp::{
     MAX_SAME_TIP_TEMPLATES, MIN_BLOCK_RESERVED_WEIGHT, STALE_TEMPLATE_GRACE_PERIOD_SECS,
-    WEIGHT_FACTOR, v31x::template_distribution_protocol::template_data::TemplateData,
+    WEIGHT_FACTOR, v32x::template_distribution_protocol::template_data::TemplateData,
 };
 use async_channel::{Receiver, Sender};
 use bitcoin_capnp_types::{
@@ -20,7 +20,7 @@ use bitcoin_capnp_types::{
     },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v31 as bitcoin_capnp_types;
+use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use capnp::capability::Request;
 use error::BitcoinCoreSv2TDPError;
 use std::{

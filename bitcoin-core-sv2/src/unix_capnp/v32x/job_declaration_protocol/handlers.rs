@@ -1,8 +1,10 @@
-//! Handlers for Bitcoin Core v30.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
+//! Handlers for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
 
 use crate::{
     runtime_api::job_declaration_protocol::io::{JdResponse, ValidationContext},
-    unix_capnp::v30x::job_declaration_protocol::{BitcoinCoreSv2JDP, mempool::ResolveError},
+    unix_capnp::v32x::job_declaration_protocol::{
+        BitcoinCoreSv2JDP, error::BitcoinCoreSv2JDPError, mempool::ResolveError,
+    },
 };
 use std::collections::{HashMap, HashSet};
 use stratum_core::{
@@ -27,6 +29,12 @@ use tracing::{debug, error, info, warn};
 /// block is even assembled.
 const MAX_BLOCK_WEIGHT: u64 = Weight::MAX_BLOCK.to_wu();
 
+/// Max attempts for `submitBlock` retries on transient "thread busy" IPC contention.
+const MAX_SUBMIT_BLOCK_ATTEMPTS: usize = 3;
+
+/// Backoff between `submitBlock` retry attempts (in milliseconds).
+const SUBMIT_BLOCK_RETRY_BACKOFF_MS: u64 = 15;
+
 /// The most transactions a declared job can list.
 ///
 /// Derived from the smallest transaction that can appear in a block, so it sits well above any
@@ -40,15 +48,15 @@ impl BitcoinCoreSv2JDP {
     /// that repeats an entry or is longer than a block can hold, stages the client-supplied
     /// transactions locally after checking that every one of them is an ordinary transaction the
     /// job declared and supplied only once, resolves the declared wtxids against the mempool mirror
-    /// plus that staging area within a block's weight budget, assembles a test block, and uses
-    /// Bitcoin Core's `checkBlock` to validate the block structure. Staged transactions are only
-    /// committed to the mempool mirror after `checkBlock` succeeds, so a rejected declaration never
-    /// grows shared state. If the chain tip moved while `checkBlock` was in flight, the declaration
-    /// is answered with `stale-chain-tip` instead and its transactions are dropped: they were only
-    /// validated against a tip that no longer exists. A rejection is classified from the reason
-    /// Core gives, with no further IPC: `stale-chain-tip` when Core reports that the tip moved
-    /// or that the coinbase height is obsolete, `invalid-job` otherwise. Returns success with
-    /// current template parameters or an error if validation fails.
+    /// plus that staging area within a block's weight budget, assembles a test block, sets IPC
+    /// thread context, and uses Bitcoin Core's `checkBlock` to validate the block structure. Staged
+    /// transactions are only committed to the mempool mirror after `checkBlock` succeeds, so a
+    /// rejected declaration never grows shared state. If the chain tip moved while `checkBlock` was
+    /// in flight, the declaration is answered with `stale-chain-tip` instead and its transactions
+    /// are dropped: they were only validated against a tip that no longer exists. A rejection
+    /// is classified from the reason Core gives, with no further IPC: `stale-chain-tip`
+    /// when Core reports that the tip moved or that the coinbase height is obsolete, `invalid-job`
+    /// otherwise. Returns success with current template parameters or an error if validation fails.
     pub(crate) async fn handle_declare_mining_job(
         &self,
         version: Version,
@@ -201,11 +209,26 @@ impl BitcoinCoreSv2JDP {
             );
 
             let mut check_block_request = self.mining_ipc_client.check_block_request();
-            let mut check_block_params = check_block_request.get();
 
-            check_block_params.set_block(&block_bytes);
+            match check_block_request.get().get_context() {
+                Ok(mut context) => context.set_thread(self.thread_ipc_client.clone()),
+                Err(e) => {
+                    error!("Failed to set check block request thread context: {e}");
+                    // send error response to the client
+                    // deliberately ignore potential send errors
+                    let _ = response_tx.send(JdResponse::Error {
+                        error_code: ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
+                        validation_context: initial_validation_context,
+                    });
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            }
 
-            let mut options = match check_block_params.get_options() {
+            check_block_request.get().set_block(&block_bytes);
+
+            let mut options = match check_block_request.get().get_options() {
                 Ok(options) => options,
                 Err(e) => {
                     error!("Failed to get check block options: {e}");
@@ -350,7 +373,7 @@ impl BitcoinCoreSv2JDP {
                 // ahead of the tip is a non-final transaction: bad-txns-nonfinal. One from behind
                 // the tip is final and fails the height check instead: bad-cb-height. All three
                 // are stale-chain-tip; every other reason is the declaration's own fault. The
-                // strings are the same across the 30.x and 31.x lines this crate supports.
+                // strings are the same across the 30.x and 32.x lines this crate supports.
                 let error_code = match reason.as_str() {
                     "inconclusive-not-best-prevblk" | "bad-txns-nonfinal" | "bad-cb-height" => {
                         ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
@@ -376,16 +399,103 @@ impl BitcoinCoreSv2JDP {
         let _ = response_tx.send(response);
     }
 
-    /// Logs and discards a solved block.
+    /// Submits a solved block to Bitcoin Core via `submitBlock`.
     ///
-    /// Propagating it requires the `submitBlock` IPC method, which Bitcoin Core only exposes
-    /// from v32 on.
+    /// The request runs on a dedicated IPC execution thread, so a solved block is never queued
+    /// behind mempool monitoring; transient "thread busy" contention is retried a few times
+    /// before the connection is torn down.
     pub(crate) async fn handle_push_solution(&self, block: Block) {
-        warn!(
-            block_hash = %block.block_hash(),
-            "Discarding PushSolution block: Bitcoin Core v30.x IPC has no submitBlock \
-             method; run a v32.x node to propagate solutions declared through jd-server"
+        let block_bytes: Vec<u8> = serialize(&block);
+        debug!(
+            block_bytes_len = block_bytes.len(),
+            tx_count = block.txdata.len(),
+            "Submitting solved block via submitBlock"
         );
+
+        for attempt in 1..=MAX_SUBMIT_BLOCK_ATTEMPTS {
+            let mut submit_block_request = self.mining_ipc_client.submit_block_request();
+
+            match submit_block_request.get().get_context() {
+                Ok(mut context) => context.set_thread(self.submit_block_thread_ipc_client.clone()),
+                Err(e) => {
+                    error!("Failed to set submitBlock request thread context: {e}");
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            }
+
+            submit_block_request.get().set_block(&block_bytes);
+
+            let submit_block_response = match submit_block_request.send().promise.await {
+                Ok(response) => response,
+                Err(e) => {
+                    let err: BitcoinCoreSv2JDPError = e.into();
+                    if err.is_thread_busy() && attempt < MAX_SUBMIT_BLOCK_ATTEMPTS {
+                        warn!(
+                            attempt,
+                            max_attempts = MAX_SUBMIT_BLOCK_ATTEMPTS,
+                            "Transient IPC contention during submitBlock (thread busy); retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            SUBMIT_BLOCK_RETRY_BACKOFF_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+
+                    error!("Failed to send submitBlock request: {err:?}");
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            let submit_block_result = match submit_block_response.get() {
+                Ok(result) => result,
+                Err(e) => {
+                    let err: BitcoinCoreSv2JDPError = e.into();
+                    if err.is_thread_busy() && attempt < MAX_SUBMIT_BLOCK_ATTEMPTS {
+                        warn!(
+                            attempt,
+                            max_attempts = MAX_SUBMIT_BLOCK_ATTEMPTS,
+                            "Transient IPC contention while reading submitBlock response \
+                             (thread busy); retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            SUBMIT_BLOCK_RETRY_BACKOFF_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+
+                    error!("Failed to get submitBlock result: {err:?}");
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self.cancellation_token.cancel();
+                    return;
+                }
+            };
+
+            let accepted = submit_block_result.get_result();
+            let reason = submit_block_result.get_reason();
+            let debug_msg = submit_block_result.get_debug();
+
+            if accepted {
+                info!(
+                    reason = ?reason,
+                    debug = ?debug_msg,
+                    "Bitcoin Core accepted block via submitBlock"
+                );
+            } else {
+                warn!(
+                    reason = ?reason,
+                    debug = ?debug_msg,
+                    "Bitcoin Core rejected block via submitBlock"
+                );
+            }
+
+            return;
+        }
     }
 }
 

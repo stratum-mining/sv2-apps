@@ -1,7 +1,7 @@
 [package]
 name = "bitcoin_core_sv2"
 description = "A library to get Stratum V2 Template Distribution and Job Declaration Protocols from Bitcoin Core over IPC"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ keywords = ["stratum", "mining", "bitcoin", "bitcoin-core"]
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 tokio = { version = "1.44.1", features = ["full"] }
-tokio-util = { version = "0.7.10", features = ["codec", "compat"] }
+tokio-util = { version = "0.7.12", features = ["codec", "compat"] }
 async-channel = "1.5.1"
 
 # Bitcoin Core v30.x IPC dependencies
@@ -23,6 +23,11 @@ bitcoin_capnp_types_v30 = { package = "bitcoin-capnp-types", version = "0.1.2" }
 
 # Bitcoin Core v31.x IPC dependencies
 bitcoin_capnp_types_v31 = { package = "bitcoin-capnp-types", version = "0.2.1" }
+
+# Bitcoin Core v32.x IPC dependencies
+# TEMPORARY: pinned to the 32.x branch of 2140-dev/bitcoin-capnp-types until its
+# v0.3.0 release (2140-dev/bitcoin-capnp-types#39) lands on crates.io.
+bitcoin_capnp_types_v32 = { package = "bitcoin-capnp-types", git = "https://github.com/2140-dev/bitcoin-capnp-types.git", rev = "4cb1da7158f534c1a94d0fdf09b311fcf9385683" }
 
 # fetching from github enables synchronizing development workflows across sv2-apps and stratum repos
 # it MUST be changed before bitcoin-core-sv2 is published to crates.io

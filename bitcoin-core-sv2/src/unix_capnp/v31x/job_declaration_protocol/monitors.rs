@@ -16,7 +16,16 @@ impl BitcoinCoreSv2JDP {
         tokio::task::spawn_local(async move {
             debug!("monitor_mempool_mirror() task started");
             debug!("Creating dedicated blocking_thread_ipc_client for waitNext requests");
-            let blocking_thread_ipc_client = match self_clone.new_thread_ipc_client().await {
+            // Stop waiting once cancelled (`None`).
+            let Some(blocking_thread_ipc_client) = self_clone
+                .cancellation_token
+                .run_until_cancelled(self_clone.new_thread_ipc_client())
+                .await
+            else {
+                debug!("monitor_mempool_mirror() exiting due to cancellation");
+                return;
+            };
+            let blocking_thread_ipc_client = match blocking_thread_ipc_client {
                 Ok(blocking_thread_ipc_client) => blocking_thread_ipc_client,
                 Err(e) => {
                     error!("Failed to create blocking thread IPC client: {:?}", e);
@@ -69,9 +78,7 @@ impl BitcoinCoreSv2JDP {
                 tokio::select! {
                     _ = self_clone.cancellation_token.cancelled() => {
                         debug!("Interrupting waitNext request");
-                        if let Err(e) = self_clone.interrupt_wait_request().await {
-                            error!("Failed to interrupt waitNext request: {:?}", e);
-                        }
+                        self_clone.interrupt_wait_request();
                         warn!("Exiting mempool mirror loop");
                         debug!("monitor_mempool_mirror() exiting due to cancellation");
                         break;
@@ -119,7 +126,16 @@ impl BitcoinCoreSv2JDP {
                                 }
 
                                 // update the mempool mirror
-                                if let Err(e) = self_clone.update_mempool_mirror().await {
+                                // Stop waiting once cancelled (`None`).
+                                let Some(updated) = self_clone
+                                    .cancellation_token
+                                    .run_until_cancelled(self_clone.update_mempool_mirror())
+                                    .await
+                                else {
+                                    debug!("monitor_mempool_mirror() exiting due to cancellation");
+                                    break;
+                                };
+                                if let Err(e) = updated {
                                     if e.is_thread_busy() {
                                         warn!(
                                             error = ?e,

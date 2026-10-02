@@ -1,4 +1,4 @@
-//! Local mempool mirror for Bitcoin Core v31.x Sv2 Job Declaration Protocol via capnp over UNIX
+//! Local mempool mirror for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX
 //! socket.
 
 use std::collections::HashMap;

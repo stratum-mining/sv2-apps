@@ -3,11 +3,18 @@
 //! Flow covered per Bitcoin Core Sv2 runtime behavior and Sv2 JDP expectations:
 //! - `DeclareMiningJob` returns `MissingTransactions` when unknown wtxids are declared.
 //! - `DeclareMiningJob` returns `Success` for a minimal valid declaration.
-//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when the declared BIP34 height is
-//!   intentionally mismatched.
-//! - `DeclareMiningJob` does not retain client-supplied transactions when validation fails.
+//! - `DeclareMiningJob` returns `Error(stale-chain-tip)` when Bitcoin Core rejects a coinbase built
+//!   for another height, as obsolete (`bad-cb-height`) or as non-final (`bad-txns-nonfinal`).
+//! - `DeclareMiningJob` returns `Error(invalid-job)` for a declaration Bitcoin Core rejects on its
+//!   own merits, and does not retain its client-supplied transactions.
 //! - `DeclareMiningJob` rejects a coinbase that does not carry exactly one input, without tearing
 //!   down the IPC connection.
+//! - `DeclareMiningJob` rejects client-supplied transactions the declaration did not ask for.
+//! - `DeclareMiningJob` keeps asking for the transactions an incomplete response left out, without
+//!   retaining the ones it did supply.
+//! - `DeclareMiningJob` rejects a declaration that repeats a wtxid, lists more transactions than a
+//!   block can hold, or weighs more than a block.
+//! - bootstrap gives way to cancellation while a peer that accepted the connection never answers.
 //!
 //! File structure:
 //! - top: version-specific `#[tokio::test]` wrappers.
@@ -15,7 +22,7 @@
 
 use async_channel::Sender;
 use integration_tests_sv2::{
-    start_bitcoin_core, start_tracing, template_provider::DifficultyLevel,
+    start_bitcoin_core, start_tracing, template_provider::DifficultyLevel, utils::join_within,
 };
 use std::time::Duration;
 use stratum_apps::{
@@ -31,12 +38,13 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, Wtxid,
-            absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
+            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Weight, Witness,
+            Wtxid, absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
             transaction::Version as TxVersion,
         },
         job_declaration_sv2::{
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
         },
     },
@@ -50,6 +58,44 @@ async fn jdp_io_integration_v30x() {
 #[tokio::test]
 async fn jdp_io_integration_v31x() {
     assert_jdp_io_integration_for_version(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_io_integration_v32x() {
+    assert_jdp_io_integration_for_version(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
+async fn jdp_bootstrap_gives_way_to_cancellation_v30x() {
+    assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
+}
+
+#[tokio::test]
+async fn jdp_bootstrap_gives_way_to_cancellation_v31x() {
+    assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_bootstrap_gives_way_to_cancellation_v32x() {
+    assert_jdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
+async fn jdp_runtime_gives_way_to_cancellation_v30x() {
+    assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
+}
+
+#[tokio::test]
+async fn jdp_runtime_gives_way_to_cancellation_v31x() {
+    assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_runtime_gives_way_to_cancellation_v32x() {
+    assert_jdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
 }
 
 async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
@@ -74,34 +120,15 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
 
     let cancellation_token = CancellationToken::new();
-    let cancellation_token_clone = cancellation_token.clone();
-    let socket_path_clone = socket_path.clone();
-
-    // Run the JDP runtime on a dedicated thread + LocalSet to match production usage.
-    let jdp_thread = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
-        let local_set = tokio::task::LocalSet::new();
-
-        local_set.block_on(&runtime, async move {
-            let jdp = job_declaration_protocol::new(
-                version,
-                socket_path_clone,
-                incoming_receiver,
-                cancellation_token_clone,
-                ready_tx,
-            )
-            .await
-            .expect("failed to initialize BitcoinCoreSv2JDP");
-
-            jdp.run().await;
-        });
-    });
-
-    // Wait until the JDP runtime has fully bootstrapped and can serve requests.
-    tokio::time::timeout(Duration::from_secs(30), ready_rx)
-        .await
-        .expect("timed out waiting for JDP readiness")
-        .expect("JDP readiness channel dropped unexpectedly");
+    let jdp_thread = spawn_jdp_thread(
+        version,
+        socket_path,
+        incoming_receiver,
+        cancellation_token.clone(),
+        ready_tx,
+        ready_rx,
+    )
+    .await;
 
     // Execute all JDP paths against the same live runtime to keep this test fully end-to-end.
     // The malformed-coinbase path runs first on purpose: every scenario after it doubles as
@@ -113,7 +140,16 @@ async fn assert_jdp_io_integration_for_version(version: BitcoinCoreVersion) {
         .await;
     assert_jdp_success_scenario(&incoming_sender, coinbase_tx.clone()).await;
     assert_jdp_stale_chain_tip_scenario(&incoming_sender, next_height).await;
-    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx).await;
+    assert_jdp_rejected_declaration_does_not_retain_txs(&incoming_sender, coinbase_tx.clone())
+        .await;
+    assert_jdp_supplied_txs_must_match_declaration(
+        &incoming_sender,
+        coinbase_tx.clone(),
+        next_height,
+    )
+    .await;
+    assert_jdp_incomplete_missing_txs_response(&incoming_sender, coinbase_tx.clone()).await;
+    assert_jdp_declaration_must_fit_in_a_block(&incoming_sender, coinbase_tx).await;
 
     cancellation_token.cancel();
     jdp_thread
@@ -157,37 +193,65 @@ async fn assert_jdp_success_scenario(
     .await;
 
     match response {
-        JdResponse::Success { txid_list, .. } => {
+        JdResponse::Success { txdata, .. } => {
             assert!(
-                txid_list.is_empty(),
-                "txid_list should be empty when no non-coinbase txs were declared"
+                txdata.is_empty(),
+                "txdata should be empty when no non-coinbase txs were declared"
             );
         }
         response => panic!("expected Success, got: {response:?}"),
     }
 }
 
+/// A coinbase built for another height is rejected by Bitcoin Core in one of two ways, and the
+/// runtime answers `stale-chain-tip` to both straight from Core's reason, with no local height
+/// bookkeeping and no template refresh.
+///
+/// Templates give the coinbase a locktime of height minus one and a sequence that enforces it, and
+/// Core checks finality before the coinbase height, so a coinbase from ahead of the tip is a
+/// non-final transaction (`bad-txns-nonfinal`); one with a final locktime fails the height check
+/// instead (`bad-cb-height`).
 async fn assert_jdp_stale_chain_tip_scenario(
     incoming_sender: &Sender<JdRequest>,
     next_height: u32,
 ) {
-    let response = send_declare_mining_job_and_recv_response(
-        incoming_sender,
-        build_valid_coinbase_tx(next_height.saturating_add(10_000)),
-        vec![],
-        vec![],
-        "jdp/stale-chain-tip",
-    )
-    .await;
+    let height_ahead = next_height.saturating_add(10_000);
 
-    match response {
-        JdResponse::Error { error_code, .. } => {
-            assert_eq!(
+    let mut non_final_coinbase_tx = build_valid_coinbase_tx(height_ahead);
+    non_final_coinbase_tx.lock_time =
+        LockTime::from_height(height_ahead - 1).expect("height must fit a locktime");
+    non_final_coinbase_tx.input[0].sequence = Sequence::from_consensus(0xffff_fffe);
+
+    let scenarios = [
+        (
+            "jdp/stale-chain-tip/bad-cb-height",
+            build_valid_coinbase_tx(height_ahead),
+        ),
+        (
+            "jdp/stale-chain-tip/bad-txns-nonfinal",
+            non_final_coinbase_tx,
+        ),
+    ];
+
+    for (path_name, coinbase_tx) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx,
+            vec![],
+            vec![],
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
                 error_code, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-                "expected stale-chain-tip error for intentionally mismatched BIP34 height"
-            );
+                "expected stale-chain-tip ({path_name})"
+            ),
+            response => {
+                panic!("expected Error(stale-chain-tip) ({path_name}), got: {response:?}")
+            }
         }
-        response => panic!("expected Error(stale-chain-tip), got: {response:?}"),
     }
 }
 
@@ -217,13 +281,13 @@ async fn assert_jdp_invalid_coinbase_input_scenario(incoming_sender: &Sender<JdR
     }
 }
 
-/// A declaration rejected by `checkBlock` must not leave its client-supplied transactions behind
-/// in the mempool mirror.
+/// A declaration rejected by `checkBlock` on its own merits is answered `invalid-job`, and must
+/// not leave its client-supplied transactions behind in the mempool mirror.
 async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     incoming_sender: &Sender<JdRequest>,
     coinbase_tx: Transaction,
 ) {
-    let invalid_tx = build_invalid_declared_tx();
+    let invalid_tx = build_invalid_declared_tx(0x11);
     let invalid_wtxid = invalid_tx.compute_wtxid();
 
     let response = send_declare_mining_job_and_recv_response(
@@ -235,10 +299,13 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
     )
     .await;
 
-    assert!(
-        matches!(response, JdResponse::Error { .. }),
-        "expected Error for a declaration carrying an invalid transaction, got: {response:?}"
-    );
+    match response {
+        JdResponse::Error { error_code, .. } => assert_eq!(
+            error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+            "expected invalid-job for a declaration carrying an invalid transaction"
+        ),
+        response => panic!("expected Error(invalid-job), got: {response:?}"),
+    }
 
     // Same wtxid, this time supplying no transactions: the rejected transaction must not be
     // served from the mempool mirror.
@@ -259,6 +326,302 @@ async fn assert_jdp_rejected_declaration_does_not_retain_txs(
             "expected MissingTransactions (rejected tx must not be retained), got: {response:?}"
         ),
     }
+}
+
+/// Client-supplied transactions must belong to the declaration that asked for them.
+///
+/// Transactions the job never declared, repeats of a transaction declared once, and coinbases are
+/// all rejected before block assembly, so a client cannot attach arbitrary payload to a retry.
+async fn assert_jdp_supplied_txs_must_match_declaration(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+    next_height: u32,
+) {
+    let declared_tx = build_invalid_declared_tx(0x21);
+    let declared_wtxid = declared_tx.compute_wtxid();
+
+    let scenarios = [
+        (
+            "jdp/unsolicited-supplied-tx",
+            vec![declared_tx.clone(), build_invalid_declared_tx(0x22)],
+        ),
+        (
+            "jdp/duplicate-supplied-tx",
+            vec![declared_tx.clone(), declared_tx],
+        ),
+        (
+            "jdp/coinbase-supplied-tx",
+            vec![build_valid_coinbase_tx(next_height)],
+        ),
+    ];
+
+    for (path_name, missing_txs) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            vec![declared_wtxid],
+            missing_txs,
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job ({path_name})"
+            ),
+            response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
+        }
+    }
+}
+
+/// An answer that supplies only part of the declared transactions leaves the declaration pending.
+///
+/// The transactions it did supply were never validated, so they must not be served from the
+/// mempool mirror on a later declaration either.
+async fn assert_jdp_incomplete_missing_txs_response(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let supplied_tx = build_invalid_declared_tx(0x31);
+    let supplied_wtxid = supplied_tx.compute_wtxid();
+    let withheld_wtxid = build_invalid_declared_tx(0x32).compute_wtxid();
+
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx.clone(),
+        vec![supplied_wtxid, withheld_wtxid],
+        vec![supplied_tx],
+        "jdp/incomplete-missing-txs",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![withheld_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions for a partially answered declaration, got: {response:?}"
+        ),
+    }
+
+    // Declare only the transaction supplied above, this time supplying nothing: the incomplete
+    // response must not have left it behind in the mempool mirror.
+    let response = send_declare_mining_job_and_recv_response(
+        incoming_sender,
+        coinbase_tx,
+        vec![supplied_wtxid],
+        vec![],
+        "jdp/incomplete-missing-txs-retry",
+    )
+    .await;
+
+    match response {
+        JdResponse::MissingTransactions { missing_wtxids, .. } => {
+            assert_eq!(missing_wtxids, vec![supplied_wtxid]);
+        }
+        response => panic!(
+            "expected MissingTransactions (unvalidated tx must not be retained), got: {response:?}"
+        ),
+    }
+}
+
+/// A declaration must be something that could be mined, before it is looked up or expanded.
+///
+/// A repeated wtxid would otherwise expand one cached transaction into as many copies as the list
+/// names it, and neither a list longer than a block can hold nor a set of transactions heavier
+/// than a block can ever validate.
+async fn assert_jdp_declaration_must_fit_in_a_block(
+    incoming_sender: &Sender<JdRequest>,
+    coinbase_tx: Transaction,
+) {
+    let repeated_wtxid = build_invalid_declared_tx(0x41).compute_wtxid();
+
+    // One more than the smallest transactions that could fit in a block.
+    let too_many_wtxids: Vec<Wtxid> = (0..=Weight::MAX_BLOCK.to_wu()
+        / Weight::MIN_TRANSACTION.to_wu())
+        .map(|index| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&index.to_le_bytes());
+            Wtxid::from_byte_array(bytes)
+        })
+        .collect();
+
+    // Two thirds of a block each, so declaring both weighs more than a block can hold.
+    let heavy_txs = vec![build_heavy_declared_tx(0x51), build_heavy_declared_tx(0x52)];
+    let heavy_wtxids: Vec<Wtxid> = heavy_txs.iter().map(|tx| tx.compute_wtxid()).collect();
+
+    let scenarios = [
+        (
+            "jdp/repeated-declared-wtxid",
+            vec![repeated_wtxid, repeated_wtxid],
+            vec![],
+        ),
+        ("jdp/too-many-declared-txs", too_many_wtxids, vec![]),
+        ("jdp/declaration-too-heavy", heavy_wtxids, heavy_txs),
+    ];
+
+    for (path_name, wtxid_list, missing_txs) in scenarios {
+        let response = send_declare_mining_job_and_recv_response(
+            incoming_sender,
+            coinbase_tx.clone(),
+            wtxid_list,
+            missing_txs,
+            path_name,
+        )
+        .await;
+
+        match response {
+            JdResponse::Error { error_code, .. } => assert_eq!(
+                error_code, ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
+                "expected invalid-job ({path_name})"
+            ),
+            response => panic!("expected Error(invalid-job) ({path_name}), got: {response:?}"),
+        }
+    }
+}
+
+/// A peer that accepts the IPC connection and never answers must not hold bootstrap past
+/// cancellation.
+///
+/// No Bitcoin Core is involved: a bare Unix listener stands in for one that stalled, which is all
+/// bootstrap needs to be kept waiting.
+/// Runs the JDP runtime on a dedicated thread + LocalSet to match production usage, returning
+/// once it has bootstrapped and can serve requests.
+async fn spawn_jdp_thread(
+    version: BitcoinCoreVersion,
+    socket_path: std::path::PathBuf,
+    incoming_receiver: async_channel::Receiver<JdRequest>,
+    cancellation_token: CancellationToken,
+    ready_tx: tokio::sync::oneshot::Sender<()>,
+    ready_rx: tokio::sync::oneshot::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
+    let jdp_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
+        let local_set = tokio::task::LocalSet::new();
+
+        local_set.block_on(&runtime, async move {
+            let jdp = job_declaration_protocol::new(
+                version,
+                socket_path,
+                incoming_receiver,
+                cancellation_token,
+                ready_tx,
+            )
+            .await
+            .expect("failed to initialize BitcoinCoreSv2JDP");
+
+            jdp.run().await;
+        });
+    });
+
+    tokio::time::timeout(Duration::from_secs(30), ready_rx)
+        .await
+        .expect("timed out waiting for JDP readiness")
+        .expect("JDP readiness channel dropped unexpectedly");
+
+    jdp_thread
+}
+
+async fn assert_jdp_runtime_gives_way_to_cancellation(version: BitcoinCoreVersion) {
+    start_tracing();
+
+    let bitcoin_core = start_bitcoin_core(DifficultyLevel::Low, version);
+    let next_height = bitcoin_core
+        .get_blockchain_info()
+        .expect("failed to get blockchain info")
+        .blocks
+        + 1;
+    let next_height = u32::try_from(next_height).expect("next height should fit in u32");
+
+    let (incoming_sender, incoming_receiver) = async_channel::unbounded::<JdRequest>();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let cancellation_token = CancellationToken::new();
+    let jdp_thread = spawn_jdp_thread(
+        version,
+        bitcoin_core.ipc_socket_path(),
+        incoming_receiver,
+        cancellation_token.clone(),
+        ready_tx,
+        ready_rx,
+    )
+    .await;
+
+    // From here on Bitcoin Core answers nothing: the monitor's `waitNext` stays pending, and so
+    // does the `checkBlock` behind the declaration sent next.
+    bitcoin_core.pause();
+    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+    incoming_sender
+        .send(JdRequest::DeclareMiningJob {
+            version: BlockVersion::from_consensus(0x2000_0000),
+            coinbase_tx: build_valid_coinbase_tx(next_height),
+            wtxid_list: vec![],
+            missing_txs: vec![],
+            response_tx,
+        })
+        .await
+        .expect("failed to send DeclareMiningJob request");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !jdp_thread.is_finished(),
+        "the runtime must outlive a node that merely stops answering"
+    );
+
+    cancellation_token.cancel();
+    join_within(jdp_thread, Duration::from_secs(10)).await;
+    bitcoin_core.resume();
+}
+
+async fn assert_jdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVersion) {
+    let socket_path = std::env::temp_dir().join(format!(
+        "jdp-stalled-peer-{}-{version:?}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener =
+        tokio::net::UnixListener::bind(&socket_path).expect("failed to bind the stalled peer");
+
+    // The runtime spawns its RPC system with `spawn_local`, so it needs a LocalSet, as in
+    // production.
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let stalled_peer = tokio::task::spawn_local(async move {
+                let (_connection, _) = listener.accept().await.expect("failed to accept");
+                std::future::pending::<()>().await;
+            });
+
+            let cancellation_token = CancellationToken::new();
+            let canceller = cancellation_token.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                canceller.cancel();
+            });
+
+            let (_incoming_sender, incoming_receiver) = async_channel::unbounded::<JdRequest>();
+            let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+            let bootstrap = tokio::time::timeout(
+                Duration::from_secs(10),
+                job_declaration_protocol::new(
+                    version,
+                    &socket_path,
+                    incoming_receiver,
+                    cancellation_token,
+                    ready_tx,
+                ),
+            )
+            .await
+            .expect("bootstrap must give way to cancellation rather than wait on a silent peer");
+
+            assert!(
+                bootstrap.is_err(),
+                "a cancelled bootstrap must not produce a runtime"
+            );
+            stalled_peer.abort();
+        })
+        .await;
+
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 async fn send_declare_mining_job_and_recv_response(
@@ -319,7 +682,7 @@ fn build_zero_input_coinbase_tx() -> Transaction {
     }
 }
 
-fn build_invalid_declared_tx() -> Transaction {
+fn build_invalid_declared_tx(prevout_txid_byte: u8) -> Transaction {
     Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
@@ -327,7 +690,7 @@ fn build_invalid_declared_tx() -> Transaction {
             // deliberately not `OutPoint::null()`, which would make Bitcoin Core treat this as a
             // second coinbase instead of exercising the empty-outputs rejection
             previous_output: OutPoint {
-                txid: Txid::from_byte_array([0x11; 32]),
+                txid: Txid::from_byte_array([prevout_txid_byte; 32]),
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),
@@ -337,6 +700,16 @@ fn build_invalid_declared_tx() -> Transaction {
         // no outputs, so Bitcoin Core's `checkBlock` rejects any block carrying this transaction
         output: vec![],
     }
+}
+
+fn build_heavy_declared_tx(prevout_txid_byte: u8) -> Transaction {
+    let mut tx = build_invalid_declared_tx(prevout_txid_byte);
+    // Weight is four times the size for a transaction carrying no witness.
+    tx.input[0].script_sig = ScriptBuf::from_bytes(vec![
+        prevout_txid_byte;
+        Weight::MAX_BLOCK.to_wu() as usize / 6
+    ]);
+    tx
 }
 
 fn build_valid_coinbase_tx(next_height: u32) -> Transaction {

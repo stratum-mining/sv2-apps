@@ -13,7 +13,7 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
@@ -143,6 +143,19 @@ pub const ROLE_STARTUP_DELAY: Duration = Duration::from_secs(1);
 /// same port, so the socket that appears can only belong to the node just started.
 ///
 /// Panics with `what` in the message if `timeout` elapses first.
+/// Joins `thread` once it finishes, panicking if it has not done so within `timeout`.
+pub async fn join_within<T>(thread: std::thread::JoinHandle<T>, timeout: Duration) -> T {
+    let deadline = Instant::now() + timeout;
+    while !thread.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "thread did not finish within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    thread.join().expect("thread panicked")
+}
+
 pub fn wait_for_path(path: &std::path::Path, timeout: Duration, what: &str) {
     let start = std::time::Instant::now();
     while !path.exists() {

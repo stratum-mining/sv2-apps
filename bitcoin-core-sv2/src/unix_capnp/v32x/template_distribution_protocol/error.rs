@@ -1,4 +1,4 @@
-//! Error types for Bitcoin Core v30.x Sv2 Template Distribution Protocol via capnp over UNIX
+//! Error types for Bitcoin Core v32.x Sv2 Template Distribution Protocol via capnp over UNIX
 //! socket.
 
 use std::path::Path;
@@ -6,7 +6,7 @@ use stratum_core::bitcoin::{
     block::ValidationError, consensus, consensus::encode::Error as ConsensusEncodeError,
 };
 
-use bitcoin_capnp_types_v30::capnp;
+use bitcoin_capnp_types_v32::capnp;
 
 /// Error type for [`super::BitcoinCoreSv2TDP`]
 #[derive(Debug)]
@@ -28,6 +28,7 @@ pub enum BitcoinCoreSv2TDPError {
     FailedToWaitForMonitorIpcTemplatesTask,
     FailedToCreateSolutionDir,
     BootstrapCancelled,
+    InvalidBlockRewardRemaining(i64),
 }
 
 impl From<capnp::Error> for BitcoinCoreSv2TDPError {
@@ -56,6 +57,7 @@ pub enum TemplateDataError {
     FailedIpcSubmitSolution,
     FailedToWriteSolution(std::io::Error),
     FailedToSerializeEmptyCoinbaseOutputs,
+    FailedToSerializeCoinbaseOutputs,
     FailedToConvertMerklePathHashToU256,
     FailedToCreateMerklePathSeq,
     BitcoinCoreSv2TDPError(BitcoinCoreSv2TDPError),
@@ -102,6 +104,9 @@ impl std::fmt::Display for TemplateDataError {
             }
             TemplateDataError::FailedToSerializeEmptyCoinbaseOutputs => {
                 write!(f, "Failed to serialize empty coinbase outputs")
+            }
+            TemplateDataError::FailedToSerializeCoinbaseOutputs => {
+                write!(f, "Failed to serialize coinbase outputs")
             }
             TemplateDataError::FailedToSumCoinbaseOutputs => {
                 write!(f, "Failed to sum coinbase outputs")

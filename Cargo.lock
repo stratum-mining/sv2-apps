@@ -1088,6 +1088,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-capnp-types"
+version = "0.2.1"
+source = "git+https://github.com/2140-dev/bitcoin-capnp-types.git?rev=4cb1da7158f534c1a94d0fdf09b311fcf9385683#4cb1da7158f534c1a94d0fdf09b311fcf9385683"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+]
+
+[[package]]
 name = "bitcoin-internals"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1114,11 +1124,12 @@ dependencies = [
 
 [[package]]
 name = "bitcoin_core_sv2"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-channel 1.9.0",
  "bitcoin-capnp-types 0.1.2",
- "bitcoin-capnp-types 0.2.1",
+ "bitcoin-capnp-types 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bitcoin-capnp-types 0.2.1 (git+https://github.com/2140-dev/bitcoin-capnp-types.git?rev=4cb1da7158f534c1a94d0fdf09b311fcf9385683)",
  "stratum-core",
  "tokio",
  "tokio-util",
@@ -2782,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "integration_tests_sv2"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-channel 1.9.0",
  "clap",
@@ -2861,7 +2872,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jd_client_sv2"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-channel 1.9.0",
  "clap",
@@ -2877,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "jd_server_sv2"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-channel 1.9.0",
  "async-trait",
@@ -3550,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "pool_sv2"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "async-channel 1.9.0",
  "clap",
@@ -4545,7 +4556,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stratum-apps"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "asic-rs",
  "async-channel 1.9.0",
@@ -5120,7 +5131,7 @@ dependencies = [
 
 [[package]]
 name = "translator_sv2"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-channel 1.9.0",
  "clap",

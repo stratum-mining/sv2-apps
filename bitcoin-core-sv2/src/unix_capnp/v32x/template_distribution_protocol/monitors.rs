@@ -1,4 +1,4 @@
-//! Background monitors for Bitcoin Core v30.x Sv2 Template Distribution Protocol via capnp over
+//! Background monitors for Bitcoin Core v32.x Sv2 Template Distribution Protocol via capnp over
 //! UNIX socket.
 
 use super::{BitcoinCoreSv2TDP, bitcoin_capnp_types::capnp};

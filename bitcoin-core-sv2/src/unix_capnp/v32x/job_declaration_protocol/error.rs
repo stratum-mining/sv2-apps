@@ -1,15 +1,17 @@
-//! Error types for Bitcoin Core v30.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
+//! Error types for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX socket.
 
 use std::path::PathBuf;
 use stratum_core::bitcoin::consensus;
 
-use bitcoin_capnp_types_v30::capnp;
+use bitcoin_capnp_types_v32::capnp;
 
-/// Errors from the [`crate::unix_capnp::v30x::job_declaration_protocol::BitcoinCoreSv2JDP`] layer.
+/// Errors from the [`crate::unix_capnp::v32x::job_declaration_protocol::BitcoinCoreSv2JDP`] layer.
 #[derive(Debug)]
 pub enum BitcoinCoreSv2JDPError {
     /// Cap'n Proto RPC error.
     CapnpError(capnp::Error),
+    /// Failed to create a dedicated thread IPC client, capturing the underlying context.
+    FailedToCreateThreadIpcClient(String),
     /// Failed to connect to the Bitcoin Core Unix socket.
     CannotConnectToUnixSocket(PathBuf, String),
     /// Failed to deserialize a block from the IPC response.

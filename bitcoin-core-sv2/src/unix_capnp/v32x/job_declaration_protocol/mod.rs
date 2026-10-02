@@ -1,9 +1,9 @@
-//! Module for interacting with Bitcoin Core v31.x via Sv2 Job Declaration Protocol via capnp over
+//! Module for interacting with Bitcoin Core v32.x via Sv2 Job Declaration Protocol via capnp over
 //! UNIX socket.
 
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
-    unix_capnp::v31x::job_declaration_protocol::{
+    unix_capnp::v32x::job_declaration_protocol::{
         error::BitcoinCoreSv2JDPError, mempool::MempoolMirror,
     },
 };
@@ -16,7 +16,7 @@ use bitcoin_capnp_types::{
     },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v31 as bitcoin_capnp_types;
+use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use std::{cell::RefCell, path::Path, rc::Rc};
 use stratum_core::bitcoin::{Block, consensus::deserialize};
 use tokio::net::UnixStream;
@@ -52,12 +52,13 @@ mod monitors;
 /// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::Success`] response with current
 /// template parameters is sent.
 ///
-/// Incoming [`JdRequest::PushSolution`] requests are logged and discarded: propagating them
-/// requires the `submitBlock` IPC method, which Bitcoin Core only exposes from v32 on.
+/// Incoming [`JdRequest::PushSolution`] requests are used to submit mining solutions to Bitcoin
+/// Core.
 #[derive(Clone)]
 pub struct BitcoinCoreSv2JDP {
     thread_map: ThreadMapIpcClient,
     thread_ipc_client: ThreadIpcClient,
+    submit_block_thread_ipc_client: ThreadIpcClient,
     mining_ipc_client: MiningIpcClient,
     current_template_ipc_client: Rc<RefCell<BlockTemplateIpcClient>>,
     cancellation_token: CancellationToken,
@@ -132,6 +133,19 @@ impl BitcoinCoreSv2JDP {
 
         info!("IPC execution thread client successfully created.");
 
+        // A dedicated IPC execution thread for `submitBlock`, so a solved block is never
+        // queued behind mempool monitoring on the shared thread.
+        let submit_block_thread_request = thread_map.make_thread_request();
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let submit_block_thread_response = cancellation_token
+            .run_until_cancelled(submit_block_thread_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)??;
+        let submit_block_thread_ipc_client: ThreadIpcClient =
+            submit_block_thread_response.get()?.get_result()?;
+
+        info!("IPC submitBlock thread client successfully created.");
+
         let mut mining_client_request = bootstrap_client.make_mining_request();
         mining_client_request
             .get()
@@ -191,6 +205,7 @@ impl BitcoinCoreSv2JDP {
         let self_ = Self {
             thread_map,
             thread_ipc_client,
+            submit_block_thread_ipc_client,
             mining_ipc_client,
             current_template_ipc_client: Rc::new(RefCell::new(template_ipc_client)),
             cancellation_token,
