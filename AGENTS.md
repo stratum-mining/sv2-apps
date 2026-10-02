@@ -24,6 +24,12 @@ PRs on `sv2-apps` always need a temporary commit that replaces `stratum-core` de
 
 For local development, `sv2-apps` has a `scripts/cross-repo.sh` script that allows an automated workflow for updating `sv2-apps` with the corresponding changes from `stratum`.
 
+## Code comments
+
+A comment block above an item describes the item that follows it, so inserting a new item directly below one steals it: the new item inherits a description written for something else, and the item it was written for is left with nothing. With `///` the compiler makes that binding literal and the doc silently moves; with a plain `//` block nothing binds at all, which only makes the result easier to miss. Both forms are used here, `///` for public items and `//` for private ones. Whenever adding an item to an existing file, look at what sits immediately above the insertion point, and whenever lifting a helper into a file from somewhere else, look again once it has landed.
+
+A single uninterrupted run of comment lines carrying two separate summaries is the signature of this mistake, the second summary reading as the start of a fresh comment rather than a continuation of the first. It is cheap to introduce and easy to miss in review, because nothing fails to compile and no lint catches it.
+
 ## Bug patching
 
 Whenever patching bugs, always keep me informed about potential side-effect implications on non-trivial aspects of the project functionality (e.g.: scalability, monitorability, new bugs or vulnerabilities).
