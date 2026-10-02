@@ -1000,21 +1000,15 @@ impl ChannelManager {
                 self.sv1_advertised_extranonce_prefixes
                     .remove(&m.channel_id);
 
-                // In non-aggregated mode each channel owns the share sequence counter keyed by
-                // its ID. In aggregated mode the only counter belongs to the shared upstream
-                // channel and is keyed by its upstream channel ID, which can equal a local
-                // channel ID, so closing a local channel must not touch it.
+                // In non-aggregated mode the local channel ID is the upstream channel ID, so the
+                // closed channel's share sequence counter and group membership go with it. In
+                // aggregated mode the only counter and the only group member are the shared
+                // upstream channel, keyed by its upstream channel ID, which can equal a local
+                // channel ID, so closing a local channel must not touch either.
                 if !self.mode.is_aggregated() {
                     self.share_sequence_counters.remove(&m.channel_id);
+                    self.remove_channel_from_groups(m.channel_id);
                 }
-
-                // Remove from any group channels that contain it
-                self.group_channels.for_each_mut(|_, group_channel| {
-                    if group_channel.has_channel_id(m.channel_id) {
-                        group_channel.remove_channel_id(m.channel_id);
-                        debug!("Removed channel {} from group channel", m.channel_id);
-                    }
-                });
 
                 // Only forward `CloseChannel` upstream in non-aggregated
                 // mode. In aggregated mode the upstream channel is shared
@@ -1845,6 +1839,69 @@ mod tests {
             .await
             .unwrap();
         assert!(!manager.group_channels.contains_key(&100));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_downstream_close_of_the_last_group_member_removes_the_group() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        let mut group = GroupChannel::new(100);
+        for channel_id in [8, 9] {
+            manager
+                .extended_channels
+                .insert(channel_id, test_extended_channel(channel_id));
+            group.add_channel_id(channel_id, 12).unwrap();
+        }
+        manager.group_channels.insert(100, group);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(8)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+        // The group still has a live member.
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(9))
+                .unwrap()
+        );
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(9)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+        assert!(!manager.group_channels.contains_key(&100));
+    }
+
+    #[tokio::test]
+    async fn aggregated_downstream_close_keeps_the_upstream_channel_in_its_group() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        // The shared upstream channel's ID equals the local ID of the channel being closed.
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, test_extended_channel(42));
+        manager
+            .extended_channels
+            .insert(42, test_extended_channel(42));
+        let mut group = GroupChannel::new(100);
+        group.add_channel_id(42, 12).unwrap();
+        manager.group_channels.insert(100, group);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(42)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(42))
+                .unwrap()
+        );
     }
 
     #[tokio::test]
