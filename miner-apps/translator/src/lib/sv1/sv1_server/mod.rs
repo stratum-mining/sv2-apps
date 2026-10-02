@@ -1159,16 +1159,8 @@ impl Sv1Server {
                             }
                         }
 
-                        let set_difficulty = Sv1Difficulty {
-                            message:
-                                build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding(
-                                    first_target,
-                                    SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
-                                )
-                                .map_err(TproxyError::shutdown)?,
-                            target: first_target,
-                            hashrate: None,
-                        };
+                        let set_difficulty =
+                            sv1_difficulty(first_target, None).map_err(TproxyError::shutdown)?;
                         // send the set_difficulty message to the downstream
                         if let Some(sender) = self
                             .sv1_server_io
@@ -3949,6 +3941,80 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn initial_shares_are_validated_against_the_advertised_difficulty() {
+        let (channel_manager_sender, _channel_manager_receiver) = unbounded();
+        let (to_server, from_channel_manager) = unbounded();
+        let config = create_test_config();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            "127.0.0.1:3333".parse().unwrap(),
+            from_channel_manager,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        let (events, _responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, None, 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        downstream
+            .downstream_data
+            .with(|data| data.session_state = Sv1SessionState::Ready)
+            .unwrap();
+
+        // A difficulty above 1, so the advertised difficulty is rounded down to a power of two.
+        let first_target = hash_rate_to_target(1e12, 5.0).unwrap();
+        let advertised_target = sv1_advertised_target_from_sv2_target(
+            first_target,
+            SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
+        )
+        .unwrap();
+        assert!(advertised_target > first_target);
+
+        server.request_id_to_downstream_id.insert(42, 7);
+        to_server
+            .send(MiningOwned::OpenExtendedMiningChannelSuccess(
+                OpenExtendedMiningChannelSuccessOwned {
+                    request_id: 42,
+                    channel_id: 9,
+                    target: first_target.to_le_bytes().into(),
+                    extranonce_size: 4,
+                    extranonce_prefix: vec![0; 4].try_into().unwrap(),
+                    group_channel_id: 0,
+                },
+            ))
+            .await
+            .unwrap();
+        server.handle_upstream_message(first_target).await.unwrap();
+        while !events.is_empty() {
+            downstream.handle_sv1_server_message().await.unwrap();
+        }
+
+        let notify: json_rpc::Message = serde_json::from_str(
+            r#"{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000","","",[],"20000000","1d00ffff","5f5e1000",true]}"#,
+        )
+        .unwrap();
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&7)
+            .unwrap()
+            .send(Sv1ServerEvent::from(notify))
+            .await
+            .unwrap();
+        downstream.handle_sv1_server_message().await.unwrap();
+
+        assert_eq!(
+            downstream
+                .downstream_data
+                .with(|data| data
+                    .job_validation_context("job")
+                    .map(|context| context.target))
+                .unwrap(),
+            Some(advertised_target)
+        );
     }
 
     #[tokio::test]
