@@ -1314,6 +1314,37 @@ impl ChannelManager {
                 *counter
             })
     }
+
+    /// Removes `channel_id` from every group channel that contains it, and drops the groups it
+    /// leaves empty.
+    ///
+    /// An empty group would otherwise keep its ID reserved and its `full_extranonce_size`, so a
+    /// later channel joining a group with the same ID could be rejected.
+    fn remove_channel_from_groups(&self, channel_id: ChannelId) {
+        let mut emptied_groups = Vec::new();
+        self.group_channels
+            .for_each_mut(|group_channel_id, group_channel| {
+                if group_channel.has_channel_id(channel_id) {
+                    group_channel.remove_channel_id(channel_id);
+                    debug!("Removed channel {channel_id} from group channel {group_channel_id}");
+                    if group_channel.is_empty() {
+                        emptied_groups.push(group_channel_id);
+                    }
+                }
+            });
+        for group_channel_id in emptied_groups {
+            // Only remove the group if no channel joined it in the meantime.
+            if self
+                .group_channels
+                .remove_if(&group_channel_id, |_, group_channel| {
+                    group_channel.is_empty()
+                })
+                .is_some()
+            {
+                debug!("Removed empty group channel {group_channel_id}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1783,6 +1814,37 @@ mod tests {
 
         assert!(!manager.extended_channels.contains_key(&42));
         assert_eq!(manager.next_share_sequence_number(42), 2);
+    }
+
+    #[tokio::test]
+    async fn upstream_close_of_the_last_group_member_removes_the_group() {
+        let (mut manager, _io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        let mut group = GroupChannel::new(100);
+        for channel_id in [8, 9] {
+            manager
+                .extended_channels
+                .insert(channel_id, test_extended_channel(channel_id));
+            group.add_channel_id(channel_id, 12).unwrap();
+        }
+        manager.group_channels.insert(100, group);
+
+        manager
+            .handle_close_channel(None, close_channel(8), None)
+            .await
+            .unwrap();
+        // The group still has a live member.
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(9))
+                .unwrap()
+        );
+
+        manager
+            .handle_close_channel(None, close_channel(9), None)
+            .await
+            .unwrap();
+        assert!(!manager.group_channels.contains_key(&100));
     }
 
     #[tokio::test]

@@ -466,12 +466,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         // aggregated mode,
         } else if self.extended_channels.remove(&m.channel_id).is_some() {
             closed_channel_ids = vec![m.channel_id];
-            // remove the channel from any group channels that contain it
-            self.group_channels.for_each_mut(|_, group_channel| {
-                if group_channel.has_channel_id(m.channel_id) {
-                    group_channel.remove_channel_id(m.channel_id);
-                }
-            });
+            self.remove_channel_from_groups(m.channel_id);
         } else {
             error!(
                 "Channel Id not found: {}, ignoring CloseChannel message",
