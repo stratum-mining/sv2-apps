@@ -1286,6 +1286,18 @@ impl Sv1Server {
 
             MiningOwned::SetNewPrevHash(m) => {
                 debug!("Received SetNewPrevHash for channel id: {}", m.channel_id);
+                // A non-aggregated channel can close while messages for it are still queued, or
+                // open after its downstream already disconnected. Its job state is only kept
+                // while a downstream owns the channel, so it cannot outlive the channel.
+                if self.mode.is_non_aggregated()
+                    && !self.channel_id_to_downstream_id.contains_key(&m.channel_id)
+                {
+                    debug!(
+                        channel_id = m.channel_id,
+                        "Ignoring SetNewPrevHash for a channel without a downstream"
+                    );
+                    return Ok(());
+                }
                 self.prevhashes.insert(m.channel_id, m.clone());
             }
 
@@ -1323,6 +1335,7 @@ impl Sv1Server {
         &self,
         channel_id: ChannelId,
     ) -> TproxyResult<(), error::Sv1Server> {
+        self.release_channel_job_state(channel_id);
         let Some((_, downstream_id)) = self.channel_id_to_downstream_id.remove(&channel_id) else {
             warn!(
                 channel_id,
@@ -1562,6 +1575,7 @@ impl Sv1Server {
                 .map_err(TproxyError::shutdown)?;
             if let Some(channel_id) = channel_id {
                 self.channel_id_to_downstream_id.remove(&channel_id);
+                self.release_channel_job_state(channel_id);
                 // Send `CloseChannel` to the channel manager in both modes so
                 // it can free the per-downstream `ExtendedChannel` (and, in
                 // aggregated mode, the allocator-minted `ExtranoncePrefix`
@@ -2073,6 +2087,18 @@ impl Sv1Server {
             AGGREGATED_CHANNEL_ID
         } else {
             channel_id
+        }
+    }
+
+    /// Drops the job state kept for a closed channel: its last `SetNewPrevHash` and its job
+    /// history.
+    ///
+    /// Only non-aggregated channels own this state. In aggregated mode it belongs to the shared
+    /// upstream channel, keyed by `AGGREGATED_CHANNEL_ID`, and outlives every downstream.
+    fn release_channel_job_state(&self, channel_id: ChannelId) {
+        if self.mode.is_non_aggregated() {
+            self.prevhashes.remove(&channel_id);
+            self.valid_sv1_jobs.remove(&channel_id);
         }
     }
 
@@ -4314,6 +4340,101 @@ mod tests {
         );
         server.set_user_identity("test_user".to_string());
         (server, to_server, from_server)
+    }
+
+    /// Feeds a `SetNewPrevHash` and a job for `channel_id`, as the channel manager would.
+    async fn feed_job_state(
+        server: &Sv1Server,
+        to_server: &Sender<MiningOwned>,
+        channel_id: ChannelId,
+    ) {
+        let target = Target::from_le_bytes([0xff; 32]);
+        to_server
+            .send(MiningOwned::SetNewPrevHash(SetNewPrevHashOwned {
+                channel_id,
+                job_id: 0,
+                prev_hash: vec![0; 32].try_into().unwrap(),
+                ntime_start: 1,
+                nbits: 0x207fffff,
+            }))
+            .await
+            .unwrap();
+        server.handle_upstream_message(target).await.unwrap();
+        to_server
+            .send(MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
+                channel_id,
+                job_id: 0,
+                ntime_start: Sv2OptionOwned::new(Some(1)),
+                version: 0x20000000,
+                version_rolling_allowed: true,
+                merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08").unwrap().try_into().unwrap(),
+                coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
+            }))
+            .await
+            .unwrap();
+        server.handle_upstream_message(target).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_downstream_disconnect_releases_its_channel_job_state() {
+        let (server, to_server, _from_server) = server_with_channels(false);
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        register_test_downstream(&server, 8, Some(10), 100.0, false);
+        for channel_id in [9, 10] {
+            feed_job_state(&server, &to_server, channel_id).await;
+        }
+
+        server.handle_downstream_disconnect(7).await.unwrap();
+
+        assert!(!server.prevhashes.contains_key(&9));
+        assert!(!server.valid_sv1_jobs.contains_key(&9));
+        assert!(server.prevhashes.contains_key(&10));
+        assert!(server.valid_sv1_jobs.contains_key(&10));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_upstream_close_releases_the_channel_job_state() {
+        let (server, to_server, _from_server) = server_with_channels(false);
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        feed_job_state(&server, &to_server, 9).await;
+
+        to_server
+            .send(MiningOwned::CloseChannel(CloseChannelOwned {
+                channel_id: 9,
+                reason_code: Str0255Owned::try_from("upstream closed channel".to_string()).unwrap(),
+            }))
+            .await
+            .unwrap();
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(!server.prevhashes.contains_key(&9));
+        assert!(!server.valid_sv1_jobs.contains_key(&9));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_job_state_is_not_stored_for_a_channel_without_a_downstream() {
+        let (server, to_server, _from_server) = server_with_channels(false);
+        // Messages can still be queued for a channel that has just closed.
+        feed_job_state(&server, &to_server, 9).await;
+
+        assert!(!server.prevhashes.contains_key(&9));
+        assert!(!server.valid_sv1_jobs.contains_key(&9));
+    }
+
+    #[tokio::test]
+    async fn aggregated_downstream_disconnect_keeps_the_shared_job_state() {
+        let (server, to_server, _from_server) = server_with_channels(true);
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        feed_job_state(&server, &to_server, AGGREGATED_CHANNEL_ID).await;
+
+        server.handle_downstream_disconnect(7).await.unwrap();
+
+        assert!(server.prevhashes.contains_key(&AGGREGATED_CHANNEL_ID));
+        assert!(server.valid_sv1_jobs.contains_key(&AGGREGATED_CHANNEL_ID));
     }
 
     #[tokio::test]
