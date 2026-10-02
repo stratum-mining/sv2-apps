@@ -1377,24 +1377,13 @@ mod tests {
     }
 
     fn create_connected_aggregated_channel_manager() -> (ChannelManager, Receiver<MiningOwned>) {
-        let (upstream_sender, _upstream_receiver) = unbounded();
-        let (_upstream_sender, upstream_receiver) = unbounded();
-        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
-        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        connect_aggregated_channel(&manager);
+        (manager, io.sv1_server_receiver)
+    }
 
-        let manager = ChannelManager::new(
-            upstream_sender,
-            upstream_receiver,
-            sv1_server_sender,
-            sv1_server_receiver,
-            vec![],
-            vec![],
-            TproxyMode::Aggregated,
-            None,
-            #[cfg(feature = "monitoring")]
-            true,
-        );
-
+    /// Installs an established aggregated upstream channel with upstream channel ID 42.
+    fn connect_aggregated_channel(manager: &ChannelManager) {
         manager.extended_channels.insert(
             AGGREGATED_CHANNEL_ID,
             ExtendedChannel::new(
@@ -1424,8 +1413,6 @@ mod tests {
         manager
             .aggregated_channel_state
             .set(AggregatedState::Connected);
-
-        (manager, sv1_server_receiver_for_test)
     }
 
     fn test_extended_job(channel_id: ChannelId, job_id: u32) -> NewExtendedMiningJobOwned {
@@ -1902,6 +1889,147 @@ mod tests {
                 .with(&100, |group| group.has_channel_id(42))
                 .unwrap()
         );
+    }
+
+    fn drain<T>(receiver: &Receiver<T>) {
+        while receiver.try_recv().is_ok() {}
+    }
+
+    fn open_channel_request(request_id: u32, min_extranonce_size: u16) -> MiningOwned {
+        MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+            request_id,
+            user_identity: "miner".try_into().unwrap(),
+            nominal_hash_rate: 1.0,
+            max_target: [0xff; 32].into(),
+            min_extranonce_size,
+        })
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_channel_churn_leaves_no_channel_state_behind() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        // Clones share the same maps; the downstream handler needs an `Arc`.
+        let downstream_handler = Arc::new(manager.clone());
+
+        for cycle in 0..32 {
+            let request_id = cycle + 1;
+            // Like SRI Pool, this upstream never reuses channel IDs. It also hands out a new
+            // group ID per channel, the worst case for group retention.
+            let channel_id = 1_000 + cycle;
+            let group_channel_id = 2_000 + cycle;
+
+            io.downstream_sender
+                .send((open_channel_request(request_id, 4), None))
+                .await
+                .unwrap();
+            downstream_handler
+                .clone()
+                .handle_downstream_message()
+                .await
+                .unwrap();
+            manager
+                .handle_open_extended_mining_channel_success(
+                    None,
+                    OpenExtendedMiningChannelSuccessOwned {
+                        request_id,
+                        channel_id,
+                        target: [0xff; 32].into(),
+                        extranonce_size: 4,
+                        extranonce_prefix: vec![0xaa; 4].try_into().unwrap(),
+                        group_channel_id,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            manager.next_share_sequence_number(channel_id);
+
+            // Alternate the downstream and upstream close directions.
+            if cycle % 2 == 0 {
+                io.downstream_sender
+                    .send((MiningOwned::CloseChannel(close_channel(channel_id)), None))
+                    .await
+                    .unwrap();
+                downstream_handler
+                    .clone()
+                    .handle_downstream_message()
+                    .await
+                    .unwrap();
+            } else {
+                manager
+                    .handle_close_channel(None, close_channel(channel_id), None)
+                    .await
+                    .unwrap();
+            }
+            drain(&io.upstream_receiver);
+            drain(&io.sv1_server_receiver);
+        }
+
+        assert!(manager.pending_downstream_channels.is_empty());
+        assert!(manager.extended_channels.is_empty());
+        assert!(manager.sv1_advertised_extranonce_prefixes.is_empty());
+        assert!(manager.group_channels.is_empty());
+        assert!(manager.share_sequence_counters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aggregated_channel_churn_only_keeps_the_shared_upstream_state() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        connect_aggregated_channel(&manager);
+        let mut group = GroupChannel::new(100);
+        group.add_channel_id(42, 12).unwrap();
+        manager.group_channels.insert(100, group);
+        let manager = Arc::new(manager);
+
+        for cycle in 0..32 {
+            io.downstream_sender
+                .send((open_channel_request(cycle + 1, 6), None))
+                .await
+                .unwrap();
+            manager.clone().handle_downstream_message().await.unwrap();
+            let Ok(MiningOwned::OpenExtendedMiningChannelSuccess(success)) =
+                io.sv1_server_receiver.try_recv()
+            else {
+                panic!("expected the downstream channel to open");
+            };
+            manager.next_share_sequence_number(42);
+
+            io.downstream_sender
+                .send((
+                    MiningOwned::CloseChannel(close_channel(success.channel_id)),
+                    None,
+                ))
+                .await
+                .unwrap();
+            manager.clone().handle_downstream_message().await.unwrap();
+            drain(&io.upstream_receiver);
+            drain(&io.sv1_server_receiver);
+        }
+
+        assert!(manager.pending_downstream_channels.is_empty());
+        assert_eq!(manager.extended_channels.len(), 1);
+        assert!(
+            manager
+                .extended_channels
+                .contains_key(&AGGREGATED_CHANNEL_ID)
+        );
+        assert!(manager.sv1_advertised_extranonce_prefixes.is_empty());
+        assert_eq!(
+            manager
+                .aggregated_extranonce_allocator
+                .with(|allocator| allocator.as_ref().unwrap().allocated_count())
+                .unwrap(),
+            0
+        );
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(42))
+                .unwrap()
+        );
+        assert_eq!(manager.group_channels.len(), 1);
+        assert_eq!(manager.share_sequence_counters.len(), 1);
+        assert_eq!(manager.next_share_sequence_number(42), 33);
     }
 
     #[tokio::test]

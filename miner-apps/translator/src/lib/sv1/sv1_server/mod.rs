@@ -4438,6 +4438,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downstream_churn_leaves_no_downstream_state_behind() {
+        for aggregated in [false, true] {
+            let (server, to_server, _from_server) = server_with_channels(aggregated);
+            for cycle in 0..32 {
+                let downstream_id = 7 + cycle;
+                // Like SRI Pool, this upstream never reuses channel IDs.
+                let channel_id = 1_000 + cycle as ChannelId;
+                register_test_downstream(&server, downstream_id, Some(channel_id), 100.0, false);
+                let job_channel_id = if aggregated {
+                    AGGREGATED_CHANNEL_ID
+                } else {
+                    channel_id
+                };
+                feed_job_state(&server, &to_server, job_channel_id).await;
+                server
+                    .handle_downstream_disconnect(downstream_id)
+                    .await
+                    .unwrap();
+            }
+
+            assert!(server.downstreams.is_empty());
+            assert!(server.channel_id_to_downstream_id.is_empty());
+            assert!(server.request_id_to_downstream_id.is_empty());
+            assert!(
+                server
+                    .sv1_server_io
+                    .sv1_server_to_downstream_sender
+                    .is_empty()
+            );
+            // Aggregated mode keeps one shared entry for the upstream channel.
+            let shared_entries = usize::from(aggregated);
+            assert_eq!(server.prevhashes.len(), shared_entries);
+            assert_eq!(server.valid_sv1_jobs.len(), shared_entries);
+        }
+    }
+
+    #[tokio::test]
     async fn configured_history_cap_reaches_shared_jobs_and_downstream_validation() {
         use stratum_apps::stratum_core::channels_sv2::client::MAX_PAST_JOBS;
 
