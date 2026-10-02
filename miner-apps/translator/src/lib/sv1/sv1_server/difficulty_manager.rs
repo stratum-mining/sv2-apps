@@ -3,10 +3,7 @@ use stratum_apps::stratum_core::{mining_sv2::UpdateChannelOwned, parsers_sv2::Mi
 
 use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
-    sv1::{
-        Sv1Server, downstream::Sv1ServerEvent,
-        sv1_server::SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
-    },
+    sv1::{Sv1Server, downstream::Sv1ServerEvent, sv1_server::sv1_difficulty},
 };
 
 use stratum_apps::{
@@ -14,10 +11,6 @@ use stratum_apps::{
         bitcoin::Target,
         channels_sv2::{Vardiff, target::hash_rate_to_target},
         mining_sv2::SetTargetOwned,
-        stratum_translation::sv2_to_sv1::{
-            build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding,
-            sv1_advertised_target_from_sv2_target,
-        },
     },
     utils::types::{ChannelId, DownstreamId, Hashrate},
 };
@@ -33,13 +26,6 @@ enum AggregatedSnapshot {
     NoOpenChannels,
     /// Open channels exist, but no exact target could be computed for any of them.
     NoValidTargets,
-}
-
-/// A pending target update ready to be applied to a downstream.
-#[derive(Debug, Clone)]
-struct PendingTargetUpdate {
-    downstream_id: DownstreamId,
-    new_target: Target,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -133,21 +119,12 @@ impl Sv1Server {
                             return Ok(());
                         }
                     };
-                    // Always update the downstream's pending target and hashrate
+                    // Always update the downstream's pending hashrate. The validation target
+                    // only changes when the difficulty derived from it reaches the miner.
                     if let Err(e) = self.with_registered_downstream(downstream_id, |downstream| {
                         downstream
                             .downstream_data
                             .with(|data| {
-                                // Store the advertised (pow2 rounded) target so share
-                                // validation matches the difficulty the miner was sent.
-                                data.set_pending_target(
-                                    sv1_advertised_target_from_sv2_target(
-                                        new_target,
-                                        SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
-                                    )
-                                    .unwrap_or(new_target),
-                                    downstream.downstream_id,
-                                );
                                 data.set_pending_hashrate(
                                     Some(new_hashrate),
                                     downstream.downstream_id,
@@ -175,11 +152,7 @@ impl Sv1Server {
                                     "✅ Target comparison: new_target ({}) >= upstream_target ({}) for downstream {}, will send mining.set_difficulty immediately",
                                     new_target, upstream_target, downstream_id
                                 );
-                                immediate_updates.push((
-                                    channel_id,
-                                    Some(downstream_id),
-                                    new_target,
-                                ));
+                                immediate_updates.push((downstream_id, new_target));
                                 // This update supersedes any parked pending target; drop
                                 // it so a later SetTarget cannot resurrect an obsolete
                                 // difficulty.
@@ -200,7 +173,7 @@ impl Sv1Server {
                                 "No upstream target set for downstream {}, will send mining.set_difficulty immediately",
                                 downstream_id
                             );
-                            immediate_updates.push((channel_id, Some(downstream_id), new_target));
+                            immediate_updates.push((downstream_id, new_target));
                             // Same as above: the immediate update supersedes any parked
                             // pending target.
                             self.pending_target_updates.remove(&downstream_id);
@@ -237,22 +210,17 @@ impl Sv1Server {
         }
 
         // Process immediate set_difficulty updates (for new_target >= upstream_target)
-        for (_channel_id, downstream_id, target) in immediate_updates {
-            let downstream_id = downstream_id.unwrap_or(0);
+        for (downstream_id, target) in immediate_updates {
             // Send set_difficulty message immediately
-            let set_difficulty_msg =
-                match build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding(
-                    target,
-                    SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
-                ) {
-                    Ok(message) => message,
-                    Err(e) => {
-                        error!(
-                            "Failed to build immediate mining.set_difficulty for downstream {downstream_id}: {e:?}; skipping"
-                        );
-                        continue;
-                    }
-                };
+            let set_difficulty_msg = match sv1_difficulty(target) {
+                Ok(message) => message,
+                Err(e) => {
+                    error!(
+                        "Failed to build immediate mining.set_difficulty for downstream {downstream_id}: {e:?}; skipping"
+                    );
+                    continue;
+                }
+            };
             if let Some(sender) = self
                 .sv1_server_io
                 .sv1_server_to_downstream_sender
@@ -544,7 +512,7 @@ impl Sv1Server {
         new_upstream_target: Target,
         downstream_id: Option<DownstreamId>,
         channel_id: ChannelId,
-    ) -> Vec<PendingTargetUpdate> {
+    ) -> Vec<(DownstreamId, Target)> {
         let mut applicable_updates = Vec::new();
 
         self.pending_target_updates
@@ -563,10 +531,7 @@ impl Sv1Server {
                 // new upstream target. The miner will then submit every upstream-valid share;
                 // anything easier is filtered locally by channel-manager validation.
                 if *pending_target >= new_upstream_target {
-                    applicable_updates.push(PendingTargetUpdate {
-                        downstream_id: *pending_downstream_id,
-                        new_target: *pending_target,
-                    });
+                    applicable_updates.push((*pending_downstream_id, *pending_target));
                     false // remove from pending map
                 } else {
                     warn!(
@@ -582,26 +547,18 @@ impl Sv1Server {
     /// Sends set_difficulty messages for all applicable pending updates.
     async fn send_pending_set_difficulty_messages_to_downstream(
         &self,
-        difficulty_updates: Vec<PendingTargetUpdate>,
+        difficulty_updates: Vec<(DownstreamId, Target)>,
     ) -> TproxyResult<(), error::Sv1Server> {
-        for PendingTargetUpdate {
-            downstream_id,
-            new_target,
-        } in difficulty_updates
-        {
-            let set_difficulty_msg =
-                match build_sv1_set_difficulty_from_sv2_target_with_integer_power_of_two_rounding(
-                    new_target,
-                    SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
-                ) {
-                    Ok(message) => message,
-                    Err(e) => {
-                        error!(
-                            "Failed to build mining.set_difficulty for downstream {downstream_id}: {e:?}; skipping"
-                        );
-                        continue;
-                    }
-                };
+        for (downstream_id, new_target) in difficulty_updates {
+            let set_difficulty_msg = match sv1_difficulty(new_target) {
+                Ok(message) => message,
+                Err(e) => {
+                    error!(
+                        "Failed to build mining.set_difficulty for downstream {downstream_id}: {e:?}; skipping"
+                    );
+                    continue;
+                }
+            };
 
             if let Some(sender) = self
                 .sv1_server_io
