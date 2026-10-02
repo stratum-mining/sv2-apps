@@ -43,7 +43,7 @@ impl BitcoinCoreSv2TDP {
             }
         }
 
-        self.process_stale_template_data().await?;
+        self.retire_all_templates()?;
 
         self.template_ipc_client_cancellation_token = CancellationToken::new();
         debug!("Created new template_ipc_client_cancellation_token");
@@ -76,7 +76,7 @@ impl BitcoinCoreSv2TDP {
         let is_stale = {
             let stale_template_ids_guard = self.stale_template_ids.read().map_err(|e| {
                 error!("Failed to acquire read lock on stale_template_ids: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
+                BitcoinCoreSv2TDPError::LockPoisoned("stale_template_ids")
             })?;
             stale_template_ids_guard.contains(&request_transaction_data.template_id)
         };
@@ -115,7 +115,7 @@ impl BitcoinCoreSv2TDP {
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::FailedToSendRequestTransactionDataResponseMessage
+                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
             })?;
 
             // clone so we can drop the read lock and avoid holding it across the await
@@ -180,10 +180,13 @@ impl BitcoinCoreSv2TDP {
             "handle_submit_solution() called for template_id: {}",
             submit_solution.template_id
         );
+        // Deliberately not gated on stale_template_ids: a superseded template is still a valid
+        // block until it is destroyed, and a downstream a few jobs behind may yet find a solution
+        // on one. Whether the block is still worth anything is left to Bitcoin Core.
         let template_data = {
             let template_data_guard = self.template_data.read().map_err(|e| {
                 error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::TemplateNotFound
+                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
             })?;
 
             let Some(template_data) = template_data_guard.get(&submit_solution.template_id) else {
@@ -222,6 +225,7 @@ impl BitcoinCoreSv2TDP {
                 self.thread_ipc_client.clone(),
                 self.thread_map.clone(),
                 &solutions_dir,
+                self.global_cancellation_token.clone(),
             )
             .await
         {

@@ -14,23 +14,20 @@ pub enum BitcoinCoreSv2TDPError {
     CapnpError(capnp::Error),
     CannotConnectToUnixSocket(Box<Path>, String),
     InvalidTemplateHeader(consensus::encode::Error),
-    InvalidTemplateHeaderLength,
-    FailedToSerializeCoinbasePrefix,
-    FailedToSerializeCoinbaseOutputs,
     TemplateNotFound,
+    LockPoisoned(&'static str),
     TemplateIpcClientNotFound,
     FailedToSendNewTemplateMessage,
     FailedToSendSetNewPrevHashMessage,
     FailedToFetchTemplateTxData,
     FailedToSendRequestTransactionDataResponseMessage,
-    FailedToRecvTemplateDistributionMessage,
-    FailedToSendTemplateDistributionMessage,
     FailedToSubmitSolution,
     FailedToSetThread,
     FailedToGetWaitNextRequestOptions,
-    FailedToSendInterruptWaitRequest,
+    CreateNewBlockRequestInterrupted,
     FailedToWaitForMonitorIpcTemplatesTask,
     FailedToCreateSolutionDir,
+    BootstrapCancelled,
 }
 
 impl From<capnp::Error> for BitcoinCoreSv2TDPError {
@@ -48,15 +45,16 @@ impl From<consensus::encode::Error> for BitcoinCoreSv2TDPError {
 #[derive(Debug)]
 pub enum TemplateDataError {
     InvalidCoinbaseTx(ConsensusEncodeError),
+    InvalidTemplateBlock(ConsensusEncodeError),
     InvalidSolution,
     InvalidSolutionPoW(ValidationError),
-    InvalidMerkleRoot,
     InvalidBlockVersion,
     InvalidCoinbaseTxVersion,
     InvalidCoinbaseScriptSig,
     FailedToSumCoinbaseOutputs,
     CapnpError(capnp::Error),
     FailedIpcSubmitSolution,
+    FailedToWriteSolution(std::io::Error),
     FailedToSerializeEmptyCoinbaseOutputs,
     FailedToConvertMerklePathHashToU256,
     FailedToCreateMerklePathSeq,
@@ -87,9 +85,14 @@ impl std::fmt::Display for TemplateDataError {
             TemplateDataError::InvalidCoinbaseTx(e) => {
                 write!(f, "Invalid coinbase transaction: {e}")
             }
-            TemplateDataError::InvalidSolution => write!(f, "Invalid solution"),
+            TemplateDataError::InvalidTemplateBlock(e) => write!(f, "Invalid template block: {e}"),
+            TemplateDataError::InvalidSolution => {
+                write!(
+                    f,
+                    "Solution coinbase is not congruent with the template's coinbase"
+                )
+            }
             TemplateDataError::InvalidSolutionPoW(e) => write!(f, "Invalid solution: {e}"),
-            TemplateDataError::InvalidMerkleRoot => write!(f, "Invalid merkle root"),
             TemplateDataError::InvalidBlockVersion => write!(f, "Invalid block version"),
             TemplateDataError::InvalidCoinbaseTxVersion => {
                 write!(f, "Invalid coinbase transaction version")
@@ -106,6 +109,9 @@ impl std::fmt::Display for TemplateDataError {
             TemplateDataError::CapnpError(e) => write!(f, "Cap'n Proto error: {e}"),
             TemplateDataError::FailedIpcSubmitSolution => {
                 write!(f, "Failed to submit solution via IPC")
+            }
+            TemplateDataError::FailedToWriteSolution(e) => {
+                write!(f, "Failed to write solution: {e}")
             }
             TemplateDataError::FailedToConvertMerklePathHashToU256 => {
                 write!(f, "Failed to convert merkle path hash to U256")

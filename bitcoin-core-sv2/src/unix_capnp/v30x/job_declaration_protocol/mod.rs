@@ -4,13 +4,12 @@
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
-        FORCE_UPDATE_MAX_ATTEMPTS, FORCE_UPDATE_RETRY_BACKOFF_MS,
+        INTERRUPT_REPLY_TIMEOUT_MS,
         v30x::job_declaration_protocol::{error::BitcoinCoreSv2JDPError, mempool::MempoolMirror},
     },
 };
 use async_channel::Receiver;
 use bitcoin_capnp_types::{
-    capnp,
     capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty},
     init_capnp::init::Client as InitIpcClient,
     mining_capnp::{
@@ -19,12 +18,12 @@ use bitcoin_capnp_types::{
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
 use bitcoin_capnp_types_v30 as bitcoin_capnp_types;
-use std::{cell::RefCell, path::Path, rc::Rc};
+use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
 use stratum_core::bitcoin::{Block, consensus::deserialize};
 use tokio::net::UnixStream;
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 pub mod error;
 mod handlers;
@@ -69,7 +68,9 @@ pub struct BitcoinCoreSv2JDP {
 impl BitcoinCoreSv2JDP {
     /// Creates a new [`BitcoinCoreSv2JDP`] instance.
     ///
-    /// Bootstraps the mempool mirror and signals readiness before returning.
+    /// Bootstraps the mempool mirror and signals readiness before returning. Every bootstrap
+    /// request gives way to `cancellation_token`, so a peer that stops answering cannot hold
+    /// it.
     pub async fn new<P>(
         bitcoin_core_unix_socket_path: P,
         incoming_requests: Receiver<JdRequest>,
@@ -94,6 +95,7 @@ impl BitcoinCoreSv2JDP {
                     e.to_string(),
                 )
             })?;
+        crate::unix_capnp::log_peer_uid(&stream);
         let (reader, writer) = stream.into_split();
         let reader_compat = reader.compat();
         let writer_compat = writer.compat_write();
@@ -111,11 +113,20 @@ impl BitcoinCoreSv2JDP {
 
         tokio::task::spawn_local(rpc_system);
 
-        let construct_response = bootstrap_client.construct_request().send().promise.await?;
+        // Stop waiting once cancelled, so a silent peer can't block shutdown: `None` means
+        // cancelled, the second `?` is the request's own error.
+        let construct_response = cancellation_token
+            .run_until_cancelled(bootstrap_client.construct_request().send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)??;
 
         let thread_map: ThreadMapIpcClient = construct_response.get()?.get_thread_map()?;
         let thread_request = thread_map.make_thread_request();
-        let thread_response = thread_request.send().promise.await?;
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let thread_response = cancellation_token
+            .run_until_cancelled(thread_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)??;
 
         let thread_ipc_client: ThreadIpcClient = thread_response.get()?.get_result()?;
 
@@ -126,7 +137,11 @@ impl BitcoinCoreSv2JDP {
             .get()
             .get_context()?
             .set_thread(thread_ipc_client.clone());
-        let mining_client_response = mining_client_request.send().promise.await?;
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let mining_client_response = cancellation_token
+            .run_until_cancelled(mining_client_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)??;
         let mining_ipc_client: MiningIpcClient = mining_client_response.get()?.get_result()?;
 
         let mut template_ipc_client_request = mining_ipc_client.create_new_block_request();
@@ -140,10 +155,12 @@ impl BitcoinCoreSv2JDP {
         template_ipc_client_request_options.set_use_mempool(true);
 
         debug!("Sending createNewBlock request to Bitcoin Core");
-        let template_ipc_client_response = template_ipc_client_request
-            .send()
-            .promise
+        // Stop waiting once cancelled (`None`). v30 has no Mining interrupt, so the request stays
+        // pending in Bitcoin Core until the connection closes.
+        let template_ipc_client_response = cancellation_token
+            .run_until_cancelled(template_ipc_client_request.send().promise)
             .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)?
             .map_err(|e| {
                 error!("Failed to send template IPC client request: {}", e);
                 e
@@ -172,7 +189,13 @@ impl BitcoinCoreSv2JDP {
 
         // Bootstrap initial mempool state before signaling readiness
         debug!("Bootstrapping initial mempool state");
-        if let Err(e) = self_.update_mempool_mirror().await {
+        // Stop waiting once cancelled (`None`); the bootstrap's own result is checked below.
+        let bootstrapped = self_
+            .cancellation_token
+            .run_until_cancelled(self_.update_mempool_mirror())
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)?;
+        if let Err(e) = bootstrapped {
             error!("Failed to bootstrap mempool mirror: {:?}", e);
             // Don't send readiness signal on failure (ready_tx dropped)
             return Err(e);
@@ -191,6 +214,8 @@ impl BitcoinCoreSv2JDP {
     /// Main event loop - runs in a LocalSet on dedicated thread.
     ///
     /// Spawns the monitor task and processes incoming job declaration requests until shutdown.
+    /// Every request to Bitcoin Core gives way to `cancellation_token`, so a node that stops
+    /// answering cannot hold shutdown.
     pub async fn run(&self) {
         // spawn mempool mirror monitor task
         let monitor_handle = self.monitor_and_update_mempool_mirror();
@@ -215,7 +240,17 @@ impl BitcoinCoreSv2JDP {
                 request = self.incoming_requests.recv() => {
                     match request {
                         Ok(request) => {
-                            self.process_request(request).await;
+                            // Stop waiting once cancelled (`None`), so a request Bitcoin Core
+                            // never answers cannot hold shutdown.
+                            if self
+                                .cancellation_token
+                                .run_until_cancelled(self.process_request(request))
+                                .await
+                                .is_none()
+                            {
+                                info!("BitcoinCoreSv2JDP shutting down");
+                                break;
+                            }
                         }
                         Err(_) => {
                             info!("Incoming requests channel closed");
@@ -269,89 +304,6 @@ impl BitcoinCoreSv2JDP {
         Ok(())
     }
 
-    /// Forces a synchronous template refresh from Bitcoin Core, then refreshes the mempool mirror.
-    ///
-    /// This is useful after `checkBlock` failures to reduce classification races where the async
-    /// `waitNext` monitor has not yet advanced `current_template_ipc_client`.
-    ///
-    /// It differs from update_mempool_mirror in the sense that it doesn't assume a new template is
-    /// available. It forces the template refresh before updating MempoolMirror.
-    ///
-    /// On transient `"thread busy"` IPC contention, this method retries a few times with
-    /// a short backoff before returning the error.
-    pub(crate) async fn force_update_mempool_mirror(&self) -> Result<(), BitcoinCoreSv2JDPError> {
-        let mut last_error: Option<BitcoinCoreSv2JDPError> = None;
-
-        for attempt in 1..=FORCE_UPDATE_MAX_ATTEMPTS {
-            let result = async {
-                let mut create_new_block_request =
-                    self.mining_ipc_client.create_new_block_request();
-
-                let mut create_new_block_options =
-                    create_new_block_request.get().get_options().map_err(|e| {
-                        error!("Failed to get createNewBlock options: {e}");
-                        e
-                    })?;
-
-                create_new_block_options.set_use_mempool(true);
-
-                let create_new_block_response =
-                    create_new_block_request.send().promise.await.map_err(|e| {
-                        error!("Failed to send createNewBlock request: {e}");
-                        e
-                    })?;
-
-                let new_template_ipc_client = create_new_block_response
-                    .get()
-                    .map_err(|e| {
-                        error!("Failed to read createNewBlock response: {e}");
-                        e
-                    })?
-                    .get_result()
-                    .map_err(|e| {
-                        error!("Failed to get BlockTemplate from createNewBlock: {e}");
-                        e
-                    })?;
-
-                {
-                    let mut current_template_ipc_client =
-                        self.current_template_ipc_client.borrow_mut();
-                    *current_template_ipc_client = new_template_ipc_client;
-                }
-
-                self.update_mempool_mirror().await
-            }
-            .await;
-
-            match result {
-                Ok(()) => return Ok(()),
-                Err(e) if e.is_thread_busy() && attempt < FORCE_UPDATE_MAX_ATTEMPTS => {
-                    warn!(
-                        error = ?e,
-                        attempt,
-                        max_attempts = FORCE_UPDATE_MAX_ATTEMPTS,
-                        "Transient IPC contention during force_update_mempool_mirror (thread busy); retrying"
-                    );
-                    last_error = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        FORCE_UPDATE_RETRY_BACKOFF_MS,
-                    ))
-                    .await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // ideally the retry logic should never allow execution to reach here
-        // but if it does, we just bubble up the error
-        Err(last_error.unwrap_or_else(|| {
-            BitcoinCoreSv2JDPError::CapnpError(capnp::Error::failed(
-                "force_update_mempool_mirror exhausted retries without a terminal error"
-                    .to_string(),
-            ))
-        }))
-    }
-
     /// Processes a single job declaration request and dispatches to the appropriate handler.
     async fn process_request(&self, request: JdRequest) {
         match request {
@@ -381,15 +333,23 @@ impl BitcoinCoreSv2JDP {
     }
 
     /// Interrupts the current `waitNext` request to Bitcoin Core for graceful shutdown.
-    async fn interrupt_wait_request(&self) -> Result<(), BitcoinCoreSv2JDPError> {
+    ///
+    /// Awaiting the reply is what delivers the interrupt: `send()` only queues it, and the bytes
+    /// reach Bitcoin Core when the `RpcSystem` task next runs. The wait is bounded by
+    /// `INTERRUPT_REPLY_TIMEOUT_MS` so a node that has stopped answering cannot hold shutdown.
+    async fn interrupt_wait_request(&self) {
         let template_ipc_client = self.current_template_ipc_client.borrow().clone();
 
-        let interrupt_wait_request = template_ipc_client.interrupt_wait_request();
-        if let Err(e) = interrupt_wait_request.send().promise.await {
-            error!("Failed to send interrupt wait request: {}", e);
-            return Err(BitcoinCoreSv2JDPError::CapnpError(e));
+        let interrupt_wait_promise = template_ipc_client.interrupt_wait_request().send().promise;
+        match tokio::time::timeout(
+            Duration::from_millis(INTERRUPT_REPLY_TIMEOUT_MS),
+            interrupt_wait_promise,
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => error!("Failed to send interrupt wait request: {}", e),
+            Err(_) => error!("Bitcoin Core did not answer the waitNext interrupt in time"),
         }
-
-        Ok(())
     }
 }

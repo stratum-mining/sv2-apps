@@ -13,7 +13,7 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
@@ -128,6 +128,19 @@ pub const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// intercept setup, so startup retains the original one-second delay until the role exposes an
 /// internal readiness signal.
 pub const ROLE_STARTUP_DELAY: Duration = Duration::from_secs(1);
+
+/// Joins `thread` once it finishes, panicking if it has not done so within `timeout`.
+pub async fn join_within<T>(thread: std::thread::JoinHandle<T>, timeout: Duration) -> T {
+    let deadline = Instant::now() + timeout;
+    while !thread.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "thread did not finish within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    thread.join().expect("thread panicked")
+}
 
 /// Blocks until `path` exists, polling every [`POLL_INTERVAL`].
 ///
