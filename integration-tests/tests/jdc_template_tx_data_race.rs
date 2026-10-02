@@ -210,7 +210,7 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
             TemplateDistributionOwned::SetNewPrevHash(SetNewPrevHashOwned {
                 template_id: TEMPLATE_ID,
                 prev_hash: [0x11; 32].into(),
-                header_timestamp: 1_700_000_000,
+                ntime_start: 1_700_000_000,
                 n_bits: 0x1d00ffff,
                 target: [0xff; 32].into(),
             }),

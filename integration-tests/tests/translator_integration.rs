@@ -245,7 +245,7 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
                 parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
                     channel_id: 0,
                     job_id: 1,
-                    min_ntime: Sv2OptionOwned::new(None),
+                    ntime_start: Sv2OptionOwned::new(None),
                     version: 0x20000000,
                     version_rolling_allowed: true,
                     merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -273,7 +273,7 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
                     .unwrap()
                     .try_into()
                     .unwrap(),
-                    min_ntime: 1766782170,
+                    ntime_start: 1766782170,
                     nbits: 0x207fffff,
                 }),
             ))
@@ -397,7 +397,7 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
         .send(AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
             channel_id: 0,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -1494,7 +1494,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
         let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
             channel_id: i,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -1521,7 +1521,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
                 .unwrap()
                 .try_into()
                 .unwrap(),
-                min_ntime: 1766782170,
+                ntime_start: 1766782170,
                 nbits: 0x207fffff,
             },
         ));
@@ -1558,7 +1558,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
     let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
         channel_id: GROUP_CHANNEL_ID_B,
         job_id: 2,
-        min_ntime: Sv2OptionOwned::new(None),
+        ntime_start: Sv2OptionOwned::new(None),
         version: 0x20000000,
         version_rolling_allowed: true,
         merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -1585,7 +1585,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
             .unwrap()
             .try_into()
             .unwrap(),
-            min_ntime: 1766782171,
+            ntime_start: 1766782171,
             nbits: 0x207fffff,
         },
     ));
@@ -1731,7 +1731,7 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
         let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
             channel_id: i,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -1758,7 +1758,7 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
                 .unwrap()
                 .try_into()
                 .unwrap(),
-                min_ntime: 1766782170,
+                ntime_start: 1766782170,
                 nbits: 0x207fffff,
             },
         ));
@@ -1998,7 +1998,7 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
     let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
             channel_id: 0,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -2028,7 +2028,7 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
             .unwrap()
             .try_into()
             .unwrap(),
-            min_ntime: 1766782170,
+            ntime_start: 1766782170,
             nbits: 0x207fffff,
         },
     ));
@@ -2144,7 +2144,7 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
     let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
             channel_id: 0,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -2174,7 +2174,7 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
             .unwrap()
             .try_into()
             .unwrap(),
-            min_ntime: 1766782170,
+            ntime_start: 1766782170,
             nbits: 0x207fffff,
         },
     ));
@@ -2308,12 +2308,12 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
         )
         .await;
 
-    // Send a FUTURE job (min_ntime: None) - this job is not active yet!
+    // Send a FUTURE job (ntime_start: None) - this job is not active yet!
     let future_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(
         NewExtendedMiningJobOwned {
             channel_id: 2,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None), // This makes it a future job!
+            ntime_start: Sv2OptionOwned::new(None), // This makes it a future job!
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -2357,7 +2357,7 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
             .unwrap()
             .try_into()
             .unwrap(),
-            min_ntime: 1766782170,
+            ntime_start: 1766782170,
             nbits: 0x207fffff,
         },
     ));

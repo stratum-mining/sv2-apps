@@ -3535,7 +3535,7 @@ mod tests {
                 channel_id: AGGREGATED_CHANNEL_ID,
                 job_id: 1,
                 prev_hash: vec![0; 32].try_into().unwrap(),
-                min_ntime: 0,
+                ntime_start: 0,
                 nbits: 0x207fffff,
             }))
             .await
@@ -3548,7 +3548,7 @@ mod tests {
         let upstream_job = NewExtendedMiningJobOwned {
             channel_id: AGGREGATED_CHANNEL_ID,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -3899,7 +3899,7 @@ mod tests {
                 channel_id: AGGREGATED_CHANNEL_ID,
                 job_id: 1,
                 prev_hash: vec![0; 32].try_into().unwrap(),
-                min_ntime: 0,
+                ntime_start: 0,
                 nbits: 0x207fffff,
             }))
             .await
@@ -3913,7 +3913,7 @@ mod tests {
                 NewExtendedMiningJobOwned {
                     channel_id: AGGREGATED_CHANNEL_ID,
                     job_id: 1,
-                    min_ntime: Sv2OptionOwned::new(None),
+                    ntime_start: Sv2OptionOwned::new(None),
                     version: 0x20000000,
                     version_rolling_allowed: true,
                     merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -4340,7 +4340,7 @@ mod tests {
                         channel_id: job_channel,
                         job_id: 0,
                         prev_hash: vec![0; 32].try_into().unwrap(),
-                        min_ntime: 1,
+                        ntime_start: 1,
                         nbits: 0x207fffff,
                     }))
                     .await
@@ -4351,7 +4351,7 @@ mod tests {
                     to_server.send(MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
                         channel_id: job_channel,
                         job_id,
-                        min_ntime: Sv2OptionOwned::new(Some(1)),
+                        ntime_start: Sv2OptionOwned::new(Some(1)),
                         version: 0x20000000,
                         version_rolling_allowed: true,
                         merkle_path: Seq0255Owned::new(vec![]).unwrap(),
