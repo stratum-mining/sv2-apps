@@ -47,7 +47,7 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     network_helpers::sv1_connection::ConnectionSV1,
     stratum_core::{
-        binary_sv2::Str0255Owned,
+        binary_sv2::{Str0255Owned, U256Owned},
         bitcoin::Target,
         channels_sv2::{
             Vardiff, VardiffState,
@@ -1159,8 +1159,19 @@ impl Sv1Server {
                             }
                         }
 
+                        // With vardiff, tProxy manages each miner's difficulty starting from the
+                        // configured initial target. Without it, the miner follows the upstream
+                        // from the start, as it does on every later SetTarget.
                         let set_difficulty =
-                            sv1_difficulty(first_target, None).map_err(TproxyError::shutdown)?;
+                            if self.config.downstream_difficulty_config.enable_vardiff {
+                                sv1_difficulty(first_target, None)
+                            } else {
+                                let hashrate = self
+                                    .hashrate_from_upstream_target(m.target.clone(), m.channel_id)
+                                    .map(|hashrate| hashrate as Hashrate);
+                                sv1_difficulty(initial_target, hashrate)
+                            }
+                            .map_err(TproxyError::shutdown)?;
                         // send the set_difficulty message to the downstream
                         if let Some(sender) = self
                             .sv1_server_io
@@ -1629,6 +1640,31 @@ impl Sv1Server {
         Ok(())
     }
 
+    /// Derives the hashrate an upstream target implies at the configured share rate.
+    ///
+    /// When vardiff is disabled the upstream controls difficulty, so this is the only hashrate
+    /// estimate monitoring can report for SV1 downstreams.
+    fn hashrate_from_upstream_target(
+        &self,
+        target: U256Owned,
+        channel_id: ChannelId,
+    ) -> Option<f64> {
+        match hash_rate_from_target(target, self.shares_per_minute as f64) {
+            Ok(hashrate) => {
+                debug!(
+                    "Derived hashrate from upstream target: {hashrate} H/s (channel_id={channel_id})"
+                );
+                Some(hashrate)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to derive hashrate from upstream target: {e:?} (channel_id={channel_id})"
+                );
+                None
+            }
+        }
+    }
+
     /// Handles SetTarget messages when vardiff is disabled.
     ///
     /// This method forwards difficulty changes from upstream directly to downstream miners
@@ -1648,24 +1684,8 @@ impl Sv1Server {
             set_target.channel_id, new_target
         );
 
-        // Derive hashrate from the upstream target so monitoring can report it
         let derived_hashrate =
-            match hash_rate_from_target(set_target.target.clone(), self.shares_per_minute as f64) {
-                Ok(hr) => {
-                    debug!(
-                        "Derived hashrate from SetTarget: {} H/s (channel_id={})",
-                        hr, set_target.channel_id
-                    );
-                    Some(hr)
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to derive hashrate from SetTarget target: {:?} (channel_id={})",
-                        e, set_target.channel_id
-                    );
-                    None
-                }
-            };
+            self.hashrate_from_upstream_target(set_target.target.clone(), set_target.channel_id);
 
         if self.mode.is_aggregated() {
             // Aggregated mode: send set_difficulty to ALL downstreams and update hashrate
@@ -3941,6 +3961,80 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn without_vardiff_the_initial_difficulty_follows_the_upstream_target() {
+        for aggregated in [false, true] {
+            let (server, to_server, _from_server) = server_with_channels(aggregated);
+            let (events, _responses) =
+                register_test_downstream_with_sv1_receiver(&server, 7, None, 100.0, false);
+            let downstream = server.downstreams.get_cloned(&7).unwrap();
+            downstream
+                .downstream_data
+                .with(|data| data.session_state = Sv1SessionState::Ready)
+                .unwrap();
+
+            // The upstream assigns a target ten times easier than tProxy's initial one.
+            let first_target = hash_rate_to_target(1e12, 5.0).unwrap();
+            let upstream_target = hash_rate_to_target(1e11, 5.0).unwrap();
+            assert!(upstream_target > first_target);
+
+            server.request_id_to_downstream_id.insert(42, 7);
+            to_server
+                .send(MiningOwned::OpenExtendedMiningChannelSuccess(
+                    OpenExtendedMiningChannelSuccessOwned {
+                        request_id: 42,
+                        channel_id: 9,
+                        target: upstream_target.to_le_bytes().into(),
+                        extranonce_size: 4,
+                        extranonce_prefix: vec![0; 4].try_into().unwrap(),
+                        group_channel_id: 0,
+                    },
+                ))
+                .await
+                .unwrap();
+            server.handle_upstream_message(first_target).await.unwrap();
+            while !events.is_empty() {
+                downstream.handle_sv1_server_message().await.unwrap();
+            }
+
+            let notify: json_rpc::Message = serde_json::from_str(
+                r#"{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000","","",[],"20000000","1d00ffff","5f5e1000",true]}"#,
+            )
+            .unwrap();
+            server
+                .sv1_server_io
+                .sv1_server_to_downstream_sender
+                .get_cloned(&7)
+                .unwrap()
+                .send(Sv1ServerEvent::from(notify))
+                .await
+                .unwrap();
+            downstream.handle_sv1_server_message().await.unwrap();
+
+            let advertised_target = sv1_advertised_target_from_sv2_target(
+                upstream_target,
+                SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
+            )
+            .unwrap();
+            downstream
+                .downstream_data
+                .with(|data| {
+                    assert_eq!(
+                        data.job_validation_context("job")
+                            .map(|context| context.target),
+                        Some(advertised_target),
+                        "aggregated: {aggregated}"
+                    );
+                    let hashrate = data.hashrate.unwrap();
+                    assert!(
+                        (hashrate - 1e11).abs() / 1e11 < 1e-3,
+                        "reported hashrate {hashrate} follows the upstream target"
+                    );
+                })
+                .unwrap();
+        }
     }
 
     #[tokio::test]
