@@ -89,6 +89,8 @@ struct PreviousPrometheusLabelSets {
     /// Labels for client per-rejection GaugeVecs: [client_id, channel_id, user_identity,
     /// error_code]
     client_rejected_share_labels: HashSet<[String; 4]>,
+    /// Labels for the per-SV1-client GaugeVec: [user_identity]
+    sv1_client_labels: HashSet<[String; 1]>,
 }
 
 /// Cached snapshot of monitoring data.
@@ -154,6 +156,7 @@ impl Clone for SnapshotCache {
                 client_rejected_share_labels: previous_metrics_labels
                     .client_rejected_share_labels
                     .clone(),
+                sv1_client_labels: previous_metrics_labels.sv1_client_labels.clone(),
             }),
         }
     }
@@ -257,6 +260,7 @@ impl SnapshotCache {
         let mut current_server_rejected_labels: HashSet<[String; 3]> = HashSet::new();
         let mut current_client_labels: HashSet<[String; 3]> = HashSet::new();
         let mut current_client_rejected_labels: HashSet<[String; 4]> = HashSet::new();
+        let mut current_sv1_client_labels: HashSet<[String; 1]> = HashSet::new();
 
         // Server metrics
         if let Some(ref summary) = snapshot.server_summary {
@@ -486,6 +490,22 @@ impl SnapshotCache {
             }
         }
 
+        // Per-SV1-client series, when opted in. Keyed on `user_identity` so a
+        // reconnecting miner continues its existing series; hashrates are summed
+        // because two connections can authorise under the same username.
+        if let Some(ref m) = metrics.sv1_client_hashrate {
+            let mut by_user: std::collections::HashMap<&str, f64> =
+                std::collections::HashMap::new();
+            for client in snapshot.sv1_clients.as_deref().unwrap_or(&[]) {
+                *by_user.entry(client.sv1_username.as_str()).or_default() +=
+                    client.hashrate.unwrap_or(0.0) as f64;
+            }
+            for (user, hashrate) in by_user {
+                m.with_label_values(&[user]).set(hashrate);
+                current_sv1_client_labels.insert([user.to_string()]);
+            }
+        }
+
         // Remove stale label combinations that are no longer in the snapshot
         let mut previous_metrics_labels = self
             .previous_metrics_labels
@@ -550,10 +570,23 @@ impl SnapshotCache {
             }
         }
 
+        for stale in previous_metrics_labels
+            .sv1_client_labels
+            .difference(&current_sv1_client_labels)
+        {
+            let label_refs: Vec<&str> = stale.iter().map(|s| s.as_str()).collect();
+            if let Some(ref m) = metrics.sv1_client_hashrate {
+                if let Err(e) = m.remove_label_values(&label_refs) {
+                    debug!(labels = ?label_refs, error = %e, "failed to remove stale sv1 client label");
+                }
+            }
+        }
+
         previous_metrics_labels.server_channel_labels = current_server_labels;
         previous_metrics_labels.server_rejected_share_labels = current_server_rejected_labels;
         previous_metrics_labels.client_channel_labels = current_client_labels;
         previous_metrics_labels.client_rejected_share_labels = current_client_rejected_labels;
+        previous_metrics_labels.sv1_client_labels = current_sv1_client_labels;
     }
 
     /// Get the refresh interval
@@ -740,5 +773,107 @@ mod tests {
             total_cache_requests > 2,
             "Cache should have processed requests",
         );
+    }
+
+    // ── per-SV1-client metrics ───────────────────────────────────────
+
+    fn sv1_client(username: &str, hashrate: f32) -> Sv1ClientInfo {
+        Sv1ClientInfo {
+            client_id: 1,
+            channel_id: Some(1),
+            connection_ip: "192.0.2.1".parse().expect("test IP must be valid"),
+            #[cfg(feature = "asic-rs-telemetry")]
+            management_ip: None,
+            sv1_username: username.to_string(),
+            sv1_worker_name: username.to_string(),
+            target_hex: "00ff".to_string(),
+            hashrate: Some(hashrate),
+            stable_hashrate: false,
+            extranonce1_hex: "aabb".to_string(),
+            extranonce2_len: 8,
+            version_rolling_mask: None,
+            version_rolling_min_bit: None,
+            #[cfg(feature = "asic-rs-telemetry")]
+            miner_telemetry: None,
+            #[cfg(feature = "asic-rs-telemetry")]
+            miner_telemetry_status: None,
+        }
+    }
+
+    struct Sv1Miners(Mutex<Vec<Sv1ClientInfo>>);
+
+    impl Sv1ClientsMonitoring for Sv1Miners {
+        fn get_sv1_clients(&self) -> Vec<Sv1ClientInfo> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// Every `sv1_client_hashrate` series currently registered, as (label, value).
+    fn sv1_series(metrics: &PrometheusMetrics) -> Vec<(String, f64)> {
+        metrics
+            .registry
+            .gather()
+            .iter()
+            .find(|f| f.get_name() == "sv1_client_hashrate")
+            .map(|f| {
+                f.get_metric()
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.get_label()[0].get_value().to_string(),
+                            m.get_gauge().get_value(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sv1_per_client_series_sums_duplicates_and_is_reaped_on_disconnect() {
+        let miners = Arc::new(Sv1Miners(Mutex::new(vec![
+            sv1_client("acct.rig-a", 10.0),
+            // Same username on a second connection: hashrate must add, not clobber.
+            sv1_client("acct.rig-a", 5.0),
+            sv1_client("acct.rig-b", 7.0),
+        ])));
+        let metrics = PrometheusMetrics::new(false, false, true)
+            .expect("metrics")
+            .with_sv1_per_client()
+            .expect("per-client metrics");
+        let cache = SnapshotCache::new(Duration::from_secs(5), None, None)
+            .with_sv1_clients_source(miners.clone())
+            .with_metrics(metrics.clone());
+
+        cache.refresh();
+        let mut series = sv1_series(&metrics);
+        series.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            series,
+            vec![
+                ("acct.rig-a".to_string(), 15.0),
+                ("acct.rig-b".to_string(), 7.0)
+            ]
+        );
+
+        // Miners disconnect; their series must not linger.
+        miners.0.lock().unwrap().clear();
+        cache.refresh();
+        assert!(
+            sv1_series(&metrics).is_empty(),
+            "series for departed miners were not removed"
+        );
+    }
+
+    #[test]
+    fn sv1_per_client_series_absent_unless_opted_in() {
+        let miners = Arc::new(Sv1Miners(Mutex::new(vec![sv1_client("acct.rig-a", 10.0)])));
+        let metrics = PrometheusMetrics::new(false, false, true).expect("metrics");
+        let cache = SnapshotCache::new(Duration::from_secs(5), None, None)
+            .with_sv1_clients_source(miners)
+            .with_metrics(metrics.clone());
+
+        cache.refresh();
+        assert!(sv1_series(&metrics).is_empty());
     }
 }
