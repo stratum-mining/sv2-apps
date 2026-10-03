@@ -52,8 +52,6 @@ pub struct NoiseTcpReadHalf {
     reader: OwnedReadHalf,
     decoder: NoiseDecoder,
     state: Option<TransportDecryptState>,
-    current_frame_buf: Vec<u8>,
-    bytes_read: usize,
 }
 
 /// The writing half of a `NoiseTcpStream`.
@@ -154,8 +152,6 @@ impl NoiseTcpStream {
                 reader,
                 decoder,
                 state: Some(decrypt_state),
-                current_frame_buf: vec![],
-                bytes_read: 0,
             },
             writer: NoiseTcpWriteHalf {
                 writer,
@@ -220,20 +216,15 @@ impl NoiseTcpReadHalf {
     /// This method blocks until a full frame is read and decoded,
     /// handling `Incomplete` rounds from the codec automatically.
     ///
-    /// Not cancellation-safe: Cancellation may leave partially-read state behind.
+    /// Cancellation-safe: the decoder counts bytes only once a read has returned them, so a
+    /// cancelled read leaves nothing behind.
     pub async fn read_frame(&mut self) -> Result<SerializedFrame, Error> {
         loop {
-            let expected = self.decoder.writable_len();
-
-            if self.current_frame_buf.len() != expected {
-                self.current_frame_buf.resize(expected, 0);
-                self.bytes_read = 0;
-            }
-
-            while self.bytes_read < expected {
+            // An empty window means the decoder is already holding the bytes it needs.
+            if self.decoder.read_len() > 0 {
                 let n = self
                     .reader
-                    .read(&mut self.current_frame_buf[self.bytes_read..])
+                    .read(self.decoder.read_buf())
                     .await
                     .map_err(|_| Error::SocketClosed)?;
 
@@ -241,14 +232,8 @@ impl NoiseTcpReadHalf {
                     return Err(Error::SocketClosed);
                 }
 
-                self.bytes_read += n;
+                self.decoder.advance(n)?;
             }
-
-            self.decoder
-                .writable()
-                .copy_from_slice(&self.current_frame_buf[..]);
-
-            self.bytes_read = 0;
 
             match self.next_frame()? {
                 Some(frame) => return Ok(frame),
@@ -264,36 +249,16 @@ impl NoiseTcpReadHalf {
     /// - `Ok(None)` if not enough data is available yet.
     /// - `Err(_)` on socket or decoding errors.
     pub fn try_read_frame(&mut self) -> Result<Option<SerializedFrame>, Error> {
-        let expected = self.decoder.writable_len();
-
-        if self.current_frame_buf.len() != expected {
-            self.current_frame_buf.resize(expected, 0);
-            self.bytes_read = 0;
-        }
-
         // An empty window means the decoder is already holding the bytes, and `try_read` of an
         // empty buffer answers `Ok(0)`, which the arm below reads as a closed socket.
-        if expected > 0 {
-            match self
-                .reader
-                .try_read(&mut self.current_frame_buf[self.bytes_read..])
-            {
+        if self.decoder.read_len() > 0 {
+            match self.reader.try_read(self.decoder.read_buf()) {
                 Ok(0) => return Err(Error::SocketClosed),
-                Ok(n) => self.bytes_read += n,
+                Ok(n) => self.decoder.advance(n)?,
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
                 Err(_) => return Err(Error::SocketClosed),
             }
-
-            if self.bytes_read < expected {
-                return Ok(None);
-            }
         }
-
-        self.decoder
-            .writable()
-            .copy_from_slice(&self.current_frame_buf[..]);
-
-        self.bytes_read = 0;
 
         self.next_frame()
     }
@@ -334,20 +299,29 @@ async fn receive_handshake_frame<R: ExpectsHandshakeMessage>(
     decoder: &mut NoiseDecoder,
     timeout: Duration,
 ) -> Result<HandshakeMessage, Error> {
-    loop {
-        let mut buffer = vec![0u8; decoder.writable_len()];
-        tokio::time::timeout(timeout, reader.read_exact(&mut buffer))
-            .await
-            .map_err(|_| Error::HandshakeTimeout)?
-            .map_err(|_| Error::SocketClosed)?;
-        decoder.writable().copy_from_slice(&buffer);
-
-        match decoder.next_handshake_frame::<R>() {
-            Ok(Decoded::Frame(frame)) => return Ok(frame),
-            Ok(Decoded::Incomplete(_)) => {
-                debug!("Waiting for more bytes during handshake");
+    // The whole message shares one timeout, so a peer cannot stretch the handshake by sending
+    // it a few bytes at a time.
+    let receive = async {
+        loop {
+            let n = reader
+                .read(decoder.read_buf())
+                .await
+                .map_err(|_| Error::SocketClosed)?;
+            if n == 0 {
+                return Err(Error::SocketClosed);
             }
-            Err(e) => return Err(Error::CodecError(e)),
+            decoder.advance(n).map_err(Error::CodecError)?;
+
+            match decoder.next_handshake_frame::<R>() {
+                Ok(Decoded::Frame(frame)) => return Ok(frame),
+                Ok(Decoded::Incomplete(_)) => {
+                    debug!("Waiting for more bytes during handshake");
+                }
+                Err(e) => return Err(Error::CodecError(e)),
+            }
         }
-    }
+    };
+    tokio::time::timeout(timeout, receive)
+        .await
+        .map_err(|_| Error::HandshakeTimeout)?
 }
