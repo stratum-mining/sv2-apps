@@ -569,7 +569,7 @@ impl ChannelManager {
                         downstream_id,
                         MiningOwned::SetTarget(SetTargetOwned {
                             channel_id,
-                            maximum_target: updated_target.to_le_bytes().into(),
+                            target: updated_target.to_le_bytes().into(),
                         }),
                     )
                         .into(),
@@ -614,7 +614,7 @@ impl ChannelManager {
                         downstream_id,
                         MiningOwned::SetTarget(SetTargetOwned {
                             channel_id,
-                            maximum_target: updated_target.to_le_bytes().into(),
+                            target: updated_target.to_le_bytes().into(),
                         }),
                     )
                         .into(),

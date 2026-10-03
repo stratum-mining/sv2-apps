@@ -1398,7 +1398,7 @@ mod tests {
         NewExtendedMiningJobOwned {
             channel_id,
             job_id,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -1485,7 +1485,7 @@ mod tests {
         let update_channel = UpdateChannelOwned {
             channel_id: 1,
             nominal_hash_rate: 2000.0,
-            maximum_target: [0xFFu8; 32].into(),
+            max_target: [0xFFu8; 32].into(),
         };
 
         // Test that the message can be handled
@@ -1524,7 +1524,7 @@ mod tests {
         let update_channel = UpdateChannelOwned {
             channel_id: 0,
             nominal_hash_rate: 0.0,
-            maximum_target: [0xFFu8; 32].into(),
+            max_target: [0xFFu8; 32].into(),
         };
 
         sv1_server_sender_for_test
@@ -1565,7 +1565,7 @@ mod tests {
         let job = NewExtendedMiningJobOwned {
             channel_id: 1,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: false,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -1653,7 +1653,7 @@ mod tests {
             true,
         );
         let mut job = test_extended_job(42, 1);
-        job.min_ntime = Sv2OptionOwned::new(Some(0));
+        job.ntime_start = Sv2OptionOwned::new(Some(0));
         let mut channel = ExtendedChannel::new(
             42,
             "miner".to_string(),
@@ -1897,7 +1897,7 @@ mod tests {
         // A new immediate job can arrive while the old future job remains queued. Its new
         // per-downstream prefixes must be advertised before the broadcast job.
         let mut new_prefix_job = test_extended_job(42, 2);
-        new_prefix_job.min_ntime = Sv2OptionOwned::new(Some(0));
+        new_prefix_job.ntime_start = Sv2OptionOwned::new(Some(0));
         manager
             .handle_new_extended_mining_job(None, new_prefix_job, None)
             .await
@@ -1936,7 +1936,7 @@ mod tests {
                     channel_id: 42,
                     job_id: 1,
                     prev_hash: vec![0; 32].try_into().unwrap(),
-                    min_ntime: 0,
+                    ntime_start: 0,
                     nbits: 0x207fffff,
                 },
                 None,
@@ -2034,7 +2034,7 @@ mod tests {
                     channel_id: 42,
                     job_id: 1,
                     prev_hash: vec![0; 32].try_into().unwrap(),
-                    min_ntime: 0,
+                    ntime_start: 0,
                     nbits: 0x207fffff,
                 },
                 None,
@@ -2051,7 +2051,7 @@ mod tests {
         ));
 
         let mut new_prefix_job = test_extended_job(42, 2);
-        new_prefix_job.min_ntime = Sv2OptionOwned::new(Some(0));
+        new_prefix_job.ntime_start = Sv2OptionOwned::new(Some(0));
         manager
             .handle_new_extended_mining_job(None, new_prefix_job, None)
             .await
@@ -2252,7 +2252,7 @@ mod tests {
                         channel_id: 42,
                         job_id: 1,
                         prev_hash: vec![0; 32].try_into().unwrap(),
-                        min_ntime: 0,
+                        ntime_start: 0,
                         nbits: 0x207fffff,
                     })
                     .unwrap();
@@ -2304,7 +2304,7 @@ mod tests {
                     sequence_number: 0,
                     job_id: job.job_message.job_id,
                     nonce: 0,
-                    ntime: *job.job_message.min_ntime.as_ref().unwrap(),
+                    ntime: *job.job_message.ntime_start.as_ref().unwrap(),
                     version: job.job_message.version,
                     extranonce: vec![0x11; channel.get_rollable_extranonce_size() as usize]
                         .try_into()
@@ -2403,7 +2403,7 @@ mod tests {
                             channel_id: 42,
                             job_id: 1,
                             prev_hash: vec![0; 32].try_into().unwrap(),
-                            min_ntime: 0,
+                            ntime_start: 0,
                             nbits: 0x207fffff,
                         })
                         .unwrap();
@@ -2517,7 +2517,7 @@ mod tests {
                         channel_id: 42,
                         job_id: 3,
                         prev_hash: vec![1; 32].try_into().unwrap(),
-                        min_ntime: 0,
+                        ntime_start: 0,
                         nbits: 0x207fffff,
                     },
                     None,
@@ -2545,7 +2545,7 @@ mod tests {
             )
             .await;
             let mut current_job = job_with_extranonce_size(4, new_prefix_len + 8);
-            current_job.min_ntime = Sv2OptionOwned::new(Some(0));
+            current_job.ntime_start = Sv2OptionOwned::new(Some(0));
             manager
                 .handle_new_extended_mining_job(None, current_job, None)
                 .await

@@ -252,7 +252,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                                     channel_id: group_channel.get_group_channel_id(),
                                     job_id: active_job_id,
                                     prev_hash: msg.prev_hash.clone(),
-                                    min_ntime: msg.header_timestamp,
+                                    ntime_start: msg.ntime_start,
                                     nbits: msg.n_bits,
                                 }),
                             )
@@ -300,7 +300,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                                 channel_id,
                                 job_id: active_job_id,
                                 prev_hash: msg.prev_hash.clone(),
-                                min_ntime: msg.header_timestamp,
+                                ntime_start: msg.ntime_start,
                                 nbits: msg.n_bits,
                             }),
                         )
