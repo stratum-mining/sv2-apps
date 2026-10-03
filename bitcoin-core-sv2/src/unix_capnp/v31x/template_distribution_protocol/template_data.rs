@@ -17,7 +17,7 @@ use stratum_core::bitcoin::{
 };
 
 use stratum_core::{
-    binary_sv2::{B016MOwned, B064KOwned, B0255Owned, Seq064KOwned, Seq0255Owned, U256Owned},
+    binary_sv2::{B08Owned, B016MOwned, B064KOwned, Seq064KOwned, Seq0255Owned, U256Owned},
     template_distribution_sv2::{
         NewTemplateOwned, RequestTransactionDataSuccessOwned, SetNewPrevHashOwned,
         SubmitSolutionOwned,
@@ -319,8 +319,8 @@ impl TemplateData {
             .map_err(|_| TemplateDataError::InvalidCoinbaseTxVersion)
     }
 
-    fn get_coinbase_script_sig(&self) -> Result<B0255Owned, TemplateDataError> {
-        let coinbase_script_sig: B0255Owned = self.coinbase_tx.input[0]
+    fn get_coinbase_script_sig(&self) -> Result<B08Owned, TemplateDataError> {
+        let coinbase_script_sig: B08Owned = self.coinbase_tx.input[0]
             .script_sig
             .to_bytes()
             .try_into()
