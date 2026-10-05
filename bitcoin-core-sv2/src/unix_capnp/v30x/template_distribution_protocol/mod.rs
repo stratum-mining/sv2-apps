@@ -56,17 +56,20 @@ mod template_data;
 /// - A `u64` for the fee delta threshold in satoshis
 /// - A `u8` for the minimum interval in seconds between mempool-driven template updates (chain tip
 ///   updates are never throttled)
-/// - A [`async_channel::Receiver`] for incoming [`TemplateDistribution`] messages (handles
-///   [`CoinbaseOutputConstraints`],
+/// - A [`async_channel::Receiver`] for incoming
+///   [`stratum_core::parsers_sv2::TemplateDistribution`] messages (handles
+///   [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`],
 ///   [`stratum_core::template_distribution_sv2::RequestTransactionData`], and
 ///   [`stratum_core::template_distribution_sv2::SubmitSolution`])
-/// - A [`async_channel::Sender`] for outgoing [`TemplateDistribution`] messages
+/// - A [`async_channel::Sender`] for outgoing
+///   [`stratum_core::parsers_sv2::TemplateDistribution`] messages
 /// - A [`tokio_util::sync::CancellationToken`] to stop the internally spawned tasks
 ///
-/// The instance waits for the first [`CoinbaseOutputConstraints`] message to be received via the
-/// incoming channel before initializing the template IPC client. Upon receiving this message and
-/// successfully initializing, the [`BitcoinCoreSv2TDP`] instance sends a `NewTemplate` followed by
-/// a corresponding `SetNewPrevHash` message over the outgoing channel.
+/// The instance waits for the first
+/// [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`] message to be received
+/// via the incoming channel before initializing the template IPC client. Upon receiving this
+/// message and successfully initializing, the [`BitcoinCoreSv2TDP`] instance sends a
+/// `NewTemplate` followed by a corresponding `SetNewPrevHash` message over the outgoing channel.
 ///
 /// As configured via `fee_threshold`, the [`BitcoinCoreSv2TDP`] instance will monitor the mempool
 /// for changes and send a `NewTemplate` message if the fee delta is greater than the configured
@@ -221,8 +224,8 @@ impl BitcoinCoreSv2TDP {
     ///   message as a response
     /// - incoming [`stratum_core::template_distribution_sv2::SubmitSolution`] messages, for which
     ///   it will submit the solution to the Bitcoin Core IPC client
-    /// - incoming [`CoinbaseOutputConstraints`] messages, for which it will update the coinbase
-    ///   output constraints
+    /// - incoming [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`]
+    ///   messages, for which it will update the coinbase output constraints
     ///
     /// Blocks until the cancellation token is activated. Every request to Bitcoin Core gives way
     /// to it, so a node that stops answering cannot hold shutdown.
@@ -525,7 +528,8 @@ impl BitcoinCoreSv2TDP {
     }
 
     /// Creates a fresh Bitcoin Core Template IPC client from the given
-    /// [`CoinbaseOutputConstraints`] and immediately sends a `NewTemplate` + `SetNewPrevHash`.
+    /// [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`] and immediately
+    /// sends a `NewTemplate` + `SetNewPrevHash`.
     ///
     /// This method intentionally couples these operations because every constraints update should
     /// make a newly constrained template visible to the Sv2 side right away. On success, it:
