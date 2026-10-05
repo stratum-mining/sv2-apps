@@ -78,7 +78,8 @@ authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
 Make sure the machine running the Translator Proxy has its clock synced with an NTP server. Certificate validation is time-sensitive, and even a small drift of a few seconds can trigger an `InvalidCertificate` error.
 
 #### **Downstream Configuration**
-- `downstream_address`: IP address for SV1 miners to connect to
+- `downstream_address`: IP address for SV1 miners to connect to. SV1 is plaintext, so keep it on
+  a trusted LAN (see [Trust Model](#trust-model))
 - `downstream_port`: Port for SV1 miners to connect to
 
 tProxy uses `sv1_api` to parse the initial `mining.configure`, `mining.subscribe`, or
@@ -374,3 +375,25 @@ authority_pubkey = "backup_pool_pubkey"
 - **Non-Aggregated Mode**: Each miner gets individual upstream channel
   - Better isolation between miners
   - Individual difficulty adjustment by the upstream Pool
+
+### **Trust Model**
+
+tProxy is meant to run in the same LAN as the SV1 miners it serves, and that LAN is trusted.
+
+- **The SV1 side is plaintext.** Miners connect over unencrypted, unauthenticated SV1. Anyone on
+  the network path between miners and tProxy can read their traffic, including the
+  `mining.authorize` credentials, and an on-path peer can modify it. tProxy does not offer TLS for
+  SV1: protecting this hop would depend on every miner's firmware supporting TLS and verifying
+  certificates.
+- **The upstream side is protected.** The connection that crosses untrusted networks, to the
+  upstream, uses Stratum V2 with Noise encryption, authenticated with the configured
+  `authority_pubkey`.
+- **Listeners must stay on the LAN.** The example configurations bind `downstream_address` and
+  `monitoring_address` to `0.0.0.0`, which listens on every interface. The monitoring API has no
+  authentication either. On a host reachable from untrusted networks, bind both to the LAN
+  interface or restrict them with a firewall, and never expose them to the internet.
+- **Connected miners are trusted.** tProxy assumes every connected miner acts in good faith: some
+  failures caused by a single miner affect all the miners sharing the translator.
+
+These are operational assumptions: nothing in tProxy verifies that the network or the miners can
+be trusted.

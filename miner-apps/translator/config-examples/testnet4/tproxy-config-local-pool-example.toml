@@ -1,4 +1,6 @@
 # Local Mining Device Downstream Connection
+# SV1 is unencrypted and "0.0.0.0" listens on every interface: only expose this port to a trusted
+# LAN (see "Trust Model" in the README).
 downstream_address = "0.0.0.0"
 downstream_port = 34255
 
@@ -35,6 +37,7 @@ supported_extensions = [
 ]
 
 # Monitoring HTTP server address for exposing channel data (optional)
+# The monitoring API has no authentication: only expose it to a trusted network.
 monitoring_address = "0.0.0.0:9092"
 monitoring_cache_refresh_secs = 15
 
