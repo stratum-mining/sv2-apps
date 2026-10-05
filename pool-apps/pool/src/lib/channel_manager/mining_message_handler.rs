@@ -348,13 +348,13 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         .into(),
                 );
                 let prev_hash = last_set_new_prev_hash_tdp.prev_hash.clone();
-                let header_timestamp = last_set_new_prev_hash_tdp.header_timestamp;
+                let ntime_start = last_set_new_prev_hash_tdp.ntime_start;
                 let n_bits = last_set_new_prev_hash_tdp.n_bits;
                 let set_new_prev_hash_mining = SetNewPrevHashOwned {
                     channel_id,
                     job_id: future_standard_job_id,
                     prev_hash,
-                    min_ntime: header_timestamp,
+                    ntime_start,
                     nbits: n_bits,
                 };
 
@@ -663,13 +663,13 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
 
                     // SetNewPrevHash message activates the future job
                     let prev_hash = last_set_new_prev_hash_tdp.prev_hash.clone();
-                    let header_timestamp = last_set_new_prev_hash_tdp.header_timestamp;
+                    let ntime_start = last_set_new_prev_hash_tdp.ntime_start;
                     let n_bits = last_set_new_prev_hash_tdp.n_bits;
                     let set_new_prev_hash_mining = SetNewPrevHashOwned {
                         channel_id,
                         job_id: future_extended_job_id,
                         prev_hash,
-                        min_ntime: header_timestamp,
+                        ntime_start,
                         nbits: n_bits,
                     };
 
@@ -801,8 +801,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                             let solution = SubmitSolutionOwned {
                                                 template_id,
                                                 version: msg.version,
-                                                header_timestamp: msg.ntime,
-                                                header_nonce: msg.nonce,
+                                                ntime: msg.ntime,
+                                                nonce: msg.nonce,
                                                 coinbase_tx: coinbase
                                                     .try_into()
                                                     .map_err(PoolError::shutdown)?,
@@ -1070,8 +1070,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                             let solution = SubmitSolutionOwned {
                                                 template_id,
                                                 version: msg.version,
-                                                header_timestamp: msg.ntime,
-                                                header_nonce: msg.nonce,
+                                                ntime: msg.ntime,
+                                                nonce: msg.nonce,
                                                 coinbase_tx: coinbase
                                                     .try_into()
                                                     .map_err(PoolError::shutdown)?,
@@ -1260,7 +1260,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             client_id.expect("client_id must be present for downstream_id extraction");
         let channel_id = msg.channel_id;
         let new_nominal_hash_rate = msg.nominal_hash_rate;
-        let requested_maximum_target = Target::from_le_bytes(msg.maximum_target.to_array());
+        let requested_max_target = Target::from_le_bytes(msg.max_target.to_array());
         let messages = self.with_registered_downstream(downstream_id, |downstream| {
             let mut messages: Vec<RouteMessageTo> = Vec::new();
 
@@ -1268,7 +1268,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 .standard_channels
                 .with_mut(&channel_id, |standard_channel| {
                     let res = standard_channel
-                        .update_channel(new_nominal_hash_rate, Some(requested_maximum_target));
+                        .update_channel(new_nominal_hash_rate, Some(requested_max_target));
                     match res {
                         Ok(_) => {}
                         Err(e) => {
@@ -1299,7 +1299,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     let new_target = standard_channel.get_target();
                     let set_target = SetTargetOwned {
                         channel_id,
-                        maximum_target: new_target.to_le_bytes().into(),
+                        target: new_target.to_le_bytes().into(),
                     };
                     messages.push((downstream_id, MiningOwned::SetTarget(set_target)).into());
                 })
@@ -1308,7 +1308,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     .extended_channels
                     .with_mut(&channel_id, |extended_channel| {
                         let res = extended_channel
-                            .update_channel(new_nominal_hash_rate, Some(requested_maximum_target));
+                            .update_channel(new_nominal_hash_rate, Some(requested_max_target));
                         match res {
                             Ok(_) => {}
                             Err(e) => {
@@ -1343,7 +1343,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         let new_target = extended_channel.get_target();
                         let set_target = SetTargetOwned {
                             channel_id,
-                            maximum_target: new_target.to_le_bytes().into(),
+                            target: new_target.to_le_bytes().into(),
                         };
                         messages.push((downstream_id, MiningOwned::SetTarget(set_target)).into());
                     })

@@ -101,7 +101,7 @@ impl TemplateData {
         SetNewPrevHashOwned {
             template_id: self.template_id,
             prev_hash: self.get_prev_hash(),
-            header_timestamp: self.get_ntime(),
+            ntime_start: self.get_ntime(),
             n_bits: self.get_nbits(),
             target: self.get_target(),
         }
@@ -257,8 +257,8 @@ impl TemplateData {
             thread_map.clone(),
             solution_coinbase_tx,
             submit_solution.version,
-            submit_solution.header_timestamp,
-            submit_solution.header_nonce,
+            submit_solution.ntime,
+            submit_solution.nonce,
             path_dir,
         )
         .await;
@@ -267,8 +267,8 @@ impl TemplateData {
         let mut submit_solution_request_params = submit_solution_request.get();
 
         submit_solution_request_params.set_version(submit_solution.version);
-        submit_solution_request_params.set_timestamp(submit_solution.header_timestamp);
-        submit_solution_request_params.set_nonce(submit_solution.header_nonce);
+        submit_solution_request_params.set_timestamp(submit_solution.ntime);
+        submit_solution_request_params.set_nonce(submit_solution.nonce);
         submit_solution_request_params.set_coinbase(&solution_coinbase_tx_bytes);
 
         submit_solution_request_params

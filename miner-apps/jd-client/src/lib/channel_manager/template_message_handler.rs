@@ -544,7 +544,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                         .expect("future_template checked above");
                     let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
                     let chain_tip =
-                        ChainTip::new(msg.prev_hash.clone(), msg.n_bits, msg.header_timestamp);
+                        ChainTip::new(msg.prev_hash.clone(), msg.n_bits, msg.ntime_start);
 
                     let custom_job = self
                         .job_factory
@@ -629,7 +629,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                             channel_id: group_channel_id,
                             job_id: activated_group_job_id,
                             prev_hash: msg.prev_hash.clone(),
-                            min_ntime: msg.header_timestamp,
+                            ntime_start: msg.ntime_start,
                             nbits: msg.n_bits,
                         }),
                     )
@@ -665,7 +665,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                                     channel_id,
                                     job_id: activated_standard_job_id,
                                     prev_hash: msg.prev_hash.clone(),
-                                    min_ntime: msg.header_timestamp,
+                                    ntime_start: msg.ntime_start,
                                     nbits: msg.n_bits,
                                 }),
                             )

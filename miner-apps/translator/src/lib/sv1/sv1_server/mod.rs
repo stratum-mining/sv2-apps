@@ -1601,32 +1601,30 @@ impl Sv1Server {
         &self,
         set_target: SetTargetOwned,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let new_target = Target::from_le_bytes(set_target.maximum_target.to_array());
+        let new_target = Target::from_le_bytes(set_target.target.to_array());
         debug!(
             "Forwarding SetTarget to downstreams: channel_id={}, target={}",
             set_target.channel_id, new_target
         );
 
         // Derive hashrate from the upstream target so monitoring can report it
-        let derived_hashrate = match hash_rate_from_target(
-            set_target.maximum_target.clone(),
-            self.shares_per_minute as f64,
-        ) {
-            Ok(hr) => {
-                debug!(
-                    "Derived hashrate from SetTarget: {} H/s (channel_id={})",
-                    hr, set_target.channel_id
-                );
-                Some(hr)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to derive hashrate from SetTarget target: {:?} (channel_id={})",
-                    e, set_target.channel_id
-                );
-                None
-            }
-        };
+        let derived_hashrate =
+            match hash_rate_from_target(set_target.target.clone(), self.shares_per_minute as f64) {
+                Ok(hr) => {
+                    debug!(
+                        "Derived hashrate from SetTarget: {} H/s (channel_id={})",
+                        hr, set_target.channel_id
+                    );
+                    Some(hr)
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to derive hashrate from SetTarget target: {:?} (channel_id={})",
+                        e, set_target.channel_id
+                    );
+                    None
+                }
+            };
 
         if self.mode.is_aggregated() {
             // Aggregated mode: send set_difficulty to ALL downstreams and update hashrate
@@ -2995,7 +2993,7 @@ mod tests {
 
         let set_target = SetTargetOwned {
             channel_id: 1,
-            maximum_target: target.to_le_bytes().into(),
+            target: target.to_le_bytes().into(),
         };
 
         // Test should not panic and should handle the message
@@ -3016,7 +3014,7 @@ mod tests {
 
         let set_target = SetTargetOwned {
             channel_id: 1,
-            maximum_target: target.to_le_bytes().into(),
+            target: target.to_le_bytes().into(),
         };
 
         // Test should not panic and should handle the message
@@ -3537,7 +3535,7 @@ mod tests {
                 channel_id: AGGREGATED_CHANNEL_ID,
                 job_id: 1,
                 prev_hash: vec![0; 32].try_into().unwrap(),
-                min_ntime: 0,
+                ntime_start: 0,
                 nbits: 0x207fffff,
             }))
             .await
@@ -3550,7 +3548,7 @@ mod tests {
         let upstream_job = NewExtendedMiningJobOwned {
             channel_id: AGGREGATED_CHANNEL_ID,
             job_id: 1,
-            min_ntime: Sv2OptionOwned::new(None),
+            ntime_start: Sv2OptionOwned::new(None),
             version: 0x20000000,
             version_rolling_allowed: true,
             merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -3687,7 +3685,7 @@ mod tests {
         let error = server
             .handle_set_target_without_vardiff(SetTargetOwned {
                 channel_id: AGGREGATED_CHANNEL_ID,
-                maximum_target: target.to_le_bytes().into(),
+                target: target.to_le_bytes().into(),
             })
             .await
             .unwrap_err();
@@ -3723,7 +3721,7 @@ mod tests {
         let error = server
             .handle_set_target_without_vardiff(SetTargetOwned {
                 channel_id: 9,
-                maximum_target: target.to_le_bytes().into(),
+                target: target.to_le_bytes().into(),
             })
             .await
             .unwrap_err();
@@ -3839,7 +3837,7 @@ mod tests {
         server
             .handle_set_target_message(SetTargetOwned {
                 channel_id: 9,
-                maximum_target: stale_upstream_target.to_le_bytes().into(),
+                target: stale_upstream_target.to_le_bytes().into(),
             })
             .await
             .unwrap();
@@ -3852,7 +3850,7 @@ mod tests {
         server
             .handle_set_target_message(SetTargetOwned {
                 channel_id: 9,
-                maximum_target: pending_target.to_le_bytes().into(),
+                target: pending_target.to_le_bytes().into(),
             })
             .await
             .unwrap();
@@ -3901,7 +3899,7 @@ mod tests {
                 channel_id: AGGREGATED_CHANNEL_ID,
                 job_id: 1,
                 prev_hash: vec![0; 32].try_into().unwrap(),
-                min_ntime: 0,
+                ntime_start: 0,
                 nbits: 0x207fffff,
             }))
             .await
@@ -3915,7 +3913,7 @@ mod tests {
                 NewExtendedMiningJobOwned {
                     channel_id: AGGREGATED_CHANNEL_ID,
                     job_id: 1,
-                    min_ntime: Sv2OptionOwned::new(None),
+                    ntime_start: Sv2OptionOwned::new(None),
                     version: 0x20000000,
                     version_rolling_allowed: true,
                     merkle_path: Seq0255Owned::new(vec![]).unwrap(),
@@ -4342,7 +4340,7 @@ mod tests {
                         channel_id: job_channel,
                         job_id: 0,
                         prev_hash: vec![0; 32].try_into().unwrap(),
-                        min_ntime: 1,
+                        ntime_start: 1,
                         nbits: 0x207fffff,
                     }))
                     .await
@@ -4353,7 +4351,7 @@ mod tests {
                     to_server.send(MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
                         channel_id: job_channel,
                         job_id,
-                        min_ntime: Sv2OptionOwned::new(Some(1)),
+                        ntime_start: Sv2OptionOwned::new(Some(1)),
                         version: 0x20000000,
                         version_rolling_allowed: true,
                         merkle_path: Seq0255Owned::new(vec![]).unwrap(),

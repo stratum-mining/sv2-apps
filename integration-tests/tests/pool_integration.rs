@@ -90,25 +90,25 @@ async fn success_pool_template_provider_connection() {
 //
 // The test ensures that:
 // - The Template Provider sends valid `SetNewPrevHash` and `NewTemplate` messages.
-// - The `minntime` field in the second `NewExtendedMiningJob` message sent to the Translator Proxy
-//   matches the `header_timestamp` from the `SetNewPrevHash` message, addressing a bug that
-//   occurred with non-future jobs.
+// - The `ntime_start` field in the second `NewExtendedMiningJob` message sent to the Translator
+//   Proxy matches the `ntime_start` from the Template Distribution `SetNewPrevHash` message,
+//   addressing a bug that occurred with non-future jobs.
 //
 // Related issue: https://github.com/stratum-mining/stratum/issues/1324
 #[tokio::test]
-async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
+async fn ntime_start_value_assertion_in_new_extended_mining_job() {
     start_tracing();
     let sv2_interval = Some(5);
     let (tp, tp_addr) = start_template_provider(sv2_interval, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let tp_pool_sniffer_identifier =
-        "header_timestamp_value_assertion_in_new_extended_mining_job tp_pool sniffer";
+        "ntime_start_value_assertion_in_new_extended_mining_job tp_pool sniffer";
     let (tp_pool_sniffer, tp_pool_sniffer_addr) =
         start_sniffer(tp_pool_sniffer_identifier, tp_addr, false, vec![], None);
     let (pool, pool_addr, _) =
         start_pool(sv2_tp_config(tp_pool_sniffer_addr), vec![], vec![], false).await;
     let pool_translator_sniffer_identifier =
-        "header_timestamp_value_assertion_in_new_extended_mining_job pool_translator sniffer";
+        "ntime_start_value_assertion_in_new_extended_mining_job pool_translator sniffer";
     let (pool_translator_sniffer, pool_translator_sniffer_addr) = start_sniffer(
         pool_translator_sniffer_identifier,
         pool_addr,
@@ -150,11 +150,11 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
         .await;
     assert_tp_message!(&tp_pool_sniffer.next_message_from_upstream(), NewTemplate);
     // Extract header timestamp from SetNewPrevHash message
-    let header_timestamp_to_check = match tp_pool_sniffer.next_message_from_upstream() {
+    let ntime_start_to_check = match tp_pool_sniffer.next_message_from_upstream() {
         Some((
             _,
             AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::SetNewPrevHash(msg)),
-        )) => msg.header_timestamp,
+        )) => msg.ntime_start,
         _ => panic!("SetNewPrevHash not found!"),
     };
     pool_translator_sniffer
@@ -174,18 +174,18 @@ async fn header_timestamp_value_assertion_in_new_extended_mining_job() {
             MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
         )
         .await;
-    // Extract min_ntime from the second NewExtendedMiningJob message
+    // Extract ntime_start from the second NewExtendedMiningJob message
     let second_job_ntime = match pool_translator_sniffer.next_message_from_upstream() {
         Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(job)))) => {
-            job.min_ntime.into_inner()
+            job.ntime_start.into_inner()
         }
         _ => panic!("Second NewExtendedMiningJob not found!"),
     };
-    // Assert that min_ntime matches header_timestamp
+    // Assert that the job's ntime_start matches the SetNewPrevHash one
     assert_eq!(
         second_job_ntime,
-        Some(header_timestamp_to_check),
-        "The `minntime` field of the second NewExtendedMiningJob does not match the `header_timestamp`!"
+        Some(ntime_start_to_check),
+        "The `ntime_start` field of the second NewExtendedMiningJob does not match the `ntime_start` of SetNewPrevHash!"
     );
     shutdown_all!(translator, pool);
 }
@@ -542,7 +542,7 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
             token: 42_u64.to_le_bytes().try_into().unwrap(),
             version: 0,
             prev_hash: [0_u8; 32].into(),
-            min_ntime: 0,
+            ntime_start: 0,
             nbits: 0,
             coinbase_tx_version: 0,
             coinbase_prefix: Vec::<u8>::new().try_into().unwrap(),
