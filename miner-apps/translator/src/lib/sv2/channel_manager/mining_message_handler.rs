@@ -438,6 +438,14 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         Ok(())
     }
 
+    /// Falls back to the next upstream when the upstream rejects a channel open.
+    ///
+    /// This applies in both modes. In aggregated mode the rejected channel is the one every miner
+    /// shares. In non-aggregated mode it belongs to a single miner, yet every miner is
+    /// disconnected: a rejection usually comes from the upstream, such as its capacity or its
+    /// user identity policy, and the next upstream may accept the same request. Rejecting only
+    /// the affected miner was considered and not adopted, as tProxy trusts its miners; see
+    /// "Upstream Fallback" in the README.
     async fn handle_open_mining_channel_error(
         &mut self,
         _server_id: Option<usize>,

@@ -376,6 +376,34 @@ authority_pubkey = "backup_pool_pubkey"
   - Better isolation between miners
   - Individual difficulty adjustment by the upstream Pool
 
+### **Upstream Fallback**
+
+When the current upstream cannot be used, tProxy falls back to the next upstream in its
+configuration. Fallback disconnects every SV1 miner; miners reconnect to tProxy once the next
+upstream is ready. Each upstream is used at most once: when none is left, tProxy stops.
+
+tProxy falls back when a channel open fails, in both channel modes:
+- the upstream rejects it with `OpenMiningChannel.Error`;
+- the upstream accepts it with a target easier than the requested `max_target` (see
+  [Difficulty and Targets](#difficulty-and-targets)).
+
+In aggregated mode the failed channel is the one every miner shares, so no miner could keep
+working anyway. In non-aggregated mode it belongs to a single miner, yet every miner is
+disconnected. Fallback is still used there because a rejection usually comes from the upstream,
+such as its capacity limits, its user identity policy or how it handles a given firmware's
+request, and the next upstream may accept the same request. It does not help when the cause is the
+miner or the configuration: the miner is rejected again after reconnecting, causing another
+fallback.
+
+Rejecting only the affected miner, while the others keep mining on the current upstream, was
+considered and not adopted, as tProxy trusts the miners connected to it (see
+[Trust Model](#trust-model)). It may be revisited if deployments need stronger isolation between
+miners.
+
+Fallback is also triggered by an upstream payout that fails verification (see
+[Solo/Donation Payout Verification](#solodonation-payout-verification)) and by a `SetTarget` above
+the allowed `max_target` (see [Difficulty and Targets](#difficulty-and-targets)).
+
 ### **Trust Model**
 
 tProxy is meant to run in the same LAN as the SV1 miners it serves, and that LAN is trusted.
@@ -393,7 +421,8 @@ tProxy is meant to run in the same LAN as the SV1 miners it serves, and that LAN
   authentication either. On a host reachable from untrusted networks, bind both to the LAN
   interface or restrict them with a firewall, and never expose them to the internet.
 - **Connected miners are trusted.** tProxy assumes every connected miner acts in good faith: some
-  failures caused by a single miner affect all the miners sharing the translator.
+  failures caused by a single miner affect all the miners sharing the translator (see
+  [Upstream Fallback](#upstream-fallback)).
 
 These are operational assumptions: nothing in tProxy verifies that the network or the miners can
 be trusted.
