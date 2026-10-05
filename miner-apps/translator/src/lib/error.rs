@@ -228,6 +228,8 @@ pub enum TproxyErrorKind {
     ChannelNotFound,
     /// An upstream identifier is already used by a different live channel scope.
     ChannelIdAlreadyInUse(ChannelId),
+    /// An upstream opened a channel with a target easier than the requested `max_target`.
+    InitialTargetAboveMaxTarget,
     /// Failed to process SetNewPrevHash message
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
@@ -333,6 +335,10 @@ impl fmt::Display for TproxyErrorKind {
             ChannelIdAlreadyInUse(channel_id) => {
                 write!(f, "Channel ID is already in use: {channel_id}")
             }
+            InitialTargetAboveMaxTarget => write!(
+                f,
+                "upstream opened a channel with a target easier than the requested max_target"
+            ),
             FailedToProcessSetNewPrevHash => write!(f, "Failed to process SetNewPrevHash message"),
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")

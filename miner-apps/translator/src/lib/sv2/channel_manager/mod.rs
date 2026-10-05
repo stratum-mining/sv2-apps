@@ -16,6 +16,7 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     payout::PayoutMode,
     stratum_core::{
+        bitcoin::Target,
         channels_sv2::{
             client::{
                 extended::ExtendedChannel, group::GroupChannel,
@@ -109,6 +110,16 @@ impl ChannelManagerIo {
     }
 }
 
+/// A downstream channel request waiting for its upstream `OpenExtendedMiningChannelSuccess`.
+#[derive(Debug, Clone)]
+pub struct PendingChannelRequest {
+    pub user_identity: String,
+    pub nominal_hashrate: Hashrate,
+    pub min_extranonce_size: usize,
+    /// The easiest target the upstream may assign when it opens the channel.
+    pub max_target: Target,
+}
+
 // In both modes, whenever an allocator is used, it mints prefixes with
 // layout `[upstream_prefix][local_prefix (padding)][local_index]` whose
 // rollable region is exactly `config.downstream_extranonce2_size`,
@@ -156,7 +167,7 @@ pub struct ChannelManager {
     ///
     /// Entries are removed when their upstream channel opens. In aggregated mode, buffering ends
     /// when the shared upstream channel becomes connected; later requests are opened immediately.
-    pub pending_downstream_channels: SharedMap<DownstreamId, (String, Hashrate, usize)>,
+    pub pending_downstream_channels: SharedMap<DownstreamId, PendingChannelRequest>,
     /// Map of active extended channels by channel ID.
     /// In aggregated mode, the shared upstream channel is stored under AGGREGATED_CHANNEL_ID.
     /// In non-aggregated mode, each downstream has its own channel with its assigned ID.
@@ -631,6 +642,7 @@ impl ChannelManager {
                 let mut user_identity = m.user_identity.as_utf8_or_hex();
                 let hashrate = m.nominal_hash_rate;
                 let min_extranonce_size = m.min_extranonce_size as usize;
+                let max_target = Target::from_le_bytes(m.max_target.to_array());
 
                 if self.mode.is_aggregated() {
                     match self.aggregated_channel_state.get() {
@@ -647,7 +659,12 @@ impl ChannelManager {
                         AggregatedState::Pending => {
                             self.pending_downstream_channels.insert(
                                 m.request_id as DownstreamId,
-                                (user_identity, hashrate, min_extranonce_size),
+                                PendingChannelRequest {
+                                    user_identity,
+                                    nominal_hashrate: hashrate,
+                                    min_extranonce_size,
+                                    max_target,
+                                },
                             );
                             return Ok(());
                         }
@@ -655,7 +672,12 @@ impl ChannelManager {
                             self.aggregated_channel_state.set(AggregatedState::Pending);
                             self.pending_downstream_channels.insert(
                                 m.request_id as DownstreamId,
-                                (user_identity.clone(), hashrate, min_extranonce_size),
+                                PendingChannelRequest {
+                                    user_identity: user_identity.clone(),
+                                    nominal_hashrate: hashrate,
+                                    min_extranonce_size,
+                                    max_target,
+                                },
                             );
                             // Modify user_identity for the upstream `OpenExtendedMiningChannel`.
                             // SRI patterns are passed unchanged to preserve pool-side parsing.
@@ -691,7 +713,12 @@ impl ChannelManager {
                 if !self.mode.is_aggregated() {
                     self.pending_downstream_channels.insert(
                         open_channel_msg.request_id as DownstreamId,
-                        (user_identity, hashrate, min_extranonce_size),
+                        PendingChannelRequest {
+                            user_identity,
+                            nominal_hashrate: hashrate,
+                            min_extranonce_size,
+                            max_target,
+                        },
                     );
                 }
 
@@ -1269,9 +1296,9 @@ impl ChannelManager {
             .for_each(|request_id, request| {
                 pending_requests.push((
                     request_id as RequestId,
-                    request.0.clone(),
-                    request.1,
-                    request.2,
+                    request.user_identity.clone(),
+                    request.nominal_hashrate,
+                    request.min_extranonce_size,
                 ));
             });
         self.pending_downstream_channels.clear();
@@ -1344,6 +1371,20 @@ impl ChannelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_request(
+        user_identity: &str,
+        nominal_hashrate: Hashrate,
+        min_extranonce_size: usize,
+        max_target: Target,
+    ) -> PendingChannelRequest {
+        PendingChannelRequest {
+            user_identity: user_identity.to_string(),
+            nominal_hashrate,
+            min_extranonce_size,
+            max_target,
+        }
+    }
     use async_channel::unbounded;
     use stratum_apps::stratum_core::{
         binary_sv2::{Seq0255Owned, Str0255Owned, Sv2OptionOwned},
@@ -1448,9 +1489,10 @@ mod tests {
         };
 
         // Store the pending channel information
-        manager
-            .pending_downstream_channels
-            .insert(1, ("test_user".to_string(), 1000.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("test_user", 1000.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
 
         // Test that the message can be handled without panicking
         // In a real test environment, we would need to mock the upstream sender
@@ -1572,9 +1614,10 @@ mod tests {
     fn test_channel_manager_data_access() {
         let manager = create_test_channel_manager();
         // Test that we can access and modify channel manager data
-        manager
-            .pending_downstream_channels
-            .insert(1, ("test".to_string(), 100.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("test", 100.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
         let has_pending = manager.pending_downstream_channels.contains_key(&1);
 
         assert!(has_pending);

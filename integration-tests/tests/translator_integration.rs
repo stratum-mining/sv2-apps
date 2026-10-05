@@ -225,12 +225,9 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
                     OpenExtendedMiningChannelSuccessOwned {
                         request_id: open_extended_mining_channel.request_id,
                         channel_id: 0,
-                        target: hex::decode(
-                            "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                        )
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
+                        // A compliant upstream never assigns a target easier than the requested
+                        // one.
+                        target: open_extended_mining_channel.max_target.clone(),
                         extranonce_size: 4,
                         extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
                         group_channel_id: 100,
@@ -378,12 +375,8 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: 0,
-                    target: hex::decode(
-                        "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                    // A compliant upstream never assigns a target easier than the requested one.
+                    target: open_extended_mining_channel.max_target.clone(),
                     extranonce_size: 4,
                     extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
                     group_channel_id: 100,
@@ -1467,12 +1460,8 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: i,
-                    target: hex::decode(
-                        "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                    // A compliant upstream never assigns a target easier than the requested one.
+                    target: open_extended_mining_channel.max_target.clone(),
                     // full extranonce has a total of 8 bytes
                     extranonce_size: 4,
                     extranonce_prefix: vec![0x00, 0x01, 0x00, i as u8].try_into().unwrap(),
@@ -1704,12 +1693,8 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: i,
-                    target: hex::decode(
-                        "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                    // A compliant upstream never assigns a target easier than the requested one.
+                    target: open_extended_mining_channel.max_target.clone(),
                     // full extranonce has a total of 8 bytes
                     extranonce_size: open_extended_mining_channel.min_extranonce_size,
                     extranonce_prefix: vec![0x00, 0x01, 0x00, i as u8].try_into().unwrap(),
@@ -1971,12 +1956,8 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
             OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_extended_mining_channel.request_id,
                 channel_id: 0,
-                target: hex::decode(
-                    "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                )
-                .unwrap()
-                .try_into()
-                .unwrap(),
+                // A compliant upstream never assigns a target easier than the requested one.
+                target: open_extended_mining_channel.max_target.clone(),
                 // full extranonce has a total of 12 bytes
                 extranonce_size: 8,
                 extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
@@ -2117,12 +2098,8 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
             OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_extended_mining_channel.request_id,
                 channel_id: 0,
-                target: hex::decode(
-                    "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                )
-                .unwrap()
-                .try_into()
-                .unwrap(),
+                // A compliant upstream never assigns a target easier than the requested one.
+                target: open_extended_mining_channel.max_target.clone(),
                 // full extranonce has a total of 12 bytes
                 extranonce_size: 8,
                 extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
@@ -2284,12 +2261,8 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
             OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_extended_mining_channel.request_id,
                 channel_id: 2, // aggregated channel ID
-                target: hex::decode(
-                    "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                )
-                .unwrap()
-                .try_into()
-                .unwrap(),
+                // A compliant upstream never assigns a target easier than the requested one.
+                target: open_extended_mining_channel.max_target.clone(),
                 // full extranonce has a total of 12 bytes
                 extranonce_size: 8,
                 extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),

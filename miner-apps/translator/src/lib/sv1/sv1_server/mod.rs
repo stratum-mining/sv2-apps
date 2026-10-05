@@ -1160,8 +1160,9 @@ impl Sv1Server {
                         }
 
                         // With vardiff, tProxy manages each miner's difficulty starting from the
-                        // configured initial target. Without it, the miner follows the upstream
-                        // from the start, as it does on every later SetTarget.
+                        // configured initial target, which the channel manager checked the
+                        // upstream did not make easier. Without it, the miner follows the
+                        // upstream from the start, as it does on every later SetTarget.
                         let set_difficulty =
                             if self.config.downstream_difficulty_config.enable_vardiff {
                                 sv1_difficulty(first_target, None)
