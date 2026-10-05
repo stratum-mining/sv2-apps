@@ -144,6 +144,46 @@ If verification fails, tProxy triggers upstream fallback instead of forwarding t
   shared history or the keepalive schedule. Normal upstream jobs are forwarded
   without waiting for keepalive deadlines.
 
+#### **Difficulty and Targets**
+Each miner's SV1 difficulty comes from `downstream_difficulty_config` and from the targets of
+the upstream SV2 channel:
+
+- **Initial difficulty**: with `enable_vardiff = true`, a miner starts at the difficulty derived
+  from `min_individual_miner_hashrate` and `shares_per_minute`, which tProxy also requests as the
+  channel's `max_target`, the easiest target the upstream may assign. With
+  `enable_vardiff = false`, tProxy accepts any target and a miner starts at the upstream's target
+  for the channel; `shares_per_minute` is then only used to derive the hashrate reported for it.
+- **Rounding**: difficulties of 1 and above are advertised rounded down to a power of two. Shares
+  are validated against the advertised difficulty, so a miner is never held to a harder one than
+  it was told.
+- **Vardiff updates**: a difficulty easier than the upstream target is advertised immediately;
+  shares that meet it but not the upstream target are accepted from the miner and dropped before
+  forwarding. A harder difficulty is only advertised once the upstream raises its difficulty with
+  `SetTarget`, so miners never discard shares the upstream would still credit. Each update is
+  sent upstream as an `UpdateChannel` whose `max_target` is the new target (in aggregated mode,
+  the hardest across miners).
+- **Upstream targets**: without vardiff, every `SetTarget` becomes the miners' new difficulty.
+  With vardiff, a `SetTarget` only releases updates waiting for it. A miner's difficulty is never
+  harder than the `max_target` requested for it, so it is never harder than any target the
+  upstream is allowed to send.
+
+tProxy enforces the Stratum V2 rules on targets:
+- The target assigned when a channel opens must not exceed the requested `max_target`.
+- A `SetTarget` must not exceed the `max_target` of the latest `UpdateChannel` the upstream
+  accepted, or of the open request. tProxy gives the upstream 30 seconds to process each
+  `UpdateChannel`: until then, a `SetTarget` within the previous value is still accepted, since
+  the upstream may have sent it before processing the change. A change the upstream rejects with
+  `UpdateChannel.Error` leaves the previous value in force.
+
+An upstream that breaks either rule triggers fallback to the next configured upstream.
+
+The specification recommends not changing `max_target` again within those 30 seconds, so that a
+client can tell which value a `SetTarget` is bound by. tProxy sends every change right away
+instead, so the upstream learns each new value without waiting, and accepts a `SetTarget` within
+any value the upstream may still be bound by. If several changes are within their 30 seconds when
+an `UpdateChannel.Error` arrives, tProxy cannot tell which one was rejected and keeps the easiest
+of them in force until the next change.
+
 #### **Miner Telemetry**
 Translator Proxy can enrich the monitoring API with telemetry from the ASICs connected to its SV1
 port. This is useful when you want the UI to show each miner's management IP, firmware, hashrate,
