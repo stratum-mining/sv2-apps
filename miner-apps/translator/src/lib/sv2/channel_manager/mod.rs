@@ -404,7 +404,8 @@ impl ChannelManager {
                 );
                 LoopControl::Continue
             }
-            Action::Fallback => {
+            // Only the upstream can request a reconnect; anywhere else it means a fallback.
+            Action::Fallback | Action::Reconnect => {
                 warn!(
                     error_kind = ?e.kind,
                     "{context} requested fallback"

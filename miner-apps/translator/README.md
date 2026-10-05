@@ -400,6 +400,13 @@ considered and not adopted, as tProxy trusts the miners connected to it (see
 [Trust Model](#trust-model)). It may be revisited if deployments need stronger isolation between
 miners.
 
+An upstream can also ask tProxy to move with `Reconnect`, for example before maintenance. tProxy
+disconnects its miners as for a fallback, then connects to the requested host and port with the
+same authority key and user identity, so the request can only point to another server of the same
+pool. If the requested endpoint cannot be used or reached, tProxy moves on to the configured
+upstreams. A request arriving less than 5 minutes after the last one tProxy followed is ignored,
+and tProxy stays on the current upstream.
+
 Fallback is also triggered by an upstream payout that fails verification (see
 [Solo/Donation Payout Verification](#solodonation-payout-verification)) and by a `SetTarget` above
 the allowed `max_target` (see [Difficulty and Targets](#difficulty-and-targets)).

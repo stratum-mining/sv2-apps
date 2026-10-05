@@ -168,7 +168,7 @@ impl AtomicAggregatedState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UpstreamEntry {
     /// Upstream host — can be an IP address or a hostname (resolved at connection time).
     pub host: String,

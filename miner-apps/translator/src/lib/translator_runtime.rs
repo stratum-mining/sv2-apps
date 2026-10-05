@@ -10,6 +10,7 @@ use stratum_apps::{
     fallback_coordinator::FallbackCoordinator,
     payout::PayoutMode,
     stratum_core::parsers_sv2::MiningOwned,
+    sync::SharedLock,
     task_manager::TaskManager,
     utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, InboundFrame, OutboundFrame},
 };
@@ -19,7 +20,7 @@ use crate::{
     TranslatorSv2,
     error::{TproxyError, TproxyErrorKind},
     sv1::Sv1Server,
-    sv2::{ChannelManager, Upstream},
+    sv2::{ChannelManager, ProtocolReconnect, Upstream},
     utils::{TproxyMode, UpstreamEntry},
 };
 
@@ -34,6 +35,9 @@ struct Io {
     sv1_server_to_channel_manager_receiver: Receiver<(MiningOwned, Option<String>)>,
 }
 
+/// Connection attempts made to an upstream before moving on.
+const MAX_UPSTREAM_RETRIES: usize = 3;
+
 /// The core coordinator of the Translator runtime, parameterized by its current bootstrap `State`.
 ///
 /// It manages the lifecycle of essential sub-services and channels, ensuring resources
@@ -44,6 +48,7 @@ pub(super) struct TranslatorRuntime<State> {
     task_manager: Arc<TaskManager>,
     translator: TranslatorSv2,
     upstream_addresses: Vec<UpstreamEntry>,
+    protocol_reconnect: SharedLock<ProtocolReconnect>,
     listen_addr: SocketAddr,
     state: State,
 }
@@ -103,6 +108,7 @@ impl<State> TranslatorRuntime<State> {
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Failed,
         }
@@ -195,6 +201,7 @@ impl TranslatorRuntime<Init> {
             task_manager: Arc::new(TaskManager::new()),
             translator,
             upstream_addresses,
+            protocol_reconnect: SharedLock::new(ProtocolReconnect::default()),
             listen_addr,
             state: Init,
         })
@@ -229,6 +236,7 @@ impl TranslatorRuntime<Init> {
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: IoReady {
                 io: Io {
@@ -270,6 +278,7 @@ impl TranslatorRuntime<IoReady> {
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: ChannelManagerReady {
                 io: self.state.io,
@@ -295,6 +304,7 @@ impl TranslatorRuntime<ChannelManagerReady> {
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Sv1ServerReady {
                 io: self.state.io,
@@ -312,19 +322,47 @@ impl TranslatorRuntime<Sv1ServerReady> {
         if let Err(kind) = self.initialize_upstream().await {
             return Err(BootstrapError::from((kind, self)));
         }
+        Ok(self.into_upstream_ready())
+    }
 
-        Ok(TranslatorRuntime {
+    /// Reconnects to the endpoint the upstream asked for, or to the configured upstreams if it
+    /// cannot be used.
+    ///
+    /// The endpoint keeps the authority key and user identity of the upstream that requested it,
+    /// so it can only be another server of the same pool. It is tried on its own and does not join
+    /// the configured list.
+    pub(super) async fn try_reconnect(
+        self,
+        upstream: UpstreamEntry,
+    ) -> Result<TranslatorRuntime<UpstreamReady>, BootstrapError> {
+        info!(
+            "Reconnecting to {}:{} as requested by the upstream",
+            upstream.host, upstream.port
+        );
+        match self.connect_with_retries(&upstream).await {
+            Ok(true) => Ok(self.into_upstream_ready()),
+            Ok(false) => {
+                warn!("Requested upstream is unreachable; trying the configured upstreams");
+                self.try_upstream().await
+            }
+            Err(kind) => Err(BootstrapError::from((kind, self))),
+        }
+    }
+
+    fn into_upstream_ready(self) -> TranslatorRuntime<UpstreamReady> {
+        TranslatorRuntime {
             tproxy_mode: self.tproxy_mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: UpstreamReady {
                 sv1_server: self.state.sv1_server,
                 channel_manager: self.state.channel_manager,
             },
-        })
+        }
     }
 
     /// Initializes the upstream connection list, handling retries, fallbacks, and flagging.
@@ -338,7 +376,6 @@ impl TranslatorRuntime<Sv1ServerReady> {
     /// malicious". Once an upstream is flagged we skip it on future loops
     /// to avoid hammering known-bad endpoints during failover.
     async fn initialize_upstream(&mut self) -> Result<(), TproxyErrorKind> {
-        const MAX_RETRIES: usize = 3;
         let upstream_len = self.upstream_addresses.len();
 
         for i in 0..upstream_len {
@@ -357,52 +394,62 @@ impl TranslatorRuntime<Sv1ServerReady> {
                 self.upstream_addresses[i].port
             );
 
-            for attempt in 1..=MAX_RETRIES {
-                info!("Connection attempt {}/{}...", attempt, MAX_RETRIES);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-
-                let upstream_entry = &self.upstream_addresses[i];
-                match self.try_initialize_upstream_single(upstream_entry).await {
-                    Ok(()) => {
-                        let user_identity = self.upstream_addresses[i].user_identity.to_string();
-                        let payout_mode = self.payout_mode(&user_identity)?;
-
-                        self.state
-                            .channel_manager
-                            .set_expected_payout_distribution(payout_mode);
-                        self.state.sv1_server.set_user_identity(user_identity);
-
-                        self.upstream_addresses[i].tried_or_flagged = true;
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        if e.action.is_shutdown() {
-                            error!("Fatal shutdown signal during upstream setup: {:?}", e.kind);
-                            return Err(e.kind);
-                        }
-
-                        warn!(
-                            "Attempt {}/{} failed for {}:{}: {:?}",
-                            attempt,
-                            MAX_RETRIES,
-                            self.upstream_addresses[i].host,
-                            self.upstream_addresses[i].port,
-                            e
-                        );
-                        if attempt == MAX_RETRIES {
-                            warn!(
-                                "Max retries reached for {}:{}, moving to next upstream",
-                                self.upstream_addresses[i].host, self.upstream_addresses[i].port
-                            );
-                        }
-                    }
-                }
-            }
+            let upstream = self.upstream_addresses[i].clone();
+            let connected = self.connect_with_retries(&upstream).await?;
             self.upstream_addresses[i].tried_or_flagged = true;
+            if connected {
+                return Ok(());
+            }
         }
 
-        tracing::error!("All upstreams failed after {} retries each", MAX_RETRIES);
+        tracing::error!(
+            "All upstreams failed after {} retries each",
+            MAX_UPSTREAM_RETRIES
+        );
         Err(TproxyErrorKind::CouldNotInitiateSystem)
+    }
+
+    /// Tries `upstream` up to [`MAX_UPSTREAM_RETRIES`] times and, once connected, configures the
+    /// channel manager and SV1 server for it.
+    ///
+    /// Returns `false` if every attempt failed.
+    async fn connect_with_retries(
+        &self,
+        upstream: &UpstreamEntry,
+    ) -> Result<bool, TproxyErrorKind> {
+        for attempt in 1..=MAX_UPSTREAM_RETRIES {
+            info!("Connection attempt {}/{}...", attempt, MAX_UPSTREAM_RETRIES);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            match self.try_initialize_upstream_single(upstream).await {
+                Ok(()) => {
+                    let user_identity = upstream.user_identity.to_string();
+                    let payout_mode = self.payout_mode(&user_identity)?;
+
+                    self.state
+                        .channel_manager
+                        .set_expected_payout_distribution(payout_mode);
+                    self.state.sv1_server.set_user_identity(user_identity);
+                    return Ok(true);
+                }
+                Err(e) => {
+                    if e.action.is_shutdown() {
+                        error!("Fatal shutdown signal during upstream setup: {:?}", e.kind);
+                        return Err(e.kind);
+                    }
+
+                    warn!(
+                        "Attempt {}/{} failed for {}:{}: {:?}",
+                        attempt, MAX_UPSTREAM_RETRIES, upstream.host, upstream.port, e
+                    );
+                }
+            }
+        }
+        warn!(
+            "Max retries reached for {}:{}, moving to next upstream",
+            upstream.host, upstream.port
+        );
+        Ok(false)
     }
 
     // Attempts to initialize a single upstream.
@@ -419,6 +466,7 @@ impl TranslatorRuntime<Sv1ServerReady> {
             self.fallback_coordinator.clone(),
             self.task_manager.clone(),
             self.translator.config.required_extensions.clone(),
+            self.protocol_reconnect.clone(),
         )
         .await?;
 
@@ -477,6 +525,7 @@ impl TranslatorRuntime<UpstreamReady> {
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Running,
         })
@@ -556,6 +605,8 @@ impl TranslatorRuntime<UpstreamReady> {
 pub(super) enum RuntimeEvent {
     Shutdown,
     Fallback,
+    /// The upstream asked tProxy to reconnect to this endpoint.
+    Reconnect(UpstreamEntry),
 }
 
 impl TranslatorRuntime<Running> {
@@ -566,7 +617,15 @@ impl TranslatorRuntime<Running> {
         tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => RuntimeEvent::Shutdown,
-            _ = fallback_token.cancelled() => RuntimeEvent::Fallback,
+            _ = fallback_token.cancelled() => {
+                match self
+                    .protocol_reconnect
+                    .with(|protocol_reconnect| protocol_reconnect.requested.take())
+                {
+                    Ok(Some(upstream)) => RuntimeEvent::Reconnect(upstream),
+                    _ => RuntimeEvent::Fallback,
+                }
+            }
         }
     }
 
@@ -574,6 +633,11 @@ impl TranslatorRuntime<Running> {
         info!("Preparing fallback");
         self.fallback_coordinator.trigger_fallback_and_wait().await;
         info!("All components finished fallback cleanup");
+        // `wait` already took the request that caused this teardown. One recorded while it was
+        // under way, after another component triggered it, is dropped rather than followed later.
+        let _ = self
+            .protocol_reconnect
+            .with(|protocol_reconnect| protocol_reconnect.requested.take());
 
         let fresh_fallback_coordinator = FallbackCoordinator::new();
 
@@ -583,6 +647,7 @@ impl TranslatorRuntime<Running> {
             task_manager: self.task_manager,
             translator: self.translator,
             upstream_addresses: self.upstream_addresses,
+            protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Init,
         }

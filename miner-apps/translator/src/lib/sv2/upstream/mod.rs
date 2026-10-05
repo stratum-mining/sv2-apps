@@ -6,7 +6,11 @@ use crate::{
     utils::UpstreamEntry,
 };
 use async_channel::{Receiver, Sender, unbounded};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
@@ -21,6 +25,7 @@ use stratum_apps::{
         handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
         parsers_sv2::AnyMessageOwned,
     },
+    sync::SharedLock,
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
@@ -31,6 +36,42 @@ use stratum_apps::{
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Minimum time between two reconnects requested by the upstream that tProxy follows.
+///
+/// Every reconnect disconnects all SV1 miners. A request arriving sooner after the last followed
+/// one is ignored, and tProxy stays on the current upstream.
+const PROTOCOL_RECONNECT_MIN_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Reconnects requested by the upstream with `Reconnect` or `ChannelEndpointChanged`.
+///
+/// Shared by the runtime and every upstream connection, so the interval between followed requests
+/// holds across reconnects.
+#[derive(Debug, Default)]
+pub struct ProtocolReconnect {
+    /// The endpoint of a followed request, taken by the runtime once the components have shut
+    /// down.
+    pub(crate) requested: Option<UpstreamEntry>,
+    /// When tProxy last followed a request.
+    last_followed: Option<Instant>,
+}
+
+impl ProtocolReconnect {
+    /// Hands a request made at `now` to the runtime, unless it arrives within
+    /// [`PROTOCOL_RECONNECT_MIN_INTERVAL`] of the last followed one. Returns whether it is
+    /// followed.
+    fn follow(&mut self, upstream: UpstreamEntry, now: Instant) -> bool {
+        if self
+            .last_followed
+            .is_some_and(|last| now.duration_since(last) < PROTOCOL_RECONNECT_MIN_INTERVAL)
+        {
+            return false;
+        }
+        self.requested = Some(upstream);
+        self.last_followed = Some(now);
+        true
+    }
+}
 
 #[derive(Debug, Clone)]
 struct UpstreamIo {
@@ -88,11 +129,18 @@ pub struct Upstream {
     /// Extensions that the translator requires (must be supported by server)
     required_extensions: Vec<u16>,
     address: SocketAddr,
+    /// The configured upstream this connection reaches. A reconnect it requests keeps its
+    /// authority key and user identity.
+    entry: UpstreamEntry,
+    /// Hands a reconnect requested by the upstream to the runtime, which follows it once the
+    /// components have shut down.
+    protocol_reconnect: SharedLock<ProtocolReconnect>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Upstream {
     fn handle_error_action(
+        &self,
         context: &str,
         e: &TproxyError<error::Upstream>,
         cancellation_token: &CancellationToken,
@@ -130,6 +178,42 @@ impl Upstream {
                 fallback_token.cancel();
                 LoopControl::Break
             }
+            Action::Reconnect => {
+                let TproxyErrorKind::ReconnectRequested(upstream) = &e.kind else {
+                    warn!(
+                        error_kind = ?e.kind,
+                        "{context} requested a reconnect without an endpoint; falling back"
+                    );
+                    fallback_token.cancel();
+                    return LoopControl::Break;
+                };
+                match self.protocol_reconnect.with(|protocol_reconnect| {
+                    protocol_reconnect.follow((**upstream).clone(), Instant::now())
+                }) {
+                    // The runtime follows the request once every component has shut down,
+                    // through the same coordinated teardown as a fallback.
+                    Ok(true) => {
+                        info!(
+                            "{context}: upstream requested a reconnect to {}:{}",
+                            upstream.host, upstream.port
+                        );
+                        fallback_token.cancel();
+                        LoopControl::Break
+                    }
+                    Ok(false) => {
+                        warn!(
+                            "{context}: ignoring a reconnect to {}:{} requested within {:?} of the last one followed",
+                            upstream.host, upstream.port, PROTOCOL_RECONNECT_MIN_INTERVAL
+                        );
+                        LoopControl::Continue
+                    }
+                    Err(_) => {
+                        error!("{context}: failed to record the requested reconnect");
+                        cancellation_token.cancel();
+                        LoopControl::Break
+                    }
+                }
+            }
             Action::Shutdown => {
                 warn!(
                     error_kind = ?e.kind,
@@ -165,6 +249,8 @@ impl Upstream {
     /// * `channel_manager_receiver` - Channel to receive messages from the channel manager
     /// * `cancellation_token` - Global application cancellation token
     /// * `fallback_coordinator` - Coordinator for upstream fallback
+    /// * `protocol_reconnect` - Where a reconnect requested by the upstream is handed to the
+    ///   runtime
     ///
     /// # Returns
     /// * `Ok(Upstream)` - Successfully connected to an upstream server
@@ -178,6 +264,7 @@ impl Upstream {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
         required_extensions: Vec<u16>,
+        protocol_reconnect: SharedLock<ProtocolReconnect>,
     ) -> TproxyResult<Self, error::Upstream> {
         info!(
             "Trying to connect to upstream at {}:{}",
@@ -253,6 +340,8 @@ impl Upstream {
                                     upstream_io,
                                     required_extensions: required_extensions.clone(),
                                     address: resolved_addr,
+                                    entry: upstream.clone(),
+                                    protocol_reconnect,
                                 })
                             }
                             Err(network_helpers::Error::InvalidKey) => {
@@ -520,7 +609,7 @@ impl Upstream {
 
                     res = self.clone().handle_upstream_message() => {
                         if let Err(e) = res {
-                            if let LoopControl::Break = Self::handle_error_action(
+                            if let LoopControl::Break = self.handle_error_action(
                                 "Upstream::handle_upstream_message",
                                 &e,
                                 &cancellation_token,
@@ -532,7 +621,7 @@ impl Upstream {
                     }
                     res = self.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            if let LoopControl::Break = Self::handle_error_action(
+                            if let LoopControl::Break = self.handle_error_action(
                                 "Upstream::handle_channel_manager_message",
                                 &e,
                                 &cancellation_token,

@@ -35,6 +35,8 @@ use stratum_apps::{
 };
 use tokio::time::error::Elapsed;
 
+use crate::utils::UpstreamEntry;
+
 pub type TproxyResult<T, Owner> = Result<T, TproxyError<Owner>>;
 
 #[derive(Debug)]
@@ -61,6 +63,9 @@ pub enum Action {
     Log,
     Disconnect(DownstreamId),
     Fallback,
+    /// Reconnect to the endpoint carried by [`TproxyErrorKind::ReconnectRequested`], which the
+    /// upstream asked for.
+    Reconnect,
     Shutdown,
 }
 
@@ -83,6 +88,12 @@ impl CanDisconnect for ChannelManager {}
 impl CanFallback for Upstream {}
 impl CanFallback for ChannelManager {}
 impl CanFallback for Sv1Server {}
+
+/// Marks the owners allowed to request a reconnect: only the upstream connection receives the
+/// messages that call for one.
+pub trait CanReconnect {}
+
+impl CanReconnect for Upstream {}
 
 impl CanShutdown for ChannelManager {}
 impl CanShutdown for Sv1Server {}
@@ -132,6 +143,19 @@ where
         Self {
             kind: kind.into(),
             action: Action::Fallback,
+            _owner: PhantomData,
+        }
+    }
+}
+
+impl<O> TproxyError<O>
+where
+    O: CanReconnect,
+{
+    pub fn reconnect(upstream: UpstreamEntry) -> Self {
+        Self {
+            kind: TproxyErrorKind::ReconnectRequested(Box::new(upstream)),
+            action: Action::Reconnect,
             _owner: PhantomData,
         }
     }
@@ -232,6 +256,10 @@ pub enum TproxyErrorKind {
     InitialTargetAboveMaxTarget,
     /// An upstream sent a `SetTarget` easier than the `max_target` it is bound by.
     SetTargetAboveMaxTarget,
+    /// The upstream asked tProxy to reconnect to this endpoint.
+    ReconnectRequested(Box<UpstreamEntry>),
+    /// The upstream asked tProxy to reconnect to a host it cannot use.
+    InvalidReconnectHost,
     /// Failed to process SetNewPrevHash message
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
@@ -345,6 +373,12 @@ impl fmt::Display for TproxyErrorKind {
                 f,
                 "upstream sent a SetTarget easier than the max_target it is bound by"
             ),
+            ReconnectRequested(upstream) => write!(
+                f,
+                "upstream requested a reconnect to {}:{}",
+                upstream.host, upstream.port
+            ),
+            InvalidReconnectHost => write!(f, "upstream requested a reconnect to an unusable host"),
             FailedToProcessSetNewPrevHash => write!(f, "Failed to process SetNewPrevHash message"),
             FailedToProcessNewExtendedMiningJob => {
                 write!(f, "Failed to process NewExtendedMiningJob message")
