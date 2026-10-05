@@ -188,7 +188,7 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
                 coinbase_tx_version: 2,
                 coinbase_prefix: vec![82, 0]
                     .try_into()
-                    .expect("coinbase prefix must fit into B0255"),
+                    .expect("coinbase prefix must fit into B08"),
                 coinbase_tx_input_sequence: u32::MAX,
                 coinbase_tx_value_remaining: 5_000_000_000,
                 coinbase_tx_outputs_count: 1,
