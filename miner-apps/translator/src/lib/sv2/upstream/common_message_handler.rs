@@ -50,7 +50,9 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
-        todo!()
+        // Extension state must be reset and negotiated again. Reconnecting to the same upstream
+        // does both, and keeps negotiation a one-time step per connection.
+        Err(TproxyError::reconnect(self.entry.clone()))
     }
 
     async fn handle_reconnect(
@@ -197,6 +199,24 @@ mod tests {
             assert!(matches!(error.action, Action::Fallback));
             assert!(matches!(error.kind, TproxyErrorKind::InvalidReconnectHost));
         }
+    }
+
+    #[tokio::test]
+    async fn channel_endpoint_changed_reconnects_to_the_current_upstream() {
+        let mut upstream = upstream();
+
+        let requested = requested_upstream(
+            upstream
+                .handle_channel_endpoint_changed(
+                    None,
+                    ChannelEndpointChangedOwned { channel_id: 7 },
+                    None,
+                )
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(requested.host, "pool.example");
+        assert_eq!(requested.port, 3333);
     }
 
     #[test]
