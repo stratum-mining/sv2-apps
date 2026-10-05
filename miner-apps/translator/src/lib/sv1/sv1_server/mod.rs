@@ -4113,6 +4113,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsolicited_set_target_within_the_bound_keeps_the_advertised_difficulty() {
+        let server = create_test_sv1_server();
+        let events = register_test_downstream(&server, 7, Some(9), 100.0, false);
+        // The miner is advertised its exact vardiff target, which is also the `max_target`
+        // requested upstream, so no target the upstream may send is easier.
+        let advertised_target = hash_rate_to_target(100.0, 5.0).unwrap();
+        set_test_upstream_target(&server, 7, advertised_target);
+
+        for upstream_target in [advertised_target, hash_rate_to_target(200.0, 5.0).unwrap()] {
+            server
+                .handle_set_target_message(SetTargetOwned {
+                    channel_id: 9,
+                    target: upstream_target.to_le_bytes().into(),
+                })
+                .await
+                .unwrap();
+
+            assert!(events.is_empty(), "no new difficulty is advertised");
+            server
+                .downstreams
+                .with(&7, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| {
+                            assert_eq!(data.target, advertised_target);
+                            assert_eq!(data.upstream_target, Some(upstream_target));
+                        })
+                        .unwrap()
+                })
+                .unwrap();
+        }
+        assert!(server.pending_target_updates.is_empty());
+    }
+
+    #[tokio::test]
     async fn harder_vardiff_target_waits_until_upstream_accepts_it() {
         let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);

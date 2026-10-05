@@ -54,7 +54,9 @@ impl Sv1Server {
     ///
     /// This method implements the core vardiff logic:
     /// 1. For each downstream, calculate if a target update is needed
-    /// 2. Always send UpdateChannel to keep upstream informed
+    /// 2. Always send UpdateChannel to keep upstream informed. Its `max_target` is the new exact
+    ///    target (the hardest one across downstreams in aggregated mode), which bounds every
+    ///    SetTarget the upstream may send for the channel once it accepts the update.
     /// 3. Compare the new target with the upstream target to decide when to send set_difficulty.
     ///    Bitcoin targets are ordered inversely to difficulty: a larger target is easier.
     ///    - If `new_target >= upstream_target`, advertise it immediately. This preserves every
@@ -420,6 +422,12 @@ impl Sv1Server {
     /// Aggregated mode: Single SetTarget updates all downstreams and processes all pending updates
     /// Non-aggregated mode: Each SetTarget updates one specific downstream and processes its
     /// pending update
+    ///
+    /// A SetTarget that releases no pending update, including one the upstream sent on its own
+    /// initiative, leaves the advertised difficulty unchanged. That never leaves a miner harder
+    /// than the upstream: the channel manager has already checked the target against the
+    /// requested `max_target`, and a miner's advertised difficulty is never harder than the
+    /// `max_target` requested for it.
     pub(super) async fn handle_set_target_message(
         &self,
         set_target: SetTargetOwned,
