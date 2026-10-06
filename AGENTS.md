@@ -45,11 +45,31 @@ Whenever helping me review PRs, don't restrict the output to an analysis of the 
 
 While listing findings, for each finding, give me a draft comment and the file/line where it would be appropriate to drop it. Also mention the finding severity, and whether you believe it's a blocker or not. This is deliberately designed to keep human reviewers on the loop, as opposed to blindly copypasting a huge "clanker review" body of text without ever looking into what each finding means.
 
+Judge a PR against the problem and the expected outcome of the issues it closes. Everything else an issue lists, including suggested approaches and the "Acceptance criteria" sections of older issues, is context: a PR that reaches the outcome another way is not a finding, as long as its description explains why. Flag a divergence only when part of the expected outcome is left unsolved, and say which part.
+
 ## Drafting issues
 
 SRI repositories try to leverage github subissue clustering. When helping humans draft new github issues, always find for issues that might be either adjacent, correlated, duplicate. Also take into consideration umbrella issues that have already been closed.
 
 You always draft github issues under human supervision. Your role here is to help human SRI contributors reason about the issues being reported, not create github noise.
+
+Describe the problem and the outcome a fix must guarantee, observable from outside the code. Implementation and test ideas are suggestions for whoever picks the issue up, so mark them as non-binding: written as requirements, they make reviewers flag every PR that solves the problem another way.
+
+## Triaging audit findings
+
+SRI maintainers triage findings from the private Loupe audit repositories into public sv2-apps issues, so the work is tracked where it happens. Draft them from `.github/ISSUE_TEMPLATE/audit-finding.md`, and:
+
+- Before publishing, check with the maintainer whether the finding is safe to disclose. A severe finding that can be exploited remotely stays in Loupe until its fix has landed.
+- Open one issue per defect, listing every Loupe finding that reports it: Loupe often reports the same defect more than once.
+- Check Pool, JDS, JDC and tProxy for the same defect, and record the ones that are not affected along with the reason.
+- Make the issue a sub-issue of exactly one tracker, and apply that tracker's label:
+  - one application affected: its own tracker, #144 (`pool`), #415 (`job-declarator-server`), #38 (`job-declarator-client`) or #31 (`translator-proxy`);
+  - the defect lives in a shared crate: #390 (`stratum-apps`) or #594 (`bitcoin-core-sv2`);
+  - the same defect in more than one application's own code: #742 (`cross-application`).
+- Leave PR grouping to whoever picks the issue up. If two issues should land together, say why under "Related issues and PRs".
+- Record progress in dated comments rather than by editing the issue body.
+
+An issue and every Loupe finding it lists close together, with the PR that completes the fix. A PR that fixes only part of it references them with `ref` instead of `Closes`.
 
 ## Ponytail
 
