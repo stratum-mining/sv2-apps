@@ -38,6 +38,10 @@ When `DeclareMiningJob` is successfully validated, the allocated token is remove
 
 Active tokens are single-use. During `SetCustomMiningJob` handling, the `JobDeclarator` deactivates the active token before passing the original allocated token value to the `JobValidationEngine`.
 
-Malformed, unknown, expired, wrong-owner, or already consumed tokens are rejected with `invalid-mining-job-token`.
+Each token is also bound to the identity it was allocated under, taken from `AllocateMiningJobToken.user_identifier`, and the active token inherits it on activation. When the Pool validates a `SetCustomMiningJob` through the `JobDeclarator`, it passes the `user_identity` of the channel the job is set on, and the job is rejected unless that identity matches the one bound to the token.
+
+A JDC may allocate tokens under different identities, e.g. one per Mining channel it opens with the Pool. The content of the identity is not constrained, so an empty string is bound and compared like any other value.
+
+Malformed, unknown, expired, wrong-owner, identity-mismatched, or already consumed tokens are rejected with `invalid-mining-job-token`.
 
 Allocated and active tokens are periodically removed by a janitor task after their configured timeouts. When a downstream disconnects, both allocated and active tokens owned by that downstream are removed immediately.
