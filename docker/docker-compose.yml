@@ -2,7 +2,6 @@ services:
   pool_sv2:
     image: stratumv2/pool_sv2:main
     container_name: pool_sv2
-    stop_signal: SIGINT
     # The pool is configured entirely from POOL__* variables in docker_env;
     # there is no config file to mount.
     env_file:
@@ -22,7 +21,6 @@ services:
   jd_client_sv2:
     image: stratumv2/jd_client_sv2:main
     container_name: jd_client_sv2
-    stop_signal: SIGINT
     # Configured entirely from JDC__* variables in docker_env.
     env_file:
       - docker_env
@@ -39,7 +37,6 @@ services:
   tproxy_sv2:
     image: stratumv2/translator_sv2:main
     container_name: tproxy_sv2
-    stop_signal: SIGINT
     # Configured entirely from TPROXY__* variables in docker_env.
     env_file:
       - docker_env
