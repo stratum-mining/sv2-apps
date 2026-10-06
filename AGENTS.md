@@ -55,6 +55,22 @@ You always draft github issues under human supervision. Your role here is to hel
 
 Describe the problem and the outcome a fix must guarantee, observable from outside the code. Implementation and test ideas are suggestions for whoever picks the issue up, so mark them as non-binding: written as requirements, they make reviewers flag every PR that solves the problem another way.
 
+## Triaging audit findings
+
+SRI maintainers triage findings from the private Loupe audit repositories into public sv2-apps issues, so the work is tracked where it happens. Draft them from `.github/ISSUE_TEMPLATE/audit-finding.md`, and:
+
+- Before publishing, check with the maintainer whether the finding is safe to disclose. A severe finding that can be exploited remotely stays in Loupe until its fix has landed.
+- Open one issue per defect, listing every Loupe finding that reports it: Loupe often reports the same defect more than once.
+- Check Pool, JDS, JDC and tProxy for the same defect, and record the ones that are not affected along with the reason.
+- Make the issue a sub-issue of exactly one tracker, and apply that tracker's label:
+  - one application affected: its own tracker, #144 (`pool`), #415 (`job-declarator-server`), #38 (`job-declarator-client`) or #31 (`translator-proxy`);
+  - the defect lives in a shared crate: #390 (`stratum-apps`) or #594 (`bitcoin-core-sv2`);
+  - the same defect in more than one application's own code: #742 (`cross-application`).
+- Leave PR grouping to whoever picks the issue up. If two issues should land together, say why under "Related issues and PRs".
+- Record progress in dated comments rather than by editing the issue body.
+
+An issue and every Loupe finding it lists close together, with the PR that completes the fix. A PR that fixes only part of it references them with `ref` instead of `Closes`.
+
 ## Ponytail
 
 If the plugin is not already installed into the coding agent harness, make sure to follow [Ponytail](https://ponytail.dev/) rules. But avoid installing it as a plugin, unless explicitly instructed to do so. This is only a repository-wide convention. Also avoid writing comments that reference "ponytail" in a compressed and implicit way, prefer explaining the actual rationale instead.
