@@ -136,14 +136,6 @@ impl BitcoinCoreSv2JDP {
                                     break;
                                 };
                                 if let Err(e) = updated {
-                                    if e.is_thread_busy() {
-                                        warn!(
-                                            error = ?e,
-                                            "Transient IPC contention while updating mempool mirror (thread busy); retrying"
-                                        );
-                                        continue;
-                                    }
-
                                     error!("Failed to update mempool mirror: {:?}", e);
                                     self_clone.cancellation_token.cancel();
                                     break;
@@ -151,13 +143,6 @@ impl BitcoinCoreSv2JDP {
                             }
                             Err(e) => {
                                 let err: super::error::BitcoinCoreSv2JDPError = e.into();
-                                if err.is_thread_busy() {
-                                    warn!(
-                                        error = ?err,
-                                        "Transient IPC contention during waitNext (thread busy); retrying"
-                                    );
-                                    continue;
-                                }
                                 debug!("waitNext request failed with error: {:?}", err);
                                 error!("Failed to get response: {:?}", err);
                                 warn!("Terminating Sv2 Bitcoin Core IPC Connection");

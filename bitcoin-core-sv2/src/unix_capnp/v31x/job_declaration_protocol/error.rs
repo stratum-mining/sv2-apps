@@ -22,17 +22,6 @@ pub enum BitcoinCoreSv2JDPError {
     BootstrapCancelled,
 }
 
-impl BitcoinCoreSv2JDPError {
-    /// Returns true when the error indicates transient IPC contention in Bitcoin Core.
-    pub fn is_thread_busy(&self) -> bool {
-        matches!(
-            self,
-            BitcoinCoreSv2JDPError::CapnpError(capnp_error)
-                if capnp_error.to_string().contains("thread busy")
-        )
-    }
-}
-
 impl From<capnp::Error> for BitcoinCoreSv2JDPError {
     fn from(error: capnp::Error) -> Self {
         BitcoinCoreSv2JDPError::CapnpError(error)
