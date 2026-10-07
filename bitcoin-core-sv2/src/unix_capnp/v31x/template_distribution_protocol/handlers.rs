@@ -43,7 +43,7 @@ impl BitcoinCoreSv2TDP {
             }
         }
 
-        self.retire_all_templates()?;
+        self.retire_all_templates();
 
         self.template_ipc_client_cancellation_token = CancellationToken::new();
         debug!("Created new template_ipc_client_cancellation_token");
@@ -78,10 +78,7 @@ impl BitcoinCoreSv2TDP {
         // a new request; anything else is current, and is cloned out so nothing is held across the
         // await below.
         let template_data = {
-            let template_data_guard = self.template_data.read().map_err(|e| {
-                error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-            })?;
+            let template_data_guard = self.template_data.borrow();
 
             match template_data_guard.get(&request_transaction_data.template_id) {
                 None => Err(ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND),
@@ -150,10 +147,7 @@ impl BitcoinCoreSv2TDP {
         // it is destroyed, and a downstream a few jobs behind may yet find a solution on one.
         // Whether the block is still worth anything is left to Bitcoin Core.
         let template_data = {
-            let template_data_guard = self.template_data.read().map_err(|e| {
-                error!("Failed to acquire read lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-            })?;
+            let template_data_guard = self.template_data.borrow();
 
             let Some(template_data) = template_data_guard.get(&submit_solution.template_id) else {
                 error!(
