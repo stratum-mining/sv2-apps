@@ -15,7 +15,6 @@ pub enum BitcoinCoreSv2TDPError {
     CannotConnectToUnixSocket(Box<Path>, String),
     InvalidTemplateHeader(consensus::encode::Error),
     TemplateNotFound,
-    LockPoisoned(&'static str),
     TemplateIpcClientNotFound,
     FailedToSendNewTemplateMessage,
     FailedToSendSetNewPrevHashMessage,

@@ -45,7 +45,6 @@ use stratum_core::{
     template_distribution_sv2::CoinbaseOutputConstraintsOwned,
 };
 
-use std::sync::RwLock;
 use tokio::{net::UnixStream, task::JoinHandle};
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
@@ -109,8 +108,8 @@ pub struct BitcoinCoreSv2TDP {
     monitor_ipc_templates_handle: Rc<RefCell<Option<JoinHandle<()>>>>,
     current_template_ipc_client: Rc<RefCell<Option<BlockTemplateIpcClient>>>,
     current_prev_hash: Rc<RefCell<Option<U256Owned>>>,
-    retained_templates: Rc<RwLock<HashMap<u64, TemplateData>>>,
-    future_template: Rc<RwLock<Option<TemplateData>>>,
+    retained_templates: Rc<RefCell<HashMap<u64, TemplateData>>>,
+    future_template: Rc<RefCell<Option<TemplateData>>>,
     template_id_factory: Rc<AtomicU64>,
     incoming_messages: Receiver<TemplateDistributionOwned>,
     outgoing_messages: Sender<TemplateDistributionOwned>,
@@ -214,8 +213,8 @@ impl BitcoinCoreSv2TDP {
             template_id_factory: Rc::new(AtomicU64::new(0)),
             current_template_ipc_client: Rc::new(RefCell::new(None)),
             current_prev_hash: Rc::new(RefCell::new(None)),
-            retained_templates: Rc::new(RwLock::new(HashMap::new())),
-            future_template: Rc::new(RwLock::new(None)),
+            retained_templates: Rc::new(RefCell::new(HashMap::new())),
+            future_template: Rc::new(RefCell::new(None)),
             global_cancellation_token,
             incoming_messages,
             outgoing_messages,
@@ -453,66 +452,38 @@ impl BitcoinCoreSv2TDP {
     // refreshes fees with non-future ones. The protocol allows several future templates inside a
     // single tip window, with `SetNewPrevHash` naming which becomes active; this runtime
     // deliberately never sends more than one.
-    fn store_template_data(
-        &self,
-        template_data: &TemplateData,
-        future_template: bool,
-    ) -> Result<(), BitcoinCoreSv2TDPError> {
+    fn store_template_data(&self, template_data: &TemplateData, future_template: bool) {
         if future_template {
-            let mut future_template_guard = self.future_template.write().map_err(|e| {
-                error!("Failed to acquire write lock on template_data: {:?}", e);
-                BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-            })?;
-
-            *future_template_guard = Some(template_data.clone());
+            self.future_template.replace(Some(template_data.clone()));
             debug!(
                 "Saved future template with template_id: {}",
                 template_data.get_template_id()
             );
-
-            return Ok(());
+            return;
         }
 
-        let mut retained_templates_guard = self.retained_templates.write().map_err(|e| {
-            error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-        })?;
-
-        retained_templates_guard.insert(template_data.get_template_id(), template_data.clone());
+        self.retained_templates
+            .borrow_mut()
+            .insert(template_data.get_template_id(), template_data.clone());
         debug!(
             "Saved template data with template_id: {}",
             template_data.get_template_id()
         );
-
-        Ok(())
     }
 
     // Hands back the template `template_id` names, from wherever it is held.
     //
     // A request names an id without knowing whether it belongs to the tip's future template or to
     // one of the refreshes retained behind it, so both are searched. The template is cloned out so
-    // no lock is held across the awaits its callers make.
-    fn template_data_for(
-        &self,
-        template_id: u64,
-    ) -> Result<Option<TemplateData>, BitcoinCoreSv2TDPError> {
-        let future_template_guard = self.future_template.read().map_err(|e| {
-            error!("Failed to acquire read lock on future_template: {:?}", e);
-            BitcoinCoreSv2TDPError::LockPoisoned("future_template")
-        })?;
-        if let Some(future_template) = future_template_guard.as_ref() {
+    // no borrow is held across the awaits its callers make.
+    fn template_data_for(&self, template_id: u64) -> Option<TemplateData> {
+        if let Some(future_template) = self.future_template.borrow().as_ref() {
             if future_template.get_template_id() == template_id {
-                return Ok(Some(future_template.clone()));
+                return Some(future_template.clone());
             }
         }
-        drop(future_template_guard);
 
-        let retained_templates_guard = self.retained_templates.read().map_err(|e| {
-            error!("Failed to acquire read lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-        })?;
-
-        Ok(retained_templates_guard.get(&template_id).cloned())
+        self.retained_templates.borrow().get(&template_id).cloned()
     }
 
     async fn publish_template(
@@ -534,12 +505,12 @@ impl BitcoinCoreSv2TDP {
             None
         };
 
-        self.store_template_data(&template_data, future_template)?;
+        self.store_template_data(&template_data, future_template);
 
         // Publishing at a tip that did not move supersedes the oldest templates once there are
         // more of them than the cap allows. A chain tip change or a constraint rotation has
         // already retired everything older by the time it gets here, so this is a no-op for them.
-        self.retire_templates_beyond_cap()?;
+        self.retire_templates_beyond_cap();
 
         if send_set_new_prev_hash {
             self.current_prev_hash
@@ -764,13 +735,10 @@ impl BitcoinCoreSv2TDP {
     //
     // A new chain tip, or a new set of coinbase output constraints, supersedes all of them at
     // once: nothing built on the previous epoch can be mined any more.
-    fn retire_all_templates(&self) -> Result<(), BitcoinCoreSv2TDPError> {
+    fn retire_all_templates(&self) {
         let retire_at = Instant::now() + Duration::from_secs(STALE_TEMPLATE_GRACE_PERIOD_SECS);
 
-        let mut retained_templates_guard = self.retained_templates.write().map_err(|e| {
-            error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-        })?;
+        let mut retained_templates_guard = self.retained_templates.borrow_mut();
 
         for template_data in retained_templates_guard.values_mut() {
             template_data.retire(retire_at);
@@ -779,17 +747,10 @@ impl BitcoinCoreSv2TDP {
         // The outgoing future template joins them rather than being retired where it sits, so the
         // sweep over the retained templates stays the only place a Bitcoin Core template
         // capability is released, and the field only ever holds the current tip's.
-        let mut future_template_guard = self.future_template.write().map_err(|e| {
-            error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-        })?;
-
-        if let Some(mut future_template) = future_template_guard.take() {
+        if let Some(mut future_template) = self.future_template.take() {
             future_template.retire(retire_at);
             retained_templates_guard.insert(future_template.get_template_id(), future_template);
         }
-
-        Ok(())
     }
 
     // Retires the oldest retained templates beyond `MAX_SAME_TIP_TEMPLATES`.
@@ -798,13 +759,10 @@ impl BitcoinCoreSv2TDP {
     // within the cap stays fully usable, for solutions as much as for transaction data: a
     // superseded fee template is still a valid block. The tip's future template is not among
     // these and so cannot be reached from here.
-    fn retire_templates_beyond_cap(&self) -> Result<(), BitcoinCoreSv2TDPError> {
+    fn retire_templates_beyond_cap(&self) {
         let retire_at = Instant::now() + Duration::from_secs(STALE_TEMPLATE_GRACE_PERIOD_SECS);
 
-        let mut retained_templates_guard = self.retained_templates.write().map_err(|e| {
-            error!("Failed to acquire write lock on template_data: {:?}", e);
-            BitcoinCoreSv2TDPError::LockPoisoned("template_data")
-        })?;
+        let mut retained_templates_guard = self.retained_templates.borrow_mut();
 
         let mut live_template_ids: Vec<u64> = retained_templates_guard
             .iter()
@@ -813,7 +771,7 @@ impl BitcoinCoreSv2TDP {
             .collect();
 
         if live_template_ids.len() <= MAX_SAME_TIP_TEMPLATES {
-            return Ok(());
+            return;
         }
 
         // Sorting puts the oldest first, so the newest `MAX_SAME_TIP_TEMPLATES` are the tail that
@@ -833,8 +791,6 @@ impl BitcoinCoreSv2TDP {
                 template_data.retire(retire_at);
             }
         }
-
-        Ok(())
     }
 }
 

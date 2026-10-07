@@ -42,7 +42,7 @@ impl BitcoinCoreSv2TDP {
             }
         }
 
-        self.retire_all_templates()?;
+        self.retire_all_templates();
 
         self.template_ipc_client_cancellation_token = CancellationToken::new();
         debug!("Created new template_ipc_client_cancellation_token");
@@ -75,7 +75,7 @@ impl BitcoinCoreSv2TDP {
         // One lookup decides the answer. A template no longer held was destroyed or never
         // published; one carrying a retirement deadline is superseded and must not answer a new
         // request; anything else is current.
-        let template_data = match self.template_data_for(request_transaction_data.template_id)? {
+        let template_data = match self.template_data_for(request_transaction_data.template_id) {
             None => Err("template-id-not-found"),
             Some(template_data) if template_data.get_retire_at().is_some() => {
                 Err("stale-template-id")
@@ -140,10 +140,18 @@ impl BitcoinCoreSv2TDP {
         // Deliberately not gated on retirement: a superseded template is still a valid block until
         // it is destroyed, and a downstream a few jobs behind may yet find a solution on one.
         // Whether the block is still worth anything is left to Bitcoin Core.
-        let Some(template_data) = self.template_data_for(submit_solution.template_id)? else {
+        let Some(template_data) = self.template_data_for(submit_solution.template_id) else {
             error!(
                 "Template data not found for template id: {}",
                 submit_solution.template_id
+            );
+            debug!(
+                "Available template IDs: future={:?}, retained={:?}",
+                self.future_template
+                    .borrow()
+                    .as_ref()
+                    .map(|template_data| template_data.get_template_id()),
+                self.retained_templates.borrow().keys().collect::<Vec<_>>()
             );
             return Err(BitcoinCoreSv2TDPError::TemplateNotFound);
         };
