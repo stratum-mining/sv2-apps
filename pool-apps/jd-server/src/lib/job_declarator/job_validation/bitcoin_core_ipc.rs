@@ -306,6 +306,7 @@ impl BitcoinCoreIPCEngine {
                 Some(dir) => dir,
                 None => {
                     // Use OS default Bitcoin data directory
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     let home = std::env::var("HOME").map_err(|e| {
                         JDSErrorKind::BitcoinCoreIPC(format!("Cannot get HOME directory: {e}"))
                     })?;
@@ -319,6 +320,7 @@ impl BitcoinCoreIPCEngine {
                     #[cfg(not(any(target_os = "macos", target_os = "linux",)))]
                     return Err(JDSErrorKind::BitcoinCoreIPC("Unsupported OS".to_string()));
 
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     base
                 }
             };
