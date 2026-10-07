@@ -15,6 +15,7 @@
 //!   retaining the ones it did supply.
 //! - `DeclareMiningJob` rejects a declaration that repeats a wtxid, lists more transactions than a
 //!   block can hold, or weighs more than a block.
+//! - `PushSolution` propagates a solved block to Bitcoin Core, which only v32.x can do.
 //! - bootstrap gives way to cancellation while a peer that accepted the connection never answers.
 //!
 //! File structure:
@@ -39,8 +40,11 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Weight, Witness,
-            Wtxid, absolute::LockTime, block::Version as BlockVersion, hashes::Hash,
+            Amount, Block, OutPoint, ScriptBuf, Sequence, Target, Transaction, TxIn, TxMerkleNode,
+            TxOut, Txid, Weight, Witness, Wtxid,
+            absolute::LockTime,
+            block::{Header, Version as BlockVersion},
+            hashes::Hash,
             transaction::Version as TxVersion,
         },
         job_declaration_sv2::{
@@ -65,6 +69,12 @@ async fn jdp_io_integration_v31x() {
 #[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
 async fn jdp_io_integration_v32x() {
     assert_jdp_io_integration_for_version(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
+async fn jdp_push_solution_propagates_block_v32x() {
+    assert_jdp_push_solution_propagates_block().await;
 }
 
 #[tokio::test]
@@ -629,6 +639,121 @@ async fn assert_jdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVers
         .await;
 
     let _ = std::fs::remove_file(&socket_path);
+}
+
+/// `PushSolution` must reach Bitcoin Core and extend the chain.
+///
+/// Only v32.x can do this: `submitBlock` is the IPC method that propagates a solved block, and the
+/// v30.x and v31.x backends log and discard the request instead. The assertion is the chain tip
+/// itself, because `PushSolution` is fire-and-forget and answers nothing.
+///
+/// `DifficultyLevel::Low` is regtest, where the proof of work target is low enough that a nonce is
+/// found immediately, so the block the declaration validated can be solved here rather than mined.
+async fn assert_jdp_push_solution_propagates_block() {
+    start_tracing();
+
+    let bitcoin_core = start_bitcoin_core(DifficultyLevel::Low, BitcoinCoreVersion::V32X);
+    let socket_path = bitcoin_core.ipc_socket_path();
+
+    let tip_height_before = bitcoin_core
+        .get_blockchain_info()
+        .expect("failed to get blockchain info")
+        .blocks;
+    let next_height = u32::try_from(tip_height_before + 1).expect("next height should fit in u32");
+
+    let coinbase_tx = build_valid_coinbase_tx(next_height);
+
+    let (incoming_sender, incoming_receiver) = async_channel::unbounded::<JdRequest>();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let cancellation_token = CancellationToken::new();
+    let jdp_thread = spawn_jdp_thread(
+        BitcoinCoreVersion::V32X,
+        socket_path,
+        incoming_receiver,
+        cancellation_token.clone(),
+        ready_tx,
+        ready_rx,
+    )
+    .await;
+
+    // The declaration is what establishes which chain tip and difficulty the block must be built
+    // against, so the solved block is assembled from its answer rather than from a guess.
+    let response = send_declare_mining_job_and_recv_response(
+        &incoming_sender,
+        coinbase_tx.clone(),
+        vec![],
+        vec![],
+        "jdp/push-solution",
+    )
+    .await;
+
+    let (prev_hash, nbits) = match response {
+        JdResponse::Success {
+            prev_hash, nbits, ..
+        } => (prev_hash, nbits),
+        response => panic!("expected Success before solving, got: {response:?}"),
+    };
+
+    // A single transaction is its own merkle root, so no merkle tree is built, and the coinbase
+    // carries no witness, which is what lets the block go without a witness commitment output.
+    let block = {
+        let mut block = Block {
+            header: Header {
+                version: BlockVersion::from_consensus(0x2000_0000),
+                prev_blockhash: prev_hash,
+                merkle_root: TxMerkleNode::from_byte_array(
+                    coinbase_tx.compute_txid().to_byte_array(),
+                ),
+                time: u32::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock must be after the unix epoch")
+                        .as_secs(),
+                )
+                .expect("current time should fit in u32"),
+                bits: nbits,
+                nonce: 0,
+            },
+            txdata: vec![coinbase_tx],
+        };
+
+        let target = Target::from_compact(nbits);
+        while block.header.validate_pow(target).is_err() {
+            block.header.nonce = block
+                .header
+                .nonce
+                .checked_add(1)
+                .expect("a regtest target must be met before the nonce space is exhausted");
+        }
+
+        block
+    };
+
+    incoming_sender
+        .send(JdRequest::PushSolution { block })
+        .await
+        .expect("failed to send PushSolution request");
+
+    // Nothing answers a PushSolution, so the chain tip is what says Bitcoin Core took the block.
+    let mut tip_height_after = tip_height_before;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tip_height_after = bitcoin_core
+            .get_blockchain_info()
+            .expect("failed to get blockchain info")
+            .blocks;
+        if tip_height_after > tip_height_before {
+            break;
+        }
+    }
+    assert_eq!(
+        tip_height_after,
+        tip_height_before + 1,
+        "Bitcoin Core must extend the chain with the block PushSolution carried"
+    );
+
+    cancellation_token.cancel();
+    join_within(jdp_thread, Duration::from_secs(10)).await;
 }
 
 async fn send_declare_mining_job_and_recv_response(
