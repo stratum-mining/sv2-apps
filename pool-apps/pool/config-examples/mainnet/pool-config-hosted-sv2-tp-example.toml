@@ -8,7 +8,8 @@ listen_address = "0.0.0.0:3333"
 #     https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki#appendix-b-index-of-script-expressions
 # Although the `musig` descriptor is not yet supported and the legacy `combo` descriptor never
 # will be. If you have an address, embed it in a descriptor like `addr(<address here>)`.
-coinbase_reward_script = "addr(bc1qtzqxqaxyy6lda2fhdtp5dp0v56vlf6g0tljy2x)"
+# This address belongs to the SRI community multisig wallet.
+coinbase_reward_script = "addr(bc1qxyeh39c8n7fv0kq80qrdk7rccnvttmczj4spg5jzg2dq3sydwahs7ema5e)"
 
 # Server Id (number to guarantee unique search space allocation across different Pool servers)
 server_id = 1

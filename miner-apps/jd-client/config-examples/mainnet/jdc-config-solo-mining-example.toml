@@ -32,7 +32,8 @@ jdc_signature = "Sv2SoloMiner"
 
 # Coinbase output used to build the coinbase tx for solo mining
 # This is where your block reward goes
-coinbase_reward_script = "addr(bc1q9f9vj7spn8h7qda6pn8d4g4j99f0mn9lhwz55j)"
+# This address belongs to the SRI community multisig wallet.
+coinbase_reward_script = "addr(bc1qxyeh39c8n7fv0kq80qrdk7rccnvttmczj4spg5jzg2dq3sydwahs7ema5e)"
 
 # No upstreams needed in solo mining mode.
 upstreams = []
