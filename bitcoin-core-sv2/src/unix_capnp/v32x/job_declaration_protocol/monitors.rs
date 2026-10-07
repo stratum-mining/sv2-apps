@@ -8,13 +8,14 @@ use tracing::{debug, error, warn};
 
 impl BitcoinCoreSv2JDP {
     /// Spawns a `spawn_local` task that issues `waitNext` requests to Bitcoin Core and
-    /// refreshes the `MempoolMirror` whenever the template
+    /// refreshes the [`ChainTipState`](super::chain_tip_state::ChainTipState) whenever the
+    /// template
     /// changes. Returns the [`JoinHandle`] so the caller can await clean shutdown.
-    pub fn monitor_and_update_mempool_mirror(&self) -> JoinHandle<()> {
+    pub fn monitor_and_update_chain_tip_state(&self) -> JoinHandle<()> {
         let self_clone = self.clone();
 
         tokio::task::spawn_local(async move {
-            debug!("monitor_mempool_mirror() task started");
+            debug!("monitor_chain_tip_state() task started");
             debug!("Creating dedicated blocking_thread_ipc_client for waitNext requests");
             // Stop waiting once cancelled (`None`).
             let Some(blocking_thread_ipc_client) = self_clone
@@ -22,7 +23,7 @@ impl BitcoinCoreSv2JDP {
                 .run_until_cancelled(self_clone.new_thread_ipc_client())
                 .await
             else {
-                debug!("monitor_mempool_mirror() exiting due to cancellation");
+                debug!("monitor_chain_tip_state() exiting due to cancellation");
                 return;
             };
             let blocking_thread_ipc_client = match blocking_thread_ipc_client {
@@ -34,7 +35,7 @@ impl BitcoinCoreSv2JDP {
                     return;
                 }
             };
-            debug!("monitor_mempool_mirror() entering main loop");
+            debug!("monitor_chain_tip_state() entering main loop");
 
             loop {
                 // Create a new waitNext request for each iteration
@@ -79,8 +80,8 @@ impl BitcoinCoreSv2JDP {
                     _ = self_clone.cancellation_token.cancelled() => {
                         debug!("Interrupting waitNext request");
                         self_clone.interrupt_wait_request().await;
-                        warn!("Exiting mempool mirror loop");
-                        debug!("monitor_mempool_mirror() exiting due to cancellation");
+                        warn!("Exiting chain tip state loop");
+                        debug!("monitor_chain_tip_state() exiting due to cancellation");
                         break;
                     }
                     wait_next_request_response = wait_next_request.send().promise => {
@@ -125,18 +126,18 @@ impl BitcoinCoreSv2JDP {
                                     debug!("Updated current_template_ipc_client with new template");
                                 }
 
-                                // update the mempool mirror
+                                // update the chain tip state
                                 // Stop waiting once cancelled (`None`).
                                 let Some(updated) = self_clone
                                     .cancellation_token
-                                    .run_until_cancelled(self_clone.update_mempool_mirror())
+                                    .run_until_cancelled(self_clone.update_chain_tip_state())
                                     .await
                                 else {
-                                    debug!("monitor_mempool_mirror() exiting due to cancellation");
+                                    debug!("monitor_chain_tip_state() exiting due to cancellation");
                                     break;
                                 };
                                 if let Err(e) = updated {
-                                    error!("Failed to update mempool mirror: {:?}", e);
+                                    error!("Failed to update chain tip state: {:?}", e);
                                     self_clone.cancellation_token.cancel();
                                     break;
                                 }
@@ -153,7 +154,7 @@ impl BitcoinCoreSv2JDP {
                     }
                 }
             }
-            debug!("monitor_mempool_mirror() task exiting");
+            debug!("monitor_chain_tip_state() task exiting");
         })
     }
 }

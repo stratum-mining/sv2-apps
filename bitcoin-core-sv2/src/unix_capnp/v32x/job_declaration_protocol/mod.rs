@@ -5,7 +5,9 @@ use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
         INTERRUPT_REPLY_TIMEOUT_MS,
-        v32x::job_declaration_protocol::{error::BitcoinCoreSv2JDPError, mempool::MempoolMirror},
+        v32x::job_declaration_protocol::{
+            chain_tip_state::ChainTipState, error::BitcoinCoreSv2JDPError,
+        },
     },
 };
 use async_channel::Receiver;
@@ -19,15 +21,15 @@ use bitcoin_capnp_types::{
 };
 use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
-use stratum_core::bitcoin::{Block, consensus::deserialize};
+use stratum_core::bitcoin::{block::Header, consensus::deserialize};
 use tokio::net::UnixStream;
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+mod chain_tip_state;
 pub mod error;
 mod handlers;
-mod mempool;
 mod monitors;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Job Declaration Protocol.
@@ -63,14 +65,14 @@ pub struct BitcoinCoreSv2JDP {
     mining_ipc_client: MiningIpcClient,
     current_template_ipc_client: Rc<RefCell<BlockTemplateIpcClient>>,
     cancellation_token: CancellationToken,
-    mempool_mirror: Rc<RefCell<MempoolMirror>>,
+    chain_tip_state: Rc<RefCell<ChainTipState>>,
     incoming_requests: Receiver<JdRequest>,
 }
 
 impl BitcoinCoreSv2JDP {
     /// Creates a new [`BitcoinCoreSv2JDP`] instance.
     ///
-    /// Bootstraps the mempool mirror and signals readiness before returning. Every bootstrap
+    /// Bootstraps the chain-tip state and signals readiness before returning. Every bootstrap
     /// request gives way to `cancellation_token`, so a peer that stops answering cannot hold
     /// it.
     pub async fn new<P>(
@@ -210,7 +212,7 @@ impl BitcoinCoreSv2JDP {
             mining_ipc_client,
             current_template_ipc_client: Rc::new(RefCell::new(template_ipc_client)),
             cancellation_token,
-            mempool_mirror: Rc::new(RefCell::new(MempoolMirror::new())),
+            chain_tip_state: Rc::new(RefCell::new(ChainTipState::new())),
             incoming_requests,
         };
 
@@ -219,11 +221,11 @@ impl BitcoinCoreSv2JDP {
         // Stop waiting once cancelled (`None`); the bootstrap's own result is checked below.
         let bootstrapped = self_
             .cancellation_token
-            .run_until_cancelled(self_.update_mempool_mirror())
+            .run_until_cancelled(self_.update_chain_tip_state())
             .await
             .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)?;
         if let Err(e) = bootstrapped {
-            error!("Failed to bootstrap mempool mirror: {:?}", e);
+            error!("Failed to bootstrap chain tip state: {:?}", e);
             // Don't send readiness signal on failure (ready_tx dropped)
             return Err(e);
         }
@@ -290,8 +292,8 @@ impl BitcoinCoreSv2JDP {
     /// Every request to Bitcoin Core gives way to `cancellation_token`, so a node that stops
     /// answering cannot hold shutdown.
     pub async fn run(&self) {
-        // spawn mempool mirror monitor task
-        let monitor_handle = self.monitor_and_update_mempool_mirror();
+        // spawn chain tip state monitor task
+        let monitor_handle = self.monitor_and_update_chain_tip_state();
 
         // Main request processing loop
         loop {
@@ -331,44 +333,50 @@ impl BitcoinCoreSv2JDP {
             }
         }
 
-        // Wait for the monitor_mempool_mirror task to finish gracefully
-        debug!("Waiting for monitor_mempool_mirror() task to finish");
+        // Wait for the monitor_chain_tip_state task to finish gracefully
+        debug!("Waiting for monitor_chain_tip_state() task to finish");
         match monitor_handle.await {
             Ok(()) => {
-                debug!("monitor_mempool_mirror() task finished successfully");
+                debug!("monitor_chain_tip_state() task finished successfully");
             }
             Err(e) => {
                 error!(
-                    "error waiting for monitor_mempool_mirror task to finish: {:?}",
+                    "error waiting for monitor_chain_tip_state task to finish: {:?}",
                     e
                 );
             }
         }
     }
 
-    /// Updates the mempool mirror with the current block template from Bitcoin Core.
-    async fn update_mempool_mirror(&self) -> Result<(), BitcoinCoreSv2JDPError> {
-        let mut get_block_request = self
+    /// Updates the chain-tip state from the header of Bitcoin Core's current block template.
+    ///
+    /// Only the header is fetched. The parameters a declaration is validated against all live in
+    /// it, and the transactions the rest of the template carries are of no use here: a declaration
+    /// names the ones it wants, and `getTransactionsByWitnessID` fetches exactly those. Fetching
+    /// the whole template at the rate the monitor refreshes would mean deserializing every
+    /// transaction in it, once a second, to read three fields.
+    async fn update_chain_tip_state(&self) -> Result<(), BitcoinCoreSv2JDPError> {
+        let mut get_block_header_request = self
             .current_template_ipc_client
             .borrow()
-            .get_block_request();
-        get_block_request
+            .get_block_header_request();
+        get_block_header_request
             .get()
             .get_context()?
             .set_thread(self.thread_ipc_client.clone());
 
-        let block_bytes = get_block_request
+        let header_bytes = get_block_header_request
             .send()
             .promise
             .await?
             .get()?
             .get_result()?
             .to_vec();
-        debug!("Deserializing block ({} bytes)", block_bytes.len());
-        let block: Block =
-            deserialize(&block_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)?;
+        debug!("Deserializing block header ({} bytes)", header_bytes.len());
+        let header: Header = deserialize(&header_bytes)
+            .map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlockHeader)?;
 
-        self.mempool_mirror.borrow_mut().update(&block);
+        self.chain_tip_state.borrow_mut().update(&header);
 
         Ok(())
     }
