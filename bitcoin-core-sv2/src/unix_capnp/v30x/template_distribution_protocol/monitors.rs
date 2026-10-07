@@ -194,12 +194,7 @@ impl BitcoinCoreSv2TDP {
                                     info!("⛓️ Chain Tip changed! New prev_hash: {}", new_prev_hash);
                                     debug!("CHAIN TIP CHANGE DETECTED - old: {}, new: {}", current_prev_hash, new_prev_hash);
 
-                                    if let Err(e) = self_clone.retire_all_templates() {
-                                        error!("Failed to retire the previous chain tip's templates: {:?}", e);
-                                        warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                                        self_clone.global_cancellation_token.cancel();
-                                        break;
-                                    }
+                                    self_clone.retire_all_templates();
 
                                     match self_clone.publish_template(new_template_data, true, true, false).await {
                                         Ok(()) => {
@@ -381,18 +376,10 @@ impl BitcoinCoreSv2TDP {
                 }
 
                 // Taking a template out of the map is what ends its life: from here on a request
-                // naming it is answered as an unknown template id. They are taken while the lock
-                // is held and destroyed once it has been dropped, because destroying awaits.
+                // naming it is answered as an unknown template id. They are taken while the borrow
+                // is held and destroyed after it is released, because destroying awaits.
                 let due_templates = {
-                    let mut template_data_guard = match self_clone.template_data.write() {
-                        Ok(template_data_guard) => template_data_guard,
-                        Err(e) => {
-                            error!("Failed to acquire write lock on template_data: {:?}", e);
-                            warn!("Terminating Sv2 Bitcoin Core IPC Connection");
-                            self_clone.global_cancellation_token.cancel();
-                            break;
-                        }
-                    };
+                    let mut template_data_guard = self_clone.template_data.borrow_mut();
 
                     let now = Instant::now();
                     template_data_guard
