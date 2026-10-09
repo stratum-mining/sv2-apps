@@ -1,5 +1,5 @@
 use jd_client_sv2::JobDeclaratorClient;
-use stratum_apps::config_helpers::logging::init_logging;
+use stratum_apps::{config_helpers::logging::init_logging, utils::shutdown::ShutdownSignal};
 
 use crate::args::process_cli_args;
 
@@ -27,12 +27,21 @@ async fn inner_main() {
     init_logging(jdc_config.log_file());
 
     let jdc = JobDeclaratorClient::new(jdc_config);
+    let mut signals = ShutdownSignal::new().unwrap_or_else(|e| {
+        tracing::error!("Job Declarator Client could not listen for shutdown signals: {e}");
+        std::process::exit(1);
+    });
     tokio::spawn({
         let jdc = jdc.clone();
         async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                tracing::info!("Ctrl+C received — initiating graceful shutdown...");
-                jdc.shutdown().await;
+            let (signal, _) = signals.wait().await;
+            tracing::info!("{signal} received — initiating graceful shutdown...");
+            tokio::select! {
+                _ = jdc.shutdown() => {}
+                (signal, exit_code) = signals.wait() => {
+                    tracing::warn!("{signal} received again — abandoning graceful shutdown");
+                    std::process::exit(exit_code);
+                }
             }
         }
     });
