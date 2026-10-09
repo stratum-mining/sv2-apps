@@ -1,21 +1,41 @@
-//! Background monitors for Bitcoin Core v30.x Sv2 Job Declaration Protocol via capnp over UNIX
+//! Background monitors for Bitcoin Core v32.x Sv2 Job Declaration Protocol via capnp over UNIX
 //! socket.
 
-use crate::unix_capnp::v30x::job_declaration_protocol::BitcoinCoreSv2JDP;
-use bitcoin_capnp_types_v30::capnp;
+use crate::unix_capnp::v32x::job_declaration_protocol::BitcoinCoreSv2JDP;
+use bitcoin_capnp_types_v32::capnp;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 
 impl BitcoinCoreSv2JDP {
     /// Spawns a `spawn_local` task that issues `waitNext` requests to Bitcoin Core and
-    /// refreshes the `MempoolMirror` whenever the template
+    /// refreshes the [`ChainTipState`](super::chain_tip_state::ChainTipState) whenever the
+    /// template
     /// changes. Returns the [`JoinHandle`] so the caller can await clean shutdown.
-    pub fn monitor_and_update_mempool_mirror(&self) -> JoinHandle<()> {
+    pub fn monitor_and_update_chain_tip_state(&self) -> JoinHandle<()> {
         let self_clone = self.clone();
 
         tokio::task::spawn_local(async move {
-            debug!("monitor_mempool_mirror() task started");
-            debug!("monitor_mempool_mirror() entering main loop");
+            debug!("monitor_chain_tip_state() task started");
+            debug!("Creating dedicated blocking_thread_ipc_client for waitNext requests");
+            // Stop waiting once cancelled (`None`).
+            let Some(blocking_thread_ipc_client) = self_clone
+                .cancellation_token
+                .run_until_cancelled(self_clone.new_thread_ipc_client())
+                .await
+            else {
+                debug!("monitor_chain_tip_state() exiting due to cancellation");
+                return;
+            };
+            let blocking_thread_ipc_client = match blocking_thread_ipc_client {
+                Ok(blocking_thread_ipc_client) => blocking_thread_ipc_client,
+                Err(e) => {
+                    error!("Failed to create blocking thread IPC client: {:?}", e);
+                    warn!("Terminating Sv2 Bitcoin Core IPC Connection");
+                    self_clone.cancellation_token.cancel();
+                    return;
+                }
+            };
+            debug!("monitor_chain_tip_state() entering main loop");
 
             loop {
                 // Create a new waitNext request for each iteration
@@ -25,7 +45,7 @@ impl BitcoinCoreSv2JDP {
                     .wait_next_request();
 
                 match wait_next_request.get().get_context() {
-                    Ok(mut context) => context.set_thread(self_clone.thread_ipc_client.clone()),
+                    Ok(mut context) => context.set_thread(blocking_thread_ipc_client.clone()),
                     Err(e) => {
                         error!("Failed to set thread: {}", e);
                         self_clone.cancellation_token.cancel();
@@ -42,20 +62,26 @@ impl BitcoinCoreSv2JDP {
                     }
                 };
 
-                // 0 sat fee threshold (accept all mempool transactions)
+                // Rebuild aggressively instead of waiting only for tip changes.
+                // Bitcoin Core reevaluates fee growth on a 1s tick, and with
+                // fee_threshold = 0 it returns any candidate whose total fees
+                // are not lower than the current template. In steady state this
+                // usually produces a new BlockTemplate about once per second.
                 wait_next_request_options.set_fee_threshold(0);
 
-                // 10 seconds timeout for waitNext requests
-                // please note that this is NOT how often we expect to get new templates
-                // it's just the max time we'll wait for the current waitNext request to complete
-                wait_next_request_options.set_timeout(10_000.0);
+                // Bound how long a single waitNext call can stay attached to
+                // one BlockTemplate before the loop recreates it from the
+                // latest current_template_ipc_client when Bitcoin Core does not
+                // produce a returnable candidate. This is a fallback, not the
+                // expected cadence of template updates.
+                wait_next_request_options.set_timeout(3_000.0);
 
                 tokio::select! {
                     _ = self_clone.cancellation_token.cancelled() => {
                         debug!("Interrupting waitNext request");
                         self_clone.interrupt_wait_request().await;
-                        warn!("Exiting mempool mirror loop");
-                        debug!("monitor_mempool_mirror() exiting due to cancellation");
+                        warn!("Exiting chain tip state loop");
+                        debug!("monitor_chain_tip_state() exiting due to cancellation");
                         break;
                     }
                     wait_next_request_response = wait_next_request.send().promise => {
@@ -100,39 +126,24 @@ impl BitcoinCoreSv2JDP {
                                     debug!("Updated current_template_ipc_client with new template");
                                 }
 
-                                // update the mempool mirror
+                                // update the chain tip state
                                 // Stop waiting once cancelled (`None`).
                                 let Some(updated) = self_clone
                                     .cancellation_token
-                                    .run_until_cancelled(self_clone.update_mempool_mirror())
+                                    .run_until_cancelled(self_clone.update_chain_tip_state())
                                     .await
                                 else {
-                                    debug!("monitor_mempool_mirror() exiting due to cancellation");
+                                    debug!("monitor_chain_tip_state() exiting due to cancellation");
                                     break;
                                 };
                                 if let Err(e) = updated {
-                                    if e.is_thread_busy() {
-                                        warn!(
-                                            error = ?e,
-                                            "Transient IPC contention while updating mempool mirror (thread busy); retrying"
-                                        );
-                                        continue;
-                                    }
-
-                                    error!("Failed to update mempool mirror: {:?}", e);
+                                    error!("Failed to update chain tip state: {:?}", e);
                                     self_clone.cancellation_token.cancel();
                                     break;
                                 }
                             }
                             Err(e) => {
                                 let err: super::error::BitcoinCoreSv2JDPError = e.into();
-                                if err.is_thread_busy() {
-                                    warn!(
-                                        error = ?err,
-                                        "Transient IPC contention during waitNext (thread busy); retrying"
-                                    );
-                                    continue;
-                                }
                                 debug!("waitNext request failed with error: {:?}", err);
                                 error!("Failed to get response: {:?}", err);
                                 warn!("Terminating Sv2 Bitcoin Core IPC Connection");
@@ -143,7 +154,7 @@ impl BitcoinCoreSv2JDP {
                     }
                 }
             }
-            debug!("monitor_mempool_mirror() task exiting");
+            debug!("monitor_chain_tip_state() task exiting");
         })
     }
 }

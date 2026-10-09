@@ -1,11 +1,13 @@
-//! Module for interacting with Bitcoin Core v30.x via Sv2 Job Declaration Protocol via capnp over
+//! Module for interacting with Bitcoin Core v32.x via Sv2 Job Declaration Protocol via capnp over
 //! UNIX socket.
 
 use crate::{
     runtime_api::job_declaration_protocol::io::JdRequest,
     unix_capnp::{
         INTERRUPT_REPLY_TIMEOUT_MS,
-        v30x::job_declaration_protocol::{error::BitcoinCoreSv2JDPError, mempool::MempoolMirror},
+        v32x::job_declaration_protocol::{
+            chain_tip_state::ChainTipState, error::BitcoinCoreSv2JDPError,
+        },
     },
 };
 use async_channel::Receiver;
@@ -17,17 +19,17 @@ use bitcoin_capnp_types::{
     },
     proxy_capnp::{thread::Client as ThreadIpcClient, thread_map::Client as ThreadMapIpcClient},
 };
-use bitcoin_capnp_types_v30 as bitcoin_capnp_types;
+use bitcoin_capnp_types_v32 as bitcoin_capnp_types;
 use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
-use stratum_core::bitcoin::{Block, consensus::deserialize};
+use stratum_core::bitcoin::{block::Header, consensus::deserialize};
 use tokio::net::UnixStream;
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+mod chain_tip_state;
 pub mod error;
 mod handlers;
-mod mempool;
 mod monitors;
 
 /// The main abstraction for interacting with Bitcoin Core via Sv2 Job Declaration Protocol.
@@ -53,22 +55,24 @@ mod monitors;
 /// [`crate::runtime_api::job_declaration_protocol::io::JdResponse::Success`] response with current
 /// template parameters is sent.
 ///
-/// Incoming [`JdRequest::PushSolution`] requests are logged and discarded: propagating them
-/// requires the `submitBlock` IPC method, which Bitcoin Core only exposes from v32 on.
+/// Incoming [`JdRequest::PushSolution`] requests are used to submit mining solutions to Bitcoin
+/// Core.
 #[derive(Clone)]
 pub struct BitcoinCoreSv2JDP {
+    thread_map: ThreadMapIpcClient,
     thread_ipc_client: ThreadIpcClient,
+    submit_block_thread_ipc_client: ThreadIpcClient,
     mining_ipc_client: MiningIpcClient,
     current_template_ipc_client: Rc<RefCell<BlockTemplateIpcClient>>,
     cancellation_token: CancellationToken,
-    mempool_mirror: Rc<RefCell<MempoolMirror>>,
+    chain_tip_state: Rc<RefCell<ChainTipState>>,
     incoming_requests: Receiver<JdRequest>,
 }
 
 impl BitcoinCoreSv2JDP {
     /// Creates a new [`BitcoinCoreSv2JDP`] instance.
     ///
-    /// Bootstraps the mempool mirror and signals readiness before returning. Every bootstrap
+    /// Bootstraps the chain-tip state and signals readiness before returning. Every bootstrap
     /// request gives way to `cancellation_token`, so a peer that stops answering cannot hold
     /// it.
     pub async fn new<P>(
@@ -132,6 +136,19 @@ impl BitcoinCoreSv2JDP {
 
         info!("IPC execution thread client successfully created.");
 
+        // A dedicated IPC execution thread for `submitBlock`, so a solved block is never
+        // queued behind mempool monitoring on the shared thread.
+        let submit_block_thread_request = thread_map.make_thread_request();
+        // Stop waiting once cancelled (`None`); the second `?` is the request's own error.
+        let submit_block_thread_response = cancellation_token
+            .run_until_cancelled(submit_block_thread_request.send().promise)
+            .await
+            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)??;
+        let submit_block_thread_ipc_client: ThreadIpcClient =
+            submit_block_thread_response.get()?.get_result()?;
+
+        info!("IPC submitBlock thread client successfully created.");
+
         let mut mining_client_request = bootstrap_client.make_mining_request();
         mining_client_request
             .get()
@@ -145,6 +162,10 @@ impl BitcoinCoreSv2JDP {
         let mining_ipc_client: MiningIpcClient = mining_client_response.get()?.get_result()?;
 
         let mut template_ipc_client_request = mining_ipc_client.create_new_block_request();
+        template_ipc_client_request
+            .get()
+            .get_context()?
+            .set_thread(thread_ipc_client.clone());
         let mut template_ipc_client_request_options = template_ipc_client_request
             .get()
             .get_options()
@@ -155,16 +176,22 @@ impl BitcoinCoreSv2JDP {
         template_ipc_client_request_options.set_use_mempool(true);
 
         debug!("Sending createNewBlock request to Bitcoin Core");
-        // Stop waiting once cancelled (`None`). v30 has no Mining interrupt, so the request stays
-        // pending in Bitcoin Core until the connection closes.
-        let template_ipc_client_response = cancellation_token
-            .run_until_cancelled(template_ipc_client_request.send().promise)
-            .await
-            .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)?
-            .map_err(|e| {
-                error!("Failed to send template IPC client request: {}", e);
-                e
-            })?;
+        let create_new_block_promise = template_ipc_client_request.send().promise;
+        // During IBD this startup call can block for a long time, so shutdown must interrupt the
+        // in-flight request instead of only abandoning the outer wait loop.
+        let template_ipc_client_response = tokio::select! {
+            template_ipc_client_response = create_new_block_promise => {
+                template_ipc_client_response.map_err(|e| {
+                    error!("Failed to send template IPC client request: {}", e);
+                    e
+                })?
+            }
+            _ = cancellation_token.cancelled() => {
+                debug!("Interrupting initial createNewBlock request");
+                Self::interrupt_create_new_block_request(&mining_ipc_client).await;
+                return Err(BitcoinCoreSv2JDPError::BootstrapCancelled);
+            }
+        };
 
         let template_ipc_client_result = template_ipc_client_response.get().map_err(|e| {
             error!("Failed to get template IPC client result: {}", e);
@@ -179,11 +206,13 @@ impl BitcoinCoreSv2JDP {
         info!("IPC JDP client successfully created.");
 
         let self_ = Self {
+            thread_map,
             thread_ipc_client,
+            submit_block_thread_ipc_client,
             mining_ipc_client,
             current_template_ipc_client: Rc::new(RefCell::new(template_ipc_client)),
             cancellation_token,
-            mempool_mirror: Rc::new(RefCell::new(MempoolMirror::new())),
+            chain_tip_state: Rc::new(RefCell::new(ChainTipState::new())),
             incoming_requests,
         };
 
@@ -192,11 +221,11 @@ impl BitcoinCoreSv2JDP {
         // Stop waiting once cancelled (`None`); the bootstrap's own result is checked below.
         let bootstrapped = self_
             .cancellation_token
-            .run_until_cancelled(self_.update_mempool_mirror())
+            .run_until_cancelled(self_.update_chain_tip_state())
             .await
             .ok_or(BitcoinCoreSv2JDPError::BootstrapCancelled)?;
         if let Err(e) = bootstrapped {
-            error!("Failed to bootstrap mempool mirror: {:?}", e);
+            error!("Failed to bootstrap chain tip state: {:?}", e);
             // Don't send readiness signal on failure (ready_tx dropped)
             return Err(e);
         }
@@ -211,14 +240,60 @@ impl BitcoinCoreSv2JDP {
         Ok(self_)
     }
 
+    /// Creates a new dedicated thread IPC client.
+    async fn new_thread_ipc_client(&self) -> Result<ThreadIpcClient, BitcoinCoreSv2JDPError> {
+        let thread_request = self.thread_map.make_thread_request();
+        let thread_response = thread_request.send().promise.await.map_err(|e| {
+            let details = format!("Failed to send make_thread request: {e}");
+            error!("{}", details);
+            BitcoinCoreSv2JDPError::FailedToCreateThreadIpcClient(details)
+        })?;
+
+        let thread_ipc_client = thread_response
+            .get()
+            .map_err(|e| {
+                let details = format!("Failed to read make_thread response: {e}");
+                error!("{}", details);
+                BitcoinCoreSv2JDPError::FailedToCreateThreadIpcClient(details)
+            })?
+            .get_result()
+            .map_err(|e| {
+                let details = format!("Failed to get thread IPC client: {e}");
+                error!("{}", details);
+                BitcoinCoreSv2JDPError::FailedToCreateThreadIpcClient(details)
+            })?;
+
+        Ok(thread_ipc_client)
+    }
+
+    /// Interrupts an in-flight `createNewBlock` request during startup shutdown.
+    ///
+    /// Awaiting the reply is what delivers the interrupt: `send()` only queues it, and the bytes
+    /// reach Bitcoin Core when the `RpcSystem` task next runs, which cannot happen once this
+    /// constructor has returned and its `LocalSet` is gone. The wait is bounded by
+    /// `INTERRUPT_REPLY_TIMEOUT_MS` so a node that has stopped answering cannot hold shutdown.
+    async fn interrupt_create_new_block_request(mining_ipc_client: &MiningIpcClient) {
+        let interrupt_promise = mining_ipc_client.interrupt_request().send().promise;
+        match tokio::time::timeout(
+            Duration::from_millis(INTERRUPT_REPLY_TIMEOUT_MS),
+            interrupt_promise,
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => error!("Failed to send interrupt createNewBlock request: {}", e),
+            Err(_) => error!("Bitcoin Core did not answer the createNewBlock interrupt in time"),
+        }
+    }
+
     /// Main event loop - runs in a LocalSet on dedicated thread.
     ///
     /// Spawns the monitor task and processes incoming job declaration requests until shutdown.
     /// Every request to Bitcoin Core gives way to `cancellation_token`, so a node that stops
     /// answering cannot hold shutdown.
     pub async fn run(&self) {
-        // spawn mempool mirror monitor task
-        let monitor_handle = self.monitor_and_update_mempool_mirror();
+        // spawn chain tip state monitor task
+        let monitor_handle = self.monitor_and_update_chain_tip_state();
 
         // Main request processing loop
         loop {
@@ -229,14 +304,10 @@ impl BitcoinCoreSv2JDP {
                     break;
                 }
 
-                // Process incoming requests
-                // Note: requests are processed sequentially for two reasons:
-                // 1. This loop awaits each request before reading the next one
-                // 2. On the Bitcoin Core side, `checkBlock` lacks a `context :Proxy.Context`
-                //    parameter in its capnp definition (mining.capnp), so it runs synchronously
-                //    on the Cap'n Proto event loop thread, blocking all other IPC operations on
-                //    this connection until it completes
-                // Pending requests are unboundedly buffered in the async_channel
+                // Process incoming requests.
+                // Requests are handled sequentially because this loop awaits each request before
+                // reading the next one.
+                // Pending requests are unboundedly buffered in the async_channel.
                 request = self.incoming_requests.recv() => {
                     match request {
                         Ok(request) => {
@@ -262,44 +333,50 @@ impl BitcoinCoreSv2JDP {
             }
         }
 
-        // Wait for the monitor_mempool_mirror task to finish gracefully
-        debug!("Waiting for monitor_mempool_mirror() task to finish");
+        // Wait for the monitor_chain_tip_state task to finish gracefully
+        debug!("Waiting for monitor_chain_tip_state() task to finish");
         match monitor_handle.await {
             Ok(()) => {
-                debug!("monitor_mempool_mirror() task finished successfully");
+                debug!("monitor_chain_tip_state() task finished successfully");
             }
             Err(e) => {
                 error!(
-                    "error waiting for monitor_mempool_mirror task to finish: {:?}",
+                    "error waiting for monitor_chain_tip_state task to finish: {:?}",
                     e
                 );
             }
         }
     }
 
-    /// Updates the mempool mirror with the current block template from Bitcoin Core.
-    async fn update_mempool_mirror(&self) -> Result<(), BitcoinCoreSv2JDPError> {
-        let mut get_block_request = self
+    /// Updates the chain-tip state from the header of Bitcoin Core's current block template.
+    ///
+    /// Only the header is fetched. The parameters a declaration is validated against all live in
+    /// it, and the transactions the rest of the template carries are of no use here: a declaration
+    /// names the ones it wants, and `getTransactionsByWitnessID` fetches exactly those. Fetching
+    /// the whole template at the rate the monitor refreshes would mean deserializing every
+    /// transaction in it, once a second, to read three fields.
+    async fn update_chain_tip_state(&self) -> Result<(), BitcoinCoreSv2JDPError> {
+        let mut get_block_header_request = self
             .current_template_ipc_client
             .borrow()
-            .get_block_request();
-        get_block_request
+            .get_block_header_request();
+        get_block_header_request
             .get()
             .get_context()?
             .set_thread(self.thread_ipc_client.clone());
 
-        let block_bytes = get_block_request
+        let header_bytes = get_block_header_request
             .send()
             .promise
             .await?
             .get()?
             .get_result()?
             .to_vec();
-        debug!("Deserializing block ({} bytes)", block_bytes.len());
-        let block: Block =
-            deserialize(&block_bytes).map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlock)?;
+        debug!("Deserializing block header ({} bytes)", header_bytes.len());
+        let header: Header = deserialize(&header_bytes)
+            .map_err(BitcoinCoreSv2JDPError::FailedToDeserializeBlockHeader)?;
 
-        self.mempool_mirror.borrow_mut().update(&block);
+        self.chain_tip_state.borrow_mut().update(&header);
 
         Ok(())
     }

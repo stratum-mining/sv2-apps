@@ -10,6 +10,7 @@ use std::fmt;
 pub enum BitcoinCoreVersion {
     V30X,
     V31X,
+    V32X,
 }
 
 impl BitcoinCoreVersion {
@@ -17,6 +18,7 @@ impl BitcoinCoreVersion {
         match self {
             Self::V30X => 30,
             Self::V31X => 31,
+            Self::V32X => 32,
         }
     }
 }
@@ -28,6 +30,7 @@ impl TryFrom<u8> for BitcoinCoreVersion {
         match value {
             30 => Ok(Self::V30X),
             31 => Ok(Self::V31X),
+            32 => Ok(Self::V32X),
             _ => Err(value),
         }
     }
@@ -49,16 +52,39 @@ impl BitcoinCoreSv2Protocol {
     }
 }
 
-/// Error returned when selecting and initializing a versioned Bitcoin Core IPC runtime fails.
+/// Why a runtime constructor returned without a runtime.
+///
+/// This is reported by [`job_declaration_protocol::new`] and
+/// [`template_distribution_protocol::new`] only. Once a runtime exists there is nothing left to
+/// report this way: cancelling it ends `run()`, which returns nothing.
 #[derive(Debug)]
-pub struct BitcoinCoreSv2Error {
-    version: BitcoinCoreVersion,
-    protocol: BitcoinCoreSv2Protocol,
-    details: String,
+pub enum BitcoinCoreSv2Error {
+    /// The cancellation token the caller passed in fired during construction, so no runtime was
+    /// built. It covers a token already cancelled when the constructor was called as much as one
+    /// that fires partway through bootstrap.
+    ///
+    /// This is the expected outcome of shutting down while starting up, not a failure: the caller
+    /// asked for it. Callers tell it apart with [`BitcoinCoreSv2Error::is_cancelled`], so a clean
+    /// shutdown is not reported as an unreachable node.
+    Cancelled {
+        version: BitcoinCoreVersion,
+        protocol: BitcoinCoreSv2Protocol,
+    },
+    /// Initialization failed. `details` describes the version-specific cause, for logging.
+    Initialization {
+        version: BitcoinCoreVersion,
+        protocol: BitcoinCoreSv2Protocol,
+        details: String,
+    },
 }
 
 impl BitcoinCoreSv2Error {
-    pub(crate) fn from_debug<E>(
+    /// Whether construction stopped because the caller's cancellation token fired.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled { .. })
+    }
+
+    pub(crate) fn initialization<E>(
         version: BitcoinCoreVersion,
         protocol: BitcoinCoreSv2Protocol,
         error: E,
@@ -66,7 +92,7 @@ impl BitcoinCoreSv2Error {
     where
         E: fmt::Debug,
     {
-        Self {
+        Self::Initialization {
             version,
             protocol,
             details: format!("{error:?}"),
@@ -76,13 +102,25 @@ impl BitcoinCoreSv2Error {
 
 impl fmt::Display for BitcoinCoreSv2Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "failed to initialize bitcoin_core_sv2 {} for v{}: {}",
-            self.protocol.as_str(),
-            self.version.as_major(),
-            self.details
-        )
+        match self {
+            Self::Cancelled { version, protocol } => write!(
+                f,
+                "bitcoin_core_sv2 {} for v{} bootstrap gave way to cancellation",
+                protocol.as_str(),
+                version.as_major()
+            ),
+            Self::Initialization {
+                version,
+                protocol,
+                details,
+            } => write!(
+                f,
+                "failed to initialize bitcoin_core_sv2 {} for v{}: {}",
+                protocol.as_str(),
+                version.as_major(),
+                details
+            ),
+        }
     }
 }
 
