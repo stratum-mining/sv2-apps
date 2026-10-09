@@ -47,10 +47,12 @@ For this to work, Bitcoin Core must be started with IPC enabled. Whatever networ
 Example: starting a **testnet4** node with IPC bindings:
 
 ```bash
-./bitcoin-30.0/bin/bitcoin -m node -testnet4 -ipcbind=unix
+./bitcoin-31.0/bin/bitcoin -m node -testnet4 -ipcbind=unix
 ```
 
 You'll also need to wait for the node to complete Initial Block Download (IBD).
+
+The socket is only as trustworthy as the directory it lives in: anyone who can replace `node.sock` can answer as Bitcoin Core. Keep the node's data directory owned by the user running Bitcoin Core and not writable by others (Bitcoin Core's defaults already do this), and mount `node.sock` from there. The containers run as root, so the `Bitcoin Core IPC socket is served by uid N` line they log shows your node's uid rather than 0; that is expected. See the `bitcoin-core-sv2` README, section "Socket Trust".
 
 ---
 
