@@ -39,11 +39,19 @@ jobs:
       # features across every member, so code relying on a feature that only
       # another app enables would pass here and still fail to build once the
       # app is compiled alone for a release.
+      #
+      # The apps that enable `monitoring` by default are then linted again with
+      # it off, since nothing else builds the code that feature gates off. That
+      # pass takes `--all-targets` because their test modules gate on the same
+      # feature and the test suite only runs them with the default on.
       - name: Clippy check
         run: |
           cargo clippy -p stratum-apps --all-features -- -D warnings
           for crate in pool_sv2 jd_server_sv2 jd_client_sv2 translator_sv2 bitcoin_core_sv2 integration_tests_sv2; do
             cargo clippy -p "$crate" -- -D warnings
+          done
+          for crate in pool_sv2 jd_client_sv2 translator_sv2; do
+            cargo clippy -p "$crate" --all-targets --no-default-features -- -D warnings
           done
 
   fmt:

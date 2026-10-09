@@ -24,11 +24,13 @@ PRs on `sv2-apps` always need a temporary commit that replaces `stratum-core` de
 
 For local development, `sv2-apps` has a `scripts/cross-repo.sh` script that allows an automated workflow for updating `sv2-apps` with the corresponding changes from `stratum`.
 
-## Code comments
+## Code comments and attributes
 
 A comment block above an item describes the item that follows it, so inserting a new item directly below one steals it: the new item inherits a description written for something else, and the item it was written for is left with nothing. With `///` the compiler makes that binding literal and the doc silently moves; with a plain `//` block nothing binds at all, which only makes the result easier to miss. Both forms are used here, `///` for public items and `//` for private ones. Whenever adding an item to an existing file, look at what sits immediately above the insertion point, and whenever lifting a helper into a file from somewhere else, look again once it has landed.
 
 A single uninterrupted run of comment lines carrying two separate summaries is the signature of this mistake, the second summary reading as the start of a fresh comment rather than a continuation of the first. It is cheap to introduce and easy to miss in review, because nothing fails to compile and no lint catches it.
+
+Attributes bind the same way, so the same insertion steals them: an item placed between an attribute and the item it was written for takes that attribute over and leaves the original without it. Reading what sits above an insertion point therefore means reading the attribute lines too, not only the comments. Most attributes move as silently as a comment: a `#[serde(default)]` that slides onto a new field makes that field optional and the field it belonged to required, and nothing notices until a config that omits it fails to load. A stolen `#[cfg(...)]` is the sharpest form of this. It fails to compile when either item depends on what the gate excludes, but only in the configuration the gate was excluding, so the ordinary build stays green and nothing in review points at it; when neither item does, both configurations build and the mistake only shows up as behavior.
 
 ## Bug patching
 
