@@ -112,6 +112,9 @@ impl BitcoinCoreSv2JDP {
         let bootstrap_client: InitIpcClient =
             rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
+        // The executor owns the connection: this task holds the socket, so dropping the capability
+        // clients never closes it. A cancelled bootstrap and an ordinary shutdown both release it
+        // the same way, by dropping the caller's `LocalSet`, which drops this task with it.
         tokio::task::spawn_local(rpc_system);
 
         // Stop waiting once cancelled, so a silent peer can't block shutdown: `None` means
