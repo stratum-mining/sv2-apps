@@ -104,33 +104,40 @@ impl TranslatorSv2 {
         };
 
         loop {
-            match running.wait().await {
+            let requested_reconnect = match running.wait().await {
                 RuntimeEvent::Shutdown => {
                     running.shutdown().await;
                     return Ok(());
                 }
-                RuntimeEvent::Fallback => {
-                    let sv1_ready_runtime = running.cleanup_for_fallback().await;
+                RuntimeEvent::Fallback => None,
+                RuntimeEvent::Reconnect(upstream) => Some(upstream),
+            };
 
-                    running = match sv1_ready_runtime.try_upstream().await {
-                        Ok(new_running) => match new_running.start_services().await {
-                            Ok(running) => running,
-                            Err(bootstrap_err) => {
-                                let (kind, runtime) = bootstrap_err.into_parts();
-                                error!(?kind, "Failed to start services for Translator Proxy");
-                                runtime.shutdown().await;
-                                return Err(kind);
-                            }
-                        },
-                        Err(bootstrap_err) => {
-                            let (kind, runtime) = bootstrap_err.into_parts();
-                            error!(?kind, "Failed to reconnect Translator Proxy");
-                            runtime.shutdown().await;
-                            return Err(kind);
-                        }
-                    };
+            // A requested reconnect shuts the components down like a fallback, then connects to
+            // the requested endpoint instead of the next configured upstream.
+            let sv1_ready_runtime = running.cleanup_for_fallback().await;
+            let upstream_ready = match requested_reconnect {
+                Some(upstream) => sv1_ready_runtime.try_reconnect(upstream).await,
+                None => sv1_ready_runtime.try_upstream().await,
+            };
+
+            running = match upstream_ready {
+                Ok(new_running) => match new_running.start_services().await {
+                    Ok(running) => running,
+                    Err(bootstrap_err) => {
+                        let (kind, runtime) = bootstrap_err.into_parts();
+                        error!(?kind, "Failed to start services for Translator Proxy");
+                        runtime.shutdown().await;
+                        return Err(kind);
+                    }
+                },
+                Err(bootstrap_err) => {
+                    let (kind, runtime) = bootstrap_err.into_parts();
+                    error!(?kind, "Failed to reconnect Translator Proxy");
+                    runtime.shutdown().await;
+                    return Err(kind);
                 }
-            }
+            };
         }
     }
 

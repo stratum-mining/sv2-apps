@@ -3,6 +3,7 @@ use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, CommonMessagesOwn
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
     mock_roles::{MockUpstream, WithSetup},
+    sniffer::Sniffer,
     start_sv2_translator_with_user_identities,
     sv1_sniffer::SV1MessageFilter,
     template_provider::DifficultyLevel,
@@ -25,8 +26,9 @@ use std::{
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq0255Owned, Sv2OptionOwned},
     common_messages_sv2::{
+        ChannelEndpointChangedOwned, MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED, MESSAGE_TYPE_RECONNECT,
         MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
-        MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
+        MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, ReconnectOwned, SetupConnectionErrorOwned,
         SetupConnectionSuccessOwned,
     },
     mining_sv2::{
@@ -225,12 +227,9 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
                     OpenExtendedMiningChannelSuccessOwned {
                         request_id: open_extended_mining_channel.request_id,
                         channel_id: 0,
-                        target: hex::decode(
-                            "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                        )
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
+                        // A compliant upstream never assigns a target easier than the requested
+                        // one.
+                        target: open_extended_mining_channel.max_target.clone(),
                         extranonce_size: 4,
                         extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
                         group_channel_id: 100,
@@ -378,12 +377,8 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: 0,
-                    target: hex::decode(
-                        "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                    // A compliant upstream never assigns a target easier than the requested one.
+                    target: open_extended_mining_channel.max_target.clone(),
                     extranonce_size: 4,
                     extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
                     group_channel_id: 100,
@@ -520,6 +515,17 @@ async fn test_translator_fallback_on_setup_connection_error() {
 // causing TProxy to fall back to the secondary pool.
 #[tokio::test]
 async fn test_translator_fallback_on_open_mining_message_error() {
+    assert_fallback_on_open_mining_channel_error(false).await;
+}
+
+// The same rejection also falls back in aggregated mode, where it rejects the channel all miners
+// share.
+#[tokio::test]
+async fn aggregated_translator_fallback_on_open_mining_message_error() {
+    assert_fallback_on_open_mining_channel_error(true).await;
+}
+
+async fn assert_fallback_on_open_mining_channel_error(aggregate_channels: bool) {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     let (pool_1, pool_addr_1, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
@@ -554,7 +560,7 @@ async fn test_translator_fallback_on_open_mining_message_error() {
             pool_translator_sniffer_addr_1,
             pool_translator_sniffer_addr_2,
         ],
-        false,
+        aggregate_channels,
         vec![],
         vec![],
         None,
@@ -1467,12 +1473,8 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: i,
-                    target: hex::decode(
-                        "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                    // A compliant upstream never assigns a target easier than the requested one.
+                    target: open_extended_mining_channel.max_target.clone(),
                     // full extranonce has a total of 8 bytes
                     extranonce_size: 4,
                     extranonce_prefix: vec![0x00, 0x01, 0x00, i as u8].try_into().unwrap(),
@@ -1704,12 +1706,8 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: i,
-                    target: hex::decode(
-                        "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
+                    // A compliant upstream never assigns a target easier than the requested one.
+                    target: open_extended_mining_channel.max_target.clone(),
                     // full extranonce has a total of 8 bytes
                     extranonce_size: open_extended_mining_channel.min_extranonce_size,
                     extranonce_prefix: vec![0x00, 0x01, 0x00, i as u8].try_into().unwrap(),
@@ -1971,12 +1969,8 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
             OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_extended_mining_channel.request_id,
                 channel_id: 0,
-                target: hex::decode(
-                    "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                )
-                .unwrap()
-                .try_into()
-                .unwrap(),
+                // A compliant upstream never assigns a target easier than the requested one.
+                target: open_extended_mining_channel.max_target.clone(),
                 // full extranonce has a total of 12 bytes
                 extranonce_size: 8,
                 extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
@@ -2117,12 +2111,8 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
             OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_extended_mining_channel.request_id,
                 channel_id: 0,
-                target: hex::decode(
-                    "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                )
-                .unwrap()
-                .try_into()
-                .unwrap(),
+                // A compliant upstream never assigns a target easier than the requested one.
+                target: open_extended_mining_channel.max_target.clone(),
                 // full extranonce has a total of 12 bytes
                 extranonce_size: 8,
                 extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
@@ -2284,12 +2274,8 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
             OpenExtendedMiningChannelSuccessOwned {
                 request_id: open_extended_mining_channel.request_id,
                 channel_id: 2, // aggregated channel ID
-                target: hex::decode(
-                    "0000137c578190689425e3ecf8449a1af39db0aed305d9206f45ac32fe8330fc",
-                )
-                .unwrap()
-                .try_into()
-                .unwrap(),
+                // A compliant upstream never assigns a target easier than the requested one.
+                target: open_extended_mining_channel.max_target.clone(),
                 // full extranonce has a total of 12 bytes
                 extranonce_size: 8,
                 extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
@@ -2641,6 +2627,376 @@ async fn test_translator_fallback_during_abrupt_disconnection() {
         )
         .await;
     shutdown_all!(translator, pool_2);
+}
+
+// A Reconnect from the upstream shuts the translator's components down like a fallback, then
+// connects to the endpoint the upstream asked for instead of the next configured upstream.
+#[tokio::test]
+async fn translator_reconnects_to_the_endpoint_requested_by_the_upstream() {
+    start_tracing();
+
+    let current_upstream_addr = get_available_address();
+    let send_from_current_upstream = MockUpstream::new(
+        current_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let requested_upstream_addr = get_available_address();
+    let _requested_upstream = MockUpstream::new(
+        requested_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+
+    let (current_sniffer, current_sniffer_addr) = start_sniffer(
+        "reconnect-current",
+        current_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (requested_sniffer, requested_sniffer_addr) = start_sniffer(
+        "reconnect-requested",
+        requested_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+
+    let (translator, _, _) =
+        start_sv2_translator(&[current_sniffer_addr], false, vec![], vec![], None, false).await;
+
+    current_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_from_current_upstream
+        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
+            ReconnectOwned {
+                new_host: requested_sniffer_addr.ip().to_string().try_into().unwrap(),
+                new_port: requested_sniffer_addr.port(),
+            },
+        )))
+        .await
+        .unwrap();
+
+    current_sniffer
+        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_RECONNECT)
+        .await;
+    requested_sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    requested_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    shutdown_all!(translator);
+}
+
+// A ChannelEndpointChanged makes the translator reconnect to the endpoint it is connected to, so
+// that SetupConnection and extension negotiation run again.
+#[tokio::test]
+async fn translator_reconnects_to_the_same_endpoint_on_channel_endpoint_changed() {
+    start_tracing();
+
+    let first_upstream_addr = get_available_address();
+    let send_from_first_upstream = MockUpstream::new(
+        first_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let (first_sniffer, endpoint) = start_sniffer(
+        "endpoint-changed-first",
+        first_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+
+    let (translator, _, _) =
+        start_sv2_translator(&[endpoint], false, vec![], vec![], None, false).await;
+
+    first_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    // A sniffer only accepts one connection, so the endpoint is free again: the next connection
+    // to it reaches a second upstream.
+    let second_upstream_addr = get_available_address();
+    let _second_upstream = MockUpstream::new(
+        second_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let second_sniffer = Sniffer::new(
+        "endpoint-changed-second",
+        endpoint,
+        second_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    second_sniffer.start();
+
+    send_from_first_upstream
+        .send(AnyMessageOwned::Common(
+            CommonMessagesOwned::ChannelEndpointChanged(ChannelEndpointChangedOwned {
+                channel_id: 0,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    first_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED,
+        )
+        .await;
+    second_sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    second_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    shutdown_all!(translator);
+}
+
+// A Reconnect arriving less than five minutes after the last one the translator followed is
+// ignored: the translator stays on the upstream that is serving it, instead of tearing down and
+// moving to the requested endpoint or to the next configured upstream.
+#[tokio::test]
+async fn translator_ignores_a_reconnect_requested_too_soon_after_the_last_one() {
+    start_tracing();
+
+    let current_upstream_addr = get_available_address();
+    let send_from_current_upstream = MockUpstream::new(
+        current_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let requested_upstream_addr = get_available_address();
+    let send_from_requested_upstream = MockUpstream::new(
+        requested_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let second_requested_upstream_addr = get_available_address();
+    let _second_requested_upstream = MockUpstream::new(
+        second_requested_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let fallback_upstream_addr = get_available_address();
+    let _fallback_upstream = MockUpstream::new(
+        fallback_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+
+    let (current_sniffer, current_sniffer_addr) = start_sniffer(
+        "reconnect-too-soon-current",
+        current_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (requested_sniffer, requested_sniffer_addr) = start_sniffer(
+        "reconnect-too-soon-requested",
+        requested_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (second_requested_sniffer, second_requested_sniffer_addr) = start_sniffer(
+        "reconnect-too-soon-second-requested",
+        second_requested_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (fallback_sniffer, fallback_sniffer_addr) = start_sniffer(
+        "reconnect-too-soon-fallback",
+        fallback_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+
+    let (translator, _, _) = start_sv2_translator(
+        &[current_sniffer_addr, fallback_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
+
+    current_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+    send_from_current_upstream
+        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
+            ReconnectOwned {
+                new_host: requested_sniffer_addr.ip().to_string().try_into().unwrap(),
+                new_port: requested_sniffer_addr.port(),
+            },
+        )))
+        .await
+        .unwrap();
+    requested_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+    requested_sniffer.clean_queue(MessageDirection::ToUpstream);
+
+    send_from_requested_upstream
+        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
+            ReconnectOwned {
+                new_host: second_requested_sniffer_addr
+                    .ip()
+                    .to_string()
+                    .try_into()
+                    .unwrap(),
+                new_port: second_requested_sniffer_addr.port(),
+            },
+        )))
+        .await
+        .unwrap();
+    requested_sniffer
+        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_RECONNECT)
+        .await;
+
+    // Neither the requested endpoint nor the next configured upstream is contacted, and the
+    // current upstream is not set up again.
+    for sniffer in [
+        &second_requested_sniffer,
+        &fallback_sniffer,
+        &requested_sniffer,
+    ] {
+        assert!(
+            sniffer
+                .assert_message_not_present(
+                    MessageDirection::ToUpstream,
+                    MESSAGE_TYPE_SETUP_CONNECTION,
+                    Duration::from_secs(3),
+                )
+                .await
+        );
+    }
+
+    shutdown_all!(translator);
+}
+
+// If the endpoint requested by Reconnect cannot be reached, the translator moves on to the
+// configured upstreams.
+#[tokio::test]
+async fn translator_uses_the_configured_upstreams_when_the_requested_one_fails() {
+    start_tracing();
+
+    let current_upstream_addr = get_available_address();
+    let send_from_current_upstream = MockUpstream::new(
+        current_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let fallback_upstream_addr = get_available_address();
+    let _fallback_upstream = MockUpstream::new(
+        fallback_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+
+    let (current_sniffer, current_sniffer_addr) = start_sniffer(
+        "reconnect-failure-current",
+        current_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (fallback_sniffer, fallback_sniffer_addr) = start_sniffer(
+        "reconnect-failure-fallback",
+        fallback_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    let unavailable_upstream_addr = get_available_address();
+
+    let (translator, _, _) = start_sv2_translator(
+        &[current_sniffer_addr, fallback_sniffer_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
+
+    current_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    send_from_current_upstream
+        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
+            ReconnectOwned {
+                new_host: unavailable_upstream_addr
+                    .ip()
+                    .to_string()
+                    .try_into()
+                    .unwrap(),
+                new_port: unavailable_upstream_addr.port(),
+            },
+        )))
+        .await
+        .unwrap();
+
+    current_sniffer
+        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_RECONNECT)
+        .await;
+    fallback_sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    fallback_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    shutdown_all!(translator);
 }
 
 #[tokio::test]

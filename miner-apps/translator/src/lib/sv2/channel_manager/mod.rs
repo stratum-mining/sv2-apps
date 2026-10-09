@@ -1,4 +1,5 @@
 mod extensions_message_handler;
+mod max_target;
 mod mining_message_handler;
 
 use crate::{
@@ -10,12 +11,17 @@ use crate::{
     },
 };
 use async_channel::{Receiver, Sender};
-use std::sync::{Arc, OnceLock};
+use max_target::{MAX_TARGET_GRACE_PERIOD, UpstreamMaxTarget};
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
     payout::PayoutMode,
     stratum_core::{
+        bitcoin::Target,
         channels_sv2::{
             client::{
                 extended::ExtendedChannel, group::GroupChannel,
@@ -109,6 +115,16 @@ impl ChannelManagerIo {
     }
 }
 
+/// A downstream channel request waiting for its upstream `OpenExtendedMiningChannelSuccess`.
+#[derive(Debug, Clone)]
+pub struct PendingChannelRequest {
+    pub user_identity: String,
+    pub nominal_hashrate: Hashrate,
+    pub min_extranonce_size: usize,
+    /// The easiest target the upstream may assign when it opens the channel.
+    pub max_target: Target,
+}
+
 // In both modes, whenever an allocator is used, it mints prefixes with
 // layout `[upstream_prefix][local_prefix (padding)][local_index]` whose
 // rollable region is exactly `config.downstream_extranonce2_size`,
@@ -156,7 +172,7 @@ pub struct ChannelManager {
     ///
     /// Entries are removed when their upstream channel opens. In aggregated mode, buffering ends
     /// when the shared upstream channel becomes connected; later requests are opened immediately.
-    pub pending_downstream_channels: SharedMap<DownstreamId, (String, Hashrate, usize)>,
+    pub pending_downstream_channels: SharedMap<DownstreamId, PendingChannelRequest>,
     /// Map of active extended channels by channel ID.
     /// In aggregated mode, the shared upstream channel is stored under AGGREGATED_CHANNEL_ID.
     /// In non-aggregated mode, each downstream has its own channel with its assigned ID.
@@ -174,6 +190,12 @@ pub struct ChannelManager {
     /// In aggregated mode: single counter for all shares going to the upstream channel.
     /// In non-aggregated mode: one counter per downstream channel.
     pub share_sequence_counters: SharedMap<u32, u32>,
+    /// `max_target` bound each upstream channel must respect when sending `SetTarget`, keyed like
+    /// `extended_channels`: by channel ID in non-aggregated mode, and by `AGGREGATED_CHANNEL_ID`
+    /// for the shared upstream channel in aggregated mode.
+    upstream_max_targets: SharedMap<ChannelId, UpstreamMaxTarget>,
+    /// Grace period the upstream is given to process an `UpdateChannel`.
+    max_target_grace_period: Duration,
     /// Extensions that have been successfully negotiated with the upstream server
     pub negotiated_extensions: SharedLock<Vec<u16>>,
     /// Single extranonce allocator used in aggregated mode to sub-divide the
@@ -382,7 +404,8 @@ impl ChannelManager {
                 );
                 LoopControl::Continue
             }
-            Action::Fallback => {
+            // Only the upstream can request a reconnect; anywhere else it means a fallback.
+            Action::Fallback | Action::Reconnect => {
                 warn!(
                     error_kind = ?e.kind,
                     "{context} requested fallback"
@@ -461,6 +484,8 @@ impl ChannelManager {
             sv1_advertised_extranonce_prefixes: SharedMap::new(),
             group_channels: SharedMap::new(),
             share_sequence_counters: SharedMap::new(),
+            upstream_max_targets: SharedMap::new(),
+            max_target_grace_period: MAX_TARGET_GRACE_PERIOD,
             negotiated_extensions: SharedLock::new(Vec::new()),
             aggregated_extranonce_allocator: SharedLock::new(None),
             aggregated_channel_state: AtomicAggregatedState::new(AggregatedState::NoChannel),
@@ -631,6 +656,7 @@ impl ChannelManager {
                 let mut user_identity = m.user_identity.as_utf8_or_hex();
                 let hashrate = m.nominal_hash_rate;
                 let min_extranonce_size = m.min_extranonce_size as usize;
+                let max_target = Target::from_le_bytes(m.max_target.to_array());
 
                 if self.mode.is_aggregated() {
                     match self.aggregated_channel_state.get() {
@@ -647,7 +673,12 @@ impl ChannelManager {
                         AggregatedState::Pending => {
                             self.pending_downstream_channels.insert(
                                 m.request_id as DownstreamId,
-                                (user_identity, hashrate, min_extranonce_size),
+                                PendingChannelRequest {
+                                    user_identity,
+                                    nominal_hashrate: hashrate,
+                                    min_extranonce_size,
+                                    max_target,
+                                },
                             );
                             return Ok(());
                         }
@@ -655,7 +686,12 @@ impl ChannelManager {
                             self.aggregated_channel_state.set(AggregatedState::Pending);
                             self.pending_downstream_channels.insert(
                                 m.request_id as DownstreamId,
-                                (user_identity.clone(), hashrate, min_extranonce_size),
+                                PendingChannelRequest {
+                                    user_identity: user_identity.clone(),
+                                    nominal_hashrate: hashrate,
+                                    min_extranonce_size,
+                                    max_target,
+                                },
                             );
                             // Modify user_identity for the upstream `OpenExtendedMiningChannel`.
                             // SRI patterns are passed unchanged to preserve pool-side parsing.
@@ -691,7 +727,12 @@ impl ChannelManager {
                 if !self.mode.is_aggregated() {
                     self.pending_downstream_channels.insert(
                         open_channel_msg.request_id as DownstreamId,
-                        (user_identity, hashrate, min_extranonce_size),
+                        PendingChannelRequest {
+                            user_identity,
+                            nominal_hashrate: hashrate,
+                            min_extranonce_size,
+                            max_target,
+                        },
                     );
                 }
 
@@ -948,6 +989,17 @@ impl ChannelManager {
                     });
                 }
 
+                // Every later `SetTarget` is checked against the `max_target` sent here.
+                let key = self.upstream_max_target_key(m.channel_id);
+                let max_target = Target::from_le_bytes(m.max_target.to_array());
+                self.upstream_max_targets.with_mut(&key, |bound| {
+                    bound.on_update_channel(
+                        max_target,
+                        Instant::now(),
+                        self.max_target_grace_period,
+                    )
+                });
+
                 info!(
                     "Sending UpdateChannel message to upstream for channel_id: {}",
                     m.channel_id
@@ -1000,13 +1052,16 @@ impl ChannelManager {
                 self.sv1_advertised_extranonce_prefixes
                     .remove(&m.channel_id);
 
-                // Remove from any group channels that contain it
-                self.group_channels.for_each_mut(|_, group_channel| {
-                    if group_channel.has_channel_id(m.channel_id) {
-                        group_channel.remove_channel_id(m.channel_id);
-                        debug!("Removed channel {} from group channel", m.channel_id);
-                    }
-                });
+                // In non-aggregated mode the local channel ID is the upstream channel ID, so the
+                // closed channel's share sequence counter, `max_target` bound and group membership
+                // go with it. In aggregated mode they all belong to the shared upstream channel,
+                // whose upstream channel ID can equal a local channel ID, so closing a local
+                // channel must not touch them.
+                if !self.mode.is_aggregated() {
+                    self.share_sequence_counters.remove(&m.channel_id);
+                    self.upstream_max_targets.remove(&m.channel_id);
+                    self.remove_channel_from_groups(m.channel_id);
+                }
 
                 // Only forward `CloseChannel` upstream in non-aggregated
                 // mode. In aggregated mode the upstream channel is shared
@@ -1267,9 +1322,9 @@ impl ChannelManager {
             .for_each(|request_id, request| {
                 pending_requests.push((
                     request_id as RequestId,
-                    request.0.clone(),
-                    request.1,
-                    request.2,
+                    request.user_identity.clone(),
+                    request.nominal_hashrate,
+                    request.min_extranonce_size,
                 ));
             });
         self.pending_downstream_channels.clear();
@@ -1297,7 +1352,8 @@ impl ChannelManager {
     ///
     /// The counter_key determines which counter to use:
     /// - In aggregated mode: use upstream channel ID (single counter for all shares)
-    /// - In non-aggregated mode: use downstream channel ID (one counter per channel)
+    /// - In non-aggregated mode: use downstream channel ID (one counter per channel, removed when
+    ///   the channel closes)
     fn next_share_sequence_number(&self, counter_key: u32) -> u32 {
         self.share_sequence_counters
             .with_mut_or_default(counter_key, |counter| {
@@ -1305,11 +1361,93 @@ impl ChannelManager {
                 *counter
             })
     }
+
+    /// Key of the `max_target` bound of the upstream channel that `channel_id` refers to.
+    fn upstream_max_target_key(&self, channel_id: ChannelId) -> ChannelId {
+        if self.mode.is_aggregated() {
+            AGGREGATED_CHANNEL_ID
+        } else {
+            channel_id
+        }
+    }
+
+    /// Checks a `SetTarget` against the `max_target` bound of every upstream channel it applies to,
+    /// before any channel state changes.
+    #[allow(clippy::result_large_err)]
+    fn check_set_target_bounds(
+        &self,
+        keys: &[ChannelId],
+        target: Target,
+    ) -> TproxyResult<(), error::ChannelManager> {
+        let now = Instant::now();
+        for &key in keys {
+            let Some(Err(violation)) = self.upstream_max_targets.with_mut(&key, |bound| {
+                bound.on_set_target(target, now, self.max_target_grace_period)
+            }) else {
+                continue;
+            };
+            error!(
+                channel = key,
+                target = %violation.target,
+                bound = %violation.bound,
+                "Upstream SetTarget exceeds the max_target it is bound by"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::SetTargetAboveMaxTarget,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Removes `channel_id` from every group channel that contains it, and drops the groups it
+    /// leaves empty.
+    ///
+    /// An empty group would otherwise keep its ID reserved and its `full_extranonce_size`, so a
+    /// later channel joining a group with the same ID could be rejected.
+    fn remove_channel_from_groups(&self, channel_id: ChannelId) {
+        let mut emptied_groups = Vec::new();
+        self.group_channels
+            .for_each_mut(|group_channel_id, group_channel| {
+                if group_channel.has_channel_id(channel_id) {
+                    group_channel.remove_channel_id(channel_id);
+                    debug!("Removed channel {channel_id} from group channel {group_channel_id}");
+                    if group_channel.is_empty() {
+                        emptied_groups.push(group_channel_id);
+                    }
+                }
+            });
+        for group_channel_id in emptied_groups {
+            // Only remove the group if no channel joined it in the meantime.
+            if self
+                .group_channels
+                .remove_if(&group_channel_id, |_, group_channel| {
+                    group_channel.is_empty()
+                })
+                .is_some()
+            {
+                debug!("Removed empty group channel {group_channel_id}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_request(
+        user_identity: &str,
+        nominal_hashrate: Hashrate,
+        min_extranonce_size: usize,
+        max_target: Target,
+    ) -> PendingChannelRequest {
+        PendingChannelRequest {
+            user_identity: user_identity.to_string(),
+            nominal_hashrate,
+            min_extranonce_size,
+            max_target,
+        }
+    }
     use async_channel::unbounded;
     use stratum_apps::stratum_core::{
         binary_sv2::{Seq0255Owned, Str0255Owned, Sv2OptionOwned},
@@ -1317,8 +1455,8 @@ mod tests {
         channels_sv2::extranonce_manager::ExtranoncePrefix,
         mining_sv2::{
             CloseChannelOwned, NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned,
-            SetExtranoncePrefixOwned, SetNewPrevHashOwned, SubmitSharesExtendedOwned,
-            UpdateChannelOwned,
+            SetExtranoncePrefixOwned, SetNewPrevHashOwned, SetTargetOwned,
+            SubmitSharesExtendedOwned, UpdateChannelErrorOwned, UpdateChannelOwned,
         },
     };
 
@@ -1343,24 +1481,13 @@ mod tests {
     }
 
     fn create_connected_aggregated_channel_manager() -> (ChannelManager, Receiver<MiningOwned>) {
-        let (upstream_sender, _upstream_receiver) = unbounded();
-        let (_upstream_sender, upstream_receiver) = unbounded();
-        let (sv1_server_sender, sv1_server_receiver_for_test) = unbounded();
-        let (_sv1_server_sender, sv1_server_receiver) = unbounded();
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        connect_aggregated_channel(&manager);
+        (manager, io.sv1_server_receiver)
+    }
 
-        let manager = ChannelManager::new(
-            upstream_sender,
-            upstream_receiver,
-            sv1_server_sender,
-            sv1_server_receiver,
-            vec![],
-            vec![],
-            TproxyMode::Aggregated,
-            None,
-            #[cfg(feature = "monitoring")]
-            true,
-        );
-
+    /// Installs an established aggregated upstream channel with upstream channel ID 42.
+    fn connect_aggregated_channel(manager: &ChannelManager) {
         manager.extended_channels.insert(
             AGGREGATED_CHANNEL_ID,
             ExtendedChannel::new(
@@ -1390,8 +1517,6 @@ mod tests {
         manager
             .aggregated_channel_state
             .set(AggregatedState::Connected);
-
-        (manager, sv1_server_receiver_for_test)
     }
 
     fn test_extended_job(channel_id: ChannelId, job_id: u32) -> NewExtendedMiningJobOwned {
@@ -1427,9 +1552,10 @@ mod tests {
         };
 
         // Store the pending channel information
-        manager
-            .pending_downstream_channels
-            .insert(1, ("test_user".to_string(), 1000.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("test_user", 1000.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
 
         // Test that the message can be handled without panicking
         // In a real test environment, we would need to mock the upstream sender
@@ -1551,9 +1677,10 @@ mod tests {
     fn test_channel_manager_data_access() {
         let manager = create_test_channel_manager();
         // Test that we can access and modify channel manager data
-        manager
-            .pending_downstream_channels
-            .insert(1, ("test".to_string(), 100.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("test", 100.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
         let has_pending = manager.pending_downstream_channels.contains_key(&1);
 
         assert!(has_pending);
@@ -1632,6 +1759,636 @@ mod tests {
             sv1_server_receiver_for_test.try_recv(),
             Ok(MiningOwned::CloseChannel(close)) if close.channel_id == 42
         ));
+    }
+
+    /// Channel endpoints a test uses to feed a channel manager and observe what it sends.
+    struct TestIo {
+        downstream_sender: Sender<(MiningOwned, Option<String>)>,
+        upstream_receiver: Receiver<OutboundFrame>,
+        sv1_server_receiver: Receiver<MiningOwned>,
+    }
+
+    fn channel_manager_with_test_io(mode: TproxyMode) -> (ChannelManager, TestIo) {
+        let (upstream_sender, upstream_receiver) = unbounded();
+        let (_upstream_inbound_sender, upstream_inbound_receiver) = unbounded();
+        let (sv1_server_sender, sv1_server_receiver) = unbounded();
+        let (downstream_sender, downstream_receiver) = unbounded();
+        let manager = ChannelManager::new(
+            upstream_sender,
+            upstream_inbound_receiver,
+            sv1_server_sender,
+            downstream_receiver,
+            vec![],
+            vec![],
+            mode,
+            None,
+            #[cfg(feature = "monitoring")]
+            true,
+        );
+        (
+            manager,
+            TestIo {
+                downstream_sender,
+                upstream_receiver,
+                sv1_server_receiver,
+            },
+        )
+    }
+
+    fn test_extended_channel(channel_id: ChannelId) -> ExtendedChannel {
+        ExtendedChannel::new(
+            channel_id,
+            "miner".to_string(),
+            ExtranoncePrefix::from_wire(vec![0; 4]).unwrap(),
+            Target::from_le_bytes([0xff; 32]),
+            1.0,
+            true,
+            8,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn close_channel(channel_id: ChannelId) -> CloseChannelOwned {
+        CloseChannelOwned {
+            channel_id,
+            reason_code: Str0255Owned::try_from("closed".to_string()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_close_removes_share_sequence_counters_of_closed_channels() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        let mut group = GroupChannel::new(100);
+        for channel_id in [7, 8, 9] {
+            manager
+                .extended_channels
+                .insert(channel_id, test_extended_channel(channel_id));
+            manager.next_share_sequence_number(channel_id);
+        }
+        for channel_id in [8, 9] {
+            group.add_channel_id(channel_id, 12).unwrap();
+        }
+        manager.group_channels.insert(100, group);
+
+        // One close addressed to a channel, one addressed to the group of the other two.
+        for close in [close_channel(7), close_channel(100)] {
+            manager
+                .handle_close_channel(None, close, None)
+                .await
+                .unwrap();
+        }
+
+        let mut forwarded = Vec::new();
+        while let Ok(MiningOwned::CloseChannel(close)) = io.sv1_server_receiver.try_recv() {
+            forwarded.push(close.channel_id);
+        }
+        forwarded.sort();
+        assert_eq!(forwarded, vec![7, 8, 9]);
+        for channel_id in [7, 8, 9] {
+            assert!(!manager.share_sequence_counters.contains_key(&channel_id));
+        }
+
+        // Closing an already closed channel is only logged.
+        let repeated = manager
+            .handle_close_channel(None, close_channel(7), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(repeated.action, Action::Log));
+
+        // A reused channel ID starts a fresh sequence.
+        assert_eq!(manager.next_share_sequence_number(7), 1);
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_downstream_close_removes_the_share_sequence_counter() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        manager
+            .extended_channels
+            .insert(7, test_extended_channel(7));
+        manager.next_share_sequence_number(7);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(7)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+
+        assert!(io.upstream_receiver.try_recv().is_ok());
+        assert!(!manager.share_sequence_counters.contains_key(&7));
+        assert_eq!(manager.next_share_sequence_number(7), 1);
+    }
+
+    #[tokio::test]
+    async fn aggregated_downstream_close_preserves_the_shared_share_sequence_counter() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        // The shared upstream channel's ID equals the local ID of the channel being closed.
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, test_extended_channel(42));
+        manager
+            .extended_channels
+            .insert(42, test_extended_channel(42));
+        manager.next_share_sequence_number(42);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(42)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+
+        assert!(!manager.extended_channels.contains_key(&42));
+        assert_eq!(manager.next_share_sequence_number(42), 2);
+    }
+
+    #[tokio::test]
+    async fn upstream_close_of_the_last_group_member_removes_the_group() {
+        let (mut manager, _io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        let mut group = GroupChannel::new(100);
+        for channel_id in [8, 9] {
+            manager
+                .extended_channels
+                .insert(channel_id, test_extended_channel(channel_id));
+            group.add_channel_id(channel_id, 12).unwrap();
+        }
+        manager.group_channels.insert(100, group);
+
+        manager
+            .handle_close_channel(None, close_channel(8), None)
+            .await
+            .unwrap();
+        // The group still has a live member.
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(9))
+                .unwrap()
+        );
+
+        manager
+            .handle_close_channel(None, close_channel(9), None)
+            .await
+            .unwrap();
+        assert!(!manager.group_channels.contains_key(&100));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_downstream_close_of_the_last_group_member_removes_the_group() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        let mut group = GroupChannel::new(100);
+        for channel_id in [8, 9] {
+            manager
+                .extended_channels
+                .insert(channel_id, test_extended_channel(channel_id));
+            group.add_channel_id(channel_id, 12).unwrap();
+        }
+        manager.group_channels.insert(100, group);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(8)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+        // The group still has a live member.
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(9))
+                .unwrap()
+        );
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(9)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+        assert!(!manager.group_channels.contains_key(&100));
+    }
+
+    #[tokio::test]
+    async fn aggregated_downstream_close_keeps_the_upstream_channel_in_its_group() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        // The shared upstream channel's ID equals the local ID of the channel being closed.
+        manager
+            .extended_channels
+            .insert(AGGREGATED_CHANNEL_ID, test_extended_channel(42));
+        manager
+            .extended_channels
+            .insert(42, test_extended_channel(42));
+        let mut group = GroupChannel::new(100);
+        group.add_channel_id(42, 12).unwrap();
+        manager.group_channels.insert(100, group);
+        let manager = Arc::new(manager);
+
+        io.downstream_sender
+            .send((MiningOwned::CloseChannel(close_channel(42)), None))
+            .await
+            .unwrap();
+        manager.clone().handle_downstream_message().await.unwrap();
+
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(42))
+                .unwrap()
+        );
+    }
+
+    fn drain<T>(receiver: &Receiver<T>) {
+        while receiver.try_recv().is_ok() {}
+    }
+
+    fn open_channel_request(request_id: u32, min_extranonce_size: u16) -> MiningOwned {
+        MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+            request_id,
+            user_identity: "miner".try_into().unwrap(),
+            nominal_hash_rate: 1.0,
+            max_target: [0xff; 32].into(),
+            min_extranonce_size,
+        })
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_channel_churn_leaves_no_channel_state_behind() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        // Clones share the same maps; the downstream handler needs an `Arc`.
+        let downstream_handler = Arc::new(manager.clone());
+
+        for cycle in 0..32 {
+            let request_id = cycle + 1;
+            // Like SRI Pool, this upstream never reuses channel IDs. It also hands out a new
+            // group ID per channel, the worst case for group retention.
+            let channel_id = 1_000 + cycle;
+            let group_channel_id = 2_000 + cycle;
+
+            io.downstream_sender
+                .send((open_channel_request(request_id, 4), None))
+                .await
+                .unwrap();
+            downstream_handler
+                .clone()
+                .handle_downstream_message()
+                .await
+                .unwrap();
+            manager
+                .handle_open_extended_mining_channel_success(
+                    None,
+                    OpenExtendedMiningChannelSuccessOwned {
+                        request_id,
+                        channel_id,
+                        target: [0xff; 32].into(),
+                        extranonce_size: 4,
+                        extranonce_prefix: vec![0xaa; 4].try_into().unwrap(),
+                        group_channel_id,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            manager.next_share_sequence_number(channel_id);
+
+            // Alternate the downstream and upstream close directions.
+            if cycle % 2 == 0 {
+                io.downstream_sender
+                    .send((MiningOwned::CloseChannel(close_channel(channel_id)), None))
+                    .await
+                    .unwrap();
+                downstream_handler
+                    .clone()
+                    .handle_downstream_message()
+                    .await
+                    .unwrap();
+            } else {
+                manager
+                    .handle_close_channel(None, close_channel(channel_id), None)
+                    .await
+                    .unwrap();
+            }
+            drain(&io.upstream_receiver);
+            drain(&io.sv1_server_receiver);
+        }
+
+        assert!(manager.pending_downstream_channels.is_empty());
+        assert!(manager.extended_channels.is_empty());
+        assert!(manager.sv1_advertised_extranonce_prefixes.is_empty());
+        assert!(manager.group_channels.is_empty());
+        assert!(manager.share_sequence_counters.is_empty());
+        assert!(manager.upstream_max_targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aggregated_channel_churn_only_keeps_the_shared_upstream_state() {
+        let (manager, io) = channel_manager_with_test_io(TproxyMode::Aggregated);
+        connect_aggregated_channel(&manager);
+        let mut group = GroupChannel::new(100);
+        group.add_channel_id(42, 12).unwrap();
+        manager.group_channels.insert(100, group);
+        manager.upstream_max_targets.insert(
+            AGGREGATED_CHANNEL_ID,
+            UpstreamMaxTarget::new(target_from_byte(100)),
+        );
+        let manager = Arc::new(manager);
+
+        for cycle in 0..32 {
+            io.downstream_sender
+                .send((open_channel_request(cycle + 1, 6), None))
+                .await
+                .unwrap();
+            manager.clone().handle_downstream_message().await.unwrap();
+            let Ok(MiningOwned::OpenExtendedMiningChannelSuccess(success)) =
+                io.sv1_server_receiver.try_recv()
+            else {
+                panic!("expected the downstream channel to open");
+            };
+            manager.next_share_sequence_number(42);
+
+            io.downstream_sender
+                .send((
+                    MiningOwned::CloseChannel(close_channel(success.channel_id)),
+                    None,
+                ))
+                .await
+                .unwrap();
+            manager.clone().handle_downstream_message().await.unwrap();
+            drain(&io.upstream_receiver);
+            drain(&io.sv1_server_receiver);
+        }
+
+        assert!(manager.pending_downstream_channels.is_empty());
+        assert_eq!(manager.extended_channels.len(), 1);
+        assert!(
+            manager
+                .extended_channels
+                .contains_key(&AGGREGATED_CHANNEL_ID)
+        );
+        assert!(manager.sv1_advertised_extranonce_prefixes.is_empty());
+        assert_eq!(
+            manager
+                .aggregated_extranonce_allocator
+                .with(|allocator| allocator.as_ref().unwrap().allocated_count())
+                .unwrap(),
+            0
+        );
+        assert!(
+            manager
+                .group_channels
+                .with(&100, |group| group.has_channel_id(42))
+                .unwrap()
+        );
+        assert_eq!(manager.group_channels.len(), 1);
+        assert_eq!(manager.share_sequence_counters.len(), 1);
+        assert_eq!(manager.next_share_sequence_number(42), 33);
+        assert_eq!(manager.upstream_max_targets.len(), 1);
+        assert!(
+            manager
+                .upstream_max_targets
+                .contains_key(&AGGREGATED_CHANNEL_ID)
+        );
+    }
+
+    /// A target built from its most significant byte; a larger value is easier.
+    fn target_from_byte(value: u8) -> Target {
+        let mut bytes = [0; 32];
+        bytes[31] = value;
+        Target::from_le_bytes(bytes)
+    }
+
+    fn set_target(channel_id: ChannelId, target: Target) -> SetTargetOwned {
+        SetTargetOwned {
+            channel_id,
+            target: target.to_le_bytes().into(),
+        }
+    }
+
+    fn update_channel(channel_id: ChannelId, max_target: Target) -> MiningOwned {
+        MiningOwned::UpdateChannel(UpdateChannelOwned {
+            channel_id,
+            nominal_hash_rate: 1.0,
+            max_target: max_target.to_le_bytes().into(),
+        })
+    }
+
+    /// Opens a non-aggregated channel whose open request carried `max_target`.
+    async fn open_channel_with_max_target(
+        manager: &mut ChannelManager,
+        request_id: u32,
+        channel_id: ChannelId,
+        group_channel_id: ChannelId,
+        max_target: Target,
+    ) {
+        manager.pending_downstream_channels.insert(
+            request_id as DownstreamId,
+            pending_request("miner", 1.0, 4, max_target),
+        );
+        manager
+            .handle_open_extended_mining_channel_success(
+                None,
+                OpenExtendedMiningChannelSuccessOwned {
+                    request_id,
+                    channel_id,
+                    target: max_target.to_le_bytes().into(),
+                    extranonce_size: 4,
+                    extranonce_prefix: vec![0xaa; 4].try_into().unwrap(),
+                    group_channel_id,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Decodes the `UpdateChannel` messages sent upstream so far as `(channel_id, max_target)`.
+    fn sent_update_channels(upstream: &Receiver<OutboundFrame>) -> Vec<(ChannelId, Target)> {
+        use stratum_apps::stratum_core::{
+            codec_sv2::EncodableFrame as _,
+            parsers_sv2::{AnyMessage, Mining},
+        };
+
+        let mut updates = Vec::new();
+        while let Ok(frame) = upstream.try_recv() {
+            let mut encoded = vec![0; frame.encoded_length()];
+            frame.encode_into(&mut encoded).unwrap();
+            let mut frame = InboundFrame::from_bytes(encoded.into()).unwrap();
+            if let AnyMessage::Mining(Mining::UpdateChannel(update)) =
+                AnyMessage::try_from((frame.header(), frame.payload())).unwrap()
+            {
+                updates.push((
+                    update.channel_id,
+                    Target::from_le_bytes(*update.max_target.as_array()),
+                ));
+            }
+        }
+        updates
+    }
+
+    fn assert_max_target_violation(error: TproxyError<error::ChannelManager>) {
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(matches!(
+            error.kind,
+            TproxyErrorKind::SetTargetAboveMaxTarget
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_target_above_the_requested_max_target_triggers_fallback() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        open_channel_with_max_target(&mut manager, 1, 7, 100, target_from_byte(100)).await;
+        drain(&io.sv1_server_receiver);
+
+        let error = manager
+            .handle_set_target(None, set_target(7, target_from_byte(101)), None)
+            .await
+            .unwrap_err();
+        assert_max_target_violation(error);
+        // Nothing was applied or forwarded.
+        assert_eq!(
+            manager
+                .extended_channels
+                .with(&7, |channel| *channel.get_target()),
+            Some(target_from_byte(100))
+        );
+        assert!(io.sv1_server_receiver.try_recv().is_err());
+
+        manager
+            .handle_set_target(None, set_target(7, target_from_byte(90)), None)
+            .await
+            .unwrap();
+        assert!(io.sv1_server_receiver.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn group_set_target_is_bound_by_every_member() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        open_channel_with_max_target(&mut manager, 1, 7, 100, target_from_byte(100)).await;
+        open_channel_with_max_target(&mut manager, 2, 8, 100, target_from_byte(50)).await;
+        drain(&io.sv1_server_receiver);
+
+        let error = manager
+            .handle_set_target(None, set_target(100, target_from_byte(80)), None)
+            .await
+            .unwrap_err();
+        assert_max_target_violation(error);
+
+        manager
+            .handle_set_target(None, set_target(100, target_from_byte(50)), None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn aggregated_set_target_is_bound_by_the_aggregated_channel() {
+        let (mut manager, _sv1_server_receiver) = create_connected_aggregated_channel_manager();
+        let mut group = GroupChannel::new(100);
+        group.add_channel_id(42, 12).unwrap();
+        manager.group_channels.insert(100, group);
+        manager.upstream_max_targets.insert(
+            AGGREGATED_CHANNEL_ID,
+            UpstreamMaxTarget::new(target_from_byte(100)),
+        );
+
+        for addressed_to in [42, 100] {
+            let error = manager
+                .handle_set_target(None, set_target(addressed_to, target_from_byte(101)), None)
+                .await
+                .unwrap_err();
+            assert_max_target_violation(error);
+        }
+    }
+
+    /// Sends `UpdateChannel`s from the SV1 server side, as vardiff would.
+    async fn request_max_targets(
+        manager: &ChannelManager,
+        io: &TestIo,
+        channel_id: ChannelId,
+        max_targets: &[u8],
+    ) {
+        let downstream_handler = Arc::new(manager.clone());
+        for &max_target in max_targets {
+            io.downstream_sender
+                .send((
+                    update_channel(channel_id, target_from_byte(max_target)),
+                    None,
+                ))
+                .await
+                .unwrap();
+            downstream_handler
+                .clone()
+                .handle_downstream_message()
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn max_target_changes_are_sent_right_away() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        open_channel_with_max_target(&mut manager, 1, 7, 100, target_from_byte(100)).await;
+
+        request_max_targets(&manager, &io, 7, &[50, 30]).await;
+        assert_eq!(
+            sent_update_channels(&io.upstream_receiver),
+            vec![(7, target_from_byte(50)), (7, target_from_byte(30))]
+        );
+
+        // The upstream may not have processed either change yet, so any target within the
+        // channel's previous value is still allowed.
+        for target in [40, 80, 100] {
+            manager
+                .handle_set_target(None, set_target(7, target_from_byte(target)), None)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_processed_max_target_change_bounds_set_target() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        open_channel_with_max_target(&mut manager, 1, 7, 100, target_from_byte(100)).await;
+        drain(&io.sv1_server_receiver);
+        // Every change is processed as soon as it is sent.
+        manager.max_target_grace_period = Duration::ZERO;
+
+        request_max_targets(&manager, &io, 7, &[50]).await;
+
+        let error = manager
+            .handle_set_target(None, set_target(7, target_from_byte(80)), None)
+            .await
+            .unwrap_err();
+        assert_max_target_violation(error);
+        assert!(io.sv1_server_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_max_target_change_keeps_the_previous_bound() {
+        let (mut manager, io) = channel_manager_with_test_io(TproxyMode::NonAggregated);
+        open_channel_with_max_target(&mut manager, 1, 7, 100, target_from_byte(50)).await;
+
+        request_max_targets(&manager, &io, 7, &[80]).await;
+        // The upstream may already have accepted 80.
+        manager
+            .handle_set_target(None, set_target(7, target_from_byte(70)), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_update_channel_error(
+                None,
+                UpdateChannelErrorOwned {
+                    channel_id: 7,
+                    error_code: "max-target-out-of-range".to_string().try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let error = manager
+            .handle_set_target(None, set_target(7, target_from_byte(70)), None)
+            .await
+            .unwrap_err();
+        assert_max_target_violation(error);
     }
 
     #[tokio::test]

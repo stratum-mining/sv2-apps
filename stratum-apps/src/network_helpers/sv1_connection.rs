@@ -17,6 +17,10 @@ use tracing::{error, trace, warn};
 /// channel is unidirectional, i.e., each [`ConnectionSV1`] instance handles the connection either
 /// from the upstream perspective or the downstream perspective. In order to communicate in both
 /// directions, you will need two instances of this struct.
+///
+/// Messages are exchanged as plaintext newline-delimited JSON-RPC over TCP, with no encryption or
+/// authentication. Anyone on the network path can read them, including `mining.authorize`
+/// credentials, and an on-path peer can modify them, so only use it on networks you trust.
 #[derive(Debug)]
 pub struct ConnectionSV1 {
     receiver: Receiver<json_rpc::Message>,
