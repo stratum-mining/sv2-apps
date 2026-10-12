@@ -38,16 +38,28 @@ const STALE_TEMPLATE_GRACE_PERIOD_SECS: u64 = 10;
 /// count is what bounds memory while a chain tip does not move.
 ///
 /// The cap must cover the job history a downstream may still submit a solution against: a
-/// `SubmitSolution` naming a template that has already been destroyed is dropped, and that is a
-/// lost block which shows up only in the logs. A channel accepts shares on its active job plus the
-/// past ones it retains, sixteen of them (`MAX_PAST_JOBS` in `channels_sv2`) when a pool does not
-/// override it, so seventeen is what covers them all. A pool that raises its own job history above
-/// that reopens the gap.
+/// `SubmitSolution` names the template its job was built from, and one naming a template that has
+/// already been destroyed is dropped, which is a lost block that shows up only in the logs. A
+/// channel accepts shares on its active job plus the past ones it retains, sixteen of them
+/// (`MAX_PAST_JOBS` in `channels_sv2`) when a pool does not override it. Each of those seventeen
+/// jobs was built from one template, so seventeen templates is what covers them.
 ///
 /// The tip's future template is not counted here and cannot be retired by this cap. It is the only
 /// template a freshly opened channel can be given, so a pool answers with it for as long as the tip
 /// lasts, which is far beyond the point where fee refreshes have superseded it.
-const MAX_SAME_TIP_TEMPLATES: usize = 17;
+///
+/// This is only the default. A caller that configures its own job history passes it to the runtime,
+/// which sizes retention from that instead, because the number that matters is the caller's and not
+/// this one.
+const DEFAULT_MAX_SAME_TIP_TEMPLATES: usize = 17;
+
+/// Retention above which the runtime says so in the logs, without refusing it.
+///
+/// Every retained template holds a Bitcoin Core `BlockTemplate` capability alive, so retention is
+/// paid for in the node's memory rather than in this process's. Four times the default is where
+/// that stops being incidental and becomes a choice worth stating. Whatever is requested is
+/// honoured: an operator asking for it has decided what their node can afford.
+const SAME_TIP_TEMPLATES_WARN_THRESHOLD: usize = 4 * DEFAULT_MAX_SAME_TIP_TEMPLATES;
 
 /// How often retired templates are swept for destruction, in seconds.
 ///

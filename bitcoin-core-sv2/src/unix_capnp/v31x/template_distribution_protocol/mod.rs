@@ -2,8 +2,8 @@
 //! capnp over UNIX socket.
 
 use crate::unix_capnp::{
-    INTERRUPT_REPLY_TIMEOUT_MS, MAX_SAME_TIP_TEMPLATES, MIN_BLOCK_RESERVED_WEIGHT,
-    STALE_TEMPLATE_GRACE_PERIOD_SECS, WEIGHT_FACTOR,
+    DEFAULT_MAX_SAME_TIP_TEMPLATES, INTERRUPT_REPLY_TIMEOUT_MS, MIN_BLOCK_RESERVED_WEIGHT,
+    SAME_TIP_TEMPLATES_WARN_THRESHOLD, STALE_TEMPLATE_GRACE_PERIOD_SECS, WEIGHT_FACTOR,
     v31x::template_distribution_protocol::template_data::TemplateData,
 };
 use async_channel::{Receiver, Sender};
@@ -110,6 +110,7 @@ pub struct BitcoinCoreSv2TDP {
     current_prev_hash: Rc<RefCell<Option<U256Owned>>>,
     retained_templates: Rc<RefCell<HashMap<u64, TemplateData>>>,
     future_template: Rc<RefCell<Option<TemplateData>>>,
+    max_same_tip_templates: usize,
     template_id_factory: Rc<AtomicU64>,
     incoming_messages: Receiver<TemplateDistributionOwned>,
     outgoing_messages: Sender<TemplateDistributionOwned>,
@@ -129,6 +130,7 @@ impl BitcoinCoreSv2TDP {
         bitcoin_core_unix_socket_path: P,
         fee_threshold: u64,
         min_interval: u8,
+        max_same_tip_templates: Option<usize>,
         incoming_messages: Receiver<TemplateDistributionOwned>,
         outgoing_messages: Sender<TemplateDistributionOwned>,
         global_cancellation_token: CancellationToken,
@@ -204,6 +206,32 @@ impl BitcoinCoreSv2TDP {
 
         info!("IPC mining client successfully created.");
 
+        // A caller asking for no particular retention gets the default, and a zero is read the
+        // same way.
+        let max_same_tip_templates = match max_same_tip_templates {
+            None | Some(0) => DEFAULT_MAX_SAME_TIP_TEMPLATES,
+            Some(requested) => {
+                if requested > SAME_TIP_TEMPLATES_WARN_THRESHOLD {
+                    warn!(
+                        requested,
+                        threshold = SAME_TIP_TEMPLATES_WARN_THRESHOLD,
+                        "⚠️ Each retained template keeps a Bitcoin Core BlockTemplate \
+                         capability open, and Bitcoin Core holds that template's full transaction \
+                         set in RAM until it is destroyed. Retaining this many at one chain tip \
+                         multiplies the node's memory use accordingly, and can drive it into swap \
+                         or get it OOM-killed. Honouring the request as made; lower it if that \
+                         was not intended."
+                    );
+                }
+
+                requested
+            }
+        };
+        info!(
+            max_same_tip_templates,
+            "Templates retained at one chain tip"
+        );
+
         let template_ipc_client_cancellation_token = CancellationToken::new();
 
         Ok(Self {
@@ -218,6 +246,7 @@ impl BitcoinCoreSv2TDP {
             current_prev_hash: Rc::new(RefCell::new(None)),
             retained_templates: Rc::new(RefCell::new(HashMap::new())),
             future_template: Rc::new(RefCell::new(None)),
+            max_same_tip_templates,
             global_cancellation_token,
             incoming_messages,
             outgoing_messages,
@@ -756,7 +785,7 @@ impl BitcoinCoreSv2TDP {
         }
     }
 
-    // Retires the oldest retained templates beyond `MAX_SAME_TIP_TEMPLATES`.
+    // Retires the oldest retained templates beyond the retention sized at construction.
     //
     // Template ids are handed out in order, so the live ones sort oldest first. Everything still
     // within the cap stays fully usable, for solutions as much as for transaction data: a
@@ -773,20 +802,20 @@ impl BitcoinCoreSv2TDP {
             .map(|(template_id, _)| *template_id)
             .collect();
 
-        if live_template_ids.len() <= MAX_SAME_TIP_TEMPLATES {
+        if live_template_ids.len() <= self.max_same_tip_templates {
             return;
         }
 
-        // Sorting puts the oldest first, so the newest `MAX_SAME_TIP_TEMPLATES` are the tail that
-        // stays and the first of them is the oldest kept: everything below it goes.
+        // Sorting puts the oldest first, so the newest retained templates are the tail that stays
+        // and the first of them is the oldest kept: everything below it goes.
         live_template_ids.sort_unstable();
         let oldest_kept_template_id =
-            live_template_ids[live_template_ids.len() - MAX_SAME_TIP_TEMPLATES];
+            live_template_ids[live_template_ids.len() - self.max_same_tip_templates];
 
         debug!(
             "Retiring {} template(s) beyond the {} kept at the current chain tip",
-            live_template_ids.len() - MAX_SAME_TIP_TEMPLATES,
-            MAX_SAME_TIP_TEMPLATES
+            live_template_ids.len() - self.max_same_tip_templates,
+            self.max_same_tip_templates
         );
 
         for (template_id, template_data) in retained_templates_guard.iter_mut() {

@@ -44,12 +44,16 @@ impl BitcoinCoreSv2TDP {
 pub type BitcoinCoreSv2TDPError = BitcoinCoreSv2Error;
 
 /// Builds a version-agnostic TDP runtime from the selected Bitcoin Core major version.
+///
+/// `max_same_tip_templates` is how many templates to retain at one chain tip, which a caller sizes
+/// from whatever it may still name in a later request. `None` leaves the runtime on its default.
 #[allow(clippy::too_many_arguments)]
 pub async fn new<P>(
     version: BitcoinCoreVersion,
     bitcoin_core_unix_socket_path: P,
     fee_threshold: u64,
     min_interval: u8,
+    max_same_tip_templates: Option<usize>,
     incoming_messages: Receiver<TemplateDistributionOwned>,
     outgoing_messages: Sender<TemplateDistributionOwned>,
     global_cancellation_token: CancellationToken,
@@ -62,6 +66,7 @@ where
             bitcoin_core_unix_socket_path,
             fee_threshold,
             min_interval,
+            max_same_tip_templates,
             incoming_messages,
             outgoing_messages,
             global_cancellation_token,
@@ -79,6 +84,7 @@ where
             bitcoin_core_unix_socket_path,
             fee_threshold,
             min_interval,
+            max_same_tip_templates,
             incoming_messages,
             outgoing_messages,
             global_cancellation_token,

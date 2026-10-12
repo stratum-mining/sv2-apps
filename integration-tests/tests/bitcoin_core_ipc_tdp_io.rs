@@ -37,7 +37,8 @@ use stratum_apps::{
 
 /// Templates kept usable at one chain tip.
 ///
-/// Mirrors `MAX_SAME_TIP_TEMPLATES` in `bitcoin_core_sv2`, which is private to that crate.
+/// Mirrors `DEFAULT_MAX_SAME_TIP_TEMPLATES` in `bitcoin_core_sv2`, which is private to that crate.
+/// This harness passes no job history, so the runtime retains that default.
 const MAX_SAME_TIP_TEMPLATES: usize = 17;
 
 #[tokio::test]
@@ -429,6 +430,8 @@ fn spawn_tdp_thread(
                 socket_path,
                 0,
                 1,
+                // this harness opens no channels, so retention stays on the runtime's default
+                None,
                 incoming_receiver,
                 outgoing_sender,
                 cancellation_token,
@@ -518,6 +521,8 @@ async fn assert_tdp_bootstrap_gives_way_to_cancellation(version: BitcoinCoreVers
                     &socket_path,
                     0,
                     1,
+                    // this harness opens no channels, so retention stays on the runtime's default
+                    None,
                     incoming_receiver,
                     outgoing_sender,
                     cancellation_token,

@@ -435,11 +435,22 @@ impl PoolRuntime<JdsReady> {
                 let outgoing_tdp_sender = self.state.io.tp_to_channel_manager_sender.clone();
 
                 let bitcoin_core_cancellation_token = CancellationToken::new();
+                let max_past_jobs = self.pool.config.max_past_jobs();
+                // One template per job a channel can still accept a share on: the active job
+                // plus the past ones it keeps, each built from its own template. A zero is not a
+                // job count but the "use the default" marker, so it is dropped to `None` here and
+                // the runtime picks its own default.
+                let max_same_tip_templates = match max_past_jobs {
+                    Some(jobs) if jobs > 0 => Some(jobs.saturating_add(1)),
+                    _ => None,
+                };
+
                 let bitcoin_core_config = BitcoinCoreSv2TDPConfig {
                     version,
                     unix_socket_path,
                     fee_threshold,
                     min_interval,
+                    max_same_tip_templates,
                     incoming_tdp_receiver,
                     outgoing_tdp_sender,
                     cancellation_token: bitcoin_core_cancellation_token.clone(),
