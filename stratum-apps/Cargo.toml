@@ -76,8 +76,9 @@ with_buffer_pool = ["stratum-core/with_buffer_pool"]
 # Convenience feature bundles for different role types
 pool = ["network", "config", "with_buffer_pool", "core", "payout", "bitcoin-core-sv2"]
 jd_client = ["network", "fallback-coordinator", "config", "with_buffer_pool", "core", "bitcoin-core-sv2"]
-# Note: jd_server intentionally excludes 'core' and 'network'
-jd_server = ["config", "bitcoin-core-sv2"]
+# Note: jd_server intentionally excludes 'network'. 'payout' (which pulls in 'core') provides the
+# shared declared-coinbase decoder used to validate `DeclareMiningJob` coinbase parts.
+jd_server = ["config", "bitcoin-core-sv2", "payout"]
 translator = ["network", "fallback-coordinator", "config", "sv1", "with_buffer_pool", "core", "payout"]
 # Note: mining_device intentionally excludes 'core' and 'network' - it uses crates.io crates directly
 mining_device = ["config"]
