@@ -71,5 +71,5 @@ COPY --from=builder /app/release/${APP} /app/${APP}
 # the binary would otherwise read from its working directory is simply absent.
 #
 # `exec` replaces the shell so the app runs as PID 1 and receives the container's
-# stop signal (SIGINT) directly, allowing graceful shutdown.
+# stop signal directly, allowing graceful shutdown.
 ENTRYPOINT ["/bin/sh", "-c", "exec /app/${APP}"]
