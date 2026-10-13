@@ -1,4 +1,5 @@
 use corepc_node::{Conf, ConnectParams, Node, types::GetBlockchainInfo};
+use serde_json::{Value, json};
 use std::{
     env,
     fs::create_dir_all,
@@ -399,6 +400,102 @@ impl BitcoinCore {
         let client = &self.bitcoind.client;
         let address = client.new_address()?;
         client.generate_to_address(101, &address)?;
+        Ok(())
+    }
+
+    /// Put more than a block's weight into the mempool, in transactions small enough that a
+    /// template packs to within a few hundred weight units of its cap.
+    ///
+    /// A few large transactions at the higher fee rate supply most of the weight and are packed
+    /// first; the small ones at the lower rate fill what is left, so the gap the template leaves
+    /// is at most one of them. Each spends its own confirmed output of a fan-out transaction
+    /// mined here, so none hangs off another's change and the mempool's chain limits never apply.
+    /// This mines one block: call it before the chain tip matters, and after
+    /// [`BitcoinCore::fund_wallet`].
+    pub fn fill_mempool_beyond_a_block(&self) -> Result<(), corepc_node::Error> {
+        // Eleven large ones outweigh a block on their own, so Bitcoin Core packs ten and leaves
+        // the remainder to the small ones; five hundred small ones more than cover it.
+        const LARGE_TXS: usize = 11;
+        const LARGE_TX_OUTPUTS: usize = 2_200; // keeps each under MAX_STANDARD_TX_WEIGHT
+        const SMALL_TXS: usize = 500;
+        const FAN_OUT_SATS: u64 = 5_000_000;
+
+        let client = &self.bitcoind.client;
+
+        // One confirmed input per transaction, so nothing below spends unconfirmed change.
+        let mut fan_out = serde_json::Map::new();
+        for _ in 0..LARGE_TXS + SMALL_TXS {
+            fan_out.insert(
+                client.new_address()?.to_string(),
+                json!(Amount::from_sat(FAN_OUT_SATS).to_btc()),
+            );
+        }
+        client.call::<Value>("sendmany", &[json!(""), Value::Object(fan_out)])?;
+        self.generate_blocks(1);
+        let inputs: Vec<Value> = client
+            .call::<Vec<Value>>("listunspent", &[json!(1)])?
+            .into_iter()
+            .filter(|utxo| utxo["amount"].as_f64() == Some(Amount::from_sat(FAN_OUT_SATS).to_btc()))
+            .map(|utxo| json!({ "txid": utxo["txid"], "vout": utxo["vout"] }))
+            .collect();
+        assert!(
+            inputs.len() >= LARGE_TXS + SMALL_TXS,
+            "fan-out left {} confirmed inputs, needed {}",
+            inputs.len(),
+            LARGE_TXS + SMALL_TXS
+        );
+        let mut inputs = inputs.into_iter();
+
+        // The large outputs only need distinct addresses, not spendable ones: derived from the
+        // wallet's own Taproot descriptor past its lookahead, in one call instead of thousands.
+        // Taproot because a block is capped on sigops as well as weight, and legacy outputs
+        // count four each: enough of them fill the sigops cap long before the weight cap.
+        let descriptors: Value = client.call("listdescriptors", &[])?;
+        let descriptor = descriptors["descriptors"]
+            .as_array()
+            .and_then(|descriptors| {
+                descriptors.iter().find(|entry| {
+                    entry["desc"]
+                        .as_str()
+                        .is_some_and(|desc| desc.starts_with("tr(") && desc.contains("/*"))
+                })
+            })
+            .and_then(|entry| entry["desc"].as_str())
+            .expect("wallet should have a ranged Taproot descriptor");
+        let large_addresses: Vec<String> = client.call(
+            "deriveaddresses",
+            &[
+                json!(descriptor),
+                json!([2_000, 2_000 + LARGE_TX_OUTPUTS - 1]),
+            ],
+        )?;
+        let large_outputs: Vec<Value> = large_addresses
+            .iter()
+            .map(|address| json!({ address: 0.00001 }))
+            .collect();
+        let small_outputs = vec![json!({ client.new_address()?.to_string(): 0.01 })];
+
+        let mut send =
+            |outputs: &[Value], fee_rate_sat_vb: u64| -> Result<(), corepc_node::Error> {
+                let input = inputs.next().expect("fan-out inputs were counted above");
+                client.call::<Value>(
+                    "send",
+                    &[
+                        json!(outputs),
+                        Value::Null,
+                        json!("unset"),
+                        json!(fee_rate_sat_vb),
+                        json!({ "inputs": [input], "add_inputs": false }),
+                    ],
+                )?;
+                Ok(())
+            };
+        for _ in 0..LARGE_TXS {
+            send(&large_outputs, 10)?;
+        }
+        for _ in 0..SMALL_TXS {
+            send(&small_outputs, 2)?;
+        }
         Ok(())
     }
 

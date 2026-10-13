@@ -19,7 +19,11 @@ pub mod v31x;
 use tokio::net::UnixStream;
 use tracing::{info, warn};
 
-/// The minimum block reserved weight established by Bitcoin Core.
+/// Weight of the block header, transaction count and the coinbase apart from the outputs a
+/// downstream adds, as itemised by the Template Distribution Protocol for a SegWit block.
+const FIXED_BLOCK_RESERVED_WEIGHT: u64 = 1168;
+
+/// The floor Bitcoin Core applies to `block_reserved_weight`.
 const MIN_BLOCK_RESERVED_WEIGHT: u64 = 2000;
 
 /// BIP141 weight factor (witness scale factor), used to convert vsize to weight units.

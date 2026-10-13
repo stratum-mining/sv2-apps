@@ -2,9 +2,9 @@
 //! capnp over UNIX socket.
 
 use crate::unix_capnp::{
-    DEFAULT_MAX_SAME_TIP_TEMPLATES, INTERRUPT_REPLY_TIMEOUT_MS, MIN_BLOCK_RESERVED_WEIGHT,
-    SAME_TIP_TEMPLATES_WARN_THRESHOLD, STALE_TEMPLATE_GRACE_PERIOD_SECS, WEIGHT_FACTOR,
-    v31x::template_distribution_protocol::template_data::TemplateData,
+    DEFAULT_MAX_SAME_TIP_TEMPLATES, FIXED_BLOCK_RESERVED_WEIGHT, INTERRUPT_REPLY_TIMEOUT_MS,
+    MIN_BLOCK_RESERVED_WEIGHT, SAME_TIP_TEMPLATES_WARN_THRESHOLD, STALE_TEMPLATE_GRACE_PERIOD_SECS,
+    WEIGHT_FACTOR, v31x::template_distribution_protocol::template_data::TemplateData,
 };
 use async_channel::{Receiver, Sender};
 use bitcoin_capnp_types::{
@@ -632,9 +632,12 @@ impl BitcoinCoreSv2TDP {
                 e
             })?;
 
-        let coinbase_weight =
+        // Bitcoin Core reserves nothing on its own: this is the whole budget for the header, the
+        // coinbase and the outputs a downstream adds, so the fixed part is paid alongside them.
+        let added_outputs_weight =
             coinbase_output_constraints.coinbase_output_max_additional_size as u64 * WEIGHT_FACTOR;
-        let block_reserved_weight = coinbase_weight.max(MIN_BLOCK_RESERVED_WEIGHT); // 2000 is the minimum block reserved weight
+        let block_reserved_weight =
+            (FIXED_BLOCK_RESERVED_WEIGHT + added_outputs_weight).max(MIN_BLOCK_RESERVED_WEIGHT);
         debug!("Setting block_reserved_weight: {block_reserved_weight}");
         template_ipc_client_request_options.set_block_reserved_weight(block_reserved_weight);
         template_ipc_client_request_options.set_coinbase_output_max_additional_sigops(
