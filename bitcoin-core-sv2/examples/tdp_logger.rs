@@ -89,6 +89,8 @@ async fn main() {
                 &bitcoin_core_unix_socket_path_clone,
                 fee_threshold,
                 min_interval,
+                // this logger opens no channels, so the runtime keeps its default retention
+                None,
                 msg_receiver_into_bitcoin_core_sv2,
                 msg_sender_from_bitcoin_core_sv2,
                 cancellation_token_clone.clone(),

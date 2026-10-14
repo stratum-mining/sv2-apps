@@ -15,6 +15,7 @@ pub struct BitcoinCoreSv2TDPConfig {
     pub unix_socket_path: PathBuf,
     pub fee_threshold: u64,
     pub min_interval: u8,
+    pub max_same_tip_templates: Option<usize>,
     pub incoming_tdp_receiver: Receiver<TemplateDistributionOwned>,
     pub outgoing_tdp_sender: Sender<TemplateDistributionOwned>,
     pub cancellation_token: CancellationToken,
@@ -63,6 +64,7 @@ pub async fn connect_to_bitcoin_core(
                 &bitcoin_core_config.unix_socket_path,
                 bitcoin_core_config.fee_threshold,
                 bitcoin_core_config.min_interval,
+                bitcoin_core_config.max_same_tip_templates,
                 bitcoin_core_config.incoming_tdp_receiver,
                 bitcoin_core_config.outgoing_tdp_sender,
                 bitcoin_core_config.cancellation_token.clone(),
@@ -71,8 +73,12 @@ pub async fn connect_to_bitcoin_core(
             {
                 Ok(sv2_bitcoin_core) => sv2_bitcoin_core,
                 Err(e) => {
-                    tracing::error!("Failed to create BitcoinCoreToSv2: {:?}", e);
-                    bitcoin_core_config.cancellation_token.cancel();
+                    if e.is_cancelled() {
+                        tracing::debug!("BitcoinCoreSv2TDP bootstrap gave way to cancellation");
+                    } else {
+                        tracing::error!("Failed to create BitcoinCoreToSv2: {:?}", e);
+                        bitcoin_core_config.cancellation_token.cancel();
+                    }
                     return;
                 }
             };

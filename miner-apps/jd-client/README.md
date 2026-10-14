@@ -79,7 +79,7 @@ The configuration file contains the following information:
    - `[template_provider_type.BitcoinCoreIpc]` - Connects directly to Bitcoin Core via IPC, with the following parameters:
      - `version` - Required Bitcoin Core IPC schema major version (`30` or `31`, any other value fails startup)
      - `network` - Bitcoin network (mainnet, testnet4, signet, regtest) for determining socket path
-     - `data_dir` - (Optional) Custom Bitcoin data directory. Uses OS default if not set
+     - `data_dir` - (Optional) Custom Bitcoin data directory. Uses OS default if not set. The directory holding `node.sock` must be owned by the Bitcoin Core user and not writable by others; run this app as that user (see [Socket Trust](../../bitcoin-core-sv2/README.md#socket-trust))
      - `fee_threshold` - Minimum fee threshold to trigger new templates
      - `min_interval` - Minimum interval between template updates in seconds
 

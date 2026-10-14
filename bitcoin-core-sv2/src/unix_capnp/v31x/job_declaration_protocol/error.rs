@@ -18,17 +18,8 @@ pub enum BitcoinCoreSv2JDPError {
     FailedToDeserializeBlock(consensus::encode::Error),
     /// Readiness signal receiver was dropped before bootstrap completed.
     ReadinessSignalFailed,
-}
-
-impl BitcoinCoreSv2JDPError {
-    /// Returns true when the error indicates transient IPC contention in Bitcoin Core.
-    pub fn is_thread_busy(&self) -> bool {
-        matches!(
-            self,
-            BitcoinCoreSv2JDPError::CapnpError(capnp_error)
-                if capnp_error.to_string().contains("thread busy")
-        )
-    }
+    /// The cancellation token fired before bootstrap completed.
+    BootstrapCancelled,
 }
 
 impl From<capnp::Error> for BitcoinCoreSv2JDPError {
