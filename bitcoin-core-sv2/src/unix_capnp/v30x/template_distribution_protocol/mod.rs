@@ -38,7 +38,7 @@ use stratum_core::{
 };
 
 use std::sync::RwLock;
-use tokio::{net::UnixStream, task::JoinHandle};
+use tokio::task::JoinHandle;
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -122,7 +122,7 @@ impl BitcoinCoreSv2TDP {
             bitcoin_core_unix_socket_path.display()
         );
 
-        let stream = UnixStream::connect(bitcoin_core_unix_socket_path)
+        let (reader, writer) = crate::unix_capnp::connect(bitcoin_core_unix_socket_path)
             .await
             .map_err(|e| {
                 BitcoinCoreSv2TDPError::CannotConnectToUnixSocket(
@@ -130,7 +130,6 @@ impl BitcoinCoreSv2TDP {
                     e.to_string(),
                 )
             })?;
-        let (reader, writer) = stream.into_split();
         let reader_compat = reader.compat();
         let writer_compat = writer.compat_write();
 

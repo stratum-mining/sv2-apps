@@ -10,7 +10,6 @@ use std::{
     convert::TryInto,
     fs, io,
     net::{SocketAddr, TcpListener, TcpStream},
-    os::fd::AsRawFd,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -31,8 +30,8 @@ use stratum_apps::{
 use tokio_util::sync::CancellationToken;
 
 /// Advisory per-port lockfiles held for the process lifetime so no two concurrent
-/// test processes can claim the same port. The kernel releases flock on exit (even
-/// after `kill -9`), so stale lockfiles are harmless.
+/// test processes can claim the same port. The kernel releases the lock on process
+/// exit, so stale lockfiles are harmless.
 static HELD_LOCKS: Lazy<Mutex<Vec<std::fs::File>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 fn lockfile_for(port: u16) -> std::path::PathBuf {
@@ -52,12 +51,7 @@ fn try_lock_port(port: u16) -> io::Result<std::fs::File> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    // Non-blocking exclusive lock: EAGAIN → another process holds this port.
-    // SAFETY: fd is valid, flock is async-signal-safe on both Linux and macOS.
-    let fd = file.as_raw_fd();
-    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    lock_file(&file, true)?;
     Ok(file)
 }
 
@@ -82,19 +76,97 @@ pub fn with_exclusive_lock(lock_path: &Path, f: impl FnOnce()) {
         .truncate(false)
         .open(lock_path)
         .unwrap_or_else(|e| panic!("failed to open lockfile {}: {e}", lock_path.display()));
-    let fd = file.as_raw_fd();
+    lock_file(&file, false)
+        .unwrap_or_else(|e| panic!("failed to lock {}: {e}", lock_path.display()));
+    f();
+}
+
+#[cfg(unix)]
+fn lock_file(file: &std::fs::File, nonblocking: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let flags = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
     loop {
-        // SAFETY: `fd` remains valid for the lifetime of `file`; `flock` is available on every
-        // platform supported by the integration-test harness (Linux and macOS).
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
-            break;
+        // SAFETY: the file descriptor stays valid for the duration of flock.
+        if unsafe { libc::flock(file.as_raw_fd(), flags) } == 0 {
+            return Ok(());
         }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            panic!("failed to lock {}: {e}", lock_path.display());
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
-    f();
+}
+
+#[cfg(windows)]
+fn lock_file(file: &std::fs::File, nonblocking: bool) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::ERROR_LOCK_VIOLATION,
+        Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx},
+        System::IO::OVERLAPPED,
+    };
+
+    let flags = LOCKFILE_EXCLUSIVE_LOCK
+        | if nonblocking {
+            LOCKFILE_FAIL_IMMEDIATELY
+        } else {
+            0
+        };
+    let mut overlapped = OVERLAPPED::default();
+    // SAFETY: OpenOptions creates a synchronous handle, so the call completes before
+    // overlapped is dropped. The handle remains valid while the first byte is locked.
+    // Locking beyond EOF is permitted; lockfiles do not need any contents.
+    if unsafe { LockFileEx(file.as_raw_handle(), flags, 0, 1, 0, &mut overlapped) } != 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        return Err(io::Error::from(io::ErrorKind::WouldBlock));
+    }
+    Err(error)
+}
+
+#[cfg(test)]
+mod file_lock_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn exclusive_locks_wait_and_release_on_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let path = lockfile_for(port);
+        let first = try_lock_port(port).unwrap();
+        assert_eq!(
+            try_lock_port(port).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            with_exclusive_lock(&worker_path, || {
+                acquired_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+        });
+        assert_eq!(
+            acquired_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(first);
+        acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            try_lock_port(port).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        drop(try_lock_port(port).unwrap());
+        fs::remove_file(path).unwrap();
+    }
 }
 
 /// How often readiness gates and message-wait loops re-check their condition.
@@ -187,7 +259,7 @@ pub fn wait_for_listener(addr: SocketAddr, timeout: Duration, what: &str) {
 /// Allocate a loopback address whose port is exclusively reserved across
 /// concurrent test processes.
 ///
-/// Probes with `bind(0)` then holds a per-port `flock` lockfile in
+/// Probes with `bind(0)` then holds a per-port exclusive lockfile in
 /// `$TMPDIR/sv2-it-ports/` for the process lifetime. Every integration-test process follows this
 /// protocol, so another test cannot claim the port after the probe is dropped and before its role
 /// binds. Lockfiles are released by the kernel on exit.

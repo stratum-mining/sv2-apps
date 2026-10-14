@@ -50,3 +50,38 @@ jobs:
         run: cargo test -p translator_sv2
       - name: Test bitcoin-core-sv2 crate
         run: cargo test -p bitcoin_core_sv2
+
+  windows:
+    name: Windows build and portable tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88
+      - name: Install Cap'n Proto compiler and schemas
+        run: |
+          vcpkg install capnproto:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/tools/capnproto" >> $env:GITHUB_PATH
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
+          key: cargo-inputs-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+      # Direct Bitcoin Core IPC is unavailable through Tokio on Windows. Cover
+      # the pool's TCP template-provider path and the standalone test miner.
+      - name: Build pool
+        run: cargo build --locked -p pool_sv2 --bin pool_sv2
+      - name: Build mining device
+        run: cargo build --locked -p integration_tests_sv2 --bin mining_device
+      - name: Test IPC backend selection
+        run: cargo test --locked -p bitcoin_core_sv2 --lib
+      - name: Test shared artifact and port locks
+        run: cargo test --locked -p integration_tests_sv2 --lib file_lock_tests
+      - name: Test mining hashes
+        run: cargo test --locked -p integration_tests_sv2 --test mining_device_fast_hasher_equivalence

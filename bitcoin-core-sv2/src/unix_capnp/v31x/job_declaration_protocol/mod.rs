@@ -21,7 +21,6 @@ use bitcoin_capnp_types::{
 use bitcoin_capnp_types_v31 as bitcoin_capnp_types;
 use std::{cell::RefCell, path::Path, rc::Rc};
 use stratum_core::bitcoin::{Block, consensus::deserialize};
-use tokio::net::UnixStream;
 use tokio_util::compat::*;
 pub use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -87,7 +86,7 @@ impl BitcoinCoreSv2JDP {
             bitcoin_core_unix_socket_path.display()
         );
 
-        let stream = UnixStream::connect(bitcoin_core_unix_socket_path)
+        let (reader, writer) = crate::unix_capnp::connect(bitcoin_core_unix_socket_path)
             .await
             .map_err(|e| {
                 BitcoinCoreSv2JDPError::CannotConnectToUnixSocket(
@@ -95,7 +94,6 @@ impl BitcoinCoreSv2JDP {
                     e.to_string(),
                 )
             })?;
-        let (reader, writer) = stream.into_split();
         let reader_compat = reader.compat();
         let writer_compat = writer.compat_write();
 
