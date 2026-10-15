@@ -37,6 +37,10 @@ supported_extensions = [
 # Monitoring HTTP server address for exposing channel data (optional)
 monitoring_address = "0.0.0.0:9092"
 monitoring_cache_refresh_secs = 15
+# One Prometheus series per connected SV1 miner (`sv1_client_hashrate`).
+# Off by default: series count scales with miner count. The JSON API at
+# /api/v1/sv1/clients serves per-client state either way.
+# monitoring_sv1_per_client_metrics = true
 
 # Past jobs retained per channel for late-share validation (optional). Unset or 0 uses the
 # channels_sv2 default of 16; set `ceil(16s / your job interval)` to reclaim ~4.5 kB per job.
