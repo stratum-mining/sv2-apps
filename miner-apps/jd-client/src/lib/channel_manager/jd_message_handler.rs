@@ -22,7 +22,7 @@ use stratum_apps::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    channel_manager::ChannelManager,
+    channel_manager::{ChannelManager, WaitingWork},
     error::{self, JDCError, JDCErrorKind},
 };
 
@@ -120,20 +120,39 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             debug!("Coinbase outputs unchanged, skipping constraints update");
         }
 
-        // A token goes first to requested work that was waiting for one, which it declares. The
-        // work asked for a token of its own when it started waiting, so this one is not replaced.
+        // A token goes first to work that was waiting for one: a declaration in full-template
+        // mode, a custom job in coinbase-only mode. The work asked for a token of its own when it
+        // started waiting, so this one is not replaced.
         let waiting = self
             .waiting_for_token
             .with(|waiting| waiting.next())
             .map_err(JDCError::shutdown)?;
-        if let Some(waiting) = waiting {
-            let token = self
-                .allocate_tokens
-                .with(|tokens| tokens.pop_front())
-                .map_err(JDCError::shutdown)?
-                .expect("a token is queued: one was just received");
-            self.declare_template(waiting.template, waiting.transaction_data, token)
-                .await?;
+        match waiting {
+            Some(WaitingWork::Declaration {
+                template,
+                transaction_data,
+            }) => {
+                let token = self
+                    .allocate_tokens
+                    .with(|tokens| tokens.pop_front())
+                    .map_err(JDCError::shutdown)?
+                    .expect("a token is queued: one was just received");
+                self.declare_template(template, transaction_data, token)
+                    .await?;
+            }
+            Some(WaitingWork::CustomJob { template }) => {
+                if let Some(custom_job) = self.build_coinbase_only_custom_job(&template).await? {
+                    let message = MiningOwned::SetCustomMiningJob(custom_job);
+                    let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
+                        .map_err(JDCError::shutdown)?;
+                    self.channel_manager_io
+                        .upstream_sender
+                        .send(sv2_frame)
+                        .await
+                        .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
+                }
+            }
+            None => {}
         }
 
         Ok(())
