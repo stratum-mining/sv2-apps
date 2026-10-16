@@ -120,6 +120,22 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             debug!("Coinbase outputs unchanged, skipping constraints update");
         }
 
+        // A token goes first to requested work that was waiting for one, which it declares. The
+        // work asked for a token of its own when it started waiting, so this one is not replaced.
+        let waiting = self
+            .waiting_for_token
+            .with(|waiting| waiting.next())
+            .map_err(JDCError::shutdown)?;
+        if let Some(waiting) = waiting {
+            let token = self
+                .allocate_tokens
+                .with(|tokens| tokens.pop_front())
+                .map_err(JDCError::shutdown)?
+                .expect("the token just received is queued");
+            self.declare_template(waiting.template, waiting.transaction_data, token)
+                .await?;
+        }
+
         Ok(())
     }
 

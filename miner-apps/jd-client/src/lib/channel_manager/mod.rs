@@ -11,7 +11,7 @@ use std::{
 use stratum_apps::stratum_core::{
     job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
     mining_sv2::{OpenExtendedMiningChannelOwned, SetTargetOwned, UpdateChannelOwned},
-    template_distribution_sv2::RequestTransactionDataOwned,
+    template_distribution_sv2::{RequestTransactionDataOwned, RequestTransactionDataSuccessOwned},
 };
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -118,6 +118,12 @@ pub const SOLO_FULL_EXTRANONCE_SIZE: u8 = 20;
 // keeps sending templates without answering. Past it, the oldest request is released.
 const MAX_REQUESTED_TEMPLATES: usize = 16;
 
+// How many templates for the current chain tip can wait for a token at once. The JDS answers a
+// token request within a round trip and fee-driven templates come seconds apart, so normally
+// nothing waits; the cap only matters against a JDS that stops answering while templates keep
+// coming. Past it, the oldest is dropped: its downstreams have already moved on to the newer ones.
+const MAX_WAITING_FOR_TOKEN: usize = 4;
+
 /// A `DeclaredJob` encapsulates all the relevant data associated with a single
 /// job declaration, including its template, optional messages, coinbase output,
 /// and transaction list.
@@ -137,6 +143,71 @@ pub struct DeclaredJob {
     coinbase_output: Vec<u8>,
     // The list of transactions included in the job’s template.
     tx_list: Vec<Vec<u8>>,
+}
+
+// Transaction data the Template Provider sent for a requested template while JDC held no token
+// to declare the template with.
+#[derive(Clone, Debug)]
+struct WaitingDeclaration {
+    template: NewTemplateOwned,
+    transaction_data: RequestTransactionDataSuccessOwned,
+}
+
+// The requested work waiting for a token: the current chain tip's, oldest first and up to
+// `MAX_WAITING_FOR_TOKEN`, and a future template waiting for the prevhash that activates it.
+// Downstreams mine every template of the current tip, and the shares they find on one are cached
+// until its job goes upstream, so each of those templates waits. A future template is mined only
+// once activated, so a newer one simply replaces it. A new chain tip leaves only the template it
+// activates, so the state stays bounded however long tokens take to arrive.
+#[derive(Debug, Default)]
+struct WaitingForToken {
+    current_tip: VecDeque<WaitingDeclaration>,
+    future: Option<WaitingDeclaration>,
+}
+
+impl WaitingForToken {
+    // Keeps `waiting` until a token arrives, and returns the work it pushes out: the oldest of the
+    // current tip's past the cap, or the future template it replaces. `chain_tip` tells a future
+    // template still waiting for its activation from one already activated, which is the current
+    // tip's work.
+    fn wait(
+        &mut self,
+        waiting: WaitingDeclaration,
+        chain_tip: Option<&SetNewPrevHashTdp>,
+    ) -> Option<WaitingDeclaration> {
+        let awaits_activation = waiting.template.future_template
+            && chain_tip.is_none_or(|tip| tip.template_id != waiting.template.template_id);
+        if awaits_activation {
+            return self.future.replace(waiting);
+        }
+        self.current_tip.push_back(waiting);
+        if self.current_tip.len() > MAX_WAITING_FOR_TOKEN {
+            self.current_tip.pop_front()
+        } else {
+            None
+        }
+    }
+
+    // Takes the work the next token goes to: the current chain tip's newest, whose downstreams are
+    // still adding shares to its bounded cache, then the older ones, then a future template's.
+    fn next(&mut self) -> Option<WaitingDeclaration> {
+        self.current_tip.pop_back().or_else(|| self.future.take())
+    }
+
+    // A new chain tip activating `template_id`. Work waiting for that template becomes the new
+    // tip's, and all other waiting work, built on the previous tip or for another future
+    // template, can no longer be mined and is returned to be dropped.
+    fn on_chain_tip(&mut self, template_id: TemplateId) -> Vec<WaitingDeclaration> {
+        let mut dropped: Vec<WaitingDeclaration> = self.current_tip.drain(..).collect();
+        match self.future.take() {
+            Some(waiting) if waiting.template.template_id == template_id => {
+                self.current_tip.push_back(waiting)
+            }
+            Some(waiting) => dropped.push(waiting),
+            None => {}
+        }
+        dropped
+    }
 }
 
 /// Represents all communication channels managed by the Channel Manager.
@@ -274,6 +345,9 @@ pub struct ChannelManager {
     // its request: solo and coinbase-only modes keep none. The answer to the request, a new chain
     // tip or the cap releases it.
     pub requested_templates: SharedLock<VecDeque<NewTemplateOwned>>,
+    // Requested work whose transaction data arrived while JDC held no token, until a token
+    // arrives to declare it.
+    waiting_for_token: SharedLock<WaitingForToken>,
     // Stores the last declared job, keyed by the request ID used
     // when declaring the job to the JDS.
     pub last_declare_job_store: SharedMap<RequestId, DeclaredJob>,
@@ -437,6 +511,7 @@ impl ChannelManager {
             last_new_prev_hash: SharedLock::new(None),
             allocate_tokens: SharedLock::new(VecDeque::new()),
             requested_templates: SharedLock::new(VecDeque::new()),
+            waiting_for_token: SharedLock::new(WaitingForToken::default()),
             last_declare_job_store: SharedMap::new(),
             template_id_to_upstream_job_id: SharedMap::new(),
             downstream_channel_id_and_job_id_to_template_id: SharedMap::new(),
@@ -1192,6 +1267,34 @@ impl ChannelManager {
             .send(message)
             .await
             .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
+        Ok(())
+    }
+
+    // Keeps `waiting` until a token arrives to pay for it, and asks the JDS for that token. JDC
+    // replaces every other token as it spends it, so it holds or has asked for two tokens plus
+    // one for each piece of waiting work. Asking here, rather than counting on the tokens already
+    // on their way, gets the work out even if the JDS never answers one of the earlier requests.
+    async fn wait_for_token(
+        &self,
+        waiting: WaitingDeclaration,
+    ) -> JDCResult<(), error::ChannelManager> {
+        let template_id = waiting.template.template_id;
+        let chain_tip = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
+        let dropped = self
+            .waiting_for_token
+            .with(|waiting_for_token| waiting_for_token.wait(waiting, chain_tip.as_ref()))
+            .map_err(JDCError::shutdown)?;
+        info!(
+            template_id,
+            "No token available, the template waits for one"
+        );
+        if let Some(dropped) = dropped {
+            warn!(
+                template_id = dropped.template.template_id,
+                "Dropping work waiting for a token: newer templates replaced it"
+            );
+        }
+        _ = self.allocate_tokens(1).await;
         Ok(())
     }
 
