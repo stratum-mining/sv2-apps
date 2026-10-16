@@ -168,7 +168,7 @@ impl AtomicAggregatedState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UpstreamEntry {
     /// Upstream host — can be an IP address or a hostname (resolved at connection time).
     pub host: String,
@@ -176,6 +176,41 @@ pub struct UpstreamEntry {
     pub authority_pubkey: Secp256k1PublicKey,
     pub tried_or_flagged: bool,
     pub user_identity: String,
+}
+
+/// A reconnect the upstream asked for, with the endpoint to connect to.
+#[derive(Clone, Debug)]
+pub enum ReconnectRequest {
+    /// Redirect to another endpoint authenticated by the same pool authority.
+    Redirect(UpstreamEntry),
+}
+
+impl ReconnectRequest {
+    /// The endpoint to connect to.
+    pub fn upstream(&self) -> &UpstreamEntry {
+        match self {
+            Self::Redirect(upstream) => upstream,
+        }
+    }
+
+    /// Consumes the request and returns the endpoint to connect to.
+    pub fn into_upstream(self) -> UpstreamEntry {
+        match self {
+            Self::Redirect(upstream) => upstream,
+        }
+    }
+}
+
+impl std::fmt::Display for ReconnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Redirect(upstream) => write!(
+                f,
+                "upstream requested a reconnect to {}:{}",
+                upstream.host, upstream.port
+            ),
+        }
+    }
 }
 
 /// Defines the operational mode for Translator Proxy.
