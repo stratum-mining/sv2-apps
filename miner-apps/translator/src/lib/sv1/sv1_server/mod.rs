@@ -1255,30 +1255,26 @@ impl Sv1Server {
                     // advances. A bootstrap can also seed an otherwise empty history.
                     let resets_job_history = clean_jobs
                         && (self.mode.is_non_aggregated() || m.channel_id == AGGREGATED_CHANNEL_ID);
-                    let store_notify = || {
-                        self.channels
-                            .with_mut_or_default(job_channel_id, |channel| {
-                                channel
-                                    .jobs
-                                    .get_or_insert_with(|| {
-                                        Sv1JobStore::new(self.config.max_past_jobs)
-                                    })
-                                    .activate(
-                                        notify.job_id.clone(),
-                                        StoredSv1Job::upstream(notify.clone()),
-                                        resets_job_history,
-                                    );
-                            });
-                    };
-                    if self.mode.is_aggregated() && m.channel_id == AGGREGATED_CHANNEL_ID {
-                        self.aggregated_job_mutation_time
-                            .with(|last_mutation| {
-                                store_notify();
-                                *last_mutation = Some(Instant::now());
-                            })
-                            .map_err(TproxyError::shutdown)?;
-                    } else {
-                        store_notify();
+                    let store_notify =
+                        || self.store_job(job_channel_id, &notify, resets_job_history);
+                    let stored =
+                        if self.mode.is_aggregated() && m.channel_id == AGGREGATED_CHANNEL_ID {
+                            self.aggregated_job_mutation_time
+                                .with(|last_mutation| {
+                                    let stored = store_notify();
+                                    *last_mutation = Some(Instant::now());
+                                    stored
+                                })
+                                .map_err(TproxyError::shutdown)?
+                        } else {
+                            store_notify()
+                        };
+                    if !stored {
+                        debug!(
+                            channel_id = m.channel_id,
+                            "Ignoring NewExtendedMiningJob for a closed channel"
+                        );
+                        return Ok(());
                     }
 
                     let notify_msg = Arc::new(notify);
@@ -1291,9 +1287,12 @@ impl Sv1Server {
 
             MiningOwned::SetNewPrevHash(m) => {
                 debug!("Received SetNewPrevHash for channel id: {}", m.channel_id);
-                self.channels.with_mut_or_default(m.channel_id, |channel| {
-                    channel.prevhash = Some(m.clone())
-                });
+                if !self.store_prevhash(&m) {
+                    debug!(
+                        channel_id = m.channel_id,
+                        "Ignoring SetNewPrevHash for a channel without a downstream"
+                    );
+                }
             }
 
             MiningOwned::SetTarget(m) => {
@@ -1332,8 +1331,8 @@ impl Sv1Server {
     ) -> TproxyResult<(), error::Sv1Server> {
         let Some(downstream_id) = self
             .channels
-            .with_mut(&channel_id, |channel| channel.owner.take())
-            .flatten()
+            .remove(&channel_id)
+            .and_then(|(_, channel)| channel.owner)
         else {
             warn!(
                 channel_id,
@@ -1569,8 +1568,9 @@ impl Sv1Server {
                 .with(|d| d.channel_id)
                 .map_err(TproxyError::shutdown)?;
             if let Some(channel_id) = channel_id {
-                self.channels
-                    .with_mut(&channel_id, |channel| channel.owner = None);
+                // The channel is the downstream's own: dropping its entry releases its job
+                // state in non-aggregated mode, and never touches the shared aggregated channel.
+                self.channels.remove(&channel_id);
                 // Send `CloseChannel` to the channel manager in both modes so
                 // it can free the per-downstream `ExtendedChannel` (and, in
                 // aggregated mode, the allocator-minted `ExtranoncePrefix`
@@ -2107,6 +2107,49 @@ impl Sv1Server {
         self.channels
             .with(&channel_id, |channel| channel.owner)
             .flatten()
+    }
+
+    /// Stores a `SetNewPrevHash` in its channel's entry, and returns whether it was stored.
+    ///
+    /// A downstream's channel is only stored into while its entry exists, which ends when the
+    /// channel closes: messages still queued for a closed channel, or for a channel whose
+    /// downstream left before it opened, cannot recreate its state. A store and the removal
+    /// touch the same entry, so they never interleave. The shared aggregated channel's entry is
+    /// created by its first `SetNewPrevHash`.
+    fn store_prevhash(&self, prevhash: &SetNewPrevHashOwned) -> bool {
+        let store = |channel: &mut ChannelState| channel.prevhash = Some(prevhash.clone());
+        if self.mode.is_aggregated() {
+            self.channels
+                .with_mut_or_default(prevhash.channel_id, store);
+            return true;
+        }
+        self.channels
+            .with_mut(&prevhash.channel_id, store)
+            .is_some()
+    }
+
+    /// Stores a job in its channel's job history, and returns whether it was stored.
+    ///
+    /// Like [`Self::store_prevhash`], it only stores into an existing entry, so a closed channel's
+    /// job history is never recreated.
+    fn store_job(
+        &self,
+        channel_id: ChannelId,
+        notify: &server_to_client::Notify,
+        resets_job_history: bool,
+    ) -> bool {
+        self.channels
+            .with_mut(&channel_id, |channel| {
+                channel
+                    .jobs
+                    .get_or_insert_with(|| Sv1JobStore::new(self.config.max_past_jobs))
+                    .activate(
+                        notify.job_id.clone(),
+                        StoredSv1Job::upstream(notify.clone()),
+                        resets_job_history,
+                    );
+            })
+            .is_some()
     }
 }
 
@@ -4346,6 +4389,128 @@ mod tests {
         );
         server.set_user_identity("test_user".to_string());
         (server, to_server, from_server)
+    }
+
+    /// Feeds a `SetNewPrevHash` and a job for `channel_id`, as the channel manager would.
+    async fn feed_job_state(
+        server: &Sv1Server,
+        to_server: &Sender<MiningOwned>,
+        channel_id: ChannelId,
+    ) {
+        let target = Target::from_le_bytes([0xff; 32]);
+        to_server
+            .send(MiningOwned::SetNewPrevHash(test_prevhash(channel_id)))
+            .await
+            .unwrap();
+        server.handle_upstream_message(target).await.unwrap();
+        to_server
+            .send(MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
+                channel_id,
+                job_id: 0,
+                ntime_start: Sv2OptionOwned::new(Some(1)),
+                version: 0x20000000,
+                version_rolling_allowed: true,
+                merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff265200162f5374726174756d2056322053524920506f6f6c2f2f08").unwrap().try_into().unwrap(),
+                coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
+            }))
+            .await
+            .unwrap();
+        server.handle_upstream_message(target).await.unwrap();
+    }
+
+    fn test_prevhash(channel_id: ChannelId) -> SetNewPrevHashOwned {
+        SetNewPrevHashOwned {
+            channel_id,
+            job_id: 0,
+            prev_hash: vec![0; 32].try_into().unwrap(),
+            ntime_start: 1,
+            nbits: 0x207fffff,
+        }
+    }
+
+    fn has_job_state(server: &Sv1Server, channel_id: ChannelId) -> bool {
+        server
+            .channels
+            .with(&channel_id, |channel| {
+                channel.prevhash.is_some() && channel.jobs.is_some()
+            })
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_downstream_disconnect_releases_its_channel_job_state() {
+        let (server, to_server, _from_server) = server_with_channels(false);
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        register_test_downstream(&server, 8, Some(10), 100.0, false);
+        for channel_id in [9, 10] {
+            feed_job_state(&server, &to_server, channel_id).await;
+        }
+
+        server.handle_downstream_disconnect(7).await.unwrap();
+
+        assert!(!server.channels.contains_key(&9));
+        assert!(has_job_state(&server, 10));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_upstream_close_releases_the_channel_job_state() {
+        let (server, to_server, _from_server) = server_with_channels(false);
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        feed_job_state(&server, &to_server, 9).await;
+
+        to_server
+            .send(MiningOwned::CloseChannel(CloseChannelOwned {
+                channel_id: 9,
+                reason_code: Str0255Owned::try_from("upstream closed channel".to_string()).unwrap(),
+            }))
+            .await
+            .unwrap();
+        server
+            .handle_upstream_message(Target::from_le_bytes([0xff; 32]))
+            .await
+            .unwrap();
+
+        assert!(!server.channels.contains_key(&9));
+    }
+
+    #[tokio::test]
+    async fn non_aggregated_job_state_is_not_stored_for_a_channel_without_a_downstream() {
+        let (server, to_server, _from_server) = server_with_channels(false);
+        // Messages can still be queued for a channel that has just closed.
+        feed_job_state(&server, &to_server, 9).await;
+
+        assert!(!server.channels.contains_key(&9));
+    }
+
+    #[test]
+    fn job_state_is_only_stored_while_its_channel_exists() {
+        let (server, _to_server, _from_server) = server_with_channels(false);
+        let notify = test_sv1_notify("1", true);
+        assert!(!server.store_prevhash(&test_prevhash(9)));
+        assert!(!server.store_job(9, &notify, true));
+        assert!(!server.channels.contains_key(&9));
+
+        set_test_channel_owner(&server, 9, 7);
+        assert!(server.store_prevhash(&test_prevhash(9)));
+        assert!(server.store_job(9, &notify, true));
+
+        // The channel closes after the job was read, before it is stored.
+        server.channels.remove(&9);
+        assert!(!server.store_job(9, &notify, false));
+        assert!(!server.channels.contains_key(&9));
+    }
+
+    #[tokio::test]
+    async fn aggregated_downstream_disconnect_keeps_the_shared_job_state() {
+        let (server, to_server, _from_server) = server_with_channels(true);
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        feed_job_state(&server, &to_server, AGGREGATED_CHANNEL_ID).await;
+
+        server.handle_downstream_disconnect(7).await.unwrap();
+
+        assert!(has_job_state(&server, AGGREGATED_CHANNEL_ID));
+        assert!(!server.channels.contains_key(&9));
     }
 
     #[tokio::test]
