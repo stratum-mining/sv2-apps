@@ -3,6 +3,7 @@ use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, CommonMessagesOwn
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
     mock_roles::{MockUpstream, WithSetup},
+    sniffer::Sniffer,
     start_sv2_translator_with_user_identities,
     sv1_sniffer::SV1MessageFilter,
     template_provider::DifficultyLevel,
@@ -25,7 +26,8 @@ use std::{
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq0255Owned, Sv2OptionOwned},
     common_messages_sv2::{
-        MESSAGE_TYPE_RECONNECT, MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
+        ChannelEndpointChangedOwned, MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED, MESSAGE_TYPE_RECONNECT,
+        MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
         MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, ReconnectOwned, SetupConnectionErrorOwned,
         SetupConnectionSuccessOwned,
     },
@@ -2690,6 +2692,84 @@ async fn translator_reconnects_to_the_endpoint_requested_by_the_upstream() {
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
     requested_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    shutdown_all!(translator);
+}
+
+// A ChannelEndpointChanged makes the translator reconnect to the endpoint it is connected to, so
+// that SetupConnection and extension negotiation run again.
+#[tokio::test]
+async fn translator_reconnects_to_the_same_endpoint_on_channel_endpoint_changed() {
+    start_tracing();
+
+    let first_upstream_addr = get_available_address();
+    let send_from_first_upstream = MockUpstream::new(
+        first_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let (first_sniffer, endpoint) = start_sniffer(
+        "endpoint-changed-first",
+        first_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+
+    let (translator, _, _) =
+        start_sv2_translator(&[endpoint], false, vec![], vec![], None, false).await;
+
+    first_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    // A sniffer only accepts one connection, so the endpoint is free again: the next connection
+    // to it reaches a second upstream.
+    let second_upstream_addr = get_available_address();
+    let _second_upstream = MockUpstream::new(
+        second_upstream_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    let second_sniffer = Sniffer::new(
+        "endpoint-changed-second",
+        endpoint,
+        second_upstream_addr,
+        false,
+        vec![],
+        None,
+    );
+    second_sniffer.start();
+
+    send_from_first_upstream
+        .send(AnyMessageOwned::Common(
+            CommonMessagesOwned::ChannelEndpointChanged(ChannelEndpointChangedOwned {
+                channel_id: 0,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    first_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED,
+        )
+        .await;
+    second_sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    second_sniffer
         .wait_for_message_type(
             MessageDirection::ToDownstream,
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,

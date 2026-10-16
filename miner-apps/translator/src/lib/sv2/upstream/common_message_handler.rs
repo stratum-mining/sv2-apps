@@ -51,7 +51,12 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
-        todo!()
+        // Extension state must be reset and negotiated again. Reconnecting to the same upstream
+        // does both, and keeps negotiation a one-time step per connection.
+        Err(TproxyError::reconnect(ReconnectRequest::EndpointChanged {
+            channel_id: msg.channel_id,
+            upstream: self.entry.clone(),
+        }))
     }
 
     async fn handle_reconnect(
@@ -140,12 +145,19 @@ mod tests {
         ReconnectOwned { new_host, new_port }
     }
 
-    fn requested_upstream(error: TproxyError<error::Upstream>) -> UpstreamEntry {
+    fn reconnect_request(error: TproxyError<error::Upstream>) -> ReconnectRequest {
         assert!(matches!(error.action, Action::Reconnect));
         let TproxyErrorKind::ReconnectRequested(request) = error.kind else {
             panic!("expected a requested reconnect");
         };
-        request.into_upstream()
+        *request
+    }
+
+    fn requested_upstream(error: TproxyError<error::Upstream>) -> UpstreamEntry {
+        let ReconnectRequest::Redirect(upstream) = reconnect_request(error) else {
+            panic!("expected a redirect");
+        };
+        upstream
     }
 
     #[tokio::test]
@@ -202,6 +214,32 @@ mod tests {
             assert!(matches!(error.action, Action::Fallback));
             assert!(matches!(error.kind, TproxyErrorKind::InvalidReconnectHost));
         }
+    }
+
+    #[tokio::test]
+    async fn channel_endpoint_changed_reconnects_to_the_current_upstream() {
+        let mut upstream = upstream();
+
+        let request = reconnect_request(
+            upstream
+                .handle_channel_endpoint_changed(
+                    None,
+                    ChannelEndpointChangedOwned { channel_id: 7 },
+                    None,
+                )
+                .await
+                .unwrap_err(),
+        );
+        let ReconnectRequest::EndpointChanged {
+            channel_id,
+            upstream: requested,
+        } = request
+        else {
+            panic!("expected an endpoint change");
+        };
+        assert_eq!(channel_id, 7);
+        assert_eq!(requested.host, "pool.example");
+        assert_eq!(requested.port, 3333);
     }
 
     #[test]

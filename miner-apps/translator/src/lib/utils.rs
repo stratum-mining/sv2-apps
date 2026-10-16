@@ -183,20 +183,26 @@ pub struct UpstreamEntry {
 pub enum ReconnectRequest {
     /// Redirect to another endpoint authenticated by the same pool authority.
     Redirect(UpstreamEntry),
+    /// Reconnect to the current upstream, to negotiate extensions again after the endpoint of one
+    /// of its channels changed.
+    EndpointChanged {
+        channel_id: ChannelId,
+        upstream: UpstreamEntry,
+    },
 }
 
 impl ReconnectRequest {
     /// The endpoint to connect to.
     pub fn upstream(&self) -> &UpstreamEntry {
         match self {
-            Self::Redirect(upstream) => upstream,
+            Self::Redirect(upstream) | Self::EndpointChanged { upstream, .. } => upstream,
         }
     }
 
     /// Consumes the request and returns the endpoint to connect to.
     pub fn into_upstream(self) -> UpstreamEntry {
         match self {
-            Self::Redirect(upstream) => upstream,
+            Self::Redirect(upstream) | Self::EndpointChanged { upstream, .. } => upstream,
         }
     }
 }
@@ -207,6 +213,14 @@ impl std::fmt::Display for ReconnectRequest {
             Self::Redirect(upstream) => write!(
                 f,
                 "upstream requested a reconnect to {}:{}",
+                upstream.host, upstream.port
+            ),
+            Self::EndpointChanged {
+                channel_id,
+                upstream,
+            } => write!(
+                f,
+                "upstream changed the endpoint of channel {channel_id}; extensions must be negotiated again with {}:{}",
                 upstream.host, upstream.port
             ),
         }
