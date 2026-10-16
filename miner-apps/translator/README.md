@@ -144,6 +144,56 @@ If verification fails, tProxy triggers upstream fallback instead of forwarding t
   shared history or the keepalive schedule. Normal upstream jobs are forwarded
   without waiting for keepalive deadlines.
 
+#### **Difficulty and Targets**
+Each miner is advertised the easier of two targets: the one vardiff wants for it, and the target
+of its upstream SV2 channel. With `enable_vardiff = false`, only the upstream target applies. The
+difficulty is worked out again whenever either target changes, and a new `mining.set_difficulty`
+is sent only when the result changes. A larger target is easier, so a miner never works at a
+difficulty harder than the upstream's and never discards a share the upstream would credit, and it
+works at the difficulty vardiff wants as far as the upstream allows. Shares that meet a miner's
+difficulty but not the upstream target are accepted from the miner and not forwarded.
+
+- **Initial difficulty**: with `enable_vardiff = true`, vardiff starts from the difficulty derived
+  from `min_individual_miner_hashrate` and `shares_per_minute`, which tProxy also requests as the
+  channel's `max_target`, the easiest target the upstream may assign. With
+  `enable_vardiff = false`, tProxy accepts any target and a miner starts at the upstream's target
+  for the channel; `shares_per_minute` is then only used to derive the hashrate reported for it.
+- **Vardiff updates**: each update is sent upstream as an `UpdateChannel` whose `max_target` is
+  the new target (in aggregated mode, the hardest across miners). An easier target applies right
+  away; a harder one applies as far as the upstream target allows, and fully once the upstream
+  lowers its target to it with `SetTarget`.
+- **Upstream targets**: a miner follows a `SetTarget` easier than its difficulty. The upstream can
+  send one without breaking the rules below, for instance while a lower `max_target` is within its
+  30 seconds or after rejecting it, and in aggregated mode a miner can join a shared channel whose
+  target is easier than its initial difficulty. A `SetTarget` harder than the target vardiff wants
+  leaves the miner at the vardiff difficulty.
+- **Rounding**: difficulties of 1 and above are advertised rounded down to a power of two. Shares
+  are validated against the advertised difficulty, so a miner is never held to a harder one than
+  it was told.
+
+tProxy enforces the Stratum V2 rules on targets:
+- The target assigned when a channel opens must not exceed the requested `max_target`.
+- A `SetTarget` must not exceed the `max_target` of the latest `UpdateChannel` the upstream
+  accepted, or of the open request. tProxy gives the upstream 30 seconds to process each
+  `UpdateChannel`: until then, a `SetTarget` within the previous value is still accepted, since
+  the upstream may have sent it before processing the change. A change the upstream rejects with
+  `UpdateChannel.Error` leaves the previous value in force.
+
+An upstream that breaks either rule triggers fallback to the next configured upstream.
+
+The specification recommends not changing `max_target` again within those 30 seconds, so that a
+client can tell which value a `SetTarget` is bound by. tProxy sends every change right away
+instead, so the upstream learns each new value without waiting, and accepts a `SetTarget` within
+any value the upstream may still be bound by. If several changes are within their 30 seconds when
+an `UpdateChannel.Error` arrives, tProxy cannot tell which one was rejected and keeps the easiest
+of them in force until the next change.
+
+An upstream that takes longer than 30 seconds to answer an `UpdateChannel` can still be misjudged.
+When its `UpdateChannel.Error` arrives late, tProxy goes back to the easier of the rejected value
+and the one it replaced. But a `SetTarget` above a lower value that arrives after the 30 seconds
+and before that late rejection triggers fallback, since nothing tells tProxy that a rejection is
+coming.
+
 #### **Miner Telemetry**
 Translator Proxy can enrich the monitoring API with telemetry from the ASICs connected to its SV1
 port. This is useful when you want the UI to show each miner's management IP, firmware, hashrate,
