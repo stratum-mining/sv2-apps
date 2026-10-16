@@ -106,6 +106,20 @@ impl StoredSv1Job {
     }
 }
 
+/// What the SV1 server keeps for one SV2 channel.
+///
+/// In aggregated mode, the shared upstream channel, keyed by `AGGREGATED_CHANNEL_ID`, holds the job
+/// state and has no owner, while each downstream's own channel only routes to its owner.
+#[derive(Default)]
+struct ChannelState {
+    /// The downstream the channel belongs to.
+    owner: Option<DownstreamId>,
+    /// The channel's latest `SetNewPrevHash`.
+    prevhash: Option<SetNewPrevHashOwned>,
+    /// Jobs sent on the channel, kept to validate shares and to build keepalives.
+    jobs: Option<Sv1JobStore<StoredSv1Job>>,
+}
+
 // A miner can pipeline mining.configure, mining.subscribe, mining.extranonce.subscribe,
 // mining.suggest_difficulty, and mining.authorize while its SV2 channel is opening; some BIP 310
 // extensions also permit mining.configure to be repeated. Eight messages leave compatibility
@@ -230,17 +244,12 @@ pub struct Sv1Server {
     #[cfg(feature = "monitoring")]
     pub(crate) miner_telemetry: MinerTelemetryState,
     pub(crate) request_id_to_downstream_id: SharedMap<RequestId, DownstreamId>,
-    pub(crate) channel_id_to_downstream_id: SharedMap<ChannelId, DownstreamId>,
+    /// The state kept for each SV2 channel, see [`ChannelState`].
+    channels: SharedMap<ChannelId, ChannelState>,
     pub(crate) vardiff: SharedMap<DownstreamId, VardiffState>,
-    /// HashMap to store the SetNewPrevHash for each channel
-    /// Used in both aggregated and non-aggregated mode
-    pub(crate) prevhashes: SharedMap<ChannelId, SetNewPrevHashOwned>,
     /// Tracks the latest target update per downstream that is waiting for a SetTarget response
     /// from upstream.
     pub(crate) pending_target_updates: SharedMap<DownstreamId, Target>,
-    /// Valid Sv1 jobs storage, containing only a single shared entry (AGGREGATED_CHANNEL_ID) in
-    /// case of channels aggregation (aggregated mode)
-    valid_sv1_jobs: SharedMap<ChannelId, Sv1JobStore<StoredSv1Job>>,
     pub(crate) mode: TproxyMode,
     user_identity: Arc<OnceLock<String>>,
 }
@@ -340,12 +349,8 @@ impl Sv1Server {
             }
         } else {
             // A concrete channel ID targets the single downstream that owns it.
-            let downstream_id = match self
-                .channel_id_to_downstream_id
-                .with(&channel_id, |downstream_id| *downstream_id)
-            {
-                Some(id) => id,
-                None => return,
+            let Some(downstream_id) = self.channel_owner(channel_id) else {
+                return;
             };
 
             let sender = self
@@ -366,8 +371,7 @@ impl Sv1Server {
 
     /// Cleans up server state and closes communication channels.
     fn cleanup(&self) {
-        self.prevhashes.clear();
-        self.valid_sv1_jobs.clear();
+        self.channels.clear();
         let _ = self.aggregated_job_mutation_time.set(None);
         if self.config.downstream_difficulty_config.enable_vardiff {
             self.vardiff.clear();
@@ -375,7 +379,6 @@ impl Sv1Server {
         self.downstreams.clear();
         #[cfg(feature = "monitoring")]
         self.miner_telemetry.clear();
-        self.channel_id_to_downstream_id.clear();
         self.request_id_to_downstream_id.clear();
         self.pending_target_updates.clear();
         self.sv1_server_io.close();
@@ -441,11 +444,9 @@ impl Sv1Server {
             #[cfg(feature = "monitoring")]
             miner_telemetry: MinerTelemetryState::new(),
             request_id_to_downstream_id: SharedMap::new(),
-            channel_id_to_downstream_id: SharedMap::new(),
+            channels: SharedMap::new(),
             vardiff: SharedMap::new(),
-            prevhashes: SharedMap::new(),
             pending_target_updates: SharedMap::new(),
-            valid_sv1_jobs: SharedMap::new(),
             mode,
             user_identity: Arc::new(OnceLock::new()),
         }
@@ -1052,7 +1053,7 @@ impl Sv1Server {
                     // A setup error may disconnect the miner while its channel is opening. If the
                     // success races with that cleanup, release the resulting unclaimed channel.
                     // Do not close a channel already routed by an earlier success.
-                    if !self.channel_id_to_downstream_id.contains_key(&m.channel_id) {
+                    if self.channel_owner(m.channel_id).is_none() {
                         self.sv1_server_io
                             .channel_manager_sender
                             .send((
@@ -1098,8 +1099,9 @@ impl Sv1Server {
                             .downstream_data
                             .with(|d| std::mem::take(&mut d.queued_sv1_handshake_messages))
                             .map_err(TproxyError::shutdown)?;
-                        self.channel_id_to_downstream_id
-                            .insert(m.channel_id, downstream_id);
+                        self.channels.with_mut_or_default(m.channel_id, |channel| {
+                            channel.owner = Some(downstream_id)
+                        });
 
                         Ok(queued_messages)
                     });
@@ -1217,8 +1219,9 @@ impl Sv1Server {
                 };
                 // Clone the prevhash immediately so shared map access is not held across .await.
                 if let Some(prevhash) = self
-                    .prevhashes
-                    .with(&job_channel_id, |prevhash| prevhash.clone())
+                    .channels
+                    .with(&job_channel_id, |channel| channel.prevhash.clone())
+                    .flatten()
                 {
                     let clean_jobs = m.job_id == prevhash.job_id;
                     let notify = build_sv1_notify_from_sv2(prevhash, m.clone(), clean_jobs)
@@ -1253,17 +1256,19 @@ impl Sv1Server {
                     let resets_job_history = clean_jobs
                         && (self.mode.is_non_aggregated() || m.channel_id == AGGREGATED_CHANNEL_ID);
                     let store_notify = || {
-                        self.valid_sv1_jobs.with_mut_or_insert_with(
-                            job_channel_id,
-                            || Sv1JobStore::new(self.config.max_past_jobs),
-                            |channel_jobs| {
-                                channel_jobs.activate(
-                                    notify.job_id.clone(),
-                                    StoredSv1Job::upstream(notify.clone()),
-                                    resets_job_history,
-                                );
-                            },
-                        );
+                        self.channels
+                            .with_mut_or_default(job_channel_id, |channel| {
+                                channel
+                                    .jobs
+                                    .get_or_insert_with(|| {
+                                        Sv1JobStore::new(self.config.max_past_jobs)
+                                    })
+                                    .activate(
+                                        notify.job_id.clone(),
+                                        StoredSv1Job::upstream(notify.clone()),
+                                        resets_job_history,
+                                    );
+                            });
                     };
                     if self.mode.is_aggregated() && m.channel_id == AGGREGATED_CHANNEL_ID {
                         self.aggregated_job_mutation_time
@@ -1286,7 +1291,9 @@ impl Sv1Server {
 
             MiningOwned::SetNewPrevHash(m) => {
                 debug!("Received SetNewPrevHash for channel id: {}", m.channel_id);
-                self.prevhashes.insert(m.channel_id, m.clone());
+                self.channels.with_mut_or_default(m.channel_id, |channel| {
+                    channel.prevhash = Some(m.clone())
+                });
             }
 
             MiningOwned::SetTarget(m) => {
@@ -1323,7 +1330,11 @@ impl Sv1Server {
         &self,
         channel_id: ChannelId,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let Some((_, downstream_id)) = self.channel_id_to_downstream_id.remove(&channel_id) else {
+        let Some(downstream_id) = self
+            .channels
+            .with_mut(&channel_id, |channel| channel.owner.take())
+            .flatten()
+        else {
             warn!(
                 channel_id,
                 "No active SV1 downstream found for upstream-closed channel"
@@ -1364,10 +1375,7 @@ impl Sv1Server {
         message: stratum_apps::stratum_core::mining_sv2::SetExtranoncePrefixOwned,
     ) -> TproxyResult<(), error::Sv1Server> {
         let channel_id = message.channel_id;
-        let Some(downstream_id) = self
-            .channel_id_to_downstream_id
-            .with(&channel_id, |downstream_id| *downstream_id)
-        else {
+        let Some(downstream_id) = self.channel_owner(channel_id) else {
             warn!(
                 channel_id,
                 "No active SV1 downstream found for changed extranonce prefix"
@@ -1561,7 +1569,8 @@ impl Sv1Server {
                 .with(|d| d.channel_id)
                 .map_err(TproxyError::shutdown)?;
             if let Some(channel_id) = channel_id {
-                self.channel_id_to_downstream_id.remove(&channel_id);
+                self.channels
+                    .with_mut(&channel_id, |channel| channel.owner = None);
                 // Send `CloseChannel` to the channel manager in both modes so
                 // it can free the per-downstream `ExtendedChannel` (and, in
                 // aggregated mode, the allocator-minted `ExtranoncePrefix`
@@ -1744,10 +1753,7 @@ impl Sv1Server {
         target: Target,
         derived_hashrate: Option<f64>,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let Some(downstream_id) = self
-            .channel_id_to_downstream_id
-            .with(&channel_id, |downstream_id| *downstream_id)
-        else {
+        let Some(downstream_id) = self.channel_owner(channel_id) else {
             warn!(
                 "No downstream found for channel {} when vardiff is disabled",
                 channel_id
@@ -1982,16 +1988,20 @@ impl Sv1Server {
 
         let job_channel_id = self.resolve_channel_id(channel_id);
         // Do not recreate job history for a channel that was removed after targets were collected.
-        self.valid_sv1_jobs.with_mut(&job_channel_id, |jobs| {
-            jobs.activate(
-                keepalive_notify.job_id.clone(),
-                StoredSv1Job {
-                    notify: keepalive_notify.clone(),
-                    keepalive_base_time: base_time,
-                },
-                false,
-            )
-        })?;
+        self.channels
+            .with_mut(&job_channel_id, |channel| {
+                channel.jobs.as_mut().map(|jobs| {
+                    jobs.activate(
+                        keepalive_notify.job_id.clone(),
+                        StoredSv1Job {
+                            notify: keepalive_notify.clone(),
+                            keepalive_base_time: base_time,
+                        },
+                        false,
+                    )
+                })
+            })
+            .flatten()?;
 
         Some(keepalive_notify)
     }
@@ -2082,8 +2092,20 @@ impl Sv1Server {
     fn get_last_job(&self, channel_id: ChannelId) -> Option<StoredSv1Job> {
         let channel_id = self.resolve_channel_id(channel_id);
 
-        self.valid_sv1_jobs
-            .with(&channel_id, |jobs| jobs.active().cloned())
+        self.channels
+            .with(&channel_id, |channel| {
+                channel
+                    .jobs
+                    .as_ref()
+                    .and_then(|jobs| jobs.active().cloned())
+            })
+            .flatten()
+    }
+
+    /// The downstream that owns `channel_id`, if any.
+    fn channel_owner(&self, channel_id: ChannelId) -> Option<DownstreamId> {
+        self.channels
+            .with(&channel_id, |channel| channel.owner)
             .flatten()
     }
 }
@@ -2091,6 +2113,39 @@ impl Sv1Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_test_channel_owner(
+        server: &Sv1Server,
+        channel_id: ChannelId,
+        downstream_id: DownstreamId,
+    ) {
+        server
+            .channels
+            .with_mut_or_default(channel_id, |channel| channel.owner = Some(downstream_id));
+    }
+
+    /// Runs `f` on the job history of `channel_id`, creating it if needed.
+    fn with_test_jobs<R>(
+        server: &Sv1Server,
+        channel_id: ChannelId,
+        f: impl FnOnce(&mut Sv1JobStore<StoredSv1Job>) -> R,
+    ) -> R {
+        server.channels.with_mut_or_default(channel_id, |channel| {
+            f(channel.jobs.get_or_insert_with(Default::default))
+        })
+    }
+
+    /// Reads the job history of `channel_id`, if it has one.
+    fn read_test_jobs<R>(
+        server: &Sv1Server,
+        channel_id: ChannelId,
+        f: impl FnOnce(&Sv1JobStore<StoredSv1Job>) -> R,
+    ) -> Option<R> {
+        server
+            .channels
+            .with(&channel_id, |channel| channel.jobs.as_ref().map(f))
+            .flatten()
+    }
     use crate::{
         config::{DownstreamDifficultyConfig, TranslatorConfig, Upstream},
         sv1::downstream::{Sv1JobValidationContext, Sv1SessionState},
@@ -2201,9 +2256,7 @@ mod tests {
 
         server.downstreams.insert(downstream_id, downstream);
         if let Some(channel_id) = channel_id {
-            server
-                .channel_id_to_downstream_id
-                .insert(channel_id, downstream_id);
+            set_test_channel_owner(server, channel_id, downstream_id);
         }
         server
             .sv1_server_io
@@ -2261,20 +2314,18 @@ mod tests {
         let old_job = test_sv1_notify("old", false);
         let mut current_job = test_sv1_notify("current", false);
         current_job.version = HexU32Be(0x20000001);
-        server
-            .valid_sv1_jobs
-            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
-                jobs.activate(
-                    old_job.job_id.clone(),
-                    StoredSv1Job::upstream(old_job.clone()),
-                    false,
-                );
-                jobs.activate(
-                    current_job.job_id.clone(),
-                    StoredSv1Job::upstream(current_job.clone()),
-                    false,
-                );
-            });
+        with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
+            jobs.activate(
+                old_job.job_id.clone(),
+                StoredSv1Job::upstream(old_job.clone()),
+                false,
+            );
+            jobs.activate(
+                current_job.job_id.clone(),
+                StoredSv1Job::upstream(current_job.clone()),
+                false,
+            );
+        });
 
         let old_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
         server
@@ -2341,15 +2392,13 @@ mod tests {
         let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
         let job = test_sv1_notify("job", false);
-        server
-            .valid_sv1_jobs
-            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
-                jobs.activate(
-                    job.job_id.clone(),
-                    StoredSv1Job::upstream(job.clone()),
-                    false,
-                );
-            });
+        with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
+            jobs.activate(
+                job.job_id.clone(),
+                StoredSv1Job::upstream(job.clone()),
+                false,
+            );
+        });
         server
             .downstreams
             .with(&7, |downstream| {
@@ -2420,15 +2469,13 @@ mod tests {
         );
 
         let job = test_sv1_notify("job", false);
-        server
-            .valid_sv1_jobs
-            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
-                jobs.activate(
-                    job.job_id.clone(),
-                    StoredSv1Job::upstream(job.clone()),
-                    false,
-                );
-            });
+        with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
+            jobs.activate(
+                job.job_id.clone(),
+                StoredSv1Job::upstream(job.clone()),
+                false,
+            );
+        });
         server
             .downstreams
             .with(&7, |downstream| {
@@ -2485,7 +2532,7 @@ mod tests {
             .with(|data| data.channel_id = Some(9))
             .unwrap();
         server.downstreams.insert(downstream_id, downstream);
-        server.channel_id_to_downstream_id.insert(9, downstream_id);
+        set_test_channel_owner(&server, 9, downstream_id);
         server
             .sv1_server_io
             .sv1_server_to_downstream_sender
@@ -2606,7 +2653,7 @@ mod tests {
             })
             .unwrap();
         server.downstreams.insert(downstream_id, downstream.clone());
-        server.channel_id_to_downstream_id.insert(42, downstream_id);
+        set_test_channel_owner(&server, 42, downstream_id);
         server
             .sv1_server_io
             .sv1_server_to_downstream_sender
@@ -2693,7 +2740,7 @@ mod tests {
             })
             .unwrap();
         server.downstreams.insert(7, downstream.clone());
-        server.channel_id_to_downstream_id.insert(42, 7);
+        set_test_channel_owner(&server, 42, 7);
         server
             .sv1_server_io
             .sv1_server_to_downstream_sender
@@ -3208,7 +3255,7 @@ mod tests {
             .unwrap();
 
         assert!(downstream.is_disconnected());
-        assert!(!server.channel_id_to_downstream_id.contains_key(&42));
+        assert!(server.channel_owner(42).is_none());
         assert_eq!(
             downstream
                 .downstream_data
@@ -3281,12 +3328,7 @@ mod tests {
         sender.send(Sv1ServerEvent::SetupComplete).await.unwrap();
         downstream.handle_sv1_server_message().await.unwrap();
         assert!(downstream.is_disconnected());
-        assert_eq!(
-            server
-                .channel_id_to_downstream_id
-                .with(&42, |downstream_id| *downstream_id),
-            Some(7)
-        );
+        assert_eq!(server.channel_owner(42), Some(7));
         assert_eq!(
             downstream
                 .downstream_data
@@ -3527,8 +3569,8 @@ mod tests {
             .sv1_server_io
             .sv1_server_to_downstream_sender
             .insert(2, second_downstream_sender);
-        server.channel_id_to_downstream_id.insert(7, 1);
-        server.channel_id_to_downstream_id.insert(8, 2);
+        set_test_channel_owner(&server, 7, 1);
+        set_test_channel_owner(&server, 8, 2);
 
         channel_manager_to_server_sender
             .send(MiningOwned::SetNewPrevHash(SetNewPrevHashOwned {
@@ -3610,16 +3652,14 @@ mod tests {
         );
         assert_eq!(server.keepalive_job_id_counter.load(Ordering::Relaxed), 3);
         assert_eq!(
-            server
-                .valid_sv1_jobs
-                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.len()),
+            read_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| jobs.len()),
             Some(4)
         );
         assert!(
-            server
-                .valid_sv1_jobs
-                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.get("1").is_some())
-                .unwrap()
+            read_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| jobs
+                .get("1")
+                .is_some())
+            .unwrap()
         );
 
         let next = server
@@ -3955,12 +3995,8 @@ mod tests {
         for downstream_id in [1, 2] {
             set_last_delivery(downstream_id, recent_delivery);
         }
-        let history_len = || {
-            server
-                .valid_sv1_jobs
-                .with(&AGGREGATED_CHANNEL_ID, |jobs| jobs.len())
-                .unwrap()
-        };
+        let history_len =
+            || read_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| jobs.len()).unwrap();
         let original_time = server
             .get_last_job(AGGREGATED_CHANNEL_ID)
             .unwrap()
@@ -4157,11 +4193,9 @@ mod tests {
             };
             let notify = server_to_client::Notify::try_from(notification).unwrap();
             let channel_id = if aggregated { AGGREGATED_CHANNEL_ID } else { 4 };
-            server
-                .valid_sv1_jobs
-                .with_mut_or_default(channel_id, |jobs| {
-                    jobs.activate(notify.job_id.clone(), StoredSv1Job::upstream(notify), false);
-                });
+            with_test_jobs(&server, channel_id, |jobs| {
+                jobs.activate(notify.job_id.clone(), StoredSv1Job::upstream(notify), false);
+            });
             server.send_keepalive_jobs(60).await.unwrap();
             for (index, receiver) in receivers.iter().enumerate() {
                 assert_eq!(receiver.try_recv().is_ok(), index == 3);
@@ -4174,15 +4208,13 @@ mod tests {
     async fn reused_keepalive_preserves_each_miners_context_and_prefix_pause() {
         let server = create_test_sv1_server();
         let original = test_sv1_notify("1", false);
-        server
-            .valid_sv1_jobs
-            .with_mut_or_default(AGGREGATED_CHANNEL_ID, |jobs| {
-                jobs.activate(
-                    "1".to_string(),
-                    StoredSv1Job::upstream(original.clone()),
-                    false,
-                );
-            });
+        with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
+            jobs.activate(
+                "1".to_string(),
+                StoredSv1Job::upstream(original.clone()),
+                false,
+            );
+        });
         let mut miners = Vec::new();
         for id in [1, 2] {
             let (_events, wire) = register_test_downstream_with_sv1_receiver(
@@ -4368,14 +4400,12 @@ mod tests {
                     assert_eq!(sent.job_id, job_id.to_string());
                 }
 
-                server
-                    .valid_sv1_jobs
-                    .with(&job_channel, |jobs| {
-                        assert_eq!(jobs.len(), cap + 1);
-                        assert!(jobs.get("0").is_none());
-                        assert!(jobs.get("1").is_some());
-                    })
-                    .unwrap();
+                read_test_jobs(&server, job_channel, |jobs| {
+                    assert_eq!(jobs.len(), cap + 1);
+                    assert!(jobs.get("0").is_none());
+                    assert!(jobs.get("1").is_some());
+                })
+                .unwrap();
                 downstream
                     .downstream_data
                     .with(|data| {
@@ -4782,14 +4812,12 @@ mod tests {
                     } else {
                         channel_id
                     };
-                    server
-                        .valid_sv1_jobs
-                        .with_mut_or_default(job_channel, |jobs| {
-                            for name in ["1", "2", "3", "4"] {
-                                let job = test_sv1_notify(name, false);
-                                jobs.activate(name.to_string(), StoredSv1Job::upstream(job), false);
-                            }
-                        });
+                    with_test_jobs(&server, job_channel, |jobs| {
+                        for name in ["1", "2", "3", "4"] {
+                            let job = test_sv1_notify(name, false);
+                            jobs.activate(name.to_string(), StoredSv1Job::upstream(job), false);
+                        }
+                    });
                     advertise_job(&server, id, &responses, test_sv1_notify("1", false), None).await;
                     miners.push(responses);
                 }

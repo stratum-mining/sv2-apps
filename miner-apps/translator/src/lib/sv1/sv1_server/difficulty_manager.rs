@@ -502,10 +502,7 @@ impl Sv1Server {
             channel_id
         );
 
-        let Some(downstream_id) = self
-            .channel_id_to_downstream_id
-            .with(&channel_id, |downstream_id| *downstream_id)
-        else {
+        let Some(downstream_id) = self.channel_owner(channel_id) else {
             warn!("No downstream found for channel {}", channel_id);
             return Ok(());
         };
