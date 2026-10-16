@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// in summary, every time we spawn a fallback-relevant task inside the manager, we MUST:
 /// - call [`FallbackCoordinator::register`] at task bootstrap
-/// - call [`FallbackHandler::done`] at task completion
+/// - call [`FallbackHandler::done`], or drop the handler, once the task's cleanup is over
 ///
 /// when a fallback trigger arrives to the main status loop, we MUST call
 /// [`FallbackCoordinator::trigger_fallback_and_wait`] to wait for all registered components to
@@ -55,15 +55,14 @@ impl FallbackCoordinator {
     }
 
     /// register a component that will participate in fallback coordination
-    /// returns a [`FallbackHandler`] that must be called when the component is done
+    /// returns a [`FallbackHandler`] to keep alive until the component's cleanup is over; dropping
+    /// it, or calling [`FallbackHandler::done`], acknowledges completion
     #[must_use]
     pub fn register(&self) -> FallbackHandler {
         tracing::debug!("FallbackCoordinator: registering component");
         self.pending_tasks.fetch_add(1, Ordering::Relaxed);
-
         FallbackHandler {
             coordinator: self.clone(),
-            done: AtomicBool::new(false),
         }
     }
 
@@ -91,22 +90,25 @@ impl FallbackCoordinator {
     }
 }
 
-pub struct FallbackHandler {
-    coordinator: FallbackCoordinator,
-    done: AtomicBool,
-}
-
 /// Handler for a component that will participate in fallback coordination
 ///
-/// ⚠️ Warning: dropping this handler without calling [`FallbackHandler::done`] will result in a
-/// panic.
-impl FallbackHandler {
-    /// Mark this handler as finished
-    /// Takes ownership of `self`, preventing double-calling
-    pub fn done(self) {
-        tracing::debug!("FallbackHandler: done called");
-        self.done.store(true, Ordering::Release);
+/// the component is pending for as long as its handler is alive: dropping the handler, which
+/// [`FallbackHandler::done`] does explicitly, is the acknowledgement that cleanup is over.
+pub struct FallbackHandler {
+    coordinator: FallbackCoordinator,
+}
 
+impl FallbackHandler {
+    /// Acknowledge completion now, by dropping the handler
+    /// Takes ownership of `self`, so calling it twice is rejected at compile time
+    pub fn done(self) {
+        drop(self)
+    }
+}
+
+impl Drop for FallbackHandler {
+    fn drop(&mut self) {
+        tracing::debug!("FallbackHandler: done");
         // every transition to zero wakes the waiter, whether or not fallback has been triggered
         // yet: an early wakeup only makes the waiter recheck the count
         if self
@@ -116,14 +118,6 @@ impl FallbackHandler {
             == 1
         {
             self.coordinator.notify.notify_one();
-        }
-    }
-}
-
-impl Drop for FallbackHandler {
-    fn drop(&mut self) {
-        if !self.done.load(Ordering::Acquire) {
-            panic!("FallbackHandler dropped without calling done()");
         }
     }
 }
@@ -269,6 +263,18 @@ mod tests {
         assert_eq!(poll(&mut wait), Poll::Pending);
 
         late.done();
+        assert_eq!(poll(&mut wait), Poll::Ready(()));
+    }
+
+    #[test]
+    fn dropping_a_handler_counts_as_done() {
+        let coordinator = FallbackCoordinator::new();
+        let handler = coordinator.register();
+
+        let mut wait = pin!(coordinator.trigger_fallback_and_wait());
+        assert_eq!(poll(&mut wait), Poll::Pending);
+
+        drop(handler);
         assert_eq!(poll(&mut wait), Poll::Ready(()));
     }
 }
