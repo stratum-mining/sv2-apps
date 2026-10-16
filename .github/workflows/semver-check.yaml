@@ -46,6 +46,19 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo binstall --no-confirm --disable-telemetry --disable-strategies quick-install --locked cargo-semver-checks@0.44.0
 
+      # `zip` yanked every release before 9.0.3 from crates.io, including the
+      # 3.0.0 that `utoipa-swagger-ui` 9.x needs at build time. Cargo.lock still
+      # pins it, which cargo accepts, but cargo-semver-checks resolves each crate
+      # from scratch and cannot select a yanked version. The patch serves the
+      # same 3.0.0 from the commit its crates.io release was packaged from (the
+      # `v3.0.0` tag). It can go once `utoipa-swagger-ui` accepts zip 9.
+      - name: Patch yanked zip for semver checks
+        run: |
+          cat >> "${CARGO_HOME:-$HOME/.cargo}/config.toml" <<'EOF'
+          [patch.crates-io]
+          zip = { git = "https://github.com/zip-rs/zip2", rev = "8c01cb7fec6c4f696f8306f1942044dcf1a8f5b2" }
+          EOF
+
       - name: Run semver checks
         run: cargo semver-checks --workspace --all-features
 
