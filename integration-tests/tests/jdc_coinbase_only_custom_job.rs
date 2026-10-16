@@ -19,7 +19,7 @@ use stratum_apps::{
         common_messages_sv2::{MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol},
         job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
         mining_sv2::{
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
+            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
             MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
             NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned,
             OpenExtendedMiningChannelSuccessOwned, SetCustomMiningJobOwned,
@@ -27,7 +27,9 @@ use stratum_apps::{
         parsers_sv2::{
             AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned,
         },
-        template_distribution_sv2::{NewTemplateOwned, SetNewPrevHashOwned},
+        template_distribution_sv2::{
+            MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, NewTemplateOwned, SetNewPrevHashOwned,
+        },
     },
 };
 
@@ -155,6 +157,47 @@ async fn jdc_coinbase_only_upstream_channel_opens_with_a_custom_job_for_the_chai
     jdc.jdc.shutdown().await;
 }
 
+/// Regression coverage for coinbase-only tokens being kept until JDC can spend them (issue #749).
+///
+/// A prevhash that activates a future template while JDC has no upstream channel cannot be
+/// answered with a custom job: there is no channel to send one on. Such activations must leave
+/// JDC's tokens where they are, so that once the upstream channel opens, its custom jobs are paid
+/// for with the tokens JDC was handed, oldest first.
+#[tokio::test]
+async fn jdc_coinbase_only_keeps_its_tokens_until_the_upstream_channel_opens() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    let token_requests = jdc.token_requests(2).await;
+    jdc.answer_token_requests(&token_requests).await;
+    jdc.wait_for_first_token().await;
+
+    // Two chain tips are activated while no downstream has asked for a channel, so while JDC has
+    // no upstream channel.
+    jdc.send_chain_tip(1).await;
+    jdc.send_chain_tip(2).await;
+
+    // JDC handles what the Template Provider sends ahead of what a downstream sends, so by the
+    // time a downstream's channel request makes it ask the Pool for the upstream channel, both
+    // prevhashes have been handled.
+    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    downstream.request_extended_channel().await;
+    jdc.pool_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+        )
+        .await;
+
+    // The custom job sent as the upstream channel opens, and the one for the next template, are
+    // paid for with the two tokens JDC was handed.
+    jdc.open_upstream_channel().await;
+    assert_eq!(jdc.next_custom_job().await.token, mining_job_token(0));
+    jdc.send_template(template(3, false)).await;
+    assert_eq!(jdc.next_custom_job().await.token, mining_job_token(1));
+
+    jdc.jdc.shutdown().await;
+}
+
 // Asserts that `custom_job` pays the whole remaining reward of a `template`, to the same outputs
 // as `downstream_job`, built from the same template.
 fn assert_pays_template_reward(
@@ -183,6 +226,7 @@ struct MockedJdc {
     tp: Sender<AnyMessageOwned>,
     pool: Sender<AnyMessageOwned>,
     jds: Sender<AnyMessageOwned>,
+    tp_sniffer: Sniffer<'static>,
     pool_sniffer: Sniffer<'static>,
     jds_sniffer: Sniffer<'static>,
 }
@@ -196,7 +240,7 @@ impl MockedJdc {
         )
         .start()
         .await;
-        let (_tp_sniffer, tp_sniffer_address) =
+        let (tp_sniffer, tp_sniffer_address) =
             integration_tests_sv2::start_sniffer("jdc-tp", tp_address, false, vec![], None);
 
         let pool_address = get_available_address();
@@ -234,6 +278,7 @@ impl MockedJdc {
             tp,
             pool,
             jds,
+            tp_sniffer,
             pool_sniffer,
             jds_sniffer,
         }
@@ -303,6 +348,20 @@ impl MockedJdc {
                 ))
                 .await
                 .expect("mock JDS should send a token");
+        }
+    }
+
+    // Waits until JDC holds the first token answered. With it, JDC takes the JDS's coinbase
+    // outputs in place of its own, and sends the Template Provider their constraints, after the
+    // ones for its own outputs it sent on startup.
+    async fn wait_for_first_token(&self) {
+        for _ in 0..2 {
+            self.tp_sniffer
+                .wait_for_message_type_and_clean_queue(
+                    MessageDirection::ToUpstream,
+                    MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
+                )
+                .await;
         }
     }
 
