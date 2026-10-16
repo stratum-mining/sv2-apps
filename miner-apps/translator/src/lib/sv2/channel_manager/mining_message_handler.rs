@@ -2,10 +2,11 @@ use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
     sv2::channel_manager::{
         AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES, AGGREGATED_TPROXY_MAX_CHANNELS, ChannelManager,
-        NON_AGGREGATED_TPROXY_MAX_CHANNELS, PendingChannelRequest,
+        NON_AGGREGATED_TPROXY_MAX_CHANNELS, PendingChannelRequest, max_target::UpstreamMaxTarget,
     },
     utils::{AGGREGATED_CHANNEL_ID, AggregatedState, aggregated_upstream_user_identity},
 };
+use std::time::Instant;
 use stratum_apps::{
     stratum_core::{
         bitcoin::Target,
@@ -113,6 +114,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 TproxyErrorKind::InitialTargetAboveMaxTarget,
             ));
         }
+        self.upstream_max_targets.insert(
+            self.upstream_max_target_key(m.channel_id),
+            UpstreamMaxTarget::new(max_target),
+        );
 
         let success = {
             info!(
@@ -452,6 +457,11 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", m);
+        // The upstream rejected a `max_target` change, so a value it accepted stays in force.
+        let key = self.upstream_max_target_key(m.channel_id);
+        self.upstream_max_targets.with_mut(&key, |bound| {
+            bound.on_update_channel_error(Instant::now(), self.max_target_grace_period)
+        });
         Ok(())
     }
 
@@ -500,8 +510,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         // submitting shares for a channel that no longer exists upstream.
         for channel_id in closed_channel_ids {
             self.sv1_advertised_extranonce_prefixes.remove(&channel_id);
-            // Each non-aggregated channel owns the share sequence counter keyed by its ID.
+            // Each non-aggregated channel owns the share sequence counter and `max_target` bound
+            // keyed by its ID.
             self.share_sequence_counters.remove(&channel_id);
+            self.upstream_max_targets.remove(&channel_id);
             let mut close = m.clone();
             close.channel_id = channel_id;
             self.channel_manager_io
@@ -1157,6 +1169,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         )))
     }
 
+    /// Applies an upstream `SetTarget` to the channels it addresses and forwards it to the SV1
+    /// server.
+    ///
+    /// The target is first checked against the `max_target` bound of every upstream channel it
+    /// applies to: the addressed channel, every member of an addressed group, or the aggregated
+    /// channel. A target the upstream is not allowed to send triggers fallback before any channel
+    /// changes.
     async fn handle_set_target(
         &mut self,
         _server_id: Option<usize>,
@@ -1166,6 +1185,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         info!("Received: {}", m);
 
         let m_static = m.clone();
+        let new_target = Target::from_le_bytes(m.target.to_array());
 
         // Update the channel targets in the channel manager
         let set_target_messages_sv1_server = {
@@ -1193,6 +1213,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
                 // was the message sent to the aggregated channel?
                 if aggregated_channel_id == m.channel_id || group_channel_id == m.channel_id {
+                    self.check_set_target_bounds(&[AGGREGATED_CHANNEL_ID], new_target)?;
                     // Update target for all extended channels (including AGGREGATED_CHANNEL_ID);
                     // an upstream that hands out a target no share can meet is misbehaving, so
                     // fall back
@@ -1224,6 +1245,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     group_channel.get_channel_ids().copied().collect::<Vec<_>>()
                 })
             {
+                // The bound applies to each channel in the group.
+                self.check_set_target_bounds(&channel_ids, new_target)?;
                 // process the message for each individual channel on the group
                 for channel_id in channel_ids {
                     self.extended_channels
@@ -1243,6 +1266,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             // if the message was not sent to a group channel, and we're not in aggregated
             // mode, we need to process the message for a specific channel
             } else {
+                self.check_set_target_bounds(&[m.channel_id], new_target)?;
                 let Some(res) = self.extended_channels.with_mut(&m.channel_id, |channel| {
                     channel.set_target(Target::from_le_bytes(m.target.to_array()))
                 }) else {
