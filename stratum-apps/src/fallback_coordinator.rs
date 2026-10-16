@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 /// until all registered components have completed their cleanup.
 ///
 /// in summary, every time we spawn a fallback-relevant task inside the manager, we MUST:
-/// - call [`FallbackCoordinator::register`] at task bootstrap
+/// - call [`FallbackCoordinator::register`] before spawning the task and move the handler into it,
+///   so the task counts as pending from the moment it exists rather than from its first poll
 /// - call [`FallbackHandler::done`], or drop the handler, once the task's cleanup is over
 ///
 /// when a fallback trigger arrives to the main status loop, we MUST call
@@ -31,7 +32,9 @@ use tokio_util::sync::CancellationToken;
 /// [`FallbackCoordinator::trigger_fallback_and_wait`] is still waiting joins the generation and
 /// the wait covers it, because the wait resolves only once it observes no pending handler and
 /// rechecks that after every wakeup. a component that registers after the wait has returned is
-/// covered only by a later wait on this coordinator.
+/// covered only by a later wait on this coordinator, which is why a task is registered by the
+/// code that spawns it, before the spawn and while any handler that code holds is still alive,
+/// never by the task itself on its first poll.
 #[derive(Debug, Clone)]
 pub struct FallbackCoordinator {
     signal: CancellationToken,
@@ -55,6 +58,7 @@ impl FallbackCoordinator {
     }
 
     /// register a component that will participate in fallback coordination
+    /// call it before spawning the component's task and move the handler into the task
     /// returns a [`FallbackHandler`] to keep alive until the component's cleanup is over; dropping
     /// it, or calling [`FallbackHandler::done`], acknowledges completion
     #[must_use]
