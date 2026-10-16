@@ -19,7 +19,7 @@ use stratum_apps::stratum_core::{
 use tracing::{error, info, warn};
 
 use crate::{
-    channel_manager::{ChannelManager, DeclaredJob, WaitingDeclaration},
+    channel_manager::{ChannelManager, DeclaredJob, WaitingWork},
     error::{self, JDCError, JDCErrorKind},
     utils::UpstreamState,
 };
@@ -65,7 +65,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         // Every downstream mines this template under the same custom job on the single upstream
         // channel, so the job is built, and a token spent on it, once per template.
         let custom_job = if !msg.future_template && self.mode.is_coinbase_only() {
-            self.build_coinbase_only_custom_job(&msg)?
+            self.build_coinbase_only_custom_job(&msg).await?
         } else {
             None
         };
@@ -265,7 +265,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)?;
         let Some(token) = token else {
             return self
-                .wait_for_token(WaitingDeclaration {
+                .wait_for_token(WaitingWork::Declaration {
                     template,
                     transaction_data: msg,
                 })
@@ -315,8 +315,8 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)?;
         for waiting in dropped {
             warn!(
-                template_id = waiting.template.template_id,
-                "Dropping transaction data waiting for a token: the chain tip moved past it"
+                template_id = waiting.template().template_id,
+                "Dropping work waiting for a token: the chain tip moved past it"
             );
         }
 
@@ -368,7 +368,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         // upstream channel to send it on yet, nothing is built and the token stays queued.
         let custom_job = match &future_template {
             Some(template) if self.mode.is_coinbase_only() => {
-                self.build_coinbase_only_custom_job(template)?
+                self.build_coinbase_only_custom_job(template).await?
             }
             _ => None,
         };
@@ -1412,6 +1412,135 @@ mod tests {
 
         let newest: Vec<u64> = templates.skip(1).collect();
         assert_eq!(declared_templates(&manager), newest);
+        assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    fn custom_jobs_sent(receiver: &Receiver<OutboundFrame>) -> usize {
+        sent_to_pool(receiver)
+            .iter()
+            .filter(|message| matches!(message, MiningOwned::SetCustomMiningJob(_)))
+            .count()
+    }
+
+    // In coinbase-only mode too, a template that finds no token waits for one instead of going
+    // without a custom job, and asks the JDS for a token of its own. The token that arrives next
+    // builds and sends the custom job, and is not replaced.
+    #[tokio::test]
+    async fn coinbase_only_template_waiting_for_a_token_gets_its_custom_job_once_one_arrives() {
+        let (mut manager, sent_to_pool_receiver, sent_to_jds) = channel_manager().await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
+        assert!(matches!(
+            sent_to_jds.try_recv(),
+            Ok(JobDeclarationOwned::AllocateMiningJobToken(_))
+        ));
+        assert!(sent_to_jds.try_recv().is_err());
+
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 1);
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+        assert!(sent_to_jds.try_recv().is_err());
+    }
+
+    // A template activated while JDC holds no token gets its custom job from the token that
+    // arrives next.
+    #[tokio::test]
+    async fn coinbase_only_activated_template_waiting_for_a_token_gets_its_custom_job() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, true), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(2), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
+
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 1);
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+    }
+
+    // Every coinbase-only template of the current chain tip that finds no token waits, and the
+    // tokens that arrive build their custom jobs newest first, each once.
+    #[tokio::test]
+    async fn coinbase_only_every_waiting_template_gets_its_custom_job_newest_first() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        for template_id in [2, 3] {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+        }
+
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+        assert!(recorded_custom_jobs(&manager, 2).is_empty());
+        assert_eq!(recorded_custom_jobs(&manager, 3).len(), 1);
+        for _ in 0..2 {
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 2);
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+        assert_eq!(recorded_custom_jobs(&manager, 3).len(), 1);
+        assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // A coinbase-only template waiting for a token is dropped when the chain tip moves past it,
+    // so the token that arrives next builds nothing for it and stays queued.
+    #[tokio::test]
+    async fn coinbase_only_waiting_template_the_chain_tip_moved_past_is_dropped() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
+        assert!(recorded_custom_jobs(&manager, 2).is_empty());
         assert_eq!(queued_tokens(&manager), 1);
     }
 }

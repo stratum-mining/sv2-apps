@@ -198,6 +198,44 @@ async fn jdc_coinbase_only_keeps_its_tokens_until_the_upstream_channel_opens() {
     jdc.jdc.shutdown().await;
 }
 
+/// Regression coverage for coinbase-only work waiting for a token, the coinbase-only counterpart of
+/// issue #905.
+///
+/// When the upstream channel opens before the JDS has answered JDC's token requests, there is no
+/// token to pay for the custom job of the chain tip the downstreams are handed. That job must
+/// wait for a token instead of never being sent, and ask the JDS for one of its own, so that it
+/// goes out once the JDS answers that request even if the earlier ones are never answered.
+#[tokio::test]
+async fn jdc_coinbase_only_upstream_channel_custom_job_waits_for_a_token() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.token_requests(2).await;
+    jdc.send_chain_tip(1).await;
+    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    downstream.request_extended_channel().await;
+    jdc.open_upstream_channel().await;
+    downstream
+        .wait_for(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+    assert!(
+        jdc.pool_sniffer
+            .assert_message_not_present(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "JDC must not send a custom job before it holds a token for it"
+    );
+
+    let own_token_request = jdc.token_requests(1).await;
+    jdc.answer_token_requests(&own_token_request).await;
+
+    assert_eq!(jdc.next_custom_job().await.token, mining_job_token(0));
+
+    jdc.jdc.shutdown().await;
+}
+
 // Asserts that `custom_job` pays the whole remaining reward of a `template`, to the same outputs
 // as `downstream_job`, built from the same template.
 fn assert_pays_template_reward(

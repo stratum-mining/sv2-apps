@@ -235,7 +235,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             // for that same template, so the custom job goes out first.
             let custom_job = match &template {
                 Some(template) if self.mode.is_coinbase_only() => {
-                    self.build_coinbase_only_custom_job(template)?
+                    self.build_coinbase_only_custom_job(template).await?
                 }
                 _ => None,
             };
