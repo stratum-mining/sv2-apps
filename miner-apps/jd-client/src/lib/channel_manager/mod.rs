@@ -658,12 +658,22 @@ impl ChannelManager {
                                 let task_manager_inner = task_manager_clone.clone();
                                 let supported_extensions_inner = supported_extensions.clone();
                                 let required_extensions_inner = required_extensions.clone();
+                                let fallback_token_inner = fallback_token.clone();
 
+                                // register before spawning, so the handshake counts as
+                                // pending for fallback from the moment the task exists;
+                                // `Downstream::start` registers the downstream's own task
+                                // before this handler is released
+                                let fallback_handler = fallback_coordinator_inner.register();
                                 task_manager_clone.spawn(async move {
                                     let noise_stream = tokio::select! {
                                         biased;
                                         _ = cancellation_token_inner.cancelled() => {
                                             info!("Shutdown received during handshake, dropping connection");
+                                            return;
+                                        }
+                                        _ = fallback_token_inner.cancelled() => {
+                                            info!("Fallback received during handshake, dropping connection");
                                             return;
                                         }
                                         result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
@@ -721,6 +731,7 @@ impl ChannelManager {
                                             move |downstream_id| this.remove_downstream(downstream_id)
                                         )
                                         .await;
+                                    fallback_handler.done();
                                 });
                                 }
 
