@@ -67,45 +67,20 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             self.request_transaction_data(msg.template_id).await?;
         }
 
-        let upstream_ready = self
-            .upstream_channel
-            .with(|channel| channel.is_some())
-            .map_err(JDCError::shutdown)?;
-        let has_prev_hash = self
-            .last_new_prev_hash
-            .with(|prev_hash| prev_hash.is_some())
-            .map_err(JDCError::shutdown)?;
-        let has_job_factory = self
-            .job_factory
-            .with(|job_factory| job_factory.is_some())
-            .map_err(JDCError::shutdown)?;
-
-        let coinbase_only_token = if !msg.future_template
-            && self.mode.is_coinbase_only()
-            && upstream_ready
-            && has_prev_hash
-            && has_job_factory
-        {
-            self.allocate_tokens
-                .with(|tokens| tokens.pop_front())
-                .map_err(JDCError::shutdown)?
+        // Every downstream mines this template under the same custom job on the single upstream
+        // channel, so the job is built, and a token spent on it, once per template.
+        let custom_job = if !msg.future_template && self.mode.is_coinbase_only() {
+            self.build_coinbase_only_custom_job(&msg, &coinbase_outputs)?
         } else {
             None
         };
-
-        let upstream_info = self
-            .upstream_channel
-            .with(|channel| {
-                channel
-                    .as_ref()
-                    .map(|channel| (channel.get_channel_id(), channel.get_full_extranonce_size()))
-            })
-            .map_err(JDCError::shutdown)?;
-        let prevhash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
-        let coinbase_output_bytes = self.coinbase_outputs.get().map_err(JDCError::shutdown)?;
+        let token_spent = custom_job.is_some();
 
         let mut messages: Vec<crate::channel_manager::downstream_message_handler::RouteMessageTo> =
             Vec::new();
+        if let Some(custom_job) = custom_job {
+            messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
+        }
 
         self.downstream.try_for_each(|downstream_id, downstream| {
             let group_channel_job = downstream
@@ -133,47 +108,6 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     Ok::<_, Self::Error>(job.clone())
                 })
                 .map_err(JDCError::shutdown)??;
-
-            if let (
-                Some(token),
-                Some((upstream_channel_id, full_extranonce_size)),
-                Some(prevhash),
-            ) = (&coinbase_only_token, upstream_info, prevhash.clone())
-            {
-                let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
-                let custom_job = self
-                    .job_factory
-                    .with(|job_factory| {
-                        let job_factory = job_factory
-                            .as_mut()
-                            .expect("job_factory checked before token extraction");
-                        job_factory.new_custom_job(
-                            upstream_channel_id,
-                            request_id,
-                            token.clone().mining_job_token,
-                            prevhash.clone().into(),
-                            msg.clone(),
-                            coinbase_outputs.clone(),
-                            full_extranonce_size,
-                        )
-                    })
-                    .map_err(JDCError::shutdown)?;
-
-                if let Ok(custom_job) = custom_job {
-                    self.last_declare_job_store.insert(
-                        request_id,
-                        DeclaredJob {
-                            declare_mining_job: None,
-                            template: msg.clone(),
-                            prev_hash: Some(prevhash),
-                            set_custom_mining_job: Some(custom_job.clone()),
-                            coinbase_output: coinbase_output_bytes.clone(),
-                            tx_list: Vec::new(),
-                        },
-                    );
-                    messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
-                }
-            }
 
             let requires_standard_jobs = downstream.require_std_job.load(Ordering::Relaxed);
             let empty_group_channel = downstream
@@ -274,7 +208,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             Ok::<(), Self::Error>(())
         })?;
 
-        if coinbase_only_token.is_some() {
+        if token_spent {
             _ = self.allocate_tokens(1).await;
         }
 
@@ -701,5 +635,219 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_channel::{Receiver, unbounded};
+    use stratum_apps::{
+        config_helpers::CoinbaseRewardScript,
+        key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
+        stratum_core::{
+            binary_sv2::B0255Owned,
+            bitcoin::{ScriptBuf, Target, TxOut},
+            channels_sv2::{
+                client::extended::ExtendedChannel, extranonce_manager::ExtranoncePrefix,
+                server::jobs::factory::JobFactory,
+            },
+            codec_sv2::EncodableFrame as _,
+            job_declaration_sv2::AllocateMiningJobTokenSuccessOwned,
+            parsers_sv2::Mining,
+        },
+        tp_type::TemplateProviderType,
+        utils::types::{InboundFrame, OutboundFrame},
+    };
+
+    use crate::{
+        config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
+        jd_mode::JDMode,
+    };
+
+    const TEMPLATE_VALUE: u64 = 5_000_000_000;
+
+    // A coinbase-only channel manager mining through an open upstream channel on the chain tip
+    // of `prev_hash(1)`, holding one token, with no downstream connected. Returns it with what it
+    // sends the Pool and what it sends the JDS.
+    async fn channel_manager() -> (
+        ChannelManager,
+        Receiver<OutboundFrame>,
+        Receiver<JobDeclarationOwned>,
+    ) {
+        let config = JobDeclaratorClientConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            ProtocolConfig::new(
+                2,
+                2,
+                CoinbaseRewardScript::from_descriptor("raw(51)").unwrap(),
+            ),
+            10.0,
+            1,
+            PoolConfig::new(
+                Secp256k1PublicKey::try_from(
+                    "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
+                )
+                .unwrap(),
+                Secp256k1SecretKey::try_from(
+                    "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
+                )
+                .unwrap(),
+            ),
+            60,
+            TemplateProviderType::Sv2Tp {
+                address: "127.0.0.1:0".to_string(),
+                public_key: None,
+            },
+            vec![],
+            "test-jdc".to_string(),
+            Some(ConfigJDCMode::CoinbaseOnly),
+            vec![],
+            vec![],
+            None,
+            None,
+            None,
+        );
+        let (upstream_sender, sent_to_pool) = unbounded();
+        let (_, upstream_receiver) = unbounded();
+        let (jd_sender, sent_to_jds) = unbounded();
+        let (_, jd_receiver) = unbounded();
+        let (tp_sender, _) = unbounded();
+        let (_, tp_receiver) = unbounded();
+        let (_, downstream_receiver) = unbounded();
+        let mode = JDMode::new(ConfigJDCMode::CoinbaseOnly);
+        mode.activate();
+
+        let manager = ChannelManager::new(
+            config,
+            upstream_sender,
+            upstream_receiver,
+            jd_sender,
+            jd_receiver,
+            tp_sender,
+            tp_receiver,
+            downstream_receiver,
+            jds_coinbase_outputs(),
+            vec![],
+            vec![],
+            mode,
+        )
+        .await
+        .unwrap();
+        manager.set_user_identity("test-user".to_string());
+        manager.upstream_state.set(UpstreamState::Connected);
+        manager
+            .upstream_channel
+            .set(Some(
+                ExtendedChannel::new(
+                    7,
+                    "test-user".to_string(),
+                    ExtranoncePrefix::from_wire(vec![0, 0, 0, 1]).unwrap(),
+                    Target::from_le_bytes([0xff; 32]),
+                    1.0,
+                    true,
+                    12,
+                    None,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        manager
+            .job_factory
+            .set(Some(JobFactory::new(
+                true,
+                None,
+                Some("test-jdc".to_string()),
+            )))
+            .unwrap();
+        manager.last_new_prev_hash.set(Some(prev_hash(1))).unwrap();
+        manager
+            .allocate_tokens
+            .with(|tokens| {
+                tokens.push_back(AllocateMiningJobTokenSuccessOwned {
+                    request_id: 0,
+                    mining_job_token: token(),
+                    coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
+                })
+            })
+            .unwrap();
+        (manager, sent_to_pool, sent_to_jds)
+    }
+
+    fn token() -> B0255Owned {
+        0_u64.to_le_bytes().to_vec().try_into().unwrap()
+    }
+
+    // Coinbase outputs as a JDS hands them out, for JDC to fill in from each template.
+    fn jds_coinbase_outputs() -> Vec<u8> {
+        consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from_hex("0014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc")
+                .unwrap(),
+        }])
+    }
+
+    fn template(template_id: u64, future_template: bool) -> NewTemplateOwned {
+        NewTemplateOwned {
+            template_id,
+            future_template,
+            version: 536_870_912,
+            coinbase_tx_version: 2,
+            coinbase_prefix: vec![82, 0].try_into().unwrap(),
+            coinbase_tx_input_sequence: u32::MAX,
+            coinbase_tx_value_remaining: TEMPLATE_VALUE,
+            coinbase_tx_outputs_count: 1,
+            coinbase_tx_outputs: vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 226, 246, 28, 63, 113, 209,
+                222, 253, 63, 169, 153, 223, 163, 105, 83, 117, 92, 105, 6, 137, 121, 153, 98, 180,
+                139, 235, 216, 54, 151, 78, 140, 249,
+            ]
+            .try_into()
+            .unwrap(),
+            coinbase_tx_locktime: 0,
+            merkle_path: vec![].try_into().unwrap(),
+        }
+    }
+
+    fn prev_hash(template_id: u64) -> SetNewPrevHashTdpOwned {
+        SetNewPrevHashTdpOwned {
+            template_id,
+            prev_hash: [template_id as u8; 32].into(),
+            ntime_start: 1_700_000_000,
+            n_bits: 0x1d00ffff,
+            target: [0xff; 32].into(),
+        }
+    }
+
+    fn sent_to_pool(receiver: &Receiver<OutboundFrame>) -> Vec<MiningOwned> {
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .map(|frame| {
+                let mut bytes = vec![0; frame.encoded_length()];
+                frame.encode_into(&mut bytes).unwrap();
+                let mut frame = InboundFrame::from_bytes(bytes.into()).unwrap();
+                let message_type = frame.header().msg_type();
+                Mining::try_from((message_type, frame.payload()))
+                    .unwrap()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    // The custom job belongs to the template and the upstream channel, not to whoever mines it,
+    // so it goes out with no downstream connected too.
+    #[tokio::test]
+    async fn template_with_no_downstream_connected_sends_its_custom_job() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        let sent = sent_to_pool(&sent_to_pool_receiver);
+        let [MiningOwned::SetCustomMiningJob(custom_job)] = sent.as_slice() else {
+            panic!("expected one custom job, the Pool got {sent:?}");
+        };
+        assert_eq!(custom_job.token, token());
     }
 }
