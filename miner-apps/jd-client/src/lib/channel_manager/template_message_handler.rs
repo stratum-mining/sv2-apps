@@ -44,7 +44,6 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
-        self.template_store.insert(msg.template_id, msg.clone());
         if msg.future_template {
             self.last_future_template
                 .set(Some(msg.clone()))
@@ -55,11 +54,11 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
         // Only request transaction data when the response can be consumed: building a
         // `DeclareMiningJob` requires the upstream channel and job factory, which only
-        // exist once `UpstreamState::Connected`. Templates received before the channel
-        // opens are still stored, and `handle_open_extended_mining_channel_success`
-        // requests their transaction data once the channel is established.
+        // exist once `UpstreamState::Connected`. Of the templates received before the channel
+        // opens, the downstreams are handed the last future template once it does, and
+        // `handle_open_extended_mining_channel_success` requests its transaction data then.
         if self.mode.is_full_template() && self.upstream_state.get() == UpstreamState::Connected {
-            self.request_transaction_data(msg.template_id).await?;
+            self.request_transaction_data(&msg).await?;
         }
 
         // Every downstream mines this template under the same custom job on the single upstream
@@ -223,6 +222,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", msg);
+        // An error answers the request as finally as a success does, and its template goes with
+        // it.
+        self.take_requested_template(msg.template_id)?;
         let error_code = msg.error_code.as_utf8_or_hex();
 
         if matches!(
@@ -261,10 +263,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             .allocate_tokens
             .with(|tokens| tokens.pop_front())
             .map_err(JDCError::shutdown)?;
-        let template_message = self
-            .template_store
-            .remove(&msg.template_id)
-            .map(|(_, template)| template);
+        let template_message = self.take_requested_template(msg.template_id)?;
         let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
         let prevhash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
 
@@ -395,6 +394,27 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         info!("Received: {}", msg);
 
         self.cached_shares.clear();
+
+        // Templates still waiting for their transaction data were built on the previous chain
+        // tip, except the one this prevhash activates.
+        let mut released = Vec::new();
+        self.requested_templates
+            .with(|requested| {
+                requested.retain(|template| {
+                    let keep = template.template_id == msg.template_id;
+                    if !keep {
+                        released.push(template.template_id);
+                    }
+                    keep
+                })
+            })
+            .map_err(JDCError::shutdown)?;
+        for template_id in released {
+            warn!(
+                template_id,
+                "Releasing template waiting for its transaction data: the chain tip moved past it"
+            );
+        }
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -590,13 +610,14 @@ mod tests {
             codec_sv2::EncodableFrame as _,
             job_declaration_sv2::AllocateMiningJobTokenSuccessOwned,
             mining_sv2::SetCustomMiningJobOwned,
-            parsers_sv2::Mining,
+            parsers_sv2::{Mining, TemplateDistributionOwned},
         },
         tp_type::TemplateProviderType,
         utils::types::{InboundFrame, OutboundFrame},
     };
 
     use crate::{
+        channel_manager::MAX_REQUESTED_TEMPLATES,
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
         error::Action,
         jd_mode::JDMode,
@@ -604,14 +625,27 @@ mod tests {
 
     const TEMPLATE_VALUE: u64 = 5_000_000_000;
 
-    // A coinbase-only channel manager mining through an open upstream channel on the chain tip
-    // of `prev_hash(1)`, holding one token, with no downstream connected. Returns it with what it
-    // sends the Pool and what it sends the JDS.
+    // What a channel manager under test sends each of its peers.
+    struct Sent {
+        pool: Receiver<OutboundFrame>,
+        jds: Receiver<JobDeclarationOwned>,
+        tp: Receiver<TemplateDistributionOwned>,
+    }
+
+    // A coinbase-only channel manager from `channel_manager_in`. Returns it with what it sends
+    // the Pool and what it sends the JDS.
     async fn channel_manager() -> (
         ChannelManager,
         Receiver<OutboundFrame>,
         Receiver<JobDeclarationOwned>,
     ) {
+        let (manager, sent) = channel_manager_in(ConfigJDCMode::CoinbaseOnly).await;
+        (manager, sent.pool, sent.jds)
+    }
+
+    // A channel manager in `mode`. Outside solo mining it mines through an open upstream channel
+    // on the chain tip of `prev_hash(1)`, holding one token, with no downstream connected.
+    async fn channel_manager_in(mode: ConfigJDCMode) -> (ChannelManager, Sent) {
         let config = JobDeclaratorClientConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             ProtocolConfig::new(
@@ -638,7 +672,7 @@ mod tests {
             },
             vec![],
             "test-jdc".to_string(),
-            Some(ConfigJDCMode::CoinbaseOnly),
+            Some(mode),
             vec![],
             vec![],
             None,
@@ -649,11 +683,10 @@ mod tests {
         let (_, upstream_receiver) = unbounded();
         let (jd_sender, sent_to_jds) = unbounded();
         let (_, jd_receiver) = unbounded();
-        let (tp_sender, _) = unbounded();
+        let (tp_sender, sent_to_tp) = unbounded();
         let (_, tp_receiver) = unbounded();
         let (_, downstream_receiver) = unbounded();
-        let mode = JDMode::new(ConfigJDCMode::CoinbaseOnly);
-        mode.activate();
+        let jd_mode = JDMode::new(mode);
 
         let manager = ChannelManager::new(
             config,
@@ -667,10 +700,21 @@ mod tests {
             jds_coinbase_outputs(),
             vec![],
             vec![],
-            mode,
+            jd_mode.clone(),
         )
         .await
         .unwrap();
+        let sent = Sent {
+            pool: sent_to_pool,
+            jds: sent_to_jds,
+            tp: sent_to_tp,
+        };
+        if mode == ConfigJDCMode::SoloMining {
+            return (manager, sent);
+        }
+
+        // What the runtime and the JDS handshake leave behind once JDC works through a Pool.
+        jd_mode.activate();
         manager.set_user_identity("test-user".to_string());
         manager.upstream_state.set(UpstreamState::Connected);
         manager
@@ -708,7 +752,7 @@ mod tests {
                 })
             })
             .unwrap();
-        (manager, sent_to_pool, sent_to_jds)
+        (manager, sent)
     }
 
     fn token() -> B0255Owned {
@@ -933,5 +977,123 @@ mod tests {
         };
         assert_eq!(custom_job.token, token());
         assert_eq!(queued_tokens(&manager), 0);
+    }
+
+    // The templates waiting for their transaction data, oldest first.
+    fn requested_templates(manager: &ChannelManager) -> Vec<u64> {
+        manager
+            .requested_templates
+            .with(|requested| {
+                requested
+                    .iter()
+                    .map(|template| template.template_id)
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    // Solo and coinbase-only modes never ask for transaction data, and nothing else reads a stored
+    // template, so they keep none of the templates they are sent.
+    #[tokio::test]
+    async fn modes_that_request_no_transaction_data_keep_no_template() {
+        for mode in [ConfigJDCMode::SoloMining, ConfigJDCMode::CoinbaseOnly] {
+            let (mut manager, _sent) = channel_manager_in(mode).await;
+
+            for template_id in 2..10 {
+                manager
+                    .handle_new_template(None, template(template_id, template_id % 2 == 0), None)
+                    .await
+                    .unwrap();
+            }
+
+            assert!(requested_templates(&manager).is_empty());
+        }
+    }
+
+    // A full-template JDC asks for no transaction data before its upstream channel opens, so it
+    // keeps none of the templates it is sent until then.
+    #[tokio::test]
+    async fn templates_before_the_upstream_channel_opens_are_not_kept() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.upstream_state.set(UpstreamState::Pending);
+
+        for template_id in 2..10 {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+        }
+
+        assert!(sent.tp.try_recv().is_err());
+        assert!(requested_templates(&manager).is_empty());
+    }
+
+    // A template is kept until its transaction-data request is answered, and an error answers it
+    // as finally as a success does.
+    #[tokio::test]
+    async fn an_error_for_its_transaction_data_releases_the_template() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        assert_eq!(requested_templates(&manager), vec![2]);
+
+        manager
+            .handle_request_tx_data_error(
+                None,
+                RequestTransactionDataErrorOwned {
+                    template_id: 2,
+                    error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
+                        .to_string()
+                        .try_into()
+                        .unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(requested_templates(&manager).is_empty());
+    }
+
+    // A new chain tip releases the templates built on the previous one that still wait for their
+    // transaction data, and keeps the one it activates.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_the_templates_it_leaves_behind() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(requested_templates(&manager), vec![3]);
+    }
+
+    // However many requests go unanswered, only the newest templates wait for their transaction
+    // data, up to a fixed number.
+    #[tokio::test]
+    async fn templates_waiting_for_transaction_data_are_capped() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let templates = 2..2 + MAX_REQUESTED_TEMPLATES as u64 + 4;
+
+        for template_id in templates.clone() {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+        }
+
+        let newest: Vec<u64> = templates.skip(4).collect();
+        assert_eq!(requested_templates(&manager), newest);
     }
 }

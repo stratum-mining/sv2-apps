@@ -113,6 +113,11 @@ const JDC_LOCAL_PREFIX_BYTES: u8 = bytes_needed(JDC_MAX_CHANNELS);
 /// ```
 pub const SOLO_FULL_EXTRANONCE_SIZE: u8 = 20;
 
+// How many templates can wait for their transaction data at once. A Template Provider answers a
+// request within moments, so normally one or two wait; the cap only matters against one that
+// keeps sending templates without answering. Past it, the oldest request is released.
+const MAX_REQUESTED_TEMPLATES: usize = 16;
+
 /// A `DeclaredJob` encapsulates all the relevant data associated with a single
 /// job declaration, including its template, optional messages, coinbase output,
 /// and transaction list.
@@ -264,8 +269,11 @@ pub struct ChannelManager {
     // FIFO buffer of allocation tokens received from the JDS.
     // Oldest token is consumed first to minimize risk of JDS-side expiration.
     pub allocate_tokens: SharedLock<VecDeque<AllocateMiningJobTokenSuccessOwned>>,
-    // Stores templates as they arrive, keyed by template ID.
-    pub template_store: SharedMap<TemplateId, NewTemplateOwned>,
+    // Templates whose transaction data has been requested from the Template Provider and not
+    // received yet, oldest first. Nothing else reads a stored template, so one is kept only for
+    // its request: solo and coinbase-only modes keep none. The answer to the request, a new chain
+    // tip or the cap releases it.
+    requested_templates: SharedLock<VecDeque<NewTemplateOwned>>,
     // Stores the last declared job, keyed by the request ID used
     // when declaring the job to the JDS.
     pub last_declare_job_store: SharedMap<RequestId, DeclaredJob>,
@@ -428,7 +436,7 @@ impl ChannelManager {
             last_future_template: SharedLock::new(None),
             last_new_prev_hash: SharedLock::new(None),
             allocate_tokens: SharedLock::new(VecDeque::new()),
-            template_store: SharedMap::new(),
+            requested_templates: SharedLock::new(VecDeque::new()),
             last_declare_job_store: SharedMap::new(),
             template_id_to_upstream_job_id: SharedMap::new(),
             downstream_channel_id_and_job_id_to_template_id: SharedMap::new(),
@@ -1131,15 +1139,36 @@ impl ChannelManager {
         Ok(())
     }
 
-    /// Sends a transaction-data request for the template.
+    /// Sends a transaction-data request for `template`, and keeps the template until the request
+    /// is answered.
     ///
     /// Only call this when the response can be consumed (i.e., `UpstreamState::Connected`
-    /// in full-template mode). Templates received before the upstream channel opens are
-    /// covered by the re-request in `handle_open_extended_mining_channel_success`.
+    /// in full-template mode). Of the templates received before the upstream channel opens,
+    /// `handle_open_extended_mining_channel_success` requests the last future template.
     async fn request_transaction_data(
         &self,
-        template_id: TemplateId,
+        template: &NewTemplateOwned,
     ) -> JDCResult<(), error::ChannelManager> {
+        let template_id = template.template_id;
+        let released = self
+            .requested_templates
+            .with(|requested| {
+                requested.retain(|requested| requested.template_id != template_id);
+                requested.push_back(template.clone());
+                if requested.len() > MAX_REQUESTED_TEMPLATES {
+                    requested.pop_front()
+                } else {
+                    None
+                }
+            })
+            .map_err(JDCError::shutdown)?;
+        if let Some(released) = released {
+            warn!(
+                template_id = released.template_id,
+                "Releasing the oldest template waiting for its transaction data: too many requests are unanswered"
+            );
+        }
+
         let message =
             TemplateDistributionOwned::RequestTransactionData(RequestTransactionDataOwned {
                 template_id,
@@ -1150,6 +1179,22 @@ impl ChannelManager {
             .await
             .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
         Ok(())
+    }
+
+    // Takes `template_id` out of the templates waiting for their transaction data, if it is one.
+    #[allow(clippy::result_large_err)]
+    fn take_requested_template(
+        &self,
+        template_id: TemplateId,
+    ) -> JDCResult<Option<NewTemplateOwned>, error::ChannelManager> {
+        self.requested_templates
+            .with(|requested| {
+                let position = requested
+                    .iter()
+                    .position(|template| template.template_id == template_id)?;
+                requested.remove(position)
+            })
+            .map_err(JDCError::shutdown)
     }
 
     /// Utility method to request for more token to JDS.

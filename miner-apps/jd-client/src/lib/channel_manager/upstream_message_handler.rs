@@ -226,7 +226,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         if channel_state == UpstreamState::Connected {
             if self.mode.is_full_template() {
                 if let Some(template) = &template {
-                    self.request_transaction_data(template.template_id).await?;
+                    self.request_transaction_data(template).await?;
                 }
             }
 
