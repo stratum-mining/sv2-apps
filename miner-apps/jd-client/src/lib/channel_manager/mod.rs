@@ -1203,6 +1203,88 @@ impl ChannelManager {
         Ok(())
     }
 
+    // Builds the coinbase-only custom job that puts `template` on the upstream channel, paying
+    // `coinbase_outputs`, records it, and spends a token on it.
+    //
+    // Returns `None` while there is no upstream channel, chain tip, job factory or token to build
+    // the job with, or when the job factory rejects the template. The token is taken from the
+    // queue only once the job is built, so neither case spends one.
+    #[allow(clippy::result_large_err)]
+    fn build_coinbase_only_custom_job(
+        &self,
+        template: &NewTemplateOwned,
+        coinbase_outputs: &[TxOut],
+    ) -> JDCResult<Option<SetCustomMiningJobOwned>, error::ChannelManager> {
+        let upstream_channel = self
+            .upstream_channel
+            .with(|channel| {
+                channel
+                    .as_ref()
+                    .map(|channel| (channel.get_channel_id(), channel.get_full_extranonce_size()))
+            })
+            .map_err(JDCError::shutdown)?;
+        let Some((upstream_channel_id, full_extranonce_size)) = upstream_channel else {
+            return Ok(None);
+        };
+        let Some(prev_hash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? else {
+            return Ok(None);
+        };
+        let Some(token) = self
+            .allocate_tokens
+            .with(|tokens| tokens.front().map(|token| token.mining_job_token.clone()))
+            .map_err(JDCError::shutdown)?
+        else {
+            return Ok(None);
+        };
+
+        let custom_job = self
+            .job_factory
+            .with(|job_factory| {
+                job_factory.as_ref().map(|job_factory| {
+                    job_factory.new_custom_job(
+                        upstream_channel_id,
+                        self.request_id_factory.fetch_add(1, Ordering::Relaxed),
+                        token,
+                        prev_hash.clone().into(),
+                        template.clone(),
+                        coinbase_outputs.to_vec(),
+                        full_extranonce_size,
+                    )
+                })
+            })
+            .map_err(JDCError::shutdown)?;
+        let Some(custom_job) = custom_job else {
+            return Ok(None);
+        };
+        let custom_job = match custom_job {
+            Ok(custom_job) => custom_job,
+            Err(e) => {
+                error!(
+                    error = ?e,
+                    template_id = template.template_id,
+                    "Failed to build coinbase-only custom job"
+                );
+                return Ok(None);
+            }
+        };
+
+        self.allocate_tokens
+            .with(|tokens| tokens.pop_front())
+            .map_err(JDCError::shutdown)?;
+        self.last_declare_job_store.insert(
+            custom_job.request_id,
+            DeclaredJob {
+                declare_mining_job: None,
+                template: template.clone(),
+                prev_hash: Some(prev_hash),
+                set_custom_mining_job: Some(custom_job.clone()),
+                coinbase_output: self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
+                tx_list: Vec::new(),
+            },
+        );
+        Ok(Some(custom_job))
+    }
+
     // Runs the vardiff on extended channel.
     fn run_vardiff_on_extended_channel(
         downstream_id: DownstreamId,
