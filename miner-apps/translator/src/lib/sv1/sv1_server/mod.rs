@@ -678,7 +678,9 @@ impl Sv1Server {
             }
             debug!("SV1 Server main listener loop exited.");
 
-            // signal fallback coordinator that this task has completed its cleanup
+            // release the port before signalling the fallback coordinator, so a subsequent
+            // fallback can re-bind the same listening address
+            drop(listener);
             fallback_handler.done();
         });
 

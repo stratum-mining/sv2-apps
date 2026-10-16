@@ -629,6 +629,9 @@ impl ChannelManager {
             };
 
             if !ready {
+                // Release the port before signalling the fallback coordinator, as the exit
+                // below the accept loop does, so a subsequent fallback can re-bind it.
+                drop(server);
                 fallback_handler.done();
                 return;
             }
