@@ -78,7 +78,8 @@ authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
 Make sure the machine running the Translator Proxy has its clock synced with an NTP server. Certificate validation is time-sensitive, and even a small drift of a few seconds can trigger an `InvalidCertificate` error.
 
 #### **Downstream Configuration**
-- `downstream_address`: IP address for SV1 miners to connect to
+- `downstream_address`: IP address for SV1 miners to connect to. SV1 is plaintext, so keep it on
+  a trusted LAN (see [Trust Model](#trust-model))
 - `downstream_port`: Port for SV1 miners to connect to
 
 tProxy uses `sv1_api` to parse the initial `mining.configure`, `mining.subscribe`, or
@@ -143,6 +144,56 @@ If verification fails, tProxy triggers upstream fallback instead of forwarding t
   shared job. A late joiner also receives the current shared job without resetting
   shared history or the keepalive schedule. Normal upstream jobs are forwarded
   without waiting for keepalive deadlines.
+
+#### **Difficulty and Targets**
+Each miner is advertised the easier of two targets: the one vardiff wants for it, and the target
+of its upstream SV2 channel. With `enable_vardiff = false`, only the upstream target applies. The
+difficulty is worked out again whenever either target changes, and a new `mining.set_difficulty`
+is sent only when the result changes. A larger target is easier, so a miner never works at a
+difficulty harder than the upstream's and never discards a share the upstream would credit, and it
+works at the difficulty vardiff wants as far as the upstream allows. Shares that meet a miner's
+difficulty but not the upstream target are accepted from the miner and not forwarded.
+
+- **Initial difficulty**: with `enable_vardiff = true`, vardiff starts from the difficulty derived
+  from `min_individual_miner_hashrate` and `shares_per_minute`, which tProxy also requests as the
+  channel's `max_target`, the easiest target the upstream may assign. With
+  `enable_vardiff = false`, tProxy accepts any target and a miner starts at the upstream's target
+  for the channel; `shares_per_minute` is then only used to derive the hashrate reported for it.
+- **Vardiff updates**: each update is sent upstream as an `UpdateChannel` whose `max_target` is
+  the new target (in aggregated mode, the hardest across miners). An easier target applies right
+  away; a harder one applies as far as the upstream target allows, and fully once the upstream
+  lowers its target to it with `SetTarget`.
+- **Upstream targets**: a miner follows a `SetTarget` easier than its difficulty. The upstream can
+  send one without breaking the rules below, for instance while a lower `max_target` is within its
+  30 seconds or after rejecting it, and in aggregated mode a miner can join a shared channel whose
+  target is easier than its initial difficulty. A `SetTarget` harder than the target vardiff wants
+  leaves the miner at the vardiff difficulty.
+- **Rounding**: difficulties of 1 and above are advertised rounded down to a power of two. Shares
+  are validated against the advertised difficulty, so a miner is never held to a harder one than
+  it was told.
+
+tProxy enforces the Stratum V2 rules on targets:
+- The target assigned when a channel opens must not exceed the requested `max_target`.
+- A `SetTarget` must not exceed the `max_target` of the latest `UpdateChannel` the upstream
+  accepted, or of the open request. tProxy gives the upstream 30 seconds to process each
+  `UpdateChannel`: until then, a `SetTarget` within the previous value is still accepted, since
+  the upstream may have sent it before processing the change. A change the upstream rejects with
+  `UpdateChannel.Error` leaves the previous value in force.
+
+An upstream that breaks either rule triggers fallback to the next configured upstream.
+
+The specification recommends not changing `max_target` again within those 30 seconds, so that a
+client can tell which value a `SetTarget` is bound by. tProxy sends every change right away
+instead, so the upstream learns each new value without waiting, and accepts a `SetTarget` within
+any value the upstream may still be bound by. If several changes are within their 30 seconds when
+an `UpdateChannel.Error` arrives, tProxy cannot tell which one was rejected and keeps the easiest
+of them in force until the next change.
+
+An upstream that takes longer than 30 seconds to answer an `UpdateChannel` can still be misjudged.
+When its `UpdateChannel.Error` arrives late, tProxy goes back to the easier of the rejected value
+and the one it replaced. But a `SetTarget` above a lower value that arrives after the 30 seconds
+and before that late rejection triggers fallback, since nothing tells tProxy that a rejection is
+coming.
 
 #### **Miner Telemetry**
 Translator Proxy can enrich the monitoring API with telemetry from the ASICs connected to its SV1
@@ -334,3 +385,53 @@ authority_pubkey = "backup_pool_pubkey"
 - **Non-Aggregated Mode**: Each miner gets individual upstream channel
   - Better isolation between miners
   - Individual difficulty adjustment by the upstream Pool
+
+### **Upstream Fallback**
+
+When the current upstream cannot be used, tProxy falls back to the next upstream in its
+configuration. Fallback disconnects every SV1 miner; miners reconnect to tProxy once the next
+upstream is ready. Each upstream is used at most once: when none is left, tProxy stops.
+
+A failed channel open triggers fallback in both channel modes, whether the upstream rejects it
+with `OpenMiningChannel.Error` or assigns a target easier than the requested `max_target`. In
+non-aggregated mode the channel belongs to a single miner, yet every miner is disconnected, since
+the next upstream may accept the same request. When the miner or the configuration causes the
+failure instead, the miner fails again after reconnecting and causes another fallback, as tProxy
+trusts the miners connected to it (see [Trust Model](#trust-model)).
+
+An upstream can also ask tProxy to move with `Reconnect`, for example before maintenance. tProxy
+disconnects its miners as for a fallback, then connects to the requested host and port with the
+same authority key and user identity, so the request can only point to another server of the same
+pool. If the requested endpoint cannot be used or reached, tProxy moves on to the configured
+upstreams. A request arriving less than 5 minutes after the last one tProxy followed is ignored,
+and tProxy stays on the current upstream. A `ChannelEndpointChanged` reconnects to the current
+upstream the same way, so that extensions are negotiated again. Within 5 minutes of the last
+followed request it is ignored like a `Reconnect`, and the extensions negotiated on the current
+connection stay in use.
+
+Fallback is also triggered by an upstream payout that fails verification (see
+[Solo/Donation Payout Verification](#solodonation-payout-verification)) and by a `SetTarget` above
+the allowed `max_target` (see [Difficulty and Targets](#difficulty-and-targets)).
+
+### **Trust Model**
+
+tProxy is meant to run in the same LAN as the SV1 miners it serves, and that LAN is trusted.
+
+- **The SV1 side is plaintext.** Miners connect over unencrypted, unauthenticated SV1. Anyone on
+  the network path between miners and tProxy can read their traffic, including the
+  `mining.authorize` credentials, and an on-path peer can modify it. tProxy does not offer TLS for
+  SV1: protecting this hop would depend on every miner's firmware supporting TLS and verifying
+  certificates.
+- **The upstream side is protected.** The connection that crosses untrusted networks, to the
+  upstream, uses Stratum V2 with Noise encryption, authenticated with the configured
+  `authority_pubkey`.
+- **Listeners must stay on the LAN.** The example configurations bind `downstream_address` and
+  `monitoring_address` to `0.0.0.0`, which listens on every interface. The monitoring API has no
+  authentication either. On a host reachable from untrusted networks, bind both to the LAN
+  interface or restrict them with a firewall, and never expose them to the internet.
+- **Connected miners are trusted.** tProxy assumes every connected miner acts in good faith: some
+  failures caused by a single miner affect all the miners sharing the translator (see
+  [Upstream Fallback](#upstream-fallback)).
+
+These are operational assumptions: nothing in tProxy verifies that the network or the miners can
+be trusted.

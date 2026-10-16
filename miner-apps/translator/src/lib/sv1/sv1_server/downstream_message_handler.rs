@@ -116,9 +116,12 @@ impl IsServer for Sv1Server {
         };
 
         let job = self
-            .valid_sv1_jobs
-            .with(&channel_id, |jobs| {
-                jobs.get(job_id).map(|job| job.notify.clone())
+            .channels
+            .with(&channel_id, |channel| {
+                channel
+                    .jobs
+                    .as_ref()
+                    .and_then(|jobs| jobs.get(job_id).map(|job| job.notify.clone()))
             })
             .flatten();
 
