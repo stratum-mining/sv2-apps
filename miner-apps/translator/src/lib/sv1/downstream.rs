@@ -204,6 +204,8 @@ pub struct DownstreamData {
     // Current SV1 share-validation target. This follows the advertised
     // difficulty sent to the miner, including any SV1 pow2 rounding.
     pub target: Target,
+    /// Hashrate estimate of the miner: the latest vardiff estimate, or with vardiff disabled the
+    /// hashrate its upstream target implies.
     pub hashrate: Option<Hashrate>,
     #[cfg(feature = "monitoring")]
     pub connection_ip: IpAddr,
@@ -223,16 +225,18 @@ pub struct DownstreamData {
     pub(super) accepted_share_hashes: Sv1AcceptedShareCache,
     /// Number of queued `mining.set_extranonce` notifications not yet applied by this downstream.
     pub(super) pending_set_extranonce_notifications: usize,
-    // Hashrate reported once the next mining.set_difficulty is sent with a new
-    // mining.notify.
-    pub pending_hashrate: Option<Hashrate>,
+    /// Target vardiff wants for the miner, `None` when vardiff is disabled.
+    pub(super) desired_target: Option<Target>,
+    /// Validation target of the latest `mining.set_difficulty` queued for the miner. `target`
+    /// catches up when that difficulty is sent with the next job.
+    pub(super) advertised_target: Option<Target>,
     pub stable_hashrate: bool,
     // Queue of Sv1 handshake messages received while waiting for SV2 channel to open
     pub queued_sv1_handshake_messages: Vec<Client2Server>,
     // Stores pending shares to be sent to the sv1_server
     pub pending_share: Option<SubmitShareWithChannelId>,
-    // Exact target currently accepted upstream, used to decide whether a
-    // stricter downstream difficulty must wait for a SetTarget response.
+    // Exact target of the miner's upstream channel. The miner is never advertised a harder
+    // difficulty.
     pub upstream_target: Option<Target>,
     /// Timestamp anchoring the next keepalive interval.
     ///
@@ -276,7 +280,8 @@ impl DownstreamData {
             job_validation_contexts: Sv1JobStore::new(max_past_jobs),
             accepted_share_hashes: Sv1AcceptedShareCache::default(),
             pending_set_extranonce_notifications: 0,
-            pending_hashrate: None,
+            desired_target: None,
+            advertised_target: None,
             stable_hashrate: false,
             queued_sv1_handshake_messages: Vec::new(),
             pending_share: None,
@@ -304,15 +309,6 @@ impl DownstreamData {
 
     pub(super) fn job_validation_context(&self, job_id: &str) -> Option<Sv1JobValidationContext> {
         self.job_validation_contexts.get(job_id).cloned()
-    }
-
-    pub fn set_pending_hashrate(
-        &mut self,
-        new_hashrate: Option<Hashrate>,
-        downstream_id: DownstreamId,
-    ) {
-        self.pending_hashrate = new_hashrate;
-        debug!("Downstream {downstream_id}: Set pending hashrate");
     }
 
     pub fn set_upstream_target(&mut self, upstream_target: Target, downstream_id: DownstreamId) {
@@ -677,9 +673,6 @@ impl Downstream {
                 }
                 let difficulty = data.cached_set_difficulty.take().map(|difficulty| {
                     data.target = difficulty.target;
-                    if let Some(hashrate) = data.pending_hashrate.take() {
-                        data.hashrate = Some(hashrate);
-                    }
                     difficulty.message
                 });
                 let extranonce = data.cached_set_extranonce.take();
