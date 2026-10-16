@@ -30,12 +30,11 @@ pub fn spawn_io_tasks(
     {
         let cancellation_token_clone = cancellation_token.clone();
         let fallback_coordinator_clone = fallback_coordinator.clone();
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback_handler = fallback_coordinator_clone.register();
         task_manager.spawn(
             async move {
-                // we just spawned a new task that's relevant to fallback coordination
-                // so register it with the fallback coordinator
-                let fallback_handler = fallback_coordinator_clone.register();
-
                 // get the cancellation token that signals fallback
                 let fallback_token = fallback_coordinator_clone.token();
 
@@ -90,12 +89,11 @@ pub fn spawn_io_tasks(
 
     {
         let fallback_coordinator_clone = fallback_coordinator.clone();
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback_handler = fallback_coordinator_clone.register();
         task_manager.spawn(
             async move {
-                // we just spawned a new task that's relevant to fallback coordination
-                // so register it with the fallback coordinator
-                let fallback_handler = fallback_coordinator_clone.register();
-
                 // get the cancellation token that signals fallback
                 let fallback_token = fallback_coordinator_clone.token();
 

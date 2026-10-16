@@ -573,9 +573,10 @@ impl TranslatorRuntime<UpstreamReady> {
         let monitoring_fallback = self.fallback_coordinator.clone();
         self.task_manager.spawn({
             let cancellation_token = self.translator.cancellation_token.clone();
+            // register before spawning, so the task counts as pending for fallback
+            // from the moment it exists rather than from its first poll
+            let fallback_handler = monitoring_fallback.register();
             async move {
-                let fallback_handler = monitoring_fallback.register();
-
                 if let Err(e) = monitoring_server.run(shutdown_signal).await {
                     error!("Monitoring server error: {:?}", e);
                     cancellation_token.cancel();
@@ -590,9 +591,11 @@ impl TranslatorRuntime<UpstreamReady> {
         self.task_manager.spawn({
             let cancellation_token = self.translator.cancellation_token.clone();
             let sv1_server = self.state.sv1_server.clone();
+            // register before spawning, so the task counts as pending for fallback
+            // from the moment it exists rather than from its first poll
+            let fallback_handler = telemetry_fallback.register();
             async move {
                 let fallback_token = telemetry_fallback.token();
-                let fallback_handler = telemetry_fallback.register();
 
                 sv1_server
                     .run_miner_telemetry_loop(refresh_interval, cancellation_token, fallback_token)

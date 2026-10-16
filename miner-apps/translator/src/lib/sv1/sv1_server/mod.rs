@@ -529,11 +529,10 @@ impl Sv1Server {
             .downstream_difficulty_config
             .job_keepalive_interval_secs
             > 0;
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback_handler = fallback_coordinator.register();
         task_manager_clone.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
             // get the cancellation token that signals fallback
             let fallback_token = fallback_coordinator.token();
 

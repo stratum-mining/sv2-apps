@@ -165,9 +165,10 @@ impl<State> JdcRuntime<State> {
         let monitoring_fallback = self.fallback_coordinator.clone();
         self.task_manager.spawn({
             let cancellation_token = self.jd_client.cancellation_token.clone();
+            // register before spawning, so the task counts as pending for fallback
+            // from the moment it exists rather than from its first poll
+            let fallback_handler = monitoring_fallback.register();
             async move {
-                let fallback_handler = monitoring_fallback.register();
-
                 if let Err(e) = monitoring_server.run(shutdown_signal).await {
                     error!("Monitoring server error: {:?}", e);
                     cancellation_token.cancel();
@@ -182,9 +183,11 @@ impl<State> JdcRuntime<State> {
         let telemetry_cm = channel_manager.clone();
         self.task_manager.spawn({
             let cancellation_token = self.jd_client.cancellation_token.clone();
+            // register before spawning, so the task counts as pending for fallback
+            // from the moment it exists rather than from its first poll
+            let fallback_handler = telemetry_fallback.register();
             async move {
                 let fallback_token = telemetry_fallback.token();
-                let fallback_handler = telemetry_fallback.register();
 
                 telemetry_cm
                     .run_miner_telemetry_loop(refresh_interval, cancellation_token, fallback_token)

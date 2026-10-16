@@ -207,8 +207,8 @@ impl JobDeclarator {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) {
-        // we just spawned a new task that's relevant to fallback coordination
-        // so register it with the fallback coordinator
+        // register before spawning the message loop below, so the task counts as pending for
+        // fallback from the moment it exists rather than from its first poll
         let fallback_handler = fallback_coordinator.register();
 
         // get the cancellation token that signals fallback

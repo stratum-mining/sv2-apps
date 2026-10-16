@@ -70,11 +70,12 @@ pub fn spawn_io_tasks(
     {
         let cancellation_token_clone = cancellation_token.clone();
         let fallback_coordinator_clone = fallback_coordinator.clone();
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback = FallbackRegistration::new(fallback_coordinator_clone);
 
         task_manager.spawn(
             async move {
-                let fallback = FallbackRegistration::new(fallback_coordinator_clone);
-
                 trace!("Reader task started");
 
                 loop {
@@ -128,10 +129,11 @@ pub fn spawn_io_tasks(
 
     {
         let fallback_coordinator_clone = fallback_coordinator.clone();
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback = FallbackRegistration::new(fallback_coordinator_clone);
         task_manager.spawn(
             async move {
-                let fallback = FallbackRegistration::new(fallback_coordinator_clone);
-
                 trace!("Writer task started");
 
                 loop {
