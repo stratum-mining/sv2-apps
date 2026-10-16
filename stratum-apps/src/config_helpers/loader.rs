@@ -82,7 +82,7 @@ pub fn load_config<T: DeserializeOwned>(
 
     // Upstreams defined as `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` are assembled into
     // an array and applied as a single override, which replaces the file's array.
-    if let Some(upstreams) = collect_env_upstreams(env_prefix) {
+    if let Some(upstreams) = collect_env_upstreams(env_prefix, std::env::vars()) {
         builder = builder.set_override("upstreams", upstreams)?;
     }
 
@@ -140,13 +140,17 @@ fn env_enum_variant(prefix_marker: &str, key: &str) -> Result<Option<String>, Co
 }
 
 /// Collects `<PREFIX>__UPSTREAM_<NAME>__<FIELD>` environment variables into a
-/// `config` array value, or `None` if none are set.
-fn collect_env_upstreams(env_prefix: &str) -> Option<Value> {
+/// `config` array value, or `None` if none are set. Values remain strings until
+/// deserialization so textual identities retain their exact spelling.
+fn collect_env_upstreams(
+    env_prefix: &str,
+    vars: impl Iterator<Item = (String, String)>,
+) -> Option<Value> {
     let marker = format!("{}__UPSTREAM_", env_prefix.to_uppercase());
 
     // name -> (field -> raw value); BTreeMaps keep a deterministic, sorted order.
     let mut grouped: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for (key, value) in std::env::vars() {
+    for (key, value) in vars {
         let Some(rest) = key.to_uppercase().strip_prefix(&marker).map(str::to_owned) else {
             continue;
         };
@@ -172,7 +176,7 @@ fn collect_env_upstreams(env_prefix: &str) -> Option<Value> {
         .map(|fields| {
             let mut table: Map<String, Value> = Map::new();
             for (field, raw) in fields {
-                table.insert(field, parse_env_value(raw));
+                table.insert(field, Value::new(None, ValueKind::String(raw)));
             }
             Value::new(None, ValueKind::Table(table))
         })
@@ -386,6 +390,27 @@ mod tests {
     struct UpstreamConfig {
         #[serde(default)]
         upstreams: Vec<TestUpstream>,
+    }
+
+    #[test]
+    fn env_upstreams_preserve_text_and_deserialize_typed_fields() {
+        for identity in ["00123", "1e3", "TRUE", "false", "ordinary-worker"] {
+            let vars = [
+                ("TEXT__UPSTREAM_01__ADDRESS", "127.0.0.1"),
+                ("TEXT__UPSTREAM_01__PORT", "34265"),
+                ("TEXT__UPSTREAM_01__USER_IDENTITY", identity),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()));
+            let upstreams: Vec<TestUpstream> = collect_env_upstreams("TEXT", vars)
+                .unwrap()
+                .try_deserialize()
+                .unwrap();
+            assert_eq!(upstreams.len(), 1);
+            assert_eq!(upstreams[0].address, "127.0.0.1");
+            assert_eq!(upstreams[0].port, 34265);
+            assert_eq!(upstreams[0].user_identity, identity);
+        }
     }
 
     #[test]

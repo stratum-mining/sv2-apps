@@ -29,7 +29,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::net::TcpListener;
 use tracing::info;
@@ -97,7 +97,8 @@ pub struct ApiDoc;
 #[derive(Clone)]
 struct ServerState {
     cache: Arc<SnapshotCache>,
-    start_time: u64,
+    /// Monotonic start time, independent of wall-clock corrections.
+    start_time: Instant,
     metrics: PrometheusMetrics,
 }
 
@@ -164,10 +165,7 @@ impl MonitoringServer {
         sv2_clients_monitoring: Option<Arc<dyn Sv2ClientsMonitoring + Send + Sync + 'static>>,
         refresh_interval: Duration,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let start_time = Instant::now();
 
         let has_server = server_monitoring.is_some();
         let has_sv2_clients = sv2_clients_monitoring.is_some();
@@ -490,11 +488,7 @@ async fn handle_health() -> Json<HealthResponse> {
     )
 )]
 async fn handle_global(State(state): State<ServerState>) -> Json<GlobalInfo> {
-    let uptime_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        - state.start_time;
+    let uptime_secs = state.start_time.elapsed().as_secs();
 
     let snapshot = state.cache.get_snapshot();
 
@@ -824,19 +818,15 @@ async fn handle_sv1_client_by_id(
 ///
 /// All GaugeVec metric values are updated atomically by the background cache refresh
 /// task in `SnapshotCache::refresh()`. This handler only needs to:
-/// 1. Set the uptime gauge (requires wall-clock time at scrape time)
+/// 1. Set the uptime gauge from the monotonic start time
 /// 2. Gather and encode all registered metrics
 ///
 /// Because metric values are always kept in sync with the snapshot data, there is
 /// never a gap where label series momentarily disappear. Tests can assert on metrics
 /// directly after a cache refresh without polling for transient states.
 async fn handle_prometheus_metrics(State(state): State<ServerState>) -> Response {
-    // Uptime is the only metric set at scrape time (needs current wall clock)
-    let uptime_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        - state.start_time;
+    // Uptime is the only metric set at scrape time.
+    let uptime_secs = state.start_time.elapsed().as_secs();
     state.metrics.sv2_uptime_seconds.set(uptime_secs as f64);
 
     // Gather and encode — all other metrics were set by the last cache refresh
@@ -1066,10 +1056,7 @@ mod tests {
 
         cache.refresh();
 
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let start_time = Instant::now();
 
         let state = ServerState {
             cache,
@@ -1245,6 +1232,35 @@ mod tests {
         let resp: GlobalInfo = serde_json::from_str(&body).unwrap();
         assert!(resp.server.is_none());
         assert!(resp.sv2_clients.is_none());
+    }
+
+    #[tokio::test]
+    async fn uptime_handlers_use_elapsed_monotonic_time() {
+        let server = MonitoringServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            None,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let mut state = server.state;
+        state.start_time = Instant::now() - Duration::from_secs(60);
+
+        let before = state.start_time.elapsed().as_secs();
+        let global = handle_global(State(state.clone())).await.0;
+        let response = handle_prometheus_metrics(State(state.clone())).await;
+        let after = state.start_time.elapsed().as_secs();
+
+        assert!((before..=after).contains(&global.uptime_secs));
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body(response).await;
+        let uptime: u64 = body
+            .lines()
+            .find_map(|line| line.strip_prefix("sv2_uptime_seconds "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((before..=after).contains(&uptime));
     }
 
     #[tokio::test]
@@ -1702,10 +1718,7 @@ mod tests {
         );
         cache.refresh();
 
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let start_time = Instant::now();
 
         let state = ServerState {
             cache: cache.clone(),
