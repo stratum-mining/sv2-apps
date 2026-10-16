@@ -230,6 +230,8 @@ pub enum TproxyErrorKind {
     ChannelIdAlreadyInUse(ChannelId),
     /// An upstream opened a channel with a target easier than the requested `max_target`.
     InitialTargetAboveMaxTarget,
+    /// An upstream sent a `SetTarget` easier than the `max_target` it is bound by.
+    SetTargetAboveMaxTarget,
     /// Failed to process SetNewPrevHash message
     FailedToProcessSetNewPrevHash,
     /// Failed to process NewExtendedMiningJob message
@@ -338,6 +340,10 @@ impl fmt::Display for TproxyErrorKind {
             InitialTargetAboveMaxTarget => write!(
                 f,
                 "upstream opened a channel with a target easier than the requested max_target"
+            ),
+            SetTargetAboveMaxTarget => write!(
+                f,
+                "upstream sent a SetTarget easier than the max_target it is bound by"
             ),
             FailedToProcessSetNewPrevHash => write!(f, "Failed to process SetNewPrevHash message"),
             FailedToProcessNewExtendedMiningJob => {
