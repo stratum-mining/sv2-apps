@@ -513,6 +513,17 @@ async fn test_translator_fallback_on_setup_connection_error() {
 // causing TProxy to fall back to the secondary pool.
 #[tokio::test]
 async fn test_translator_fallback_on_open_mining_message_error() {
+    assert_fallback_on_open_mining_channel_error(false).await;
+}
+
+// The same rejection also falls back in aggregated mode, where it rejects the channel all miners
+// share.
+#[tokio::test]
+async fn aggregated_translator_fallback_on_open_mining_message_error() {
+    assert_fallback_on_open_mining_channel_error(true).await;
+}
+
+async fn assert_fallback_on_open_mining_channel_error(aggregate_channels: bool) {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     let (pool_1, pool_addr_1, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
@@ -547,7 +558,7 @@ async fn test_translator_fallback_on_open_mining_message_error() {
             pool_translator_sniffer_addr_1,
             pool_translator_sniffer_addr_2,
         ],
-        false,
+        aggregate_channels,
         vec![],
         vec![],
         None,
