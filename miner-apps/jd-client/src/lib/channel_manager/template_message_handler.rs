@@ -16,7 +16,7 @@ use stratum_apps::stratum_core::{
     parsers_sv2::Tlv,
     template_distribution_sv2::{SetNewPrevHashOwned as SetNewPrevHashTdpOwned, *},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     channel_manager::{ChannelManager, DeclaredJob},
@@ -246,16 +246,18 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
-        // Transaction data is only ever requested in full-template mode while the
-        // upstream channel is open. Ignore anything else as unsolicited or late, so
-        // stored templates stay available for the request sent when the channel opens.
-        if !self.mode.is_full_template() || self.upstream_state.get() != UpstreamState::Connected {
-            debug!(
+        // Only the answer for a template whose transaction data JDC requested and has not
+        // received yet is acted on, and taking the template out makes a duplicate answer one JDC
+        // never asked for. Requests are only sent in full-template mode while the upstream channel
+        // is open, and a fallback starts with none, so anything else is dropped here, before it
+        // can reach the token queue.
+        let Some(template_message) = self.take_requested_template(msg.template_id)? else {
+            warn!(
                 template_id = msg.template_id,
-                "Ignoring unexpected RequestTransactionData.Success"
+                "Ignoring RequestTransactionData.Success for a template whose data was not requested"
             );
             return Ok(());
-        }
+        };
 
         let transactions_data = msg.transaction_list;
         let excess_data = msg.excess_data;
@@ -269,7 +271,6 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             .allocate_tokens
             .with(|tokens| tokens.pop_front())
             .map_err(JDCError::shutdown)?;
-        let template_message = self.take_requested_template(msg.template_id)?;
         let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
         let prevhash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
 
@@ -282,13 +283,6 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             return Ok(());
         };
         _ = self.allocate_tokens(1).await;
-
-        let Some(template_message) = template_message else {
-            error!("Template not found, template id: {}", msg.template_id);
-            return Err(JDCError::log(JDCErrorKind::TemplateNotFound(
-                msg.template_id,
-            )));
-        };
 
         let mining_token = token.mining_job_token.clone();
         deserialized_outputs[0].value =
@@ -1061,5 +1055,131 @@ mod tests {
 
         let newest: Vec<u64> = templates.skip(4).collect();
         assert_eq!(requested_templates(&manager), newest);
+    }
+
+    fn transaction_data(template_id: u64) -> RequestTransactionDataSuccessOwned {
+        RequestTransactionDataSuccessOwned {
+            template_id,
+            excess_data: vec![].try_into().unwrap(),
+            transaction_list: vec![].try_into().unwrap(),
+        }
+    }
+
+    // Solo mode never asks the Template Provider for transaction data, so it ignores any it is
+    // sent, without reaching for a JDS it does not have.
+    #[tokio::test]
+    async fn solo_mode_ignores_transaction_data_it_never_requested() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::SoloMining).await;
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        assert!(sent.jds.try_recv().is_err());
+    }
+
+    // Transaction data JDC never asked for is dropped before it reaches the token queue, so it
+    // cannot make JDC ask the JDS for tokens. An answer to a request made before a fallback,
+    // which builds a new channel manager, is one of these.
+    #[tokio::test]
+    async fn transaction_data_never_requested_asks_the_jds_for_no_token() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+
+        for template_id in [2, 3] {
+            manager
+                .handle_request_tx_data_success(None, transaction_data(template_id), None)
+                .await
+                .unwrap();
+        }
+
+        assert!(sent.jds.try_recv().is_err());
+    }
+
+    // Transaction data JDC never asked for leaves the token queue and the requests still waiting
+    // for their answer as they were, and declares nothing.
+    #[tokio::test]
+    async fn transaction_data_never_requested_leaves_tokens_and_requests_alone() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(queued_tokens(&manager), 1);
+        assert_eq!(requested_templates(&manager), vec![2]);
+        assert!(sent.jds.try_recv().is_err());
+    }
+
+    // The answer to a request is acted on once. A duplicate of it declares nothing more and
+    // leaves the token queue alone.
+    #[tokio::test]
+    async fn duplicate_transaction_data_is_acted_on_once() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sent.tp.try_recv(),
+            Ok(TemplateDistributionOwned::RequestTransactionData(_))
+        ));
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        let declarations = std::iter::from_fn(|| sent.jds.try_recv().ok())
+            .filter(|message| matches!(message, JobDeclarationOwned::DeclareMiningJob(_)))
+            .count();
+        assert_eq!(declarations, 1);
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        assert!(sent.jds.try_recv().is_err());
+    }
+
+    // An error answers a request as finally as a success does, so transaction data that follows
+    // it is dropped before it reaches the token queue.
+    #[tokio::test]
+    async fn transaction_data_after_an_error_for_its_request_is_dropped() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_error(
+                None,
+                RequestTransactionDataErrorOwned {
+                    template_id: 2,
+                    error_code: ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
+                        .to_string()
+                        .try_into()
+                        .unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        assert_eq!(queued_tokens(&manager), 1);
+        assert!(sent.jds.try_recv().is_err());
     }
 }
