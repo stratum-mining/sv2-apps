@@ -2,7 +2,7 @@ use crate::{
     error::{self, TproxyError, TproxyErrorKind, TproxyResult},
     sv2::channel_manager::{
         AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES, AGGREGATED_TPROXY_MAX_CHANNELS, ChannelManager,
-        NON_AGGREGATED_TPROXY_MAX_CHANNELS,
+        NON_AGGREGATED_TPROXY_MAX_CHANNELS, PendingChannelRequest,
     },
     utils::{AGGREGATED_CHANNEL_ID, AggregatedState, aggregated_upstream_user_identity},
 };
@@ -74,7 +74,12 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         // Retrieve the pending channel request data.
         // Both aggregated and non-aggregated modes store data in pending_downstream_channels, keyed
         // by request_id, so the lookup is identical for both.
-        let (user_identity, nominal_hashrate, downstream_extranonce_len) = self
+        let PendingChannelRequest {
+            user_identity,
+            nominal_hashrate,
+            min_extranonce_size: downstream_extranonce_len,
+            max_target,
+        } = self
             .pending_downstream_channels
             .remove(&(m.request_id as DownstreamId))
             .ok_or_else(|| {
@@ -91,6 +96,21 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             );
             return Err(TproxyError::fallback(
                 TproxyErrorKind::ChannelIdAlreadyInUse(conflicting_id),
+            ));
+        }
+
+        // The spec requires the initial target not to exceed the requested `max_target`; a server
+        // that cannot satisfy it must reject the open instead.
+        let initial_target = Target::from_le_bytes(m.target.to_array());
+        if initial_target > max_target {
+            error!(
+                channel_id = m.channel_id,
+                %initial_target,
+                %max_target,
+                "Rejecting OpenExtendedMiningChannelSuccess with a target easier than the requested max_target"
+            );
+            return Err(TproxyError::fallback(
+                TproxyErrorKind::InitialTargetAboveMaxTarget,
             ));
         }
 
@@ -1421,6 +1441,21 @@ mod tests {
     use super::*;
     use crate::{TproxyMode, error::Action};
     use async_channel::{Receiver, unbounded};
+    use stratum_apps::utils::types::Hashrate;
+
+    fn pending_request(
+        user_identity: &str,
+        nominal_hashrate: Hashrate,
+        min_extranonce_size: usize,
+        max_target: Target,
+    ) -> PendingChannelRequest {
+        PendingChannelRequest {
+            user_identity: user_identity.to_string(),
+            nominal_hashrate,
+            min_extranonce_size,
+            max_target,
+        }
+    }
 
     fn channel_manager_with_mode(mode: TproxyMode) -> (ChannelManager, Receiver<MiningOwned>) {
         let (upstream_sender, _upstream_receiver_for_test) = unbounded();
@@ -1519,11 +1554,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_open_success_easier_than_the_requested_max_target() {
+        for mode in [TproxyMode::NonAggregated, TproxyMode::Aggregated] {
+            let (mut manager, sv1_server_receiver) = channel_manager_with_mode(mode);
+            let max_target = Target::from_le_bytes([0x11; 32]);
+            manager
+                .pending_downstream_channels
+                .insert(1, pending_request("miner", 1.0, 4, max_target));
+            // `open_success` assigns the easiest possible target.
+            let error = manager
+                .handle_open_extended_mining_channel_success(
+                    None,
+                    open_success(1, 7, 100, 0xaa, 4),
+                    None,
+                )
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error.action, Action::Fallback));
+            assert!(matches!(
+                error.kind,
+                TproxyErrorKind::InitialTargetAboveMaxTarget
+            ));
+            assert!(!manager.extended_channels.contains_key(&7));
+            assert!(!manager.group_channels.contains_key(&100));
+            assert!(sv1_server_receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_open_success_within_the_requested_max_target() {
+        let (mut manager, sv1_server_receiver) = channel_manager();
+        let max_target = Target::from_le_bytes([0x11; 32]);
+        let harder_target = Target::from_le_bytes([0x01; 32]);
+        for (request_id, channel_id, target) in [(1, 7, max_target), (2, 8, harder_target)] {
+            manager
+                .pending_downstream_channels
+                .insert(request_id, pending_request("miner", 1.0, 4, max_target));
+            let mut success = open_success(request_id as u32, channel_id, 100, 0xaa, 4);
+            success.target = target.to_le_bytes().into();
+            manager
+                .handle_open_extended_mining_channel_success(None, success, None)
+                .await
+                .unwrap();
+            assert!(matches!(
+                sv1_server_receiver.try_recv(),
+                Ok(MiningOwned::OpenExtendedMiningChannelSuccess(success)) if success.channel_id == channel_id
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_open_success_that_reuses_a_live_channel_id() {
         let (mut manager, sv1_server_receiver) = channel_manager();
-        manager
-            .pending_downstream_channels
-            .insert(1, ("first-miner".to_string(), 1.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("first-miner", 1.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
         manager
             .handle_open_extended_mining_channel_success(
                 None,
@@ -1534,9 +1621,10 @@ mod tests {
             .unwrap();
         sv1_server_receiver.recv().await.unwrap();
 
-        manager
-            .pending_downstream_channels
-            .insert(2, ("second-miner".to_string(), 1.0, 6));
+        manager.pending_downstream_channels.insert(
+            2,
+            pending_request("second-miner", 1.0, 6, Target::from_le_bytes([0xff; 32])),
+        );
         let error = manager
             .handle_open_extended_mining_channel_success(
                 None,
@@ -1566,9 +1654,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_open_success_that_reinterprets_its_channel_as_a_group() {
         let (mut manager, sv1_server_receiver) = channel_manager();
-        manager
-            .pending_downstream_channels
-            .insert(1, ("miner".to_string(), 1.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("miner", 1.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
 
         let error = manager
             .handle_open_extended_mining_channel_success(None, open_success(1, 7, 7, 0xaa, 4), None)
@@ -1585,9 +1674,10 @@ mod tests {
     async fn rejects_open_success_that_shadows_a_live_group() {
         let (mut manager, sv1_server_receiver) = channel_manager();
         manager.group_channels.insert(7, GroupChannel::new(7));
-        manager
-            .pending_downstream_channels
-            .insert(1, ("miner".to_string(), 1.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("miner", 1.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
 
         let error = manager
             .handle_open_extended_mining_channel_success(
@@ -1632,9 +1722,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_reserved_channel_id_in_aggregated_mode() {
         let (mut manager, sv1_server_receiver) = channel_manager_with_mode(TproxyMode::Aggregated);
-        manager
-            .pending_downstream_channels
-            .insert(1, ("miner".to_string(), 1.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("miner", 1.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
 
         let error = manager
             .handle_open_extended_mining_channel_success(
@@ -1654,9 +1745,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_reserved_group_id() {
         let (mut manager, sv1_server_receiver) = channel_manager();
-        manager
-            .pending_downstream_channels
-            .insert(1, ("miner".to_string(), 1.0, 4));
+        manager.pending_downstream_channels.insert(
+            1,
+            pending_request("miner", 1.0, 4, Target::from_le_bytes([0xff; 32])),
+        );
 
         let error = manager
             .handle_open_extended_mining_channel_success(
