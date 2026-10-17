@@ -153,7 +153,7 @@ impl Sv2Tp {
                                     });
                                 }
                                 Err(e) => {
-                                    error!(attempt, error = ?e, "Noise handshake failed");
+                                    error!(attempt, error = %e, "Noise handshake failed");
                                 }
                             }
                         }
