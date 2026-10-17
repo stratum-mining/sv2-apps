@@ -303,7 +303,7 @@ impl fmt::Display for JDCErrorKind {
             ChannelErrorReceiver(e) => write!(f, "Channel receive error: `{e:?}`"),
             Parser(e) => write!(f, "Parser error: `{e:?}`"),
             ChannelErrorSender => write!(f, "Sender error"),
-            NetworkHelpersError(e) => write!(f, "Network error: {e:?}"),
+            NetworkHelpersError(e) => write!(f, "Network error: {e}"),
             UnexpectedMessage(extension_type, message_type) => {
                 write!(f, "Unexpected Message: {extension_type} {message_type}")
             }

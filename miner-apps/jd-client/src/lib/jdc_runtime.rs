@@ -743,14 +743,14 @@ impl JdcRuntime<ChannelManagerReady> {
                         }
 
                         warn!(
-                            "Attempt {}/{} failed for pool={}:{}, jds={}:{}: {:?}",
+                            "Attempt {}/{} failed for pool={}:{}, jds={}:{}: {}",
                             attempt,
                             MAX_RETRIES,
                             upstream_entry.pool_host,
                             upstream_entry.pool_port,
                             upstream_entry.jds_host,
                             upstream_entry.jds_port,
-                            e
+                            e.kind
                         );
                         if attempt == MAX_RETRIES {
                             warn!(
