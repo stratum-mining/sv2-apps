@@ -382,12 +382,12 @@ impl TranslatorRuntime<Sv1ServerReady> {
                         }
 
                         warn!(
-                            "Attempt {}/{} failed for {}:{}: {:?}",
+                            "Attempt {}/{} failed for {}:{}: {}",
                             attempt,
                             MAX_RETRIES,
                             self.upstream_addresses[i].host,
                             self.upstream_addresses[i].port,
-                            e
+                            e.kind
                         );
                         if attempt == MAX_RETRIES {
                             warn!(
