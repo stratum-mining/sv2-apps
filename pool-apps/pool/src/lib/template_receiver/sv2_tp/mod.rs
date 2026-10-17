@@ -156,7 +156,7 @@ impl Sv2Tp {
                                     return Err(PoolError::shutdown(PoolErrorKind::InvalidKey))
                                 }
                                 Err(e) => {
-                                    error!(attempt, error = ?e, "Noise handshake failed");
+                                    error!(attempt, error = %e, "Noise handshake failed");
                                 }
                             }
                         }
