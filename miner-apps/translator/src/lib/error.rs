@@ -316,7 +316,7 @@ impl fmt::Display for TproxyErrorKind {
             }
             SV1Error(e) => write!(f, "Sv1 error: `{e:?}`"),
             TranslatorCore(e) => write!(f, "Translator core error: {e:?}"),
-            NetworkHelpersError(e) => write!(f, "Network helpers error: {e:?}"),
+            NetworkHelpersError(e) => write!(f, "Network helpers error: {e}"),
             ParserError(e) => write!(f, "Roles logic parser error: {e:?}"),
             RequestIdNotFound(request_id) => write!(
                 f,
