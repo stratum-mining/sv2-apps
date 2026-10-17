@@ -203,7 +203,7 @@ impl Sv2Tp {
                                     return Err(JDCError::shutdown(JDCErrorKind::InvalidKey));
                                 }
                                 Err(e) => {
-                                    error!(attempt, error = ?e, "Noise handshake failed");
+                                    error!(attempt, error = %e, "Noise handshake failed");
                                 }
                             }
                         }
