@@ -629,6 +629,9 @@ impl ChannelManager {
             };
 
             if !ready {
+                // Release the port before signalling the fallback coordinator, as the exit
+                // below the accept loop does, so a subsequent fallback can re-bind it.
+                drop(server);
                 fallback_handler.done();
                 return;
             }
@@ -655,12 +658,22 @@ impl ChannelManager {
                                 let task_manager_inner = task_manager_clone.clone();
                                 let supported_extensions_inner = supported_extensions.clone();
                                 let required_extensions_inner = required_extensions.clone();
+                                let fallback_token_inner = fallback_token.clone();
 
+                                // register before spawning, so the handshake counts as
+                                // pending for fallback from the moment the task exists;
+                                // `Downstream::start` registers the downstream's own task
+                                // before this handler is released
+                                let fallback_handler = fallback_coordinator_inner.register();
                                 task_manager_clone.spawn(async move {
                                     let noise_stream = tokio::select! {
                                         biased;
                                         _ = cancellation_token_inner.cancelled() => {
                                             info!("Shutdown received during handshake, dropping connection");
+                                            return;
+                                        }
+                                        _ = fallback_token_inner.cancelled() => {
+                                            info!("Fallback received during handshake, dropping connection");
                                             return;
                                         }
                                         result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
@@ -718,6 +731,7 @@ impl ChannelManager {
                                             move |downstream_id| this.remove_downstream(downstream_id)
                                         )
                                         .await;
+                                    fallback_handler.done();
                                 });
                                 }
 
@@ -751,11 +765,10 @@ impl ChannelManager {
     ) -> JDCResult<(), error::ChannelManager> {
         self.coinbase_output_constraints(coinbase_outputs).await?;
 
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback_handler = fallback_coordinator.register();
         task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
             // get the cancellation token that signals fallback
             let fallback_token = fallback_coordinator.token();
             let cm = self.clone();

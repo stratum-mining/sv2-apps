@@ -519,11 +519,10 @@ impl Sv1Server {
             .downstream_difficulty_config
             .job_keepalive_interval_secs
             > 0;
+        // register before spawning, so the task counts as pending for fallback
+        // from the moment it exists rather than from its first poll
+        let fallback_handler = fallback_coordinator.register();
         task_manager_clone.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
             // get the cancellation token that signals fallback
             let fallback_token = fallback_coordinator.token();
 
@@ -669,7 +668,9 @@ impl Sv1Server {
             }
             debug!("SV1 Server main listener loop exited.");
 
-            // signal fallback coordinator that this task has completed its cleanup
+            // release the port before signalling the fallback coordinator, so a subsequent
+            // fallback can re-bind the same listening address
+            drop(listener);
             fallback_handler.done();
         });
 
