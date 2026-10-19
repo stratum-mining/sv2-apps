@@ -36,7 +36,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Clone, Debug)]
 pub(super) enum Sv1ServerEvent {
     Notify(Arc<server_to_client::Notify>),
-    SetDifficulty(json_rpc::Message),
+    SetDifficulty(Sv1Difficulty),
     SetExtranonce {
         message: server_to_client::SetExtranonce,
         /// Decided by the server in the same task that builds and records subscribe responses.
@@ -44,6 +44,20 @@ pub(super) enum Sv1ServerEvent {
         notify_miner: bool,
     },
     SetupComplete,
+}
+
+/// A `mining.set_difficulty` together with the state it advertises to the miner.
+///
+/// The miner only starts working at the new difficulty with the next `mining.notify`, so the
+/// validation target is applied when the message is sent, not when it is queued. Keeping them
+/// together means a newer update cannot change what an already queued difficulty is validated
+/// against.
+#[derive(Clone, Debug)]
+pub(super) struct Sv1Difficulty {
+    pub(super) message: json_rpc::Message,
+    /// Target that shares are validated against once the message is sent: the advertised
+    /// difficulty, including any SV1 power-of-two rounding.
+    pub(super) target: Target,
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +204,8 @@ pub struct DownstreamData {
     // Current SV1 share-validation target. This follows the advertised
     // difficulty sent to the miner, including any SV1 pow2 rounding.
     pub target: Target,
+    /// Hashrate estimate of the miner: the latest vardiff estimate, or with vardiff disabled the
+    /// hashrate its upstream target implies.
     pub hashrate: Option<Hashrate>,
     #[cfg(feature = "monitoring")]
     pub connection_ip: IpAddr,
@@ -197,7 +213,7 @@ pub struct DownstreamData {
     pub version_rolling_min_bit: Option<HexU32Be>,
     pub sv1_username: String,
     pub sv1_worker_name: String,
-    pub cached_set_difficulty: Option<json_rpc::Message>,
+    pub(super) cached_set_difficulty: Option<Sv1Difficulty>,
     pub cached_notify: Option<Arc<server_to_client::Notify>>,
     /// Prefix notification paired with the next deliverable job. Capability is checked only
     /// when that job is sent, allowing the miner to announce support during setup.
@@ -209,17 +225,18 @@ pub struct DownstreamData {
     pub(super) accepted_share_hashes: Sv1AcceptedShareCache,
     /// Number of queued `mining.set_extranonce` notifications not yet applied by this downstream.
     pub(super) pending_set_extranonce_notifications: usize,
-    // Next advertised SV1 target, applied when the corresponding
-    // mining.set_difficulty is sent with a new mining.notify.
-    pub pending_target: Option<Target>,
-    pub pending_hashrate: Option<Hashrate>,
+    /// Target vardiff wants for the miner, `None` when vardiff is disabled.
+    pub(super) desired_target: Option<Target>,
+    /// Validation target of the latest `mining.set_difficulty` queued for the miner. `target`
+    /// catches up when that difficulty is sent with the next job.
+    pub(super) advertised_target: Option<Target>,
     pub stable_hashrate: bool,
     // Queue of Sv1 handshake messages received while waiting for SV2 channel to open
     pub queued_sv1_handshake_messages: Vec<Client2Server>,
     // Stores pending shares to be sent to the sv1_server
     pub pending_share: Option<SubmitShareWithChannelId>,
-    // Exact target currently accepted upstream, used to decide whether a
-    // stricter downstream difficulty must wait for a SetTarget response.
+    // Exact target of the miner's upstream channel. The miner is never advertised a harder
+    // difficulty.
     pub upstream_target: Option<Target>,
     /// Timestamp anchoring the next keepalive interval.
     ///
@@ -263,8 +280,8 @@ impl DownstreamData {
             job_validation_contexts: Sv1JobStore::new(max_past_jobs),
             accepted_share_hashes: Sv1AcceptedShareCache::default(),
             pending_set_extranonce_notifications: 0,
-            pending_target: None,
-            pending_hashrate: None,
+            desired_target: None,
+            advertised_target: None,
             stable_hashrate: false,
             queued_sv1_handshake_messages: Vec::new(),
             pending_share: None,
@@ -292,20 +309,6 @@ impl DownstreamData {
 
     pub(super) fn job_validation_context(&self, job_id: &str) -> Option<Sv1JobValidationContext> {
         self.job_validation_contexts.get(job_id).cloned()
-    }
-
-    pub fn set_pending_target(&mut self, new_target: Target, downstream_id: DownstreamId) {
-        self.pending_target = Some(new_target);
-        debug!("Downstream {downstream_id}: Set pending target");
-    }
-
-    pub fn set_pending_hashrate(
-        &mut self,
-        new_hashrate: Option<Hashrate>,
-        downstream_id: DownstreamId,
-    ) {
-        self.pending_hashrate = new_hashrate;
-        debug!("Downstream {downstream_id}: Set pending hashrate");
     }
 
     pub fn set_upstream_target(&mut self, upstream_target: Target, downstream_id: DownstreamId) {
@@ -553,9 +556,9 @@ impl Downstream {
             .map_err(|error| TproxyError::disconnect(error, self.downstream_id))?;
         match event {
             Sv1ServerEvent::SetupComplete => self.enable_notification_forwarding().await?,
-            Sv1ServerEvent::SetDifficulty(message) => {
+            Sv1ServerEvent::SetDifficulty(difficulty) => {
                 self.downstream_data
-                    .with(|data| data.cached_set_difficulty = Some(message))
+                    .with(|data| data.cached_set_difficulty = Some(difficulty))
                     .map_err(TproxyError::shutdown)?;
             }
             Sv1ServerEvent::Notify(notify) => {
@@ -668,15 +671,10 @@ impl Downstream {
                 if data.cached_set_extranonce.is_some() && !data.supports_set_extranonce {
                     return None;
                 }
-                let difficulty = data.cached_set_difficulty.take();
-                if difficulty.is_some() {
-                    if let Some(target) = data.pending_target.take() {
-                        data.target = target;
-                    }
-                    if let Some(hashrate) = data.pending_hashrate.take() {
-                        data.hashrate = Some(hashrate);
-                    }
-                }
+                let difficulty = data.cached_set_difficulty.take().map(|difficulty| {
+                    data.target = difficulty.target;
+                    difficulty.message
+                });
                 let extranonce = data.cached_set_extranonce.take();
                 data.record_job_validation_context(&notify);
                 Some((difficulty, extranonce))
@@ -728,7 +726,6 @@ mod tests {
                 "mining.notify" => Self::Notify(Arc::new(
                     server_to_client::Notify::try_from(notification.clone()).unwrap(),
                 )),
-                "mining.set_difficulty" => Self::SetDifficulty(message),
                 "mining.set_extranonce" => Self::SetExtranonce {
                     message: server_to_client::SetExtranonce::try_from(notification.clone())
                         .unwrap(),
@@ -782,6 +779,14 @@ mod tests {
         notify_with_clean_jobs(job_id, true)
     }
 
+    /// A `mining.set_difficulty` validated against `target` once it reaches the miner.
+    fn difficulty(target: Target) -> Sv1Difficulty {
+        Sv1Difficulty {
+            message: set_difficulty(),
+            target,
+        }
+    }
+
     fn set_difficulty() -> Message {
         serde_json::from_value(serde_json::json!({
             "id": null,
@@ -824,8 +829,7 @@ mod tests {
             .downstream_data
             .with(|data| {
                 data.session_state = Sv1SessionState::Ready;
-                data.cached_set_difficulty = Some(set_difficulty());
-                data.pending_target = Some(new_target);
+                data.cached_set_difficulty = Some(difficulty(new_target));
             })
             .unwrap();
 
@@ -836,8 +840,12 @@ mod tests {
             .downstream_data
             .with(|data| {
                 assert_eq!(data.target, old_target);
-                assert_eq!(data.pending_target, Some(new_target));
-                assert!(data.cached_set_difficulty.is_some());
+                assert_eq!(
+                    data.cached_set_difficulty
+                        .as_ref()
+                        .map(|difficulty| difficulty.target),
+                    Some(new_target)
+                );
                 assert_eq!(data.session_state, Sv1SessionState::Ready);
             })
             .unwrap();
@@ -918,7 +926,7 @@ mod tests {
             "127.0.0.1".parse().unwrap(),
             CancellationToken::new(),
         );
-        let queued_difficulty = set_difficulty();
+        let queued_difficulty = difficulty(Target::from_le_bytes([0x11; 32]));
         downstream
             .downstream_data
             .with(|data| {
@@ -930,7 +938,7 @@ mod tests {
             .unwrap();
 
         sv1_server_message_sender
-            .send(Sv1ServerEvent::from(queued_difficulty.clone()))
+            .send(Sv1ServerEvent::SetDifficulty(queued_difficulty.clone()))
             .await
             .unwrap();
         sv1_server_message_sender
@@ -946,8 +954,8 @@ mod tests {
             .with(|data| {
                 assert_eq!(data.session_state, Sv1SessionState::Ready);
                 assert_message_eq(
-                    data.cached_set_difficulty.as_ref().unwrap(),
-                    &queued_difficulty,
+                    &data.cached_set_difficulty.as_ref().unwrap().message,
+                    &queued_difficulty.message,
                 );
             })
             .unwrap();
@@ -960,7 +968,7 @@ mod tests {
         downstream.handle_sv1_server_message().await.unwrap();
         assert_message_eq(
             &downstream_sv1_receiver.recv().await.unwrap(),
-            &queued_difficulty,
+            &queued_difficulty.message,
         );
         let forwarded_notify = downstream_sv1_receiver.recv().await.unwrap();
         let Message::Notification(notification) = &forwarded_notify else {
@@ -1004,15 +1012,11 @@ mod tests {
         downstream.handle_sv1_server_message().await.unwrap();
         downstream_sv1_receiver.recv().await.unwrap();
 
-        downstream
-            .downstream_data
-            .with(|data| data.pending_target = Some(new_target))
-            .unwrap();
-        for message in [set_difficulty(), notify_with_clean_jobs("new", false)] {
-            sv1_server_message_sender
-                .send(Sv1ServerEvent::from(message))
-                .await
-                .unwrap();
+        for event in [
+            Sv1ServerEvent::SetDifficulty(difficulty(new_target)),
+            Sv1ServerEvent::from(notify_with_clean_jobs("new", false)),
+        ] {
+            sv1_server_message_sender.send(event).await.unwrap();
             downstream.handle_sv1_server_message().await.unwrap();
         }
         downstream_sv1_receiver.recv().await.unwrap();
