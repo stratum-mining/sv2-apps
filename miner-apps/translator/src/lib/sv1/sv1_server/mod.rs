@@ -1139,6 +1139,11 @@ impl Sv1Server {
                             self.vardiff.insert(downstream_id, vardiff);
                         }
 
+                        // Queue the initial difficulty before replaying the setup messages:
+                        // completing setup releases any job cached while the channel was opening,
+                        // and that job must reach the miner with its difficulty.
+                        self.update_difficulty(downstream_id)?;
+
                         // Process all queued messages now that channel is established
                         if !queued_messages.is_empty() {
                             info!(
@@ -1151,8 +1156,6 @@ impl Sv1Server {
                                 self.process_sv1_message(downstream_id, message).await?;
                             }
                         }
-
-                        self.update_difficulty(downstream_id)?;
 
                         // Opening a downstream changes the aggregate just like disconnecting one.
                         // Refresh it now so the newly active hashrate is not left out until the
@@ -4743,6 +4746,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn job_cached_during_setup_is_delivered_with_the_initial_difficulty() {
+        let (server, to_server, from_server) = server_with_channels(true);
+        let (events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, None, 100.0, false);
+        let downstream = server.downstreams.get_cloned(&7).unwrap();
+        for wire in [
+            r#"{"id":1,"method":"mining.subscribe","params":[]}"#,
+            r#"{"id":2,"method":"mining.authorize","params":["worker",""]}"#,
+        ] {
+            receive_request(&server, serde_json::from_str(wire).unwrap())
+                .await
+                .unwrap();
+        }
+        let (MiningOwned::OpenExtendedMiningChannel(open), _) = from_server.try_recv().unwrap()
+        else {
+            panic!("expected channel open");
+        };
+
+        // Shared jobs reach every connected miner, so one can arrive while the miner's channel is
+        // still opening. The downstream caches it until setup completes.
+        server
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&7)
+            .unwrap()
+            .send(Sv1ServerEvent::Notify(Arc::new(test_sv1_notify(
+                "shared", true,
+            ))))
+            .await
+            .unwrap();
+        let target = hash_rate_to_target(1e12, 5.0).unwrap();
+        to_server
+            .send(MiningOwned::OpenExtendedMiningChannelSuccess(
+                OpenExtendedMiningChannelSuccessOwned {
+                    request_id: open.request_id,
+                    channel_id: 9,
+                    target: target.to_le_bytes().into(),
+                    extranonce_size: 4,
+                    extranonce_prefix: vec![1, 2, 3, 4].try_into().unwrap(),
+                    group_channel_id: 0,
+                },
+            ))
+            .await
+            .unwrap();
+        server.handle_upstream_message(target).await.unwrap();
+        while !events.is_empty() {
+            downstream.handle_sv1_server_message().await.unwrap();
+        }
+
+        // The miner gets both setup responses, then the cached job with its difficulty.
+        let delivered: Vec<String> = std::iter::from_fn(|| responses.try_recv().ok())
+            .map(|message| match message {
+                json_rpc::Message::Notification(notification) => notification.method,
+                json_rpc::Message::OkResponse(_) => "response".to_string(),
+                other => panic!("unexpected message {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            delivered,
+            [
+                "response",
+                "response",
+                "mining.set_difficulty",
+                "mining.notify"
+            ]
+        );
+        downstream
+            .downstream_data
+            .with(|data| {
+                assert_eq!(
+                    data.job_validation_context("shared")
+                        .map(|context| context.target),
+                    Some(advertised(target))
+                );
+            })
+            .unwrap();
     }
 
     #[tokio::test]
