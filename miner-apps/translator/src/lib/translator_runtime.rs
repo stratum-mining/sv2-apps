@@ -570,38 +570,30 @@ impl TranslatorRuntime<UpstreamReady> {
             }
         };
 
-        let monitoring_fallback = self.fallback_coordinator.clone();
-        self.task_manager.spawn({
+        self.task_manager.spawn(self.fallback_coordinator.track({
             let cancellation_token = self.translator.cancellation_token.clone();
             async move {
-                let fallback_handler = monitoring_fallback.register();
-
                 if let Err(e) = monitoring_server.run(shutdown_signal).await {
                     error!("Monitoring server error: {:?}", e);
                     cancellation_token.cancel();
                 }
 
-                fallback_handler.done();
-                info!("Monitoring server task exited and signaled fallback coordinator");
+                info!("Monitoring server task exited");
             }
-        });
+        }));
 
-        let telemetry_fallback = self.fallback_coordinator.clone();
-        self.task_manager.spawn({
+        self.task_manager.spawn(self.fallback_coordinator.track({
             let cancellation_token = self.translator.cancellation_token.clone();
+            let fallback_token = self.fallback_coordinator.token();
             let sv1_server = self.state.sv1_server.clone();
             async move {
-                let fallback_token = telemetry_fallback.token();
-                let fallback_handler = telemetry_fallback.register();
-
                 sv1_server
                     .run_miner_telemetry_loop(refresh_interval, cancellation_token, fallback_token)
                     .await;
 
-                fallback_handler.done();
-                info!("SV1 miner telemetry task exited and signaled fallback coordinator");
+                info!("SV1 miner telemetry task exited");
             }
-        });
+        }));
 
         Ok(())
     }

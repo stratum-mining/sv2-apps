@@ -207,11 +207,6 @@ impl JobDeclarator {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) {
-        // we just spawned a new task that's relevant to fallback coordination
-        // so register it with the fallback coordinator
-        let fallback_handler = fallback_coordinator.register();
-
-        // get the cancellation token that signals fallback
         let fallback_token = fallback_coordinator.token();
         if let Err(e) = self.setup_connection().await {
             _ = Self::handle_error_action(
@@ -221,11 +216,10 @@ impl JobDeclarator {
                 &fallback_token,
             );
             self.job_declarator_io.close();
-            fallback_handler.done();
             return;
         }
 
-        task_manager.spawn(async move {
+        task_manager.spawn(fallback_coordinator.track(async move {
             loop {
                 let mut self_clone_1 = self.clone();
                 let self_clone_2 = self.clone();
@@ -269,10 +263,7 @@ impl JobDeclarator {
             }
             self.job_declarator_io.close();
             warn!("JobDeclarator: unified message loop exited.");
-
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
     }
 
     /// Performs SV2 setup connection handshake with Job Declarator server.

@@ -517,14 +517,8 @@ impl ChannelManager {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) {
-        task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
-
+        let fallback_token = fallback_coordinator.token();
+        task_manager.spawn(fallback_coordinator.track(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -569,10 +563,7 @@ impl ChannelManager {
 
             self.channel_manager_io.close();
             warn!("ChannelManager: unified message loop exited.");
-
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
     }
 
     /// Handles messages received from the upstream SV2 server.

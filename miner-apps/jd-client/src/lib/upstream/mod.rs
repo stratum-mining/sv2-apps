@@ -355,14 +355,8 @@ impl Upstream {
             return;
         }
 
-        task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
-
+        let fallback_token = fallback_coordinator.token();
+        task_manager.spawn(fallback_coordinator.track(async move {
             let mut self_clone_1 = self.clone();
             let mut self_clone_2 = self.clone();
             loop {
@@ -408,10 +402,7 @@ impl Upstream {
             }
             self.upstream_io.close();
             warn!("Upstream: unified message loop exited.");
-
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
     }
 
     // Handle incoming frames from upstream (pool).

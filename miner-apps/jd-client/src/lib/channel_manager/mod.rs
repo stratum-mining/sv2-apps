@@ -590,10 +590,10 @@ impl ChannelManager {
         })?;
 
         let task_manager_clone = task_manager.clone();
-        // Register the listener task in fallback coordination, so fallback waits
-        // for this accept loop to stop before attempting to re-bind the same port.
-        let fallback_handler = fallback_coordinator.register();
-        task_manager.spawn(async move {
+        // Track the listener task in fallback coordination, so fallback waits for this accept
+        // loop to stop, and the socket it owns to close, before attempting to re-bind the same
+        // port.
+        task_manager.spawn(fallback_coordinator.clone().track(async move {
             // Wait for initial template and prevhash before accepting connections
             let ready = loop {
                 let has_required_data = match (
@@ -629,7 +629,6 @@ impl ChannelManager {
             };
 
             if !ready {
-                fallback_handler.done();
                 return;
             }
 
@@ -729,11 +728,7 @@ impl ChannelManager {
                 }
             }
             info!("Downstream server: Unified loop break");
-            // Release the port before signalling the fallback coordinator, so a subsequent
-            // fallback can re-bind the same listening address.
-            drop(server);
-            fallback_handler.done();
-        });
+        }));
         Ok(())
     }
 
@@ -751,13 +746,8 @@ impl ChannelManager {
     ) -> JDCResult<(), error::ChannelManager> {
         self.coinbase_output_constraints(coinbase_outputs).await?;
 
-        task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
+        let fallback_token = fallback_coordinator.token();
+        task_manager.spawn(fallback_coordinator.track(async move {
             let cm = self.clone();
             let vd = self.clone();
             let vardiff_future = vd.run_vardiff_loop();
@@ -844,9 +834,7 @@ impl ChannelManager {
             let close_template_provider =
                 cancellation_token.is_cancelled() || !fallback_token.is_cancelled();
             self.channel_manager_io.close(close_template_provider);
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
 
         Ok(())
     }
