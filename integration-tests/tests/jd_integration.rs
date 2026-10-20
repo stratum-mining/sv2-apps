@@ -1884,3 +1884,99 @@ async fn jdc_per_upstream_identity_switches_on_fallback() {
 
     shutdown_all!(jdc);
 }
+
+// Verifies that a downstream connection that never starts its handshake is dropped when JDC falls
+// back, instead of outliving the generation that accepted it, and that the next generation listens
+// on the same address afterwards.
+//
+// What this observes from outside is the handshake stopping on the fallback token. That the
+// connection task counts as pending until then is not visible here; it follows from `track`
+// wrapping the task at its spawn, and the coordinator's unit tests cover the counting itself.
+#[tokio::test]
+async fn jdc_fallback_drops_a_downstream_stalled_in_handshake() {
+    use tokio::io::AsyncReadExt as _;
+
+    start_tracing();
+
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (primary_pool, primary_pool_addr, primary_jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (_fallback_pool, fallback_pool_addr, fallback_jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (fallback_jds_sniffer, fallback_jds_sniffer_addr) =
+        start_sniffer("fallback-jds", fallback_jds_addr, false, vec![], None);
+
+    let (jdc, jdc_addr, _) = start_jdc(
+        &[
+            (primary_pool_addr, primary_jds_addr),
+            (fallback_pool_addr, fallback_jds_sniffer_addr),
+        ],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+
+    // JDC accepts downstreams only once it holds a template: a completed handshake proves the
+    // accept loop is running before the stalled connection is opened.
+    let (jdc_sniffer, jdc_sniffer_addr) = start_sniffer("jdc", jdc_addr, false, vec![], None);
+    let _mock_downstream = MockDownstream::new(
+        jdc_sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    )
+    .start()
+    .await;
+    jdc_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    let connected_at = std::time::Instant::now();
+    let mut stalled = tokio::net::TcpStream::connect(jdc_addr)
+        .await
+        .expect("failed to connect to JDC");
+    // Give the accept loop time to hand the connection to its handshake task.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    primary_pool.shutdown().await;
+    fallback_jds_sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stalled.read(&mut [0u8; 1]),
+    )
+    .await;
+    // EOF proves the old generation had accepted the connection and dropped it; a reset would
+    // mean it never left the listener's backlog, which would not exercise the handshake task.
+    assert!(
+        matches!(read, Ok(Ok(0))),
+        "stalled connection was not closed cleanly by fallback: {read:?}"
+    );
+    // Well inside the 10 s noise handshake timeout, so the close was fallback's doing and not
+    // the handshake giving up on its own.
+    assert!(
+        connected_at.elapsed() < std::time::Duration::from_secs(8),
+        "stalled connection closed too late to tell fallback from the handshake timeout"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match tokio::net::TcpStream::connect(jdc_addr).await {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("failed to connect to {jdc_addr}: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("JDC did not listen on its downstream address again after fallback");
+
+    shutdown_all!(jdc);
+}

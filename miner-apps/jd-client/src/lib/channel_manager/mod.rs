@@ -649,17 +649,25 @@ impl ChannelManager {
 
                                 let this = Arc::clone(&this);
                                 let cancellation_token_inner = cancellation_token.clone();
+                                let fallback_token_inner = fallback_token.clone();
                                 let fallback_coordinator_inner = fallback_coordinator.clone();
                                 let channel_manager_sender_inner = channel_manager_sender.clone();
                                 let task_manager_inner = task_manager_clone.clone();
                                 let supported_extensions_inner = supported_extensions.clone();
                                 let required_extensions_inner = required_extensions.clone();
 
-                                task_manager_clone.spawn(async move {
+                                // Tracked from the handshake on, so a connection accepted by this
+                                // generation is never set up after fallback has completed; the
+                                // handshake stops on fallback so a stalled client cannot hold it up.
+                                task_manager_clone.spawn(fallback_coordinator_inner.clone().track(async move {
                                     let noise_stream = tokio::select! {
                                         biased;
                                         _ = cancellation_token_inner.cancelled() => {
                                             info!("Shutdown received during handshake, dropping connection");
+                                            return;
+                                        }
+                                        _ = fallback_token_inner.cancelled() => {
+                                            info!("Fallback received during handshake, dropping connection");
                                             return;
                                         }
                                         result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
@@ -717,7 +725,7 @@ impl ChannelManager {
                                             move |downstream_id| this.remove_downstream(downstream_id)
                                         )
                                         .await;
-                                });
+                                }));
                                 }
 
                                 Err(e) => {
