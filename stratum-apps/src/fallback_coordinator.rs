@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 /// - call [`FallbackCoordinator::register`] before spawning the task and move the handler into it,
 ///   so the task counts as pending from the moment it exists rather than from its first poll
 /// - call [`FallbackHandler::done`], or drop the handler, once the task's cleanup is over
+/// - for a task that runs outside the manager, such as a connection's I/O task, have the registered
+///   task that owns it wait for its exit before calling `done`, so the wait still covers it
 ///
 /// when a fallback trigger arrives to the main status loop, we MUST call
 /// [`FallbackCoordinator::trigger_fallback_and_wait`] to wait for all registered components to

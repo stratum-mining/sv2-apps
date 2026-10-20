@@ -592,6 +592,7 @@ impl Sv1Server {
                                     cancellation_token.clone(),
                                     fallback_coordinator.clone(),
                                     task_manager.clone(),
+                                    connection.closed(),
                                     move || async move {
                                         // Cleanup only ever fails with `Shutdown` (poisoned
                                         // lock), so honour it.

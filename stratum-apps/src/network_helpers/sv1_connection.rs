@@ -25,6 +25,7 @@ use tracing::{error, trace, warn};
 pub struct ConnectionSV1 {
     receiver: Receiver<json_rpc::Message>,
     sender: Sender<json_rpc::Message>,
+    closed: CancellationToken,
 }
 
 struct ConnectionState {
@@ -75,7 +76,13 @@ impl ConnectionSV1 {
             sender_incoming.clone(),
         );
 
+        let closed = CancellationToken::new();
+        let closed_signal = closed.clone();
         tokio::spawn(async move {
+            // cancels `closed` when this task ends, whether it returns or unwinds. the guard is
+            // declared before the select, whose block owns the reader and writer futures, so it
+            // drops after them and after the two socket halves they held
+            let _closed_guard = closed_signal.drop_guard();
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
                     trace!("ConnectionSV1: received cancellation signal.");
@@ -95,6 +102,7 @@ impl ConnectionSV1 {
         Self {
             receiver: receiver_incoming,
             sender: sender_outgoing,
+            closed,
         }
     }
 
@@ -168,13 +176,45 @@ impl ConnectionSV1 {
     pub fn sender(&self) -> Sender<json_rpc::Message> {
         self.sender.clone()
     }
+
+    /// Token cancelled once the I/O task has exited and released the socket.
+    ///
+    /// Cancelling the token passed to [`ConnectionSV1::new`] only asks the I/O task to stop; the
+    /// task releases the socket when it is next polled. A caller that must know the socket is
+    /// gone, rather than merely told to go, awaits `cancelled()` on this token.
+    pub fn closed(&self) -> CancellationToken {
+        self.closed.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[tokio::test]
+    async fn closed_fires_once_the_io_task_has_exited() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _peer = TcpStream::connect(addr).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+
+        let token = CancellationToken::new();
+        let connection = ConnectionSV1::new(stream, token.clone()).await;
+        let closed = connection.closed();
+        assert!(
+            !closed.is_cancelled(),
+            "must not report closed while the I/O task runs"
+        );
+
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), closed.cancelled())
+            .await
+            .expect("I/O task did not exit after cancellation");
+    }
 
     #[tokio::test]
     async fn test_sv1_connection() {

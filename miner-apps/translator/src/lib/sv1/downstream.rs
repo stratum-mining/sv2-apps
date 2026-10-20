@@ -467,11 +467,16 @@ impl Downstream {
     /// The task will continue running until a cancellation signal is received or
     /// an unrecoverable error occurs. It ensures graceful cleanup of resources
     /// and proper error reporting.
+    ///
+    /// `connection_closed` is the token from `ConnectionSV1::closed` for this downstream's socket.
+    /// The task acknowledges fallback only once that token has fired, so a completed fallback
+    /// wait means the socket is released, rather than merely told to close.
     pub(super) fn start<F, Fut>(
         self,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
+        connection_closed: CancellationToken,
         on_disconnect: F,
     ) where
         F: FnOnce() -> Fut + Send + 'static,
@@ -537,6 +542,10 @@ impl Downstream {
             self.downstream_cancellation_token.cancel();
             self.downstream_io.close();
             on_disconnect().await;
+            // the I/O task runs outside the task manager and releases the socket on its own
+            // schedule once cancelled; waiting for it here is what makes `done()` mean the
+            // socket is gone, not just that it was asked to go
+            connection_closed.cancelled().await;
             // signal fallback coordinator that this task has completed its cleanup
             fallback_handler.done();
         });
