@@ -220,25 +220,24 @@ impl NoiseTcpReadHalf {
     /// cancelled read leaves nothing behind.
     pub async fn read_frame(&mut self) -> Result<SerializedFrame, Error> {
         loop {
-            // An empty window means the decoder is already holding the bytes it needs.
-            if self.decoder.read_len() > 0 {
-                let n = self
-                    .reader
-                    .read(self.decoder.read_buf())
-                    .await
-                    .map_err(|_| Error::SocketClosed)?;
-
-                if n == 0 {
-                    return Err(Error::SocketClosed);
-                }
-
-                self.decoder.advance(n)?;
-            }
-
             match self.next_frame()? {
                 Some(frame) => return Ok(frame),
                 None => tokio::task::yield_now().await,
             }
+
+            // An incomplete frame always leaves the decoder's read window non-empty, so a read of
+            // 0 bytes means the peer closed the socket.
+            let n = self
+                .reader
+                .read(self.decoder.read_buf())
+                .await
+                .map_err(|_| Error::SocketClosed)?;
+
+            if n == 0 {
+                return Err(Error::SocketClosed);
+            }
+
+            self.decoder.advance(n)?;
         }
     }
 
@@ -249,15 +248,17 @@ impl NoiseTcpReadHalf {
     /// - `Ok(None)` if not enough data is available yet.
     /// - `Err(_)` on socket or decoding errors.
     pub fn try_read_frame(&mut self) -> Result<Option<SerializedFrame>, Error> {
-        // An empty window means the decoder is already holding the bytes, and `try_read` of an
-        // empty buffer answers `Ok(0)`, which the arm below reads as a closed socket.
-        if self.decoder.read_len() > 0 {
-            match self.reader.try_read(self.decoder.read_buf()) {
-                Ok(0) => return Err(Error::SocketClosed),
-                Ok(n) => self.decoder.advance(n)?,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-                Err(_) => return Err(Error::SocketClosed),
-            }
+        if let Some(frame) = self.next_frame()? {
+            return Ok(Some(frame));
+        }
+
+        // An incomplete frame always leaves the decoder's read window non-empty, so `Ok(0)`
+        // means the peer closed the socket.
+        match self.reader.try_read(self.decoder.read_buf()) {
+            Ok(0) => return Err(Error::SocketClosed),
+            Ok(n) => self.decoder.advance(n)?,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(_) => return Err(Error::SocketClosed),
         }
 
         self.next_frame()
@@ -273,7 +274,7 @@ impl NoiseTcpReadHalf {
                 self.state = Some(state);
                 Ok(Some(frame))
             }
-            Decrypted::Incomplete(_, state) => {
+            Decrypted::Incomplete(state) => {
                 self.state = Some(state);
                 Ok(None)
             }
@@ -303,6 +304,14 @@ async fn receive_handshake_frame<R: ExpectsHandshakeMessage>(
     // it a few bytes at a time.
     let receive = async {
         loop {
+            match decoder.next_handshake_frame::<R>() {
+                Ok(Decoded::Frame(frame)) => return Ok(frame),
+                Ok(Decoded::Incomplete) => {
+                    debug!("Waiting for more bytes during handshake");
+                }
+                Err(e) => return Err(Error::CodecError(e)),
+            }
+
             let n = reader
                 .read(decoder.read_buf())
                 .await
@@ -311,14 +320,6 @@ async fn receive_handshake_frame<R: ExpectsHandshakeMessage>(
                 return Err(Error::SocketClosed);
             }
             decoder.advance(n).map_err(Error::CodecError)?;
-
-            match decoder.next_handshake_frame::<R>() {
-                Ok(Decoded::Frame(frame)) => return Ok(frame),
-                Ok(Decoded::Incomplete(_)) => {
-                    debug!("Waiting for more bytes during handshake");
-                }
-                Err(e) => return Err(Error::CodecError(e)),
-            }
         }
     };
     tokio::time::timeout(timeout, receive)
