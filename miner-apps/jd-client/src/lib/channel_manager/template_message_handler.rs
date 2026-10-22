@@ -10,7 +10,6 @@ use stratum_apps::stratum_core::{
 
 use stratum_apps::stratum_core::{
     bitcoin::{Transaction, consensus, hashes::Hash},
-    channels_sv2::chain_tip::ChainTip,
     handlers_sv2::HandleTemplateDistributionMessagesFromServerOwnedAsync,
     mining_sv2::SetNewPrevHashOwned as SetNewPrevHashMp,
     parsers_sv2::Tlv,
@@ -441,79 +440,17 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
         let mut messages: Vec<crate::channel_manager::downstream_message_handler::RouteMessageTo> =
             Vec::new();
-        let mut token_consumed = false;
-
-        if self.mode.is_coinbase_only() && future_template.is_some() {
-            if let Some(token) = self
-                .allocate_tokens
-                .with(|tokens| tokens.pop_front())
-                .map_err(JDCError::shutdown)?
-            {
-                let upstream_info = self
-                    .upstream_channel
-                    .with(|channel| {
-                        channel.as_ref().map(|channel| {
-                            (channel.get_channel_id(), channel.get_full_extranonce_size())
-                        })
-                    })
-                    .map_err(JDCError::shutdown)?;
-
-                if let Some((upstream_channel_id, full_extranonce_size)) = upstream_info {
-                    token_consumed = true;
-                    let template = future_template
-                        .clone()
-                        .expect("future_template checked above");
-                    let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
-                    let chain_tip =
-                        ChainTip::new(msg.prev_hash.clone(), msg.n_bits, msg.ntime_start);
-                    let outputs = self.coinbase_outputs_for(&template)?;
-
-                    let custom_job = self
-                        .job_factory
-                        .with(|job_factory| {
-                            let job_factory =
-                                job_factory.as_mut().expect("job_factory should be present");
-                            job_factory.new_custom_job(
-                                upstream_channel_id,
-                                request_id,
-                                token.mining_job_token,
-                                chain_tip,
-                                template.clone(),
-                                outputs,
-                                full_extranonce_size,
-                            )
-                        })
-                        .map_err(JDCError::shutdown)?;
-                    // The downstream channels were handed this template's jobs when it arrived,
-                    // built from the same outputs, and activate them below. Their shares have
-                    // nowhere upstream to go without this custom job, so a rejected one shuts JDC
-                    // down, as it does in `handle_new_template`.
-                    let custom_job = custom_job.map_err(|e| {
-                        error!(
-                            error = ?e,
-                            template_id = template.template_id,
-                            "Failed to build coinbase-only custom job"
-                        );
-                        JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
-                    })?;
-
-                    self.last_declare_job_store.insert(
-                        request_id,
-                        DeclaredJob {
-                            declare_mining_job: None,
-                            template,
-                            prev_hash: Some(msg.clone()),
-                            set_custom_mining_job: Some(custom_job.clone()),
-                            coinbase_output: self
-                                .coinbase_outputs
-                                .get()
-                                .map_err(JDCError::shutdown)?,
-                            tx_list: vec![],
-                        },
-                    );
-                    messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
-                }
+        // The activated template goes on the upstream channel under its own custom job. With no
+        // upstream channel to send it on yet, nothing is built and the token stays queued.
+        let custom_job = match &future_template {
+            Some(template) if self.mode.is_coinbase_only() => {
+                self.build_coinbase_only_custom_job(template)?
             }
+            _ => None,
+        };
+        let token_consumed = custom_job.is_some();
+        if let Some(custom_job) = custom_job {
+            messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
         }
 
         self.downstream.try_for_each(|downstream_id, downstream| {
@@ -652,6 +589,7 @@ mod tests {
             },
             codec_sv2::EncodableFrame as _,
             job_declaration_sv2::AllocateMiningJobTokenSuccessOwned,
+            mining_sv2::SetCustomMiningJobOwned,
             parsers_sv2::Mining,
         },
         tp_type::TemplateProviderType,
@@ -826,6 +764,24 @@ mod tests {
         }
     }
 
+    fn queued_tokens(manager: &ChannelManager) -> usize {
+        manager.allocate_tokens.with(|tokens| tokens.len()).unwrap()
+    }
+
+    // The custom jobs recorded for `template_id`.
+    fn recorded_custom_jobs(
+        manager: &ChannelManager,
+        template_id: u64,
+    ) -> Vec<SetCustomMiningJobOwned> {
+        let mut custom_jobs = Vec::new();
+        manager.last_declare_job_store.for_each(|_, declared_job| {
+            if declared_job.template.template_id == template_id {
+                custom_jobs.extend(declared_job.set_custom_mining_job.clone());
+            }
+        });
+        custom_jobs
+    }
+
     fn sent_to_pool(receiver: &Receiver<OutboundFrame>) -> Vec<MiningOwned> {
         std::iter::from_fn(|| receiver.try_recv().ok())
             .map(|frame| {
@@ -936,5 +892,70 @@ mod tests {
             consensus::deserialize::<Vec<TxOut>>(&recorded).unwrap(),
             manager.coinbase_outputs_for(&template(2, false)).unwrap()
         );
+    }
+
+    // A prevhash that activates a template other than the last future one gives that future
+    // template no custom job on the new chain tip, and spends no token on it.
+    #[tokio::test]
+    async fn activation_of_another_template_builds_no_custom_job() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+        manager
+            .last_future_template
+            .set(Some(template(2, true)))
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+
+        assert!(sent_to_pool(&sent_to_pool_receiver).is_empty());
+        assert_eq!(
+            manager.allocate_tokens.with(|tokens| tokens.len()).unwrap(),
+            1
+        );
+    }
+
+    // An activation takes a token only for a custom job it built, so one whose custom job is
+    // rejected leaves the token queued.
+    #[tokio::test]
+    async fn activation_whose_custom_job_is_rejected_keeps_its_token() {
+        let (mut manager, _sent_to_pool, sent_to_jds) = channel_manager().await;
+        manager
+            .last_future_template
+            .set(Some(oversized_template(2, true)))
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(2), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(queued_tokens(&manager), 1);
+        assert!(sent_to_jds.try_recv().is_err());
+    }
+
+    // An activation's custom job that cannot be handed to the Pool sender keeps its token
+    // recorded with the job, not queued again for another one.
+    #[tokio::test]
+    async fn activation_custom_job_the_pool_cannot_receive_keeps_its_token_recorded() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+        drop(sent_to_pool_receiver);
+        manager
+            .last_future_template
+            .set(Some(template(2, true)))
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(2), None)
+            .await
+            .unwrap();
+
+        let recorded = recorded_custom_jobs(&manager, 2);
+        let [custom_job] = recorded.as_slice() else {
+            panic!("expected one recorded custom job, got {recorded:?}");
+        };
+        assert_eq!(custom_job.token, token());
+        assert_eq!(queued_tokens(&manager), 0);
     }
 }
