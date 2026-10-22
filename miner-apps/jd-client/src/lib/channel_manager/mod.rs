@@ -590,10 +590,10 @@ impl ChannelManager {
         })?;
 
         let task_manager_clone = task_manager.clone();
-        // Register the listener task in fallback coordination, so fallback waits
-        // for this accept loop to stop before attempting to re-bind the same port.
-        let fallback_handler = fallback_coordinator.register();
-        task_manager.spawn(async move {
+        // Track the listener task in fallback coordination, so fallback waits for this accept
+        // loop to stop, and the socket it owns to close, before attempting to re-bind the same
+        // port.
+        task_manager.spawn(fallback_coordinator.clone().track(async move {
             // Wait for initial template and prevhash before accepting connections
             let ready = loop {
                 let has_required_data = match (
@@ -629,7 +629,6 @@ impl ChannelManager {
             };
 
             if !ready {
-                fallback_handler.done();
                 return;
             }
 
@@ -650,17 +649,25 @@ impl ChannelManager {
 
                                 let this = Arc::clone(&this);
                                 let cancellation_token_inner = cancellation_token.clone();
+                                let fallback_token_inner = fallback_token.clone();
                                 let fallback_coordinator_inner = fallback_coordinator.clone();
                                 let channel_manager_sender_inner = channel_manager_sender.clone();
                                 let task_manager_inner = task_manager_clone.clone();
                                 let supported_extensions_inner = supported_extensions.clone();
                                 let required_extensions_inner = required_extensions.clone();
 
-                                task_manager_clone.spawn(async move {
+                                // Tracked from the handshake on, so a connection accepted by this
+                                // generation is never set up after fallback has completed; the
+                                // handshake stops on fallback so a stalled client cannot hold it up.
+                                task_manager_clone.spawn(fallback_coordinator_inner.clone().track(async move {
                                     let noise_stream = tokio::select! {
                                         biased;
                                         _ = cancellation_token_inner.cancelled() => {
                                             info!("Shutdown received during handshake, dropping connection");
+                                            return;
+                                        }
+                                        _ = fallback_token_inner.cancelled() => {
+                                            info!("Fallback received during handshake, dropping connection");
                                             return;
                                         }
                                         result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
@@ -718,7 +725,7 @@ impl ChannelManager {
                                             move |downstream_id| this.remove_downstream(downstream_id)
                                         )
                                         .await;
-                                });
+                                }));
                                 }
 
                                 Err(e) => {
@@ -729,11 +736,7 @@ impl ChannelManager {
                 }
             }
             info!("Downstream server: Unified loop break");
-            // Release the port before signalling the fallback coordinator, so a subsequent
-            // fallback can re-bind the same listening address.
-            drop(server);
-            fallback_handler.done();
-        });
+        }));
         Ok(())
     }
 
@@ -751,13 +754,8 @@ impl ChannelManager {
     ) -> JDCResult<(), error::ChannelManager> {
         self.coinbase_output_constraints(coinbase_outputs).await?;
 
-        task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
+        let fallback_token = fallback_coordinator.token();
+        task_manager.spawn(fallback_coordinator.track(async move {
             let cm = self.clone();
             let vd = self.clone();
             let vardiff_future = vd.run_vardiff_loop();
@@ -844,9 +842,7 @@ impl ChannelManager {
             let close_template_provider =
                 cancellation_token.is_cancelled() || !fallback_token.is_cancelled();
             self.channel_manager_io.close(close_template_provider);
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
 
         Ok(())
     }

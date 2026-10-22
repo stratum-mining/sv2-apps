@@ -529,14 +529,8 @@ impl Sv1Server {
             .downstream_difficulty_config
             .job_keepalive_interval_secs
             > 0;
-        task_manager_clone.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
-
+        let fallback_token = fallback_coordinator.token();
+        task_manager_clone.spawn(fallback_coordinator.clone().track(async move {
             tokio::pin!(vardiff_future);
             tokio::pin!(keepalive_future);
             loop {
@@ -678,10 +672,7 @@ impl Sv1Server {
                 }
             }
             debug!("SV1 Server main listener loop exited.");
-
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
 
         Ok(())
     }

@@ -225,7 +225,6 @@ impl Downstream {
         task_manager: Arc<TaskManager>,
         on_disconnect: impl FnOnce(DownstreamId) + Send + 'static,
     ) {
-        let fallback_handler = fallback_coordinator.register();
         let fallback_token = fallback_coordinator.token();
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
@@ -243,11 +242,10 @@ impl Downstream {
             );
             on_disconnect(self.downstream_id);
             self.downstream_io.close();
-            fallback_handler.done();
             return;
         }
 
-        task_manager.spawn(async move {
+        task_manager.spawn(fallback_coordinator.track(async move {
             loop {
                 let self_clone_1 = self.clone();
                 let downstream_id = self_clone_1.downstream_id;
@@ -300,8 +298,7 @@ impl Downstream {
             self.downstream_cancellation_token.cancel();
             self.downstream_io.close();
             warn!("Downstream: unified message loop exited.");
-            fallback_handler.done();
-        });
+        }));
     }
 
     // Performs the initial handshake with a downstream peer.

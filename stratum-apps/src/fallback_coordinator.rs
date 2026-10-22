@@ -1,113 +1,122 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
+use std::future::Future;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-/// coordinates fallback operations across multiple components with acknowledgement.
+/// Coordinates fallback across the components of a runtime generation.
 ///
-/// this is meant to be used together with [`crate::task_manager::TaskManager`],
-/// as it allows triggering a fallback event (via [`CancellationToken`]) and waiting
-/// until all registered components have completed their cleanup.
+/// Fallback is signalled through a [`CancellationToken`] and acknowledged by lifetime: a future
+/// wrapped with [`FallbackCoordinator::track`] counts as pending until it is dropped, whether it
+/// returned, was cancelled or panicked, so there is nothing a component has to remember to call
+/// on its way out. [`FallbackCoordinator::trigger_fallback_and_wait`] cancels the token and
+/// resolves once no tracked future is left, which it checks rather than infers from a wakeup: a
+/// future tracked after the trigger, or after every other one already finished, is still waited
+/// for.
 ///
-/// in summary, every time we spawn a fallback-relevant task inside the manager, we MUST:
-/// - call [`FallbackCoordinator::register`] at task bootstrap
-/// - call [`FallbackHandler::done`] at task completion
+/// This is meant to be used together with [`crate::task_manager::TaskManager`]:
 ///
-/// when a fallback trigger arrives to the main status loop, we MUST call
-/// [`FallbackCoordinator::trigger_fallback_and_wait`] to wait for all registered components to
-/// complete their cleanup before re-initializing them under the new upstream server.
+/// ```ignore
+/// task_manager.spawn(fallback_coordinator.track(async move {
+///     tokio::select! {
+///         _ = fallback_token.cancelled() => { /* clean up */ }
+///         // ...
+///     }
+/// }));
+/// ```
 ///
-/// finally, a new [`FallbackCoordinator`] must be instantiated for the next fallback cycle.
-#[derive(Debug, Clone)]
+/// A coordinator serves one fallback cycle: once the wait returned, the runtime instantiates a
+/// fresh one for the next generation.
+#[derive(Debug, Clone, Default)]
 pub struct FallbackCoordinator {
     signal: CancellationToken,
-    pending_tasks: Arc<AtomicUsize>,
-    notify: Arc<Notify>,
-}
-
-impl Default for FallbackCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
+    tasks: TaskTracker,
 }
 
 impl FallbackCoordinator {
     pub fn new() -> Self {
-        Self {
-            signal: CancellationToken::new(),
-            pending_tasks: Arc::new(AtomicUsize::new(0)),
-            notify: Arc::new(Notify::new()),
-        }
+        Self::default()
     }
 
-    /// register a component that will participate in fallback coordination
-    /// returns a [`FallbackHandler`] that must be called when the component is done
-    #[must_use]
-    pub fn register(&self) -> FallbackHandler {
-        tracing::debug!("FallbackCoordinator: registering component");
-        self.pending_tasks.fetch_add(1, Ordering::Relaxed);
-
-        FallbackHandler {
-            coordinator: self.clone(),
-            done: AtomicBool::new(false),
-        }
-    }
-
-    /// get the cancellation token that signals fallback
+    /// Get the cancellation token that signals fallback.
     pub fn token(&self) -> CancellationToken {
         self.signal.clone()
     }
 
-    /// trigger fallback and wait for all registered components to acknowledge
+    /// Wrap a fallback-relevant future so that fallback waits for it until it is dropped.
+    ///
+    /// Tracking starts here, not when the future is first polled, so a tracked future handed to a
+    /// spawner is pending from the moment it exists. Track before fallback is triggered or from
+    /// inside a future that is itself tracked: a future tracked after the wait has observed the
+    /// tracker empty belongs to no generation and is not waited for.
+    pub fn track<F: Future>(&self, fut: F) -> impl Future<Output = F::Output> + use<F> {
+        self.tasks.track_future(fut)
+    }
+
+    /// Trigger fallback and wait until every tracked future has been dropped.
     pub async fn trigger_fallback_and_wait(&self) {
-        tracing::debug!("FallbackCoordinator: triggering fallback");
+        tracing::debug!(
+            pending = self.tasks.len(),
+            "FallbackCoordinator: triggering fallback"
+        );
         self.signal.cancel();
-
-        if self.pending_tasks.load(Ordering::Acquire) == 0 {
-            return; // all tasks already done
+        self.tasks.close();
+        // `wait` resolves once the tracker has been empty at some point since the call, so work
+        // tracked after that point would not be covered: look again, and wait again if there is
+        // any. `wait` re-reads the closed-and-empty state when it is created and on every poll,
+        // so a drop between the check and the next `wait` is seen by that `wait`, not missed.
+        loop {
+            self.tasks.wait().await;
+            if self.tasks.is_empty() {
+                break;
+            }
+            tracing::debug!(
+                pending = self.tasks.len(),
+                "FallbackCoordinator: work tracked after the tracker emptied, waiting again"
+            );
         }
-
-        // there's still some tasks running,
-        // wait for the last task to notify us
-        self.notify.notified().await;
-        tracing::debug!("FallbackCoordinator: finished waiting for components to complete cleanup");
+        tracing::debug!("FallbackCoordinator: all components finished fallback cleanup");
     }
 }
 
-pub struct FallbackHandler {
-    coordinator: FallbackCoordinator,
-    done: AtomicBool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::FutureExt as _;
+    use std::pin::pin;
 
-/// Handler for a component that will participate in fallback coordination
-///
-/// ⚠️ Warning: dropping this handler without calling [`FallbackHandler::done`] will result in a
-/// panic.
-impl FallbackHandler {
-    /// Mark this handler as finished
-    /// Takes ownership of `self`, preventing double-calling
-    pub fn done(self) {
-        tracing::debug!("FallbackHandler: done called");
-        self.done.store(true, Ordering::Release);
+    #[tokio::test]
+    async fn waits_for_work_tracked_after_an_earlier_one_finished() {
+        let coordinator = FallbackCoordinator::new();
+        let first = coordinator.track(std::future::pending::<()>());
+        let mut wait = pin!(coordinator.trigger_fallback_and_wait());
+        assert!(wait.as_mut().now_or_never().is_none());
 
-        let prev = self
-            .coordinator
-            .pending_tasks
-            .fetch_sub(1, Ordering::Release);
+        drop(first);
+        let second = coordinator.track(std::future::pending::<()>());
+        assert!(
+            wait.as_mut().now_or_never().is_none(),
+            "fallback completed while a component was still pending"
+        );
 
-        // Notify if fallback has been triggered and this is the last handler
-        if self.coordinator.signal.is_cancelled() && prev == 1 {
-            self.coordinator.notify.notify_one();
-        }
+        drop(second);
+        assert!(wait.as_mut().now_or_never().is_some());
     }
-}
 
-impl Drop for FallbackHandler {
-    fn drop(&mut self) {
-        if !self.done.load(Ordering::Acquire) {
-            panic!("FallbackHandler dropped without calling done()");
-        }
+    #[tokio::test]
+    async fn tracked_future_counts_from_creation_until_dropped() {
+        let coordinator = FallbackCoordinator::new();
+        let never_polled = coordinator.track(std::future::pending::<()>());
+        let mut wait = pin!(coordinator.trigger_fallback_and_wait());
+        assert!(wait.as_mut().now_or_never().is_none());
+
+        drop(never_polled);
+        assert!(wait.as_mut().now_or_never().is_some());
+    }
+
+    #[tokio::test]
+    async fn panicking_tracked_task_is_released() {
+        let coordinator = FallbackCoordinator::new();
+        let task = tokio::spawn(coordinator.track(async { panic!("task failed") }));
+        assert!(task.await.unwrap_err().is_panic());
+
+        coordinator.trigger_fallback_and_wait().await;
     }
 }

@@ -591,14 +591,8 @@ impl Upstream {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) -> TproxyResult<(), error::Upstream> {
-        task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
-
+        let fallback_token = fallback_coordinator.token();
+        task_manager.spawn(fallback_coordinator.track(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -644,10 +638,7 @@ impl Upstream {
 
             self.upstream_io.close();
             warn!("Upstream: task shutting down cleanly.");
-
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
 
         Ok(())
     }

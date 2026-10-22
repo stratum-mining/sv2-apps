@@ -4,52 +4,31 @@ use async_channel::{Receiver, Sender};
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     channel_utils::ReceiverCleanup,
-    fallback_coordinator::{FallbackCoordinator, FallbackHandler},
+    fallback_coordinator::FallbackCoordinator,
     network_helpers::noise_stream::{NoiseTcpReadHalf, NoiseTcpWriteHalf},
     task_manager::TaskManager,
     utils::types::{InboundFrame, OutboundFrame},
 };
 use tracing::{Instrument as _, error, trace, warn};
 
-struct FallbackRegistration {
-    handler: Option<FallbackHandler>,
-    token: Option<CancellationToken>,
-}
-
-impl FallbackRegistration {
-    fn new(fallback_coordinator: Option<FallbackCoordinator>) -> Self {
-        match fallback_coordinator {
-            Some(fallback_coordinator) => Self {
-                handler: Some(fallback_coordinator.register()),
-                token: Some(fallback_coordinator.token()),
-            },
-            None => Self {
-                handler: None,
-                token: None,
-            },
-        }
-    }
-
-    fn is_enabled(&self) -> bool {
-        self.token.is_some()
-    }
-
-    async fn cancelled(&self) {
-        if let Some(token) = &self.token {
-            token.cancelled().await;
-        }
-    }
-
-    fn done(self) {
-        if let Some(handler) = self.handler {
-            handler.done();
-        }
+// Spawns `fut` through `task_manager`, tracked by `fallback_coordinator` when there is one.
+#[track_caller]
+fn spawn_io_task<F>(
+    task_manager: &TaskManager,
+    fallback_coordinator: Option<&FallbackCoordinator>,
+    fut: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    match fallback_coordinator {
+        Some(fallback_coordinator) => task_manager.spawn(fallback_coordinator.track(fut)),
+        None => task_manager.spawn(fut),
     }
 }
 
 /// Spawns async reader and writer tasks for handling framed I/O with shutdown support.
 ///
-/// If a fallback coordinator is provided, both tasks are registered with it and listen for fallback
+/// If a fallback coordinator is provided, both tasks are tracked by it and listen for fallback
 /// cancellation.
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
@@ -66,15 +45,19 @@ pub fn spawn_io_tasks(
     let caller = std::panic::Location::caller();
     let inbound_tx_clone = inbound_tx.clone();
     let outbound_rx_clone = outbound_rx.clone();
+    // A connection outside fallback coordination gets a token that never fires.
+    let fallback_token = fallback_coordinator
+        .as_ref()
+        .map_or_else(CancellationToken::new, |c| c.token());
 
     {
         let cancellation_token_clone = cancellation_token.clone();
-        let fallback_coordinator_clone = fallback_coordinator.clone();
+        let fallback_token = fallback_token.clone();
 
-        task_manager.spawn(
+        spawn_io_task(
+            &task_manager,
+            fallback_coordinator.as_ref(),
             async move {
-                let fallback = FallbackRegistration::new(fallback_coordinator_clone);
-
                 trace!("Reader task started");
 
                 loop {
@@ -85,7 +68,7 @@ pub fn spawn_io_tasks(
                             inbound_tx.close();
                             break;
                         }
-                        _ = fallback.cancelled(), if fallback.is_enabled() => {
+                        _ = fallback_token.cancelled() => {
                             trace!("Received fallback signal");
                             inbound_tx.close();
                             break;
@@ -115,8 +98,6 @@ pub fn spawn_io_tasks(
                 drop(inbound_tx);
                 drop(outbound_rx_clone);
 
-                fallback.done();
-
                 warn!("Reader task exited.");
             }
             .instrument(tracing::trace_span!(
@@ -126,59 +107,54 @@ pub fn spawn_io_tasks(
         );
     }
 
-    {
-        let fallback_coordinator_clone = fallback_coordinator.clone();
-        task_manager.spawn(
-            async move {
-                let fallback = FallbackRegistration::new(fallback_coordinator_clone);
+    spawn_io_task(
+        &task_manager,
+        fallback_coordinator.as_ref(),
+        async move {
+            trace!("Writer task started");
 
-                trace!("Writer task started");
-
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancellation_token.cancelled() => {
-                            trace!("Received shutdown signal");
-                            inbound_tx_clone.close();
-                            break;
-                        }
-                        _ = fallback.cancelled(), if fallback.is_enabled() => {
-                            trace!("Received fallback signal");
-                            inbound_tx_clone.close();
-                            break;
-                        }
-                        res = outbound_rx.recv() => {
-                            match res {
-                                Ok(frame) => {
-                                    trace!("Sending outbound frame");
-                                    if let Err(e) = writer.write_frame(frame).await {
-                                        error!(error=?e, "Writer error");
-                                        outbound_rx.close_and_drain();
-                                        break;
-                                    }
-                                }
-                                Err(_) => {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => {
+                        trace!("Received shutdown signal");
+                        inbound_tx_clone.close();
+                        break;
+                    }
+                    _ = fallback_token.cancelled() => {
+                        trace!("Received fallback signal");
+                        inbound_tx_clone.close();
+                        break;
+                    }
+                    res = outbound_rx.recv() => {
+                        match res {
+                            Ok(frame) => {
+                                trace!("Sending outbound frame");
+                                if let Err(e) = writer.write_frame(frame).await {
+                                    error!(error=?e, "Writer error");
                                     outbound_rx.close_and_drain();
-                                    warn!("Outbound channel closed");
                                     break;
                                 }
+                            }
+                            Err(_) => {
+                                outbound_rx.close_and_drain();
+                                warn!("Outbound channel closed");
+                                break;
                             }
                         }
                     }
                 }
-                outbound_rx.close_and_drain();
-                inbound_tx_clone.close();
-                drop(outbound_rx);
-                drop(inbound_tx_clone);
-
-                fallback.done();
-
-                warn!("Writer task exited.");
             }
-            .instrument(tracing::trace_span!(
-                "writer_task",
-                spawned_at = %format!("{}:{}", caller.file(), caller.line())
-            )),
-        );
-    }
+            outbound_rx.close_and_drain();
+            inbound_tx_clone.close();
+            drop(outbound_rx);
+            drop(inbound_tx_clone);
+
+            warn!("Writer task exited.");
+        }
+        .instrument(tracing::trace_span!(
+            "writer_task",
+            spawned_at = %format!("{}:{}", caller.file(), caller.line())
+        )),
+    );
 }

@@ -478,14 +478,8 @@ impl Downstream {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let downstream_id = self.downstream_id;
-        task_manager.spawn(async move {
-            // we just spawned a new task that's relevant to fallback coordination
-            // so register it with the fallback coordinator
-            let fallback_handler = fallback_coordinator.register();
-
-            // get the cancellation token that signals fallback
-            let fallback_token = fallback_coordinator.token();
-
+        let fallback_token = fallback_coordinator.token();
+        task_manager.spawn(fallback_coordinator.track(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -538,9 +532,7 @@ impl Downstream {
             self.downstream_cancellation_token.cancel();
             self.downstream_io.close();
             on_disconnect().await;
-            // signal fallback coordinator that this task has completed its cleanup
-            fallback_handler.done();
-        });
+        }));
     }
 
     /// Processes typed notifications in per-downstream FIFO order.
