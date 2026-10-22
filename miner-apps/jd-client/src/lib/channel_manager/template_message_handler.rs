@@ -641,6 +641,7 @@ mod tests {
     use super::*;
     use async_channel::{Receiver, unbounded};
     use stratum_apps::{
+        coinbase_output_constraints::coinbase_output_constraints_message,
         config_helpers::CoinbaseRewardScript,
         key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
         stratum_core::{
@@ -766,7 +767,12 @@ mod tests {
         jd_mode.activate();
         manager
             .output_sets
-            .with(|output_sets| output_sets.update(parsed(&jds_coinbase_outputs())))
+            .with(|output_sets| {
+                output_sets.update(
+                    parsed(&jds_coinbase_outputs()),
+                    coinbase_output_constraints_message(parsed(&jds_coinbase_outputs())).unwrap(),
+                )
+            })
             .unwrap();
         manager.set_user_identity("test-user".to_string());
         manager.upstream_state.set(UpstreamState::Connected);
@@ -2321,14 +2327,15 @@ mod tests {
     #[test]
     fn output_sets_follow_template_ids_and_chain_tips_prune_them() {
         let outputs = |hash| parsed(&payout_outputs(hash));
+        let room = coinbase_output_constraints_message(outputs(1)).unwrap();
         let mut sets = OutputSets::new(outputs(0));
         sets.hand_out(1);
-        sets.update(outputs(1));
+        sets.update(outputs(1), room);
         sets.hand_out(2);
         sets.hand_out(3);
-        sets.update(outputs(2));
+        sets.update(outputs(2), room);
         // No template was handed out with `outputs(2)`, so `outputs(3)` replaces it.
-        sets.update(outputs(3));
+        sets.update(outputs(3), room);
         sets.hand_out(5);
 
         assert_eq!(sets.of(1).outputs, outputs(0));
@@ -2336,11 +2343,98 @@ mod tests {
         assert_eq!(sets.of(4).outputs, outputs(1));
         assert_eq!(sets.of(5).outputs, outputs(3));
         assert_eq!(sets.of(5).serialized, payout_outputs(3));
-        assert_eq!(sets.0.len(), 3);
+        assert_eq!(sets.sets.len(), 3);
 
         sets.on_chain_tip(3);
-        assert_eq!(sets.0.len(), 2);
+        assert_eq!(sets.sets.len(), 2);
         sets.on_chain_tip(5);
-        assert_eq!(sets.0.len(), 1);
+        assert_eq!(sets.sets.len(), 1);
+    }
+
+    // JDC asks the JDS for a token, and the JDS answers with `outputs`.
+    async fn answer_with_outputs(manager: &mut ChannelManager, outputs: Vec<u8>) {
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(manager);
+        answer.coinbase_outputs = outputs.try_into().unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap();
+    }
+
+    // Outputs that fit the room the Template Provider already reserves, like a new payout address
+    // of the same size, send it no constraints. The templates handed out next pay them.
+    #[tokio::test]
+    async fn outputs_fitting_the_reserved_room_send_no_constraints() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+
+        answer_with_outputs(&mut manager, payout_outputs(0x11)).await;
+
+        assert!(sent.tp.try_recv().is_err());
+        assert_eq!(current_outputs(&manager), payout_outputs(0x11));
+    }
+
+    // Outputs needing more room than the Template Provider reserves send it constraints for that
+    // room, and the reservation never shrinks: later outputs that fit it, smaller or not, send
+    // nothing.
+    #[tokio::test]
+    async fn the_reserved_room_only_grows() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let two_payouts: Vec<TxOut> = [0x11, 0x33]
+            .into_iter()
+            .flat_map(|hash| consensus::deserialize::<Vec<TxOut>>(&payout_outputs(hash)).unwrap())
+            .collect();
+        let taproot_payout = consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from_bytes([&[0x51, 0x20][..], &[0x44; 32]].concat()),
+        }]);
+
+        answer_with_outputs(&mut manager, consensus::serialize(&two_payouts)).await;
+        let Ok(TemplateDistributionOwned::CoinbaseOutputConstraints(constraints)) =
+            sent.tp.try_recv()
+        else {
+            panic!("JDC asks the Template Provider for more room");
+        };
+        let two_payouts_size: usize = two_payouts.iter().map(TxOut::size).sum();
+        assert_eq!(
+            constraints.coinbase_output_max_additional_size as usize,
+            two_payouts_size
+        );
+
+        answer_with_outputs(&mut manager, payout_outputs(0x55)).await;
+        answer_with_outputs(&mut manager, taproot_payout).await;
+        assert!(sent.tp.try_recv().is_err());
+    }
+
+    // The room for the miner's own outputs gives way to the JDS's first outputs whatever their
+    // size. From then on it only grows: outputs that fit it send nothing, and outputs needing more
+    // in either field get the larger of the room and their need in both.
+    #[test]
+    fn the_reserved_room_grows_only_for_outputs_that_need_more() {
+        let outputs = |hash| parsed(&payout_outputs(hash));
+        let constraints = |size, sigops| CoinbaseOutputConstraintsOwned {
+            coinbase_output_max_additional_size: size,
+            coinbase_output_max_additional_sigops: sigops,
+        };
+        let mut sets = OutputSets::new(outputs(0x00));
+
+        let rooms = [
+            sets.update(outputs(0x11), constraints(10, 4)),
+            sets.update(outputs(0x22), constraints(10, 4)),
+            sets.update(outputs(0x33), constraints(8, 0)),
+            sets.update(outputs(0x44), constraints(12, 0)),
+            sets.update(outputs(0x55), constraints(0, 8)),
+        ];
+
+        assert_eq!(
+            rooms,
+            [
+                Some(constraints(10, 4)),
+                None,
+                None,
+                Some(constraints(12, 4)),
+                Some(constraints(12, 8)),
+            ]
+        );
     }
 }

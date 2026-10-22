@@ -11,7 +11,10 @@ use std::{
 use stratum_apps::stratum_core::{
     job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
     mining_sv2::{OpenExtendedMiningChannelOwned, SetTargetOwned, UpdateChannelOwned},
-    template_distribution_sv2::{RequestTransactionDataOwned, RequestTransactionDataSuccessOwned},
+    template_distribution_sv2::{
+        CoinbaseOutputConstraintsOwned, RequestTransactionDataOwned,
+        RequestTransactionDataSuccessOwned,
+    },
 };
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -324,59 +327,108 @@ impl OutputSet {
 // pays what its downstream jobs pay. Template IDs strictly increase (sv2-spec 07, `NewTemplate`),
 // so each set covers the templates from its first one up to the next set's, and a new chain tip
 // drops the sets no template from the one it activates on can be paying.
+//
+// The sets also keep the room the Template Provider reserves in its templates for the outputs, so
+// the two change together. The room starts sized for the miner's own outputs, as JDC asks for it at
+// startup. No template pays those once the JDS answers, so the JDS's first outputs get constraints
+// of their own, whatever their size. From then on it only grows: new constraints can make the
+// Template Provider start over, as the in-tree one does with a new template and prevhash, which
+// ends the work JDC has waiting, so JDC keeps the larger reservation rather than give room back.
 #[derive(Debug)]
-struct OutputSets(VecDeque<OutputSet>);
+struct OutputSets {
+    sets: VecDeque<OutputSet>,
+    // The room reserved for the JDS's outputs, once JDC asked for it: `None` while the miner's own
+    // outputs are the current ones.
+    room: Option<CoinbaseOutputConstraintsOwned>,
+}
 
 impl OutputSets {
     // The miner's own `outputs`, paid until the JDS hands out its own.
     fn new(outputs: Vec<TxOut>) -> Self {
-        Self(VecDeque::from([OutputSet::new(outputs, true)]))
+        Self {
+            sets: VecDeque::from([OutputSet::new(outputs, true)]),
+            room: None,
+        }
     }
 
     // The outputs the next template is handed out with.
     fn current(&self) -> &OutputSet {
-        self.0.back().expect("there is always a set of outputs")
+        self.sets.back().expect("there is always a set of outputs")
     }
 
-    // Takes `outputs` from a JDS answer as the ones the next template is handed out with, and
-    // returns whether they replace different outputs or the miner's own. A set no template was
-    // handed out with is replaced rather than kept.
-    fn update(&mut self, outputs: Vec<TxOut>) -> bool {
+    // Takes `outputs` from a JDS answer, which need `needed` in the Template Provider's templates,
+    // as the ones the next template is handed out with. Returns the constraints to send the
+    // Template Provider when the room it reserves doesn't fit `needed` yet: the larger of the room
+    // and `needed` in each field, which the room becomes. A set no template was handed out with is
+    // replaced rather than kept.
+    fn update(
+        &mut self,
+        outputs: Vec<TxOut>,
+        needed: CoinbaseOutputConstraintsOwned,
+    ) -> Option<CoinbaseOutputConstraintsOwned> {
         let current = self.current();
-        if !current.miners_own && current.outputs == outputs {
-            return false;
+        if current.miners_own {
+            info!("Templates are handed out with the JDS's coinbase outputs from now on");
+        } else if current.outputs == outputs {
+            return None;
+        } else {
+            info!("The JDS's coinbase outputs changed");
         }
         if current.first_template.is_none() {
-            self.0.pop_back();
+            self.sets.pop_back();
         }
-        self.0.push_back(OutputSet::new(outputs, false));
-        true
+        self.sets.push_back(OutputSet::new(outputs, false));
+
+        let room = match self.room {
+            Some(room)
+                if needed.coinbase_output_max_additional_size
+                    <= room.coinbase_output_max_additional_size
+                    && needed.coinbase_output_max_additional_sigops
+                        <= room.coinbase_output_max_additional_sigops =>
+            {
+                return None;
+            }
+            Some(room) => CoinbaseOutputConstraintsOwned {
+                coinbase_output_max_additional_size: room
+                    .coinbase_output_max_additional_size
+                    .max(needed.coinbase_output_max_additional_size),
+                coinbase_output_max_additional_sigops: room
+                    .coinbase_output_max_additional_sigops
+                    .max(needed.coinbase_output_max_additional_sigops),
+            },
+            None => needed,
+        };
+        self.room = Some(room);
+        Some(room)
     }
 
     // Records that `template_id` is handed out with the current outputs.
     fn hand_out(&mut self, template_id: TemplateId) {
-        let current = self.0.back_mut().expect("there is always a set of outputs");
+        let current = self
+            .sets
+            .back_mut()
+            .expect("there is always a set of outputs");
         current.first_template.get_or_insert(template_id);
     }
 
     // The set `template_id` was handed out with.
     fn of(&self, template_id: TemplateId) -> &OutputSet {
-        self.0
+        self.sets
             .iter()
             .rev()
             .find(|set| set.first_template.is_some_and(|first| first <= template_id))
-            .unwrap_or_else(|| self.0.front().expect("there is always a set of outputs"))
+            .unwrap_or_else(|| self.sets.front().expect("there is always a set of outputs"))
     }
 
     // A new chain tip activating `template_id`: only the set it was handed out with, and newer
     // ones, can still be paid.
     fn on_chain_tip(&mut self, template_id: TemplateId) {
-        while self.0.len() > 1
-            && self.0[1]
+        while self.sets.len() > 1
+            && self.sets[1]
                 .first_template
                 .is_some_and(|first| first <= template_id)
         {
-            self.0.pop_front();
+            self.sets.pop_front();
         }
     }
 }
@@ -526,7 +578,8 @@ pub struct ChannelManager {
     // Maps a downstream ID + channel ID + job ID to the corresponding template ID.
     pub downstream_channel_id_and_job_id_to_template_id:
         SharedMap<DownstreamChannelJobId, TemplateId>,
-    // The coinbase outputs templates are handed out with.
+    // The coinbase outputs templates are handed out with, and the room the Template Provider
+    // reserves for them.
     output_sets: SharedLock<OutputSets>,
     // The active upstream extended channel (client-side instance), if any.
     pub upstream_channel: SharedLock<Option<ExtendedChannel>>,

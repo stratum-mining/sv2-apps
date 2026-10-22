@@ -41,8 +41,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     // - checks the answer's coinbase outputs, and falls back if JDC can't use them;
     // - records the outputs as the ones the next templates are handed out with, and queues the
     //   token with them;
-    // - if the outputs changed, or replace the miner's own, sends the Template Provider
-    //   `CoinbaseOutputConstraints` for them;
+    // - grows the room the Template Provider reserves if the outputs need more, sending it
+    //   `CoinbaseOutputConstraints` for that room;
     // - hands the token to work waiting for one.
     async fn handle_allocate_mining_job_token_success(
         &mut self,
@@ -72,34 +72,37 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         let (new_coinbase_outputs, constraints) =
             usable_coinbase_outputs(msg.coinbase_outputs.as_bytes()).map_err(JDCError::fallback)?;
 
-        let coinbase_changed = self
+        // The Template Provider gets constraints for the JDS's first outputs, and afterwards only
+        // when outputs need more room than it reserves (see `OutputSets`).
+        let room = self
             .output_sets
-            .with(|output_sets| output_sets.update(new_coinbase_outputs))
+            .with(|output_sets| output_sets.update(new_coinbase_outputs, constraints))
             .map_err(JDCError::shutdown)?;
         self.mining_job_tokens
             .with(|tokens| tokens.queue(msg.clone()))
             .map_err(JDCError::shutdown)?;
 
-        if coinbase_changed {
-            info!("Coinbase outputs from JDS changed, sending new constraints");
+        //
+        // A template the Template Provider built before applying new constraints, but sent after
+        // JDC sent them, can't be told apart: `NewTemplate` doesn't say which constraints it was
+        // built under, so JDC hands it out with outputs it may have no room for. With the Template
+        // Provider on the same host or LAN that window is under a round trip, and in full-template
+        // mode the in-tree one closes it, answering the template's transaction-data request with
+        // `stale-template-id`.
+        if let Some(room) = room {
             debug!(
-                max_additional_size = constraints.coinbase_output_max_additional_size,
-                max_additional_sigops = constraints.coinbase_output_max_additional_sigops,
+                max_additional_size = room.coinbase_output_max_additional_size,
+                max_additional_sigops = room.coinbase_output_max_additional_sigops,
                 "Computed coinbase output constraints"
             );
-
-            let coinbase_output_constraints_message =
-                TemplateDistributionOwned::CoinbaseOutputConstraints(constraints);
-
             self.channel_manager_io
                 .tp_sender
-                .send(coinbase_output_constraints_message)
+                .send(TemplateDistributionOwned::CoinbaseOutputConstraints(room))
                 .await
                 .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
-
             info!("Sent updated CoinbaseOutputConstraints to TP channel");
         } else {
-            debug!("Coinbase outputs unchanged, skipping constraints update");
+            debug!("Coinbase outputs fit the room reserved, skipping constraints update");
         }
 
         // A token goes first to work that was waiting for one: a declaration in full-template
