@@ -1,10 +1,8 @@
 use stratum_apps::{
+    coinbase_output_constraints::coinbase_output_constraints_message,
     stratum_core::{
         binary_sv2::{B016MOwned, Seq064KOwned},
-        bitcoin::{
-            self, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
-            absolute::LockTime, transaction::Version,
-        },
+        bitcoin::{self, TxOut},
         channels_sv2::outputs::deserialize_outputs,
         handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync,
         job_declaration_sv2::{
@@ -15,7 +13,6 @@ use stratum_apps::{
         parsers_sv2::{
             AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned, Tlv,
         },
-        template_distribution_sv2::CoinbaseOutputConstraintsOwned,
     },
     utils::types::OutboundFrame,
 };
@@ -42,7 +39,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     // Handles a successful `AllocateMiningJobToken` response from the JDS:
     // - drops an answer to a token request JDC never sent or already saw answered;
     // - takes the answer's coinbase outputs, and queues its token;
-    // - if the outputs changed, sends the Template Provider `CoinbaseOutputConstraints` for them;
+    // - if the outputs changed, sends the Template Provider `CoinbaseOutputConstraints` for them,
+    //   or falls back when they need more room than the message can carry;
     // - hands the token to work waiting for one.
     async fn handle_allocate_mining_job_token_success(
         &mut self,
@@ -85,39 +83,21 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 bitcoin::consensus::deserialize(msg.coinbase_outputs.as_bytes())
                     .map_err(JDCError::shutdown)?;
 
-            let max_additional_size: usize = deserialized_jds_coinbase_outputs
-                .iter()
-                .map(|o| o.size())
-                .sum();
-
-            // create a dummy coinbase transaction with the empty output
-            // this is used to calculate the sigops of the coinbase output
-            let dummy_coinbase = Transaction {
-                version: Version::TWO,
-                lock_time: LockTime::ZERO,
-                input: vec![TxIn {
-                    previous_output: OutPoint::null(),
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::from(vec![vec![0; 32]]),
-                }],
-                output: deserialized_jds_coinbase_outputs,
-            };
-
-            let max_additional_sigops = dummy_coinbase.total_sigop_cost(|_| None) as u16;
-
+            let constraints = coinbase_output_constraints_message(
+                deserialized_jds_coinbase_outputs,
+            )
+            .map_err(|e| {
+                warn!(error = %e, "JDS coinbase outputs don't fit CoinbaseOutputConstraints");
+                JDCError::fallback(JDCErrorKind::CoinbaseOutputConstraints(e))
+            })?;
             debug!(
-                max_additional_size,
-                max_additional_sigops, "Computed coinbase output constraints"
+                max_additional_size = constraints.coinbase_output_max_additional_size,
+                max_additional_sigops = constraints.coinbase_output_max_additional_sigops,
+                "Computed coinbase output constraints"
             );
 
             let coinbase_output_constraints_message =
-                TemplateDistributionOwned::CoinbaseOutputConstraints(
-                    CoinbaseOutputConstraintsOwned {
-                        coinbase_output_max_additional_size: max_additional_size as u32,
-                        coinbase_output_max_additional_sigops: max_additional_sigops,
-                    },
-                );
+                TemplateDistributionOwned::CoinbaseOutputConstraints(constraints);
 
             self.channel_manager_io
                 .tp_sender
