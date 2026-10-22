@@ -2,7 +2,7 @@ use stratum_apps::{
     stratum_core::{
         binary_sv2::{B016MOwned, Seq064KOwned},
         bitcoin::{
-            self, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            self, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
             absolute::LockTime, transaction::Version,
         },
         channels_sv2::outputs::deserialize_outputs,
@@ -72,7 +72,13 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             return Ok(());
         }
 
+        // Everything about the answer that can fail is checked before any of it is kept, so
+        // outputs JDC can't use leave its outputs, tokens and constraints as they were, and JDC
+        // falls back from the JDS that handed them out.
         let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
+        let constraints =
+            usable_coinbase_outputs(&new_coinbase_outputs).map_err(JDCError::fallback)?;
+
         let coinbase_changed = self
             .coinbase_outputs
             .with(|coinbase_outputs| {
@@ -86,13 +92,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)?;
 
         if coinbase_changed {
-            info!("Coinbase outputs from JDS changed, recalculating constraints");
-            let deserialized_jds_coinbase_outputs: Vec<TxOut> =
-                bitcoin::consensus::deserialize(msg.coinbase_outputs.as_bytes())
-                    .map_err(JDCError::shutdown)?;
-
-            let constraints = coinbase_output_constraints(deserialized_jds_coinbase_outputs)
-                .map_err(JDCError::fallback)?;
+            info!("Coinbase outputs from JDS changed, sending new constraints");
             debug!(
                 max_additional_size = constraints.coinbase_output_max_additional_size,
                 max_additional_sigops = constraints.coinbase_output_max_additional_sigops,
@@ -367,6 +367,24 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
         Ok(())
     }
+}
+
+// The `CoinbaseOutputConstraints` for the coinbase outputs a JDS token answer hands out, if JDC
+// can use them: they deserialize, and there is at least one, the first being the pool payout
+// output JDC puts the template's reward in. Every one comes at 0 sats, as the JDS hands them out
+// (sv2-spec 06, `AllocateMiningJobToken.Success`).
+fn usable_coinbase_outputs(
+    serialized: &[u8],
+) -> Result<CoinbaseOutputConstraintsOwned, JDCErrorKind> {
+    let outputs: Vec<TxOut> = bitcoin::consensus::deserialize(serialized)
+        .map_err(|_| JDCErrorKind::AllocateMiningJobTokenSuccessCoinbaseOutputsError)?;
+    if outputs.is_empty() {
+        return Err(JDCErrorKind::AllocateMiningJobTokenSuccessNoCoinbaseOutputs);
+    }
+    if outputs.iter().any(|output| output.value != Amount::ZERO) {
+        return Err(JDCErrorKind::AllocateMiningJobTokenSuccessCoinbaseOutputValue);
+    }
+    coinbase_output_constraints(outputs)
 }
 
 // The `CoinbaseOutputConstraints` that reserve room in the Template Provider's templates for the

@@ -113,6 +113,13 @@ separate operator: the account you hold at your primary pool is not the account 
 backup. It is mandatory, and JDC exits with an error if any entry omits it. Solo mining mode has no
 upstreams (`upstreams = []`) and therefore no `user_identity`.
 
+When the Pool or JDS in use stops being usable, JDC falls back: it moves to the next upstream in the
+list, and mines solo once none is left. A token answer from the JDS whose coinbase outputs JDC can't
+use is one such case: the outputs don't deserialize, there are none, one carries a value (the JDS
+hands every output out at 0 sats, and JDC puts the template's reward in the first), or they need
+more room or sigops than `CoinbaseOutputConstraints` can reserve. An answer to a token request JDC
+never sent, or a second answer to one already answered, is ignored instead.
+
 ### Miner Telemetry
 
 JDC can enrich the monitoring API with telemetry from SV2 ASIC miners that connect directly to JDC.

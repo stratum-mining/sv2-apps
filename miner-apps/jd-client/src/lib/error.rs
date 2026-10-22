@@ -222,6 +222,10 @@ pub enum JDCErrorKind {
     FailedToCreateCustomJob,
     /// Allocate Mining job token coinbase output error
     AllocateMiningJobTokenSuccessCoinbaseOutputsError,
+    /// `AllocateMiningJobToken.Success` hands out no coinbase output.
+    AllocateMiningJobTokenSuccessNoCoinbaseOutputs,
+    /// `AllocateMiningJobToken.Success` hands out a coinbase output with a nonzero value.
+    AllocateMiningJobTokenSuccessCoinbaseOutputValue,
     /// Channel manager has bad coinbase outputs.
     ChannelManagerHasBadCoinbaseOutputs,
     /// Coinbase outputs need more room than `CoinbaseOutputConstraints` can reserve.
@@ -343,6 +347,18 @@ impl fmt::Display for JDCErrorKind {
                 write!(
                     f,
                     "AllocateMiningJobToken.Success coinbase outputs are not deserializable"
+                )
+            }
+            AllocateMiningJobTokenSuccessNoCoinbaseOutputs => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out no coinbase output"
+                )
+            }
+            AllocateMiningJobTokenSuccessCoinbaseOutputValue => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out a coinbase output with a nonzero value"
                 )
             }
             ChannelManagerHasBadCoinbaseOutputs => {

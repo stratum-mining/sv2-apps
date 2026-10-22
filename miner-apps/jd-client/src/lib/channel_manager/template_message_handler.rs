@@ -1770,4 +1770,43 @@ mod tests {
             outputs_size
         );
     }
+
+    // A token answer whose outputs JDC can't use makes JDC fall back, and changes nothing: no
+    // token is queued, JDC keeps its outputs, and the Template Provider gets no constraints.
+    #[tokio::test]
+    async fn unusable_token_answers_fall_back_and_change_nothing() {
+        let output = |sats, script: Vec<u8>| TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: ScriptBuf::from_bytes(script),
+        };
+        let unusable_outputs = [
+            // Not a list of outputs: a CompactSize cut short.
+            vec![0xfd],
+            // No output to pay the template's reward into.
+            consensus::serialize(&Vec::<TxOut>::new()),
+            // A value in the pool payout output, or in another one.
+            consensus::serialize(&vec![output(1, vec![])]),
+            consensus::serialize(&vec![output(0, vec![]), output(1, vec![])]),
+            // More sigops than `CoinbaseOutputConstraints` can carry.
+            consensus::serialize(&vec![output(0, vec![0xae; 1000])]),
+        ];
+
+        for coinbase_outputs in unusable_outputs {
+            let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+            let outputs = manager.coinbase_outputs.get().unwrap();
+            manager.allocate_tokens(1).await.unwrap();
+            let mut answer = token_success(&manager);
+            answer.coinbase_outputs = coinbase_outputs.try_into().unwrap();
+
+            let error = manager
+                .handle_allocate_mining_job_token_success(None, answer, None)
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error.action, Action::Fallback));
+            assert_eq!(queued_tokens(&manager), 1);
+            assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
+            assert!(sent.tp.try_recv().is_err());
+        }
+    }
 }
