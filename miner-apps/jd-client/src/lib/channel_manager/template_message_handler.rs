@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq064KOwned, U256Owned},
-    job_declaration_sv2::DeclareMiningJobOwned,
+    job_declaration_sv2::{AllocateMiningJobTokenSuccessOwned, DeclareMiningJobOwned},
     parsers_sv2::{JobDeclarationOwned, MiningOwned},
     template_distribution_sv2::{
         NewTemplateOwned, RequestTransactionDataErrorOwned, RequestTransactionDataSuccessOwned,
@@ -18,7 +18,7 @@ use stratum_apps::stratum_core::{
 use tracing::{error, info, warn};
 
 use crate::{
-    channel_manager::{ChannelManager, DeclaredJob},
+    channel_manager::{ChannelManager, DeclaredJob, WaitingDeclaration},
     error::{self, JDCError, JDCErrorKind},
     utils::UpstreamState,
 };
@@ -250,7 +250,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         // never asked for. Requests are only sent in full-template mode while the upstream channel
         // is open, and a fallback starts with none, so anything else is dropped here, before it
         // can reach the token queue.
-        let Some(template_message) = self.take_requested_template(msg.template_id)? else {
+        let Some(template) = self.take_requested_template(msg.template_id)? else {
             warn!(
                 template_id = msg.template_id,
                 "Ignoring RequestTransactionData.Success for a template whose data was not requested"
@@ -258,125 +258,21 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             return Ok(());
         };
 
-        let transactions_data = msg.transaction_list;
-        let excess_data = msg.excess_data;
-
         let token = self
             .allocate_tokens
             .with(|tokens| tokens.pop_front())
             .map_err(JDCError::shutdown)?;
-        let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
-        let prevhash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
-
         let Some(token) = token else {
-            warn!(
-                "No token available, discarding template id: {}",
-                msg.template_id
-            );
-            _ = self.allocate_tokens(1).await;
-            return Ok(());
+            return self
+                .wait_for_token(WaitingDeclaration {
+                    template,
+                    transaction_data: msg,
+                })
+                .await;
         };
         _ = self.allocate_tokens(1).await;
 
-        let mining_token = token.mining_job_token.clone();
-        let deserialized_outputs = self.coinbase_outputs_for(&template_message)?;
-        let reserialized_outputs = consensus::serialize(&deserialized_outputs);
-
-        let tx_list: Vec<Transaction> = transactions_data
-            .iter_bytes()
-            .map(consensus::deserialize)
-            .collect::<Result<_, _>>()
-            .map_err(|e| {
-                error!(
-                    error = ?e,
-                    template_id = msg.template_id,
-                    "Template provider sent a malformed transaction"
-                );
-                JDCError::shutdown(e)
-            })?;
-
-        let wtxids_as_u256: Vec<U256Owned> = tx_list
-            .iter()
-            .map(|tx| {
-                let txid = tx.compute_wtxid();
-                U256Owned::from(*txid.as_byte_array())
-            })
-            .collect();
-        let wtx_ids = Seq064KOwned::new(wtxids_as_u256).map_err(JDCError::shutdown)?;
-
-        let is_activated_future_template = template_message.future_template
-            && prevhash
-                .as_ref()
-                .map(|prev_hash| prev_hash.template_id != template_message.template_id)
-                .unwrap_or(true);
-
-        let upstream_full_extranonce_size = self
-            .upstream_channel
-            .with(|channel| {
-                channel
-                    .as_ref()
-                    .map(|channel| channel.get_full_extranonce_size())
-            })
-            .map_err(JDCError::shutdown)?;
-
-        let declare_job = if let Some(full_extranonce_size) = upstream_full_extranonce_size {
-            self.job_factory
-                .with(|job_factory| {
-                    let job_factory = job_factory.as_mut()?;
-                    if let Ok((coinbase_tx_prefix, coinbase_tx_suffix)) = job_factory
-                        .new_coinbase_tx_prefix_and_suffix(
-                            template_message.clone(),
-                            deserialized_outputs.clone(),
-                            full_extranonce_size,
-                        )
-                    {
-                        let declare_job = DeclareMiningJobOwned {
-                            request_id,
-                            mining_job_token: mining_token,
-                            version: template_message.version,
-                            coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
-                            coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
-                            wtxid_list: wtx_ids,
-                            excess_data,
-                        };
-
-                        self.last_declare_job_store.insert(
-                            request_id,
-                            DeclaredJob {
-                                declare_mining_job: Some(declare_job.clone()),
-                                template: template_message,
-                                prev_hash: prevhash,
-                                set_custom_mining_job: None,
-                                coinbase_output: reserialized_outputs,
-                                tx_list: transactions_data
-                                    .iter_bytes()
-                                    .map(|tx| tx.to_vec())
-                                    .collect(),
-                            },
-                        );
-
-                        return Some(declare_job);
-                    }
-                    None
-                })
-                .map_err(JDCError::shutdown)?
-        } else {
-            None
-        };
-
-        if is_activated_future_template {
-            return Ok(());
-        }
-
-        if let Some(declare_job) = declare_job {
-            _ = self
-                .channel_manager_io
-                .jd_sender
-                .send(JobDeclarationOwned::DeclareMiningJob(declare_job))
-                .await;
-        }
-
-        Ok(())
+        self.declare_template(template, msg, token).await
     }
 
     async fn handle_set_new_prev_hash(
@@ -407,6 +303,19 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             warn!(
                 template_id,
                 "Releasing template waiting for its transaction data: the chain tip moved past it"
+            );
+        }
+
+        // Work waiting for a token was built on the previous chain tip, except the template this
+        // prevhash activates, which becomes the new tip's.
+        let dropped = self
+            .waiting_for_token
+            .with(|waiting| waiting.on_chain_tip(msg.template_id))
+            .map_err(JDCError::shutdown)?;
+        for waiting in dropped {
+            warn!(
+                template_id = waiting.template.template_id,
+                "Dropping transaction data waiting for a token: the chain tip moved past it"
             );
         }
 
@@ -587,6 +496,124 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     }
 }
 
+#[cfg_attr(not(test), hotpath::measure_all)]
+impl ChannelManager {
+    // Declares `template` to the JDS with `token`, from the transaction data the Template Provider
+    // sent for it, and records the declaration. A future template's declaration is held back for
+    // the prevhash that activates it, which sends it.
+    pub(super) async fn declare_template(
+        &self,
+        template: NewTemplateOwned,
+        transaction_data: RequestTransactionDataSuccessOwned,
+        token: AllocateMiningJobTokenSuccessOwned,
+    ) -> Result<(), JDCError<error::ChannelManager>> {
+        let transactions_data = transaction_data.transaction_list;
+        let excess_data = transaction_data.excess_data;
+        let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
+        let prevhash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
+
+        let mining_token = token.mining_job_token.clone();
+        let deserialized_outputs = self.coinbase_outputs_for(&template)?;
+        let reserialized_outputs = consensus::serialize(&deserialized_outputs);
+
+        let tx_list: Vec<Transaction> = transactions_data
+            .iter_bytes()
+            .map(consensus::deserialize)
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                error!(
+                    error = ?e,
+                    template_id = template.template_id,
+                    "Template provider sent a malformed transaction"
+                );
+                JDCError::shutdown(e)
+            })?;
+
+        let wtxids_as_u256: Vec<U256Owned> = tx_list
+            .iter()
+            .map(|tx| {
+                let txid = tx.compute_wtxid();
+                U256Owned::from(*txid.as_byte_array())
+            })
+            .collect();
+        let wtx_ids = Seq064KOwned::new(wtxids_as_u256).map_err(JDCError::shutdown)?;
+
+        let is_activated_future_template = template.future_template
+            && prevhash
+                .as_ref()
+                .map(|prev_hash| prev_hash.template_id != template.template_id)
+                .unwrap_or(true);
+
+        let upstream_full_extranonce_size = self
+            .upstream_channel
+            .with(|channel| {
+                channel
+                    .as_ref()
+                    .map(|channel| channel.get_full_extranonce_size())
+            })
+            .map_err(JDCError::shutdown)?;
+
+        let declare_job = if let Some(full_extranonce_size) = upstream_full_extranonce_size {
+            self.job_factory
+                .with(|job_factory| {
+                    let job_factory = job_factory.as_mut()?;
+                    if let Ok((coinbase_tx_prefix, coinbase_tx_suffix)) = job_factory
+                        .new_coinbase_tx_prefix_and_suffix(
+                            template.clone(),
+                            deserialized_outputs.clone(),
+                            full_extranonce_size,
+                        )
+                    {
+                        let declare_job = DeclareMiningJobOwned {
+                            request_id,
+                            mining_job_token: mining_token,
+                            version: template.version,
+                            coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
+                            coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
+                            wtxid_list: wtx_ids,
+                            excess_data,
+                        };
+
+                        self.last_declare_job_store.insert(
+                            request_id,
+                            DeclaredJob {
+                                declare_mining_job: Some(declare_job.clone()),
+                                template,
+                                prev_hash: prevhash,
+                                set_custom_mining_job: None,
+                                coinbase_output: reserialized_outputs,
+                                tx_list: transactions_data
+                                    .iter_bytes()
+                                    .map(|tx| tx.to_vec())
+                                    .collect(),
+                            },
+                        );
+
+                        return Some(declare_job);
+                    }
+                    None
+                })
+                .map_err(JDCError::shutdown)?
+        } else {
+            None
+        };
+
+        if is_activated_future_template {
+            return Ok(());
+        }
+
+        if let Some(declare_job) = declare_job {
+            _ = self
+                .channel_manager_io
+                .jd_sender
+                .send(JobDeclarationOwned::DeclareMiningJob(declare_job))
+                .await;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,8 +637,10 @@ mod tests {
         utils::types::{InboundFrame, OutboundFrame},
     };
 
+    use stratum_apps::stratum_core::handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync;
+
     use crate::{
-        channel_manager::MAX_REQUESTED_TEMPLATES,
+        channel_manager::{MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN},
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
         error::Action,
         jd_mode::JDMode,
@@ -1215,5 +1244,276 @@ mod tests {
 
         assert_eq!(queued_tokens(&manager), 1);
         assert!(sent.jds.try_recv().is_err());
+    }
+
+    // A token the JDS hands JDC.
+    fn token_success() -> AllocateMiningJobTokenSuccessOwned {
+        AllocateMiningJobTokenSuccessOwned {
+            request_id: 7,
+            mining_job_token: token(),
+            coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
+        }
+    }
+
+    // The templates JDC has recorded a declaration for, in ascending order.
+    fn declared_templates(manager: &ChannelManager) -> Vec<u64> {
+        let mut templates = Vec::new();
+        manager.last_declare_job_store.for_each(|_, declared_job| {
+            if declared_job.declare_mining_job.is_some() {
+                templates.push(declared_job.template.template_id);
+            }
+        });
+        templates.sort();
+        templates
+    }
+
+    fn declarations_sent(receiver: &Receiver<JobDeclarationOwned>) -> usize {
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter(|message| matches!(message, JobDeclarationOwned::DeclareMiningJob(_)))
+            .count()
+    }
+
+    // Transaction data that finds no token waits for one, and asks the JDS for a token of its
+    // own. The token that arrives next declares the template, without a new one, and is not
+    // replaced: the waiting work already asked for it.
+    #[tokio::test]
+    async fn requested_template_waiting_for_a_token_is_declared_once_one_arrives() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sent.jds.try_recv(),
+            Ok(JobDeclarationOwned::AllocateMiningJobToken(_))
+        ));
+        assert!(sent.jds.try_recv().is_err());
+
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+        let sent_after_token: Vec<_> = std::iter::from_fn(|| sent.jds.try_recv().ok()).collect();
+        assert!(matches!(
+            sent_after_token.as_slice(),
+            [JobDeclarationOwned::DeclareMiningJob(_)]
+        ));
+        assert_eq!(declared_templates(&manager), vec![2]);
+    }
+
+    // A future template whose transaction data waits for a token through its own activation is
+    // declared, and sent, by the token that arrives after it.
+    #[tokio::test]
+    async fn activated_template_waiting_for_a_token_is_declared_once_one_arrives() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(2), None)
+            .await
+            .unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(declarations_sent(&sent.jds), 1);
+        assert_eq!(declared_templates(&manager), vec![2]);
+    }
+
+    // Work built on a chain tip can no longer be mined once the tip moves, so a new tip ends its
+    // wait: the token that arrives next declares nothing and stays queued.
+    #[tokio::test]
+    async fn waiting_work_the_chain_tip_moved_past_is_dropped() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(declarations_sent(&sent.jds), 0);
+        assert!(declared_templates(&manager).is_empty());
+        assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // Downstreams mine every template of the current chain tip, so each one whose transaction
+    // data finds no token waits, and the tokens that arrive declare them newest first, each once.
+    #[tokio::test]
+    async fn every_waiting_template_is_declared_newest_first() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        for template_id in [2, 3] {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+        }
+        for template_id in [2, 3] {
+            manager
+                .handle_request_tx_data_success(None, transaction_data(template_id), None)
+                .await
+                .unwrap();
+        }
+
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+        assert_eq!(declared_templates(&manager), vec![3]);
+        for _ in 0..2 {
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(declarations_sent(&sent.jds), 2);
+        assert_eq!(declared_templates(&manager), vec![2, 3]);
+        assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // However long tokens take to arrive, only the newest templates of the current chain tip
+    // wait for one, up to a fixed number.
+    #[tokio::test]
+    async fn templates_waiting_for_a_token_are_capped() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        let templates = 2..2 + MAX_WAITING_FOR_TOKEN as u64 + 1;
+        for template_id in templates.clone() {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+        }
+        for template_id in templates.clone() {
+            manager
+                .handle_request_tx_data_success(None, transaction_data(template_id), None)
+                .await
+                .unwrap();
+        }
+
+        for _ in templates.clone() {
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .await
+                .unwrap();
+        }
+
+        let newest: Vec<u64> = templates.skip(1).collect();
+        assert_eq!(declared_templates(&manager), newest);
+        assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // A future template's transaction data that waits for a token is declared by a token that
+    // arrives before its activation, but the declaration only goes to the JDS once a prevhash
+    // activates the template.
+    #[tokio::test]
+    async fn future_template_waiting_for_a_token_is_sent_once_activated() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .await
+            .unwrap();
+        assert_eq!(declared_templates(&manager), vec![2]);
+        assert_eq!(declarations_sent(&sent.jds), 0);
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(2), None)
+            .await
+            .unwrap();
+        assert_eq!(declarations_sent(&sent.jds), 1);
+    }
+
+    // Only one future template waits for a token: a newer one takes its place, and only the newer
+    // one is declared.
+    #[tokio::test]
+    async fn newer_future_template_replaces_a_waiting_one() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .allocate_tokens
+            .with(|tokens| tokens.clear())
+            .unwrap();
+        for template_id in [2, 3] {
+            manager
+                .handle_new_template(None, template(template_id, true), None)
+                .await
+                .unwrap();
+        }
+        for template_id in [2, 3] {
+            manager
+                .handle_request_tx_data_success(None, transaction_data(template_id), None)
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..2 {
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(declared_templates(&manager), vec![3]);
+        assert_eq!(queued_tokens(&manager), 1);
     }
 }
