@@ -1,7 +1,7 @@
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
 use std::{
-    collections::{BinaryHeap, VecDeque},
+    collections::{BinaryHeap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{
         Arc, OnceLock,
@@ -143,6 +143,53 @@ pub struct DeclaredJob {
     coinbase_output: Vec<u8>,
     // The list of transactions included in the job’s template.
     tx_list: Vec<Vec<u8>>,
+}
+
+// The mining job tokens JDC asks the JDS for, from the request to the job that spends the token.
+// An answer is accepted only if it takes its request out, so the JDS can't add tokens or change
+// outputs JDC never asked for. A fallback builds a channel manager with no requests, so answers
+// to requests sent before it are never accepted either.
+#[derive(Debug, Default)]
+struct MiningJobTokens {
+    // Token requests sent to the JDS and not answered yet.
+    requests: HashSet<RequestId>,
+    // The tokens the answers brought, oldest first. The oldest is spent first, to minimize the
+    // risk of JDS-side expiration.
+    queue: VecDeque<AllocateMiningJobTokenSuccessOwned>,
+}
+
+impl MiningJobTokens {
+    // Records a token request JDC sends the JDS.
+    fn request(&mut self, request_id: RequestId) {
+        self.requests.insert(request_id);
+    }
+
+    // Takes out the request an answer with `request_id` answers, and returns whether there was
+    // one: an answer to a request JDC never sent, or a second answer to one, finds none.
+    fn answered(&mut self, request_id: RequestId) -> bool {
+        self.requests.remove(&request_id)
+    }
+
+    // Keeps the token `answer` brings until a job spends it.
+    fn queue(&mut self, answer: AllocateMiningJobTokenSuccessOwned) {
+        self.queue.push_back(answer);
+    }
+
+    // The token the next job spends, left in the queue until the job is built.
+    fn peek(&self) -> Option<&AllocateMiningJobTokenSuccessOwned> {
+        self.queue.front()
+    }
+
+    // Takes the token the next job spends out of the queue.
+    fn take(&mut self) -> Option<AllocateMiningJobTokenSuccessOwned> {
+        self.queue.pop_front()
+    }
+
+    // Takes out the token the answer to `request_id` brought, once a job built with it is sent.
+    // Each queued token came with the answer to a request of its own, so the ID names one token.
+    fn spend(&mut self, request_id: RequestId) {
+        self.queue.retain(|token| token.request_id != request_id);
+    }
 }
 
 // Work on a template that was ready to go upstream while JDC held no token to pay for it.
@@ -356,9 +403,8 @@ pub struct ChannelManager {
     pub last_future_template: SharedLock<Option<NewTemplateOwned>>,
     // The last new-prevhash received from the template provider.
     pub last_new_prev_hash: SharedLock<Option<SetNewPrevHashTdp>>,
-    // FIFO buffer of allocation tokens received from the JDS.
-    // Oldest token is consumed first to minimize risk of JDS-side expiration.
-    pub allocate_tokens: SharedLock<VecDeque<AllocateMiningJobTokenSuccessOwned>>,
+    // The token requests JDC sent the JDS, and the tokens it holds.
+    mining_job_tokens: SharedLock<MiningJobTokens>,
     // Templates whose transaction data has been requested from the Template Provider and not
     // received yet, oldest first. Nothing else reads a stored template, so one is kept only for
     // its request: solo and coinbase-only modes keep none. The answer to the request, a new chain
@@ -528,7 +574,7 @@ impl ChannelManager {
             sequence_number_factory: Arc::new(AtomicU32::new(1)),
             last_future_template: SharedLock::new(None),
             last_new_prev_hash: SharedLock::new(None),
-            allocate_tokens: SharedLock::new(VecDeque::new()),
+            mining_job_tokens: SharedLock::new(MiningJobTokens::default()),
             requested_templates: SharedLock::new(VecDeque::new()),
             waiting_for_token: SharedLock::new(WaitingForToken::default()),
             last_declare_job_store: SharedMap::new(),
@@ -1327,6 +1373,9 @@ impl ChannelManager {
 
         for i in 0..token_to_allocate {
             let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
+            self.mining_job_tokens
+                .with(|tokens| tokens.request(request_id))
+                .map_err(JDCError::shutdown)?;
 
             debug!(
                 request_id,
@@ -1411,8 +1460,8 @@ impl ChannelManager {
             return Ok(None);
         }
         let Some(token) = self
-            .allocate_tokens
-            .with(|tokens| tokens.front().map(|token| token.mining_job_token.clone()))
+            .mining_job_tokens
+            .with(|tokens| tokens.peek().cloned())
             .map_err(JDCError::shutdown)?
         else {
             self.wait_for_token(WaitingWork::CustomJob {
@@ -1431,7 +1480,7 @@ impl ChannelManager {
                     job_factory.new_custom_job(
                         upstream_channel_id,
                         self.request_id_factory.fetch_add(1, Ordering::Relaxed),
-                        token,
+                        token.mining_job_token.clone(),
                         prev_hash.clone().into(),
                         template.clone(),
                         coinbase_outputs,
@@ -1455,8 +1504,8 @@ impl ChannelManager {
             JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
         })?;
 
-        self.allocate_tokens
-            .with(|tokens| tokens.pop_front())
+        self.mining_job_tokens
+            .with(|tokens| tokens.spend(token.request_id))
             .map_err(JDCError::shutdown)?;
         self.last_declare_job_store.insert(
             custom_job.request_id,

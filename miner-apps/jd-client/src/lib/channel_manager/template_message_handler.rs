@@ -259,8 +259,8 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         };
 
         let token = self
-            .allocate_tokens
-            .with(|tokens| tokens.pop_front())
+            .mining_job_tokens
+            .with(|tokens| tokens.take())
             .map_err(JDCError::shutdown)?;
         let Some(token) = token else {
             return self
@@ -640,7 +640,7 @@ mod tests {
     use stratum_apps::stratum_core::handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync;
 
     use crate::{
-        channel_manager::{MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN},
+        channel_manager::{MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN, MiningJobTokens},
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
         error::Action,
         jd_mode::JDMode,
@@ -765,11 +765,12 @@ mod tests {
             )))
             .unwrap();
         manager.last_new_prev_hash.set(Some(prev_hash(1))).unwrap();
+        let request_id = manager.request_id_factory.fetch_add(1, Ordering::Relaxed);
         manager
-            .allocate_tokens
+            .mining_job_tokens
             .with(|tokens| {
-                tokens.push_back(AllocateMiningJobTokenSuccessOwned {
-                    request_id: 0,
+                tokens.queue(AllocateMiningJobTokenSuccessOwned {
+                    request_id,
                     mining_job_token: token(),
                     coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
                 })
@@ -832,7 +833,10 @@ mod tests {
     }
 
     fn queued_tokens(manager: &ChannelManager) -> usize {
-        manager.allocate_tokens.with(|tokens| tokens.len()).unwrap()
+        manager
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.len())
+            .unwrap()
     }
 
     // The custom jobs recorded for `template_id`.
@@ -932,7 +936,10 @@ mod tests {
 
         assert!(custom_job.is_none());
         assert_eq!(
-            manager.allocate_tokens.with(|tokens| tokens.len()).unwrap(),
+            manager
+                .mining_job_tokens
+                .with(|tokens| tokens.queue.len())
+                .unwrap(),
             1
         );
         assert!(sent_to_pool(&sent_to_pool_receiver).is_empty());
@@ -979,7 +986,10 @@ mod tests {
 
         assert!(sent_to_pool(&sent_to_pool_receiver).is_empty());
         assert_eq!(
-            manager.allocate_tokens.with(|tokens| tokens.len()).unwrap(),
+            manager
+                .mining_job_tokens
+                .with(|tokens| tokens.queue.len())
+                .unwrap(),
             1
         );
     }
@@ -1174,8 +1184,8 @@ mod tests {
     async fn transaction_data_never_requested_asks_the_jds_for_no_token() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
 
         for template_id in [2, 3] {
@@ -1271,10 +1281,15 @@ mod tests {
         assert!(sent.jds.try_recv().is_err());
     }
 
-    // A token the JDS hands JDC.
-    fn token_success() -> AllocateMiningJobTokenSuccessOwned {
+    // A token the JDS hands JDC, answering the oldest of JDC's token requests not answered yet.
+    fn token_success(manager: &ChannelManager) -> AllocateMiningJobTokenSuccessOwned {
+        let request_id = manager
+            .mining_job_tokens
+            .with(|tokens| tokens.requests.iter().min().copied())
+            .unwrap()
+            .expect("JDC has a token request to answer");
         AllocateMiningJobTokenSuccessOwned {
-            request_id: 7,
+            request_id,
             mining_job_token: token(),
             coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
         }
@@ -1305,8 +1320,8 @@ mod tests {
     async fn requested_template_waiting_for_a_token_is_declared_once_one_arrives() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         manager
             .handle_new_template(None, template(2, false), None)
@@ -1324,7 +1339,7 @@ mod tests {
         assert!(sent.jds.try_recv().is_err());
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         let sent_after_token: Vec<_> = std::iter::from_fn(|| sent.jds.try_recv().ok()).collect();
@@ -1341,8 +1356,8 @@ mod tests {
     async fn activated_template_waiting_for_a_token_is_declared_once_one_arrives() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         manager
             .handle_new_template(None, template(2, true), None)
@@ -1358,7 +1373,7 @@ mod tests {
             .await
             .unwrap();
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
 
@@ -1372,8 +1387,8 @@ mod tests {
     async fn waiting_work_the_chain_tip_moved_past_is_dropped() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         manager
             .handle_new_template(None, template(2, false), None)
@@ -1393,7 +1408,7 @@ mod tests {
             .await
             .unwrap();
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
 
@@ -1408,8 +1423,8 @@ mod tests {
     async fn every_waiting_template_is_declared_newest_first() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         for template_id in [2, 3] {
             manager
@@ -1425,16 +1440,20 @@ mod tests {
         }
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(declared_templates(&manager), vec![3]);
-        for _ in 0..2 {
-            manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
-                .await
-                .unwrap();
-        }
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        // One more token, with no work left waiting for it: it stays queued.
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
 
         assert_eq!(declarations_sent(&sent.jds), 2);
         assert_eq!(declared_templates(&manager), vec![2, 3]);
@@ -1448,8 +1467,8 @@ mod tests {
     async fn templates_waiting_for_a_token_are_capped() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         let templates = 2..2 + MAX_WAITING_FOR_TOKEN as u64 + 1;
         for template_id in templates.clone() {
@@ -1469,12 +1488,18 @@ mod tests {
             .count();
         assert_eq!(token_requests, MAX_WAITING_FOR_TOKEN);
 
-        for _ in templates.clone() {
+        for _ in 0..MAX_WAITING_FOR_TOKEN {
             manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
                 .await
                 .unwrap();
         }
+        // One more token, with no work left waiting for it: it stays queued.
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
 
         let newest: Vec<u64> = templates.skip(1).collect();
         assert_eq!(declared_templates(&manager), newest);
@@ -1488,8 +1513,8 @@ mod tests {
     async fn future_template_waiting_for_a_token_is_sent_once_activated() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         manager
             .handle_new_template(None, template(2, true), None)
@@ -1501,7 +1526,7 @@ mod tests {
             .unwrap();
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(declared_templates(&manager), vec![2]);
@@ -1520,8 +1545,8 @@ mod tests {
     async fn newer_future_template_replaces_a_waiting_one() {
         let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         for template_id in [2, 3] {
             manager
@@ -1536,12 +1561,16 @@ mod tests {
                 .unwrap();
         }
 
-        for _ in 0..2 {
-            manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
-                .await
-                .unwrap();
-        }
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        // One more token, with no work left waiting for it: it stays queued.
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
 
         assert_eq!(declared_templates(&manager), vec![3]);
         assert_eq!(queued_tokens(&manager), 1);
@@ -1561,8 +1590,8 @@ mod tests {
     async fn coinbase_only_template_waiting_for_a_token_gets_its_custom_job_once_one_arrives() {
         let (mut manager, sent_to_pool_receiver, sent_to_jds) = channel_manager().await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
 
         manager
@@ -1577,7 +1606,7 @@ mod tests {
         assert!(sent_to_jds.try_recv().is_err());
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 1);
@@ -1591,8 +1620,8 @@ mod tests {
     async fn coinbase_only_activated_template_waiting_for_a_token_gets_its_custom_job() {
         let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         manager
             .handle_new_template(None, template(2, true), None)
@@ -1606,7 +1635,7 @@ mod tests {
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 1);
@@ -1619,8 +1648,8 @@ mod tests {
     async fn coinbase_only_every_waiting_template_gets_its_custom_job_newest_first() {
         let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         for template_id in [2, 3] {
             manager
@@ -1630,17 +1659,21 @@ mod tests {
         }
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert!(recorded_custom_jobs(&manager, 2).is_empty());
         assert_eq!(recorded_custom_jobs(&manager, 3).len(), 1);
-        for _ in 0..2 {
-            manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
-                .await
-                .unwrap();
-        }
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        // One more token, with no work left waiting for it: it stays queued.
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
 
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 2);
         assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
@@ -1654,8 +1687,8 @@ mod tests {
     async fn coinbase_only_waiting_template_the_chain_tip_moved_past_is_dropped() {
         let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
         manager
-            .allocate_tokens
-            .with(|tokens| tokens.clear())
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
             .unwrap();
         manager
             .handle_new_template(None, template(2, false), None)
@@ -1667,12 +1700,111 @@ mod tests {
             .await
             .unwrap();
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
 
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
         assert!(recorded_custom_jobs(&manager, 2).is_empty());
         assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // An answer to a token request is acted on once: a second copy of it adds no token. JDC
+    // starts with one token queued, and ends with that one and the one it asked for.
+    #[tokio::test]
+    async fn replayed_token_answer_is_queued_once() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.allocate_tokens(1).await.unwrap();
+        let Ok(JobDeclarationOwned::AllocateMiningJobToken(request)) = sent.jds.try_recv() else {
+            panic!("JDC asks the JDS for a token");
+        };
+        let answer = AllocateMiningJobTokenSuccessOwned {
+            request_id: request.request_id,
+            mining_job_token: token(),
+            coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
+        };
+
+        for _ in 0..2 {
+            manager
+                .handle_allocate_mining_job_token_success(None, answer.clone(), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(queued_tokens(&manager), 2);
+    }
+
+    // An answer to a token request JDC never sent changes nothing: no token is queued, JDC keeps
+    // its outputs, and the Template Provider gets no new constraints.
+    #[tokio::test]
+    async fn token_answer_jdc_never_asked_for_changes_nothing() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let outputs = manager.coinbase_outputs.get().unwrap();
+        let other_outputs = consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new(),
+        }]);
+
+        manager
+            .handle_allocate_mining_job_token_success(
+                None,
+                AllocateMiningJobTokenSuccessOwned {
+                    request_id: 7,
+                    mining_job_token: token(),
+                    coinbase_outputs: other_outputs.try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(queued_tokens(&manager), 1);
+        assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
+        assert!(sent.tp.try_recv().is_err());
+    }
+
+    // A token answered for `request_id`.
+    fn token_answer(request_id: u32) -> AllocateMiningJobTokenSuccessOwned {
+        AllocateMiningJobTokenSuccessOwned {
+            request_id,
+            mining_job_token: token(),
+            coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
+        }
+    }
+
+    // The request IDs of the queued tokens, oldest first.
+    fn queued_requests(tokens: &MiningJobTokens) -> Vec<u32> {
+        tokens.queue.iter().map(|token| token.request_id).collect()
+    }
+
+    // An answer is accepted for a request JDC sent, once: a second answer to it, or one to a
+    // request JDC never sent, finds no request.
+    #[test]
+    fn a_token_request_is_answered_once() {
+        let mut tokens = MiningJobTokens::default();
+        tokens.request(4);
+
+        assert!(!tokens.answered(5));
+        assert!(tokens.answered(4));
+        assert!(!tokens.answered(4));
+    }
+
+    // Tokens are spent oldest first, and a job spends the token it was built with even when the
+    // queue changed in between: that token is taken out, or nothing if it is gone already.
+    #[test]
+    fn a_job_spends_the_token_it_was_built_with() {
+        let mut tokens = MiningJobTokens::default();
+        for request_id in [4, 5, 6] {
+            tokens.queue(token_answer(request_id));
+        }
+
+        let built_with = tokens.peek().unwrap().request_id;
+        assert_eq!(built_with, 4);
+        assert_eq!(tokens.take().unwrap().request_id, 4);
+        tokens.spend(built_with);
+        assert_eq!(queued_requests(&tokens), vec![5, 6]);
+
+        tokens.spend(6);
+        assert_eq!(queued_requests(&tokens), vec![5]);
     }
 }

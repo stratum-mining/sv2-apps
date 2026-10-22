@@ -39,15 +39,11 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)
     }
 
-    // Handles a successful `AllocateMiningJobToken` response from the JDS.
-    //
-    // When the JDS confirms job token allocation:
-    // - Updates the channel manager state with the newly issued token.
-    // - Checks whether the JDS has provided updated coinbase outputs.
-    //   - If outputs have changed, recalculates the corresponding size and sigops constraints.
-    //   - Sends an updated `CoinbaseOutputConstraints` message to the Template Provider to ensure
-    //     the new coinbase rules are enforced.
-    // - If outputs are unchanged, skips recomputation and continues as normal.
+    // Handles a successful `AllocateMiningJobToken` response from the JDS:
+    // - drops an answer to a token request JDC never sent or already saw answered;
+    // - takes the answer's coinbase outputs, and queues its token;
+    // - if the outputs changed, sends the Template Provider `CoinbaseOutputConstraints` for them;
+    // - hands the token to work waiting for one.
     async fn handle_allocate_mining_job_token_success(
         &mut self,
         _server_id: Option<usize>,
@@ -55,6 +51,20 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
+
+        // Only the answer to a token request JDC sent and has not seen answered is acted on,
+        // before it reaches the outputs or the token queue (see `MiningJobTokens`).
+        let requested = self
+            .mining_job_tokens
+            .with(|tokens| tokens.answered(msg.request_id))
+            .map_err(JDCError::shutdown)?;
+        if !requested {
+            warn!(
+                request_id = msg.request_id,
+                "Ignoring AllocateMiningJobToken.Success for a token request JDC did not send or already saw answered"
+            );
+            return Ok(());
+        }
 
         let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
         let coinbase_changed = self
@@ -65,8 +75,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 changed
             })
             .map_err(JDCError::shutdown)?;
-        self.allocate_tokens
-            .with(|tokens| tokens.push_back(msg.clone()))
+        self.mining_job_tokens
+            .with(|tokens| tokens.queue(msg.clone()))
             .map_err(JDCError::shutdown)?;
 
         if coinbase_changed {
@@ -133,8 +143,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 transaction_data,
             }) => {
                 let token = self
-                    .allocate_tokens
-                    .with(|tokens| tokens.pop_front())
+                    .mining_job_tokens
+                    .with(|tokens| tokens.take())
                     .map_err(JDCError::shutdown)?
                     .ok_or_else(|| JDCError::shutdown(JDCErrorKind::MiningJobTokenNotFound))?;
                 self.declare_template(template, transaction_data, token)
