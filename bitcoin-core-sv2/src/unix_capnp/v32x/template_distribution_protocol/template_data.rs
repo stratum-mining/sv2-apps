@@ -27,7 +27,7 @@ use stratum_core::{
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct TemplateData {
@@ -274,7 +274,7 @@ impl TemplateData {
         Ok(())
     }
 
-    /// Submits a solution to Bitcoin Core, and archives it once Bitcoin Core has accepted it.
+    /// Submits a solution to Bitcoin Core, and archives it once Bitcoin Core holds its block.
     pub async fn submit_solution(
         &self,
         submit_solution: SubmitSolutionOwned,
@@ -305,14 +305,36 @@ impl TemplateData {
 
         let submit_solution_response = submit_solution_request.send().promise.await?;
 
-        if !submit_solution_response.get()?.get_result() {
-            return Err(TemplateDataError::FailedIpcSubmitSolution);
+        let submit_solution_result = submit_solution_response.get()?;
+        if !submit_solution_result.get_result() {
+            let reason = submit_solution_result
+                .get_reason()
+                .ok()
+                .and_then(|reason| reason.to_str().ok())
+                .unwrap_or_default();
+            // The block may already have reached Bitcoin Core another way, over the network from
+            // a node another party submitted it to, and `duplicate` says the node holds it, which
+            // is not a rejection.
+            if reason != "duplicate" {
+                let debug_msg = submit_solution_result
+                    .get_debug()
+                    .ok()
+                    .and_then(|debug_msg| debug_msg.to_str().ok())
+                    .unwrap_or_default();
+                warn!(
+                    reason = %reason,
+                    debug = %debug_msg,
+                    "Bitcoin Core rejected the solution via submitSolution"
+                );
+                return Err(TemplateDataError::FailedIpcSubmitSolution);
+            }
+            info!("Bitcoin Core already had the block submitted via submitSolution");
         }
 
-        // Bitcoin Core accepting the solution is what makes it worth archiving. The checks
-        // `dump_solution_to_disk` runs establish that a solution is well formed and carries the
-        // work it claims, not that the node took the block it belongs to, so archiving any earlier
-        // would keep blocks Bitcoin Core rejected.
+        // Bitcoin Core holding the block, taken in this call or before it, is what makes the
+        // solution worth archiving. The checks `dump_solution_to_disk` runs establish that a
+        // solution is well formed and carries the work it claims, not that the node took the block
+        // it belongs to, so archiving any earlier would keep blocks Bitcoin Core rejected.
         self.dump_solution_to_disk(
             thread_map,
             solution_coinbase_tx,
