@@ -18,7 +18,7 @@ use crate::utils::{
     with_exclusive_lock,
 };
 
-const VERSION_SV2_TP: &str = "1.1.0";
+const VERSION_SV2_TP: &str = "1.1.2";
 const BITCOIN_CORE_V30X: &str = "30.2";
 const BITCOIN_CORE_V31X: &str = "31.0";
 const BITCOIN_CORE_V32X: &str = "32.0";
@@ -64,7 +64,7 @@ fn get_bitcoin_core_filename(os: &str, arch: &str, bitcoin_core_version: &str) -
     }
 }
 
-pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V31X;
+pub const BITCOIN_CORE_LATEST: BitcoinCoreVersion = BitcoinCoreVersion::V32X;
 
 fn release_version(version: BitcoinCoreVersion) -> &'static str {
     match version {

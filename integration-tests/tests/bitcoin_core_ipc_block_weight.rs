@@ -84,7 +84,6 @@ async fn full_template_block_passes_check_block_v31x() {
 }
 
 #[tokio::test]
-#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
 async fn full_template_block_passes_check_block_v32x() {
     assert_full_template_block_passes_check_block(BitcoinCoreVersion::V32X).await;
 }
