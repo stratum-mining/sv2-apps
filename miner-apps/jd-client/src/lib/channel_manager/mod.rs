@@ -1,7 +1,7 @@
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
 use std::{
-    collections::{BinaryHeap, VecDeque},
+    collections::{BinaryHeap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{
         Arc, OnceLock,
@@ -359,6 +359,9 @@ pub struct ChannelManager {
     // FIFO buffer of allocation tokens received from the JDS.
     // Oldest token is consumed first to minimize risk of JDS-side expiration.
     pub allocate_tokens: SharedLock<VecDeque<AllocateMiningJobTokenSuccessOwned>>,
+    // Token requests sent to the JDS and not answered yet. An answer is accepted only if it takes
+    // its request out, so the JDS can't add tokens or change outputs JDC never asked for.
+    token_requests: SharedLock<HashSet<RequestId>>,
     // Templates whose transaction data has been requested from the Template Provider and not
     // received yet, oldest first. Nothing else reads a stored template, so one is kept only for
     // its request: solo and coinbase-only modes keep none. The answer to the request, a new chain
@@ -529,6 +532,7 @@ impl ChannelManager {
             last_future_template: SharedLock::new(None),
             last_new_prev_hash: SharedLock::new(None),
             allocate_tokens: SharedLock::new(VecDeque::new()),
+            token_requests: SharedLock::new(HashSet::new()),
             requested_templates: SharedLock::new(VecDeque::new()),
             waiting_for_token: SharedLock::new(WaitingForToken::default()),
             last_declare_job_store: SharedMap::new(),
@@ -1325,6 +1329,9 @@ impl ChannelManager {
 
         for i in 0..token_to_allocate {
             let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
+            self.token_requests
+                .with(|requests| requests.insert(request_id))
+                .map_err(JDCError::shutdown)?;
 
             debug!(
                 request_id,

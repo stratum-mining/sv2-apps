@@ -56,6 +56,22 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
+        // Only the answer to a token request JDC sent and has not seen answered is acted on, and
+        // taking the request out makes a second copy of the answer one JDC never asked for. A
+        // fallback builds a channel manager with no requests, so answers to requests sent before
+        // it are dropped too, before they reach the outputs or the token queue.
+        let requested = self
+            .token_requests
+            .with(|requests| requests.remove(&msg.request_id))
+            .map_err(JDCError::shutdown)?;
+        if !requested {
+            warn!(
+                request_id = msg.request_id,
+                "Ignoring AllocateMiningJobToken.Success for a token request JDC did not send or already saw answered"
+            );
+            return Ok(());
+        }
+
         let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
         let coinbase_changed = self
             .coinbase_outputs

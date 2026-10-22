@@ -1247,10 +1247,15 @@ mod tests {
         assert!(sent.jds.try_recv().is_err());
     }
 
-    // A token the JDS hands JDC.
-    fn token_success() -> AllocateMiningJobTokenSuccessOwned {
+    // A token the JDS hands JDC, answering the oldest of JDC's token requests not answered yet.
+    fn token_success(manager: &ChannelManager) -> AllocateMiningJobTokenSuccessOwned {
+        let request_id = manager
+            .token_requests
+            .with(|requests| requests.iter().min().copied())
+            .unwrap()
+            .expect("JDC has a token request to answer");
         AllocateMiningJobTokenSuccessOwned {
-            request_id: 7,
+            request_id,
             mining_job_token: token(),
             coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
         }
@@ -1300,7 +1305,7 @@ mod tests {
         assert!(sent.jds.try_recv().is_err());
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         let sent_after_token: Vec<_> = std::iter::from_fn(|| sent.jds.try_recv().ok()).collect();
@@ -1334,7 +1339,7 @@ mod tests {
             .await
             .unwrap();
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
 
@@ -1369,7 +1374,7 @@ mod tests {
             .await
             .unwrap();
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
 
@@ -1401,16 +1406,20 @@ mod tests {
         }
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(declared_templates(&manager), vec![3]);
-        for _ in 0..2 {
-            manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
-                .await
-                .unwrap();
-        }
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        // One more token, with no work left waiting for it: it stays queued.
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
 
         assert_eq!(declarations_sent(&sent.jds), 2);
         assert_eq!(declared_templates(&manager), vec![2, 3]);
@@ -1442,7 +1451,7 @@ mod tests {
 
         for _ in templates.clone() {
             manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
                 .await
                 .unwrap();
         }
@@ -1472,7 +1481,7 @@ mod tests {
             .unwrap();
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(declared_templates(&manager), vec![2]);
@@ -1509,7 +1518,7 @@ mod tests {
 
         for _ in 0..2 {
             manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
                 .await
                 .unwrap();
         }
@@ -1548,7 +1557,7 @@ mod tests {
         assert!(sent_to_jds.try_recv().is_err());
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 1);
@@ -1577,7 +1586,7 @@ mod tests {
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 1);
@@ -1601,17 +1610,21 @@ mod tests {
         }
 
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
         assert!(recorded_custom_jobs(&manager, 2).is_empty());
         assert_eq!(recorded_custom_jobs(&manager, 3).len(), 1);
-        for _ in 0..2 {
-            manager
-                .handle_allocate_mining_job_token_success(None, token_success(), None)
-                .await
-                .unwrap();
-        }
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        // One more token, with no work left waiting for it: it stays queued.
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
 
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 2);
         assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
@@ -1638,12 +1651,66 @@ mod tests {
             .await
             .unwrap();
         manager
-            .handle_allocate_mining_job_token_success(None, token_success(), None)
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
             .await
             .unwrap();
 
         assert_eq!(custom_jobs_sent(&sent_to_pool_receiver), 0);
         assert!(recorded_custom_jobs(&manager, 2).is_empty());
         assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // An answer to a token request is acted on once: a second copy of it adds no token. JDC
+    // starts with one token queued, and ends with that one and the one it asked for.
+    #[tokio::test]
+    async fn replayed_token_answer_is_queued_once() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.allocate_tokens(1).await.unwrap();
+        let Ok(JobDeclarationOwned::AllocateMiningJobToken(request)) = sent.jds.try_recv() else {
+            panic!("JDC asks the JDS for a token");
+        };
+        let answer = AllocateMiningJobTokenSuccessOwned {
+            request_id: request.request_id,
+            mining_job_token: token(),
+            coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
+        };
+
+        for _ in 0..2 {
+            manager
+                .handle_allocate_mining_job_token_success(None, answer.clone(), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(queued_tokens(&manager), 2);
+    }
+
+    // An answer to a token request JDC never sent changes nothing: no token is queued, JDC keeps
+    // its outputs, and the Template Provider gets no new constraints.
+    #[tokio::test]
+    async fn token_answer_jdc_never_asked_for_changes_nothing() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let outputs = manager.coinbase_outputs.get().unwrap();
+        let other_outputs = consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::new(),
+        }]);
+
+        manager
+            .handle_allocate_mining_job_token_success(
+                None,
+                AllocateMiningJobTokenSuccessOwned {
+                    request_id: 7,
+                    mining_job_token: token(),
+                    coinbase_outputs: other_outputs.try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(queued_tokens(&manager), 1);
+        assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
+        assert!(sent.tp.try_recv().is_err());
     }
 }
