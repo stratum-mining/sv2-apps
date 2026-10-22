@@ -12,14 +12,17 @@ use stratum_apps::{
     config_helpers::CoinbaseRewardScript,
     stratum_core::{
         binary_sv2::B0255Owned,
-        bitcoin::{Amount, TxOut, consensus::serialize},
+        bitcoin::{
+            Amount, TxOut,
+            consensus::{deserialize, serialize},
+        },
         common_messages_sv2::{MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol},
         job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
         mining_sv2::{
             MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
             MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
-            OpenExtendedMiningChannelOwned, OpenExtendedMiningChannelSuccessOwned,
-            SetCustomMiningJobOwned,
+            NewExtendedMiningJobOwned, OpenExtendedMiningChannelOwned,
+            OpenExtendedMiningChannelSuccessOwned, SetCustomMiningJobOwned,
         },
         parsers_sv2::{
             AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned,
@@ -30,6 +33,9 @@ use stratum_apps::{
 
 // How long the test waits for a message that must never be sent.
 const ABSENCE_WINDOW: Duration = Duration::from_millis(2000);
+
+// What every test template leaves for the coinbase outputs to pay.
+const TEMPLATE_VALUE: u64 = 5_000_000_000;
 
 /// Regression coverage for JDC building one coinbase-only custom job per template (issue #753).
 ///
@@ -101,6 +107,72 @@ async fn jdc_coinbase_only_sends_one_custom_job_per_template() {
     ));
 
     jdc.jdc.shutdown().await;
+}
+
+/// Regression coverage for the custom job of an activated future template paying the template's
+/// remaining reward (issue #810).
+///
+/// The JDS hands out zero-valued outputs, and JDC fills in what each template leaves for the
+/// coinbase. When a prevhash activates a future template, the custom job JDC sends the Pool for it
+/// must pay that reward, to the same outputs the downstreams were handed for the template.
+#[tokio::test]
+async fn jdc_coinbase_only_activated_template_custom_job_pays_the_template_reward() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    let downstream = jdc.connect_with_upstream_channel().await;
+    jdc.sent_custom_jobs();
+    downstream
+        .sniffer
+        .clean_queue(MessageDirection::ToDownstream);
+
+    jdc.send_template(template(2, true)).await;
+    let downstream_job = downstream.next_extended_job().await;
+    jdc.send_prev_hash(2).await;
+
+    let custom_job = jdc.next_custom_job().await;
+    assert_pays_template_reward(&custom_job, &downstream_job);
+
+    jdc.jdc.shutdown().await;
+}
+
+/// Regression coverage for the custom job JDC sends as its upstream channel opens (issue #810).
+///
+/// The first downstream to request a channel makes JDC open its upstream channel, and is handed a
+/// job for the current chain tip once the channel is open. JDC must send the Pool a custom job
+/// for that chain tip at the same time, paying the template's remaining reward to the same
+/// outputs, or the downstream's shares on its first job have no upstream job to go to.
+#[tokio::test]
+async fn jdc_coinbase_only_upstream_channel_opens_with_a_custom_job_for_the_chain_tip() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    let downstream = jdc.connect_with_upstream_channel().await;
+    let downstream_job = downstream.next_extended_job().await;
+
+    let custom_job = jdc.next_custom_job().await;
+    assert_eq!(custom_job.token, mining_job_token(0));
+    assert_pays_template_reward(&custom_job, &downstream_job);
+
+    jdc.jdc.shutdown().await;
+}
+
+// Asserts that `custom_job` pays the whole remaining reward of a `template`, to the same outputs
+// as `downstream_job`, built from the same template.
+fn assert_pays_template_reward(
+    custom_job: &SetCustomMiningJobOwned,
+    downstream_job: &NewExtendedMiningJobOwned,
+) {
+    let outputs: Vec<TxOut> = deserialize(custom_job.coinbase_tx_outputs.as_bytes())
+        .expect("custom job outputs must deserialize");
+    let paid: u64 = outputs.iter().map(|output| output.value.to_sat()).sum();
+    assert_eq!(paid, TEMPLATE_VALUE);
+    assert!(
+        downstream_job
+            .coinbase_tx_suffix
+            .as_bytes()
+            .windows(custom_job.coinbase_tx_outputs.as_bytes().len())
+            .any(|window| window == custom_job.coinbase_tx_outputs.as_bytes()),
+        "the custom job and the downstream job must pay the same outputs"
+    );
 }
 
 // A coinbase-only JDC whose Template Provider, Pool and JDS are mocks, each behind a sniffer, so a
@@ -373,6 +445,19 @@ impl MockedDownstream {
             .wait_for_message_type(MessageDirection::ToDownstream, message_type)
             .await;
     }
+
+    // Waits for the next extended job JDC hands this downstream. Whatever JDC sent it before the
+    // job is discarded, and whatever it sent after it stays queued.
+    async fn next_extended_job(&self) -> NewExtendedMiningJobOwned {
+        self.wait_for(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB).await;
+        loop {
+            if let Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(job)))) =
+                self.sniffer.next_message_from_upstream()
+            {
+                return job;
+            }
+        }
+    }
 }
 
 fn mining_job_token(token: u64) -> B0255Owned {
@@ -394,7 +479,7 @@ fn template(template_id: u64, future_template: bool) -> NewTemplateOwned {
             .try_into()
             .expect("coinbase prefix must fit into B0255"),
         coinbase_tx_input_sequence: u32::MAX,
-        coinbase_tx_value_remaining: 5_000_000_000,
+        coinbase_tx_value_remaining: TEMPLATE_VALUE,
         coinbase_tx_outputs_count: 1,
         coinbase_tx_outputs: vec![
             0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 226, 246, 28, 63, 113, 209,

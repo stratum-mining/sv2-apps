@@ -527,23 +527,13 @@ impl ChannelManager {
             }
         };
 
-        let coinbase_outputs = match self.coinbase_outputs.get() {
+        let coinbase_outputs = match self.coinbase_outputs_for(&last_future_template) {
             Ok(outputs) => outputs,
             Err(e) => {
-                error!(error = ?JDCErrorKind::from(e), "Failed to access channel manager state");
+                error!(error = ?e, "Failed to compute coinbase outputs");
                 return None;
             }
         };
-        let mut coinbase_outputs = match deserialize_outputs(coinbase_outputs) {
-            Ok(outputs) => outputs,
-            Err(e) => {
-                error!(error = ?e, "Failed to deserialize coinbase outputs");
-                return None;
-            }
-        };
-
-        coinbase_outputs[0].value =
-            Amount::from_sat(last_future_template.coinbase_tx_value_remaining);
 
         if let Err(e) =
             group_channel.on_new_template(last_future_template, coinbase_outputs.clone())
@@ -1203,17 +1193,32 @@ impl ChannelManager {
         Ok(())
     }
 
+    // The coinbase outputs a job built from `template` pays: the outputs the JDS handed out, with
+    // everything the template leaves for the coinbase in the first one.
+    #[allow(clippy::result_large_err)]
+    fn coinbase_outputs_for(
+        &self,
+        template: &NewTemplateOwned,
+    ) -> JDCResult<Vec<TxOut>, error::ChannelManager> {
+        let mut outputs = deserialize_outputs(
+            self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
+        )
+        .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
+        outputs[0].value = Amount::from_sat(template.coinbase_tx_value_remaining);
+        Ok(outputs)
+    }
+
     // Builds the coinbase-only custom job that puts `template` on the upstream channel, paying
-    // `coinbase_outputs`, records it, and spends a token on it.
+    // the outputs from `coinbase_outputs_for`, records it, and spends a token on it.
     //
-    // Returns `None` while there is no upstream channel, chain tip, job factory or token to build
-    // the job with, or when the job factory rejects the template. The token is taken from the
-    // queue only once the job is built, so neither case spends one.
+    // Returns `None` while there is no upstream channel, chain tip for the template, job factory
+    // or token to build the job with, and an error when the job factory rejects the template. A
+    // future template has a chain tip only once a prevhash activates it. The token is taken
+    // from the queue only once the job is built.
     #[allow(clippy::result_large_err)]
     fn build_coinbase_only_custom_job(
         &self,
         template: &NewTemplateOwned,
-        coinbase_outputs: &[TxOut],
     ) -> JDCResult<Option<SetCustomMiningJobOwned>, error::ChannelManager> {
         let upstream_channel = self
             .upstream_channel
@@ -1229,13 +1234,21 @@ impl ChannelManager {
         let Some(prev_hash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? else {
             return Ok(None);
         };
+        if template.future_template && prev_hash.template_id != template.template_id {
+            return Ok(None);
+        }
         let Some(token) = self
             .allocate_tokens
             .with(|tokens| tokens.front().map(|token| token.mining_job_token.clone()))
             .map_err(JDCError::shutdown)?
         else {
+            warn!(
+                template_id = template.template_id,
+                "No token available, template gets no custom job"
+            );
             return Ok(None);
         };
+        let coinbase_outputs = self.coinbase_outputs_for(template)?;
 
         let custom_job = self
             .job_factory
@@ -1247,7 +1260,7 @@ impl ChannelManager {
                         token,
                         prev_hash.clone().into(),
                         template.clone(),
-                        coinbase_outputs.to_vec(),
+                        coinbase_outputs,
                         full_extranonce_size,
                     )
                 })
@@ -1256,17 +1269,17 @@ impl ChannelManager {
         let Some(custom_job) = custom_job else {
             return Ok(None);
         };
-        let custom_job = match custom_job {
-            Ok(custom_job) => custom_job,
-            Err(e) => {
-                error!(
-                    error = ?e,
-                    template_id = template.template_id,
-                    "Failed to build coinbase-only custom job"
-                );
-                return Ok(None);
-            }
-        };
+        // A rejected custom job would leave the downstreams mining work whose shares could never
+        // reach the Pool. JDC shuts down instead, as it does when the downstream channels
+        // themselves cannot build a job from a template.
+        let custom_job = custom_job.map_err(|e| {
+            error!(
+                error = ?e,
+                template_id = template.template_id,
+                "Failed to build coinbase-only custom job"
+            );
+            JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
+        })?;
 
         self.allocate_tokens
             .with(|tokens| tokens.pop_front())
