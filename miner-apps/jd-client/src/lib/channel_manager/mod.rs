@@ -11,7 +11,10 @@ use std::{
 use stratum_apps::stratum_core::{
     job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
     mining_sv2::{OpenExtendedMiningChannelOwned, SetTargetOwned, UpdateChannelOwned},
-    template_distribution_sv2::{RequestTransactionDataOwned, RequestTransactionDataSuccessOwned},
+    template_distribution_sv2::{
+        CoinbaseOutputConstraintsOwned, RequestTransactionDataOwned,
+        RequestTransactionDataSuccessOwned,
+    },
 };
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -464,6 +467,9 @@ pub struct ChannelManager {
         SharedMap<DownstreamChannelJobId, TemplateId>,
     // The coinbase outputs templates are handed out with.
     output_sets: SharedLock<OutputSets>,
+    // The room the Template Provider reserves for the JDS's outputs, once JDC sent it constraints
+    // for them. It only grows.
+    reserved_room: SharedLock<Option<CoinbaseOutputConstraintsOwned>>,
     // The active upstream extended channel (client-side instance), if any.
     pub upstream_channel: SharedLock<Option<ExtendedChannel>>,
     // Optional "pool tag" string identifying the upstream pool.
@@ -623,6 +629,7 @@ impl ChannelManager {
             template_id_to_upstream_job_id: SharedMap::new(),
             downstream_channel_id_and_job_id_to_template_id: SharedMap::new(),
             output_sets: SharedLock::new(OutputSets::new(coinbase_outputs)),
+            reserved_room: SharedLock::new(None),
             upstream_channel: SharedLock::new(None),
             pool_tag_string: SharedLock::new(None),
             pending_downstream_requests: SharedLock::new(VecDeque::new()),

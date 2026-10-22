@@ -650,7 +650,10 @@ mod tests {
     use stratum_apps::stratum_core::handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync;
 
     use crate::{
-        channel_manager::{MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN, OutputSets},
+        channel_manager::{
+            MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN, OutputSets,
+            jd_message_handler::coinbase_output_constraints,
+        },
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
         error::Action,
         jd_mode::JDMode,
@@ -753,6 +756,15 @@ mod tests {
         manager
             .output_sets
             .with(|output_sets| output_sets.update(jds_coinbase_outputs()))
+            .unwrap();
+        manager
+            .reserved_room
+            .set(Some(
+                coinbase_output_constraints(
+                    consensus::deserialize(&jds_coinbase_outputs()).unwrap(),
+                )
+                .unwrap(),
+            ))
             .unwrap();
         manager.set_user_identity("test-user".to_string());
         manager.upstream_state.set(UpstreamState::Connected);
@@ -2013,6 +2025,7 @@ mod tests {
             .output_sets
             .set(OutputSets::new(payout_outputs(0x22)))
             .unwrap();
+        manager.reserved_room.set(None).unwrap();
 
         manager
             .handle_new_template(None, template(2, false), None)
@@ -2057,6 +2070,7 @@ mod tests {
             .output_sets
             .set(OutputSets::new(payout_outputs(0x22)))
             .unwrap();
+        manager.reserved_room.set(None).unwrap();
 
         manager
             .handle_new_template(None, template(2, false), None)
@@ -2091,5 +2105,60 @@ mod tests {
         assert_eq!(sets.0.len(), 2);
         sets.on_chain_tip(5);
         assert_eq!(sets.0.len(), 1);
+    }
+
+    // JDC asks the JDS for a token, and the JDS answers with `outputs`.
+    async fn answer_with_outputs(manager: &mut ChannelManager, outputs: Vec<u8>) {
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(manager);
+        answer.coinbase_outputs = outputs.try_into().unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap();
+    }
+
+    // Outputs that fit the room the Template Provider already reserves, like a new payout address
+    // of the same size, send it no constraints. The templates handed out next pay them.
+    #[tokio::test]
+    async fn outputs_fitting_the_reserved_room_send_no_constraints() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+
+        answer_with_outputs(&mut manager, payout_outputs(0x11)).await;
+
+        assert!(sent.tp.try_recv().is_err());
+        assert_eq!(current_outputs(&manager), payout_outputs(0x11));
+    }
+
+    // Outputs needing more room than the Template Provider reserves send it constraints for that
+    // room, and the reservation never shrinks: later outputs that fit it, smaller or not, send
+    // nothing.
+    #[tokio::test]
+    async fn the_reserved_room_only_grows() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let two_payouts: Vec<TxOut> = [0x11, 0x33]
+            .into_iter()
+            .flat_map(|hash| consensus::deserialize::<Vec<TxOut>>(&payout_outputs(hash)).unwrap())
+            .collect();
+        let taproot_payout = consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from_bytes([&[0x51, 0x20][..], &[0x44; 32]].concat()),
+        }]);
+
+        answer_with_outputs(&mut manager, consensus::serialize(&two_payouts)).await;
+        let Ok(TemplateDistributionOwned::CoinbaseOutputConstraints(constraints)) =
+            sent.tp.try_recv()
+        else {
+            panic!("JDC asks the Template Provider for more room");
+        };
+        let two_payouts_size: usize = two_payouts.iter().map(TxOut::size).sum();
+        assert_eq!(
+            constraints.coinbase_output_max_additional_size as usize,
+            two_payouts_size
+        );
+
+        answer_with_outputs(&mut manager, payout_outputs(0x55)).await;
+        answer_with_outputs(&mut manager, taproot_payout).await;
+        assert!(sent.tp.try_recv().is_err());
     }
 }

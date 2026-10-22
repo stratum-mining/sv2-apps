@@ -88,25 +88,60 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)?;
 
         if coinbase_changed {
-            info!("Coinbase outputs from JDS changed, sending new constraints");
+            info!("Coinbase outputs from JDS changed");
+        }
+
+        // The Template Provider gets constraints for the JDS's first outputs, and afterwards only
+        // when outputs need more room than it reserves. New constraints can make it start over,
+        // as the in-tree one does with a new template and prevhash, which ends the work JDC has
+        // waiting, so JDC keeps the larger reservation rather than give room back.
+        //
+        // A template the Template Provider built before applying new constraints, but sent after
+        // JDC sent them, can't be told apart: `NewTemplate` doesn't say which constraints it was
+        // built under, so JDC hands it out with outputs it may have no room for. With the Template
+        // Provider on the same host or LAN that window is under a round trip, and in full-template
+        // mode the in-tree one closes it, answering the template's transaction-data request with
+        // `stale-template-id`.
+        let room = self
+            .reserved_room
+            .with(|reserved| {
+                let room = match reserved {
+                    Some(reserved)
+                        if constraints.coinbase_output_max_additional_size
+                            <= reserved.coinbase_output_max_additional_size
+                            && constraints.coinbase_output_max_additional_sigops
+                                <= reserved.coinbase_output_max_additional_sigops =>
+                    {
+                        return None;
+                    }
+                    Some(reserved) => CoinbaseOutputConstraintsOwned {
+                        coinbase_output_max_additional_size: reserved
+                            .coinbase_output_max_additional_size
+                            .max(constraints.coinbase_output_max_additional_size),
+                        coinbase_output_max_additional_sigops: reserved
+                            .coinbase_output_max_additional_sigops
+                            .max(constraints.coinbase_output_max_additional_sigops),
+                    },
+                    None => constraints,
+                };
+                *reserved = Some(room);
+                Some(room)
+            })
+            .map_err(JDCError::shutdown)?;
+        if let Some(room) = room {
             debug!(
-                max_additional_size = constraints.coinbase_output_max_additional_size,
-                max_additional_sigops = constraints.coinbase_output_max_additional_sigops,
+                max_additional_size = room.coinbase_output_max_additional_size,
+                max_additional_sigops = room.coinbase_output_max_additional_sigops,
                 "Computed coinbase output constraints"
             );
-
-            let coinbase_output_constraints_message =
-                TemplateDistributionOwned::CoinbaseOutputConstraints(constraints);
-
             self.channel_manager_io
                 .tp_sender
-                .send(coinbase_output_constraints_message)
+                .send(TemplateDistributionOwned::CoinbaseOutputConstraints(room))
                 .await
                 .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
-
             info!("Sent updated CoinbaseOutputConstraints to TP channel");
         } else {
-            debug!("Coinbase outputs unchanged, skipping constraints update");
+            debug!("Coinbase outputs fit the room reserved, skipping constraints update");
         }
 
         // A token goes first to work that was waiting for one: a declaration in full-template
@@ -386,7 +421,7 @@ fn usable_coinbase_outputs(
 // covers the outputs alone, since the Template Provider reserves the worst case of the coinbase's
 // output count itself (sv2-spec 07, `CoinbaseOutputConstraints`). Outputs needing more than the
 // message can carry are an error, never a smaller reservation.
-fn coinbase_output_constraints(
+pub(super) fn coinbase_output_constraints(
     outputs: Vec<TxOut>,
 ) -> Result<CoinbaseOutputConstraintsOwned, JDCErrorKind> {
     let size: usize = outputs.iter().map(TxOut::size).sum();
