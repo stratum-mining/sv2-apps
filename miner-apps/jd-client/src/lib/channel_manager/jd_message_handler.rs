@@ -39,8 +39,10 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     // Handles a successful `AllocateMiningJobToken` response from the JDS:
     // - drops an answer to a token request JDC never sent or already saw answered;
     // - checks the answer's coinbase outputs, and falls back if JDC can't use them;
-    // - takes the outputs, and queues the token;
-    // - if the outputs changed, sends the Template Provider `CoinbaseOutputConstraints` for them;
+    // - records the outputs as the ones the next templates are handed out with, and queues the
+    //   token with them;
+    // - if the outputs changed, or replace the miner's own, sends the Template Provider
+    //   `CoinbaseOutputConstraints` for them;
     // - hands the token to work waiting for one.
     async fn handle_allocate_mining_job_token_success(
         &mut self,
@@ -71,12 +73,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             usable_coinbase_outputs(msg.coinbase_outputs.as_bytes()).map_err(JDCError::fallback)?;
 
         let coinbase_changed = self
-            .coinbase_outputs
-            .with(|coinbase_outputs| {
-                let changed = *coinbase_outputs != new_coinbase_outputs;
-                *coinbase_outputs = new_coinbase_outputs;
-                changed
-            })
+            .output_sets
+            .with(|output_sets| output_sets.update(new_coinbase_outputs))
             .map_err(JDCError::shutdown)?;
         self.mining_job_tokens
             .with(|tokens| tokens.queue(msg.clone()))
@@ -117,9 +115,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 transaction_data,
             }) => {
                 let token = self
-                    .mining_job_tokens
-                    .with(|tokens| tokens.take())
-                    .map_err(JDCError::shutdown)?
+                    .take_token_for(&template)?
                     .ok_or_else(|| JDCError::shutdown(JDCErrorKind::MiningJobTokenNotFound))?;
                 self.declare_template(template, transaction_data, token)
                     .await?;

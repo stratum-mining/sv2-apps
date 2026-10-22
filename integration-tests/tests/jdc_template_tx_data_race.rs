@@ -17,8 +17,8 @@ use stratum_apps::{
             AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned,
         },
         template_distribution_sv2::{
-            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, NewTemplateOwned,
-            RequestTransactionDataSuccessOwned, SetNewPrevHashOwned,
+            MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA,
+            NewTemplateOwned, RequestTransactionDataSuccessOwned, SetNewPrevHashOwned,
         },
     },
 };
@@ -173,6 +173,18 @@ async fn jdc_requests_tx_data_only_after_upstream_channel_opens() {
         ))
         .await
         .expect("mock JDS should send the second token");
+
+    // Wait until JDC has taken the JDS's outputs, which it shows by sending the Template Provider
+    // their constraints, after the ones for its own outputs sent on startup. A template handed out
+    // before that pays the miner's own outputs: solo work, with no transaction data to request.
+    for _ in 0..2 {
+        tp_sniffer
+            .wait_for_message_type_and_clean_queue(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
+            )
+            .await;
+    }
 
     // Send a valid future template and activate it with a matching `SetNewPrevHash`.
     //

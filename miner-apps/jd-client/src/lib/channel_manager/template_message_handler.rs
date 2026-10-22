@@ -44,6 +44,13 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
+        // JDC hands the template out with the outputs it holds now: they go in the downstream jobs
+        // built below, and every job built from the template later, downstream or upstream, pays
+        // them.
+        self.output_sets
+            .with(|output_sets| output_sets.hand_out(msg.template_id))
+            .map_err(JDCError::shutdown)?;
+
         if msg.future_template {
             self.last_future_template
                 .set(Some(msg.clone()))
@@ -258,11 +265,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             return Ok(());
         };
 
-        let token = self
-            .mining_job_tokens
-            .with(|tokens| tokens.take())
-            .map_err(JDCError::shutdown)?;
-        let Some(token) = token else {
+        let Some(token) = self.take_token_for(&template)? else {
             return self
                 .wait_for_token(WaitingWork::Declaration {
                     template,
@@ -318,6 +321,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 "Dropping work waiting for a token: the chain tip moved past it"
             );
         }
+        self.output_sets
+            .with(|output_sets| output_sets.on_chain_tip(msg.template_id))
+            .map_err(JDCError::shutdown)?;
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -656,7 +662,9 @@ mod tests {
     use stratum_apps::stratum_core::handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync;
 
     use crate::{
-        channel_manager::{MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN, MiningJobTokens},
+        channel_manager::{
+            MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN, MiningJobTokens, OutputSets,
+        },
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
         error::Action,
         jd_mode::JDMode,
@@ -683,7 +691,8 @@ mod tests {
     }
 
     // A channel manager in `mode`. Outside solo mining it mines through an open upstream channel
-    // on the chain tip of `prev_hash(1)`, holding one token, with no downstream connected.
+    // on the chain tip of `prev_hash(1)`, holding one token and the JDS's outputs, with no
+    // downstream connected.
     async fn channel_manager_in(mode: ConfigJDCMode) -> (ChannelManager, Sent) {
         let config = JobDeclaratorClientConfig::new(
             "127.0.0.1:0".parse().unwrap(),
@@ -736,7 +745,7 @@ mod tests {
             tp_sender,
             tp_receiver,
             downstream_receiver,
-            consensus::deserialize(&jds_coinbase_outputs()).unwrap(),
+            parsed(&jds_coinbase_outputs()),
             vec![],
             vec![],
             jd_mode.clone(),
@@ -752,8 +761,13 @@ mod tests {
             return (manager, sent);
         }
 
-        // What the runtime and the JDS handshake leave behind once JDC works through a Pool.
+        // What the runtime and the JDS handshake leave behind once JDC works through a Pool, and
+        // the JDS has answered a token request.
         jd_mode.activate();
+        manager
+            .output_sets
+            .with(|output_sets| output_sets.update(parsed(&jds_coinbase_outputs())))
+            .unwrap();
         manager.set_user_identity("test-user".to_string());
         manager.upstream_state.set(UpstreamState::Connected);
         manager
@@ -797,6 +811,11 @@ mod tests {
 
     fn token() -> B0255Owned {
         0_u64.to_le_bytes().to_vec().try_into().unwrap()
+    }
+
+    // The serialized `outputs`, parsed.
+    fn parsed(outputs: &[u8]) -> Vec<TxOut> {
+        consensus::deserialize(outputs).unwrap()
     }
 
     // Coinbase outputs as a JDS hands them out, for JDC to fill in from each template.
@@ -846,6 +865,14 @@ mod tests {
             n_bits: 0x1d00ffff,
             target: [0xff; 32].into(),
         }
+    }
+
+    // The outputs JDC hands the next template out with.
+    fn current_outputs(manager: &ChannelManager) -> Vec<u8> {
+        manager
+            .output_sets
+            .with(|output_sets| output_sets.current().serialized.clone())
+            .unwrap()
     }
 
     fn queued_tokens(manager: &ChannelManager) -> usize {
@@ -1755,7 +1782,7 @@ mod tests {
     #[tokio::test]
     async fn token_answer_jdc_never_asked_for_changes_nothing() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
-        let outputs = manager.coinbase_outputs.get().unwrap();
+        let outputs = current_outputs(&manager);
         let other_outputs = consensus::serialize(&vec![TxOut {
             value: Amount::from_sat(0),
             script_pubkey: ScriptBuf::new(),
@@ -1775,16 +1802,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(queued_tokens(&manager), 1);
-        assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
+        assert_eq!(current_outputs(&manager), outputs);
         assert!(sent.tp.try_recv().is_err());
     }
 
-    // A token answered for `request_id`.
-    fn token_answer(request_id: u32) -> AllocateMiningJobTokenSuccessOwned {
+    // A token answered for `request_id`, carrying the serialized `outputs`.
+    fn token_answer(request_id: u32, outputs: Vec<u8>) -> AllocateMiningJobTokenSuccessOwned {
         AllocateMiningJobTokenSuccessOwned {
             request_id,
             mining_job_token: token(),
-            coinbase_outputs: jds_coinbase_outputs().try_into().unwrap(),
+            coinbase_outputs: outputs.try_into().unwrap(),
         }
     }
 
@@ -1805,23 +1832,52 @@ mod tests {
         assert!(!tokens.answered(4));
     }
 
-    // Tokens are spent oldest first, and a job spends the token it was built with even when the
-    // queue changed in between: that token is taken out, or nothing if it is gone already.
+    // A job spends the token it was built with even when the queue changed in between: that
+    // token is taken out, or nothing if it is gone already.
     #[test]
     fn a_job_spends_the_token_it_was_built_with() {
         let mut tokens = MiningJobTokens::default();
         for request_id in [4, 5, 6] {
-            tokens.queue(token_answer(request_id));
+            tokens.queue(token_answer(request_id, jds_coinbase_outputs()));
         }
 
-        let built_with = tokens.peek().unwrap().request_id;
+        let built_with = tokens.peek_for(&jds_coinbase_outputs()).unwrap().request_id;
         assert_eq!(built_with, 4);
-        assert_eq!(tokens.take().unwrap().request_id, 4);
+        assert_eq!(
+            tokens.take_for(&jds_coinbase_outputs()).unwrap().request_id,
+            4
+        );
         tokens.spend(built_with);
         assert_eq!(queued_requests(&tokens), vec![5, 6]);
 
         tokens.spend(6);
         assert_eq!(queued_requests(&tokens), vec![5]);
+    }
+
+    // A job takes the oldest token that came with the outputs it pays, and the oldest of all when
+    // none did.
+    #[test]
+    fn a_job_takes_the_oldest_token_that_came_with_its_outputs() {
+        let mut tokens = MiningJobTokens::default();
+        for (request_id, hash) in [(4, 0x11), (5, 0x22), (6, 0x22)] {
+            tokens.queue(token_answer(request_id, payout_outputs(hash)));
+        }
+
+        assert_eq!(
+            tokens.peek_for(&payout_outputs(0x22)).unwrap().request_id,
+            5
+        );
+        assert_eq!(
+            tokens.take_for(&payout_outputs(0x33)).unwrap().request_id,
+            4
+        );
+        assert_eq!(
+            tokens.take_for(&payout_outputs(0x22)).unwrap().request_id,
+            5
+        );
+        assert_eq!(queued_requests(&tokens), vec![6]);
+        tokens.spend(6);
+        assert!(tokens.take_for(&payout_outputs(0x22)).is_none());
     }
 
     // Outputs whose sigop cost doesn't fit `CoinbaseOutputConstraints` make JDC fall back rather
@@ -2009,7 +2065,7 @@ mod tests {
 
         for coinbase_outputs in unusable_outputs {
             let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
-            let outputs = manager.coinbase_outputs.get().unwrap();
+            let outputs = current_outputs(&manager);
             manager.allocate_tokens(1).await.unwrap();
             let mut answer = token_success(&manager);
             answer.coinbase_outputs = coinbase_outputs.try_into().unwrap();
@@ -2021,8 +2077,270 @@ mod tests {
 
             assert!(matches!(error.action, Action::Fallback));
             assert_eq!(queued_tokens(&manager), 1);
-            assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
+            assert_eq!(current_outputs(&manager), outputs);
             assert!(sent.tp.try_recv().is_err());
         }
+    }
+
+    // A payout output to `hash`, the way a JDS or the miner's configuration hands one out.
+    fn payout_outputs(hash: u8) -> Vec<u8> {
+        consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from_bytes([&[0x00, 0x14][..], &[hash; 20]].concat()),
+        }])
+    }
+
+    // The script of the first of the serialized `outputs`, where a job pays the template's reward.
+    fn payout_script(outputs: &[u8]) -> ScriptBuf {
+        consensus::deserialize::<Vec<TxOut>>(outputs).unwrap()[0]
+            .script_pubkey
+            .clone()
+    }
+
+    // The outputs JDC recorded with its declaration of `template_id`.
+    fn declared_outputs(manager: &ChannelManager, template_id: u64) -> Vec<u8> {
+        let mut outputs = None;
+        manager.last_declare_job_store.for_each(|_, declared_job| {
+            if declared_job.template.template_id == template_id {
+                outputs = Some(consensus::serialize(&declared_job.coinbase_outputs));
+            }
+        });
+        outputs.expect("the template is declared")
+    }
+
+    // A template is declared with the outputs it was handed out with, even when the JDS hands out
+    // others before its transaction data arrives, so that the declared job pays what the
+    // template's downstream jobs pay. The next template pays the new outputs.
+    #[tokio::test]
+    async fn template_is_declared_with_the_outputs_it_was_handed_out_with() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(&manager);
+        answer.coinbase_outputs = payout_outputs(0x11).try_into().unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        manager
+            .handle_new_template(None, template(3, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payout_script(&declared_outputs(&manager, 2)),
+            payout_script(&jds_coinbase_outputs())
+        );
+        assert_eq!(
+            payout_script(&declared_outputs(&manager, 3)),
+            payout_script(&payout_outputs(0x11))
+        );
+    }
+
+    // A coinbase-only template waiting for a token gets its custom job with the outputs it was
+    // handed out with, even when the token that pays for it brings different ones.
+    #[tokio::test]
+    async fn waiting_coinbase_only_template_keeps_the_outputs_it_was_handed_out_with() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::CoinbaseOnly).await;
+        manager
+            .mining_job_tokens
+            .with(|tokens| tokens.queue.clear())
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        let mut answer = token_success(&manager);
+        answer.coinbase_outputs = payout_outputs(0x11).try_into().unwrap();
+
+        manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap();
+
+        let custom_jobs = recorded_custom_jobs(&manager, 2);
+        assert_eq!(
+            payout_script(custom_jobs[0].coinbase_tx_outputs.as_bytes()),
+            payout_script(&jds_coinbase_outputs())
+        );
+    }
+
+    // JDC holds the token it started with, which came with `jds_coinbase_outputs`, and then gets
+    // token 1 with other outputs, which the templates handed out from then on pay.
+    async fn queue_token_with_other_outputs(
+        manager: &mut ChannelManager,
+    ) -> AllocateMiningJobTokenSuccessOwned {
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(manager);
+        answer.mining_job_token = 1_u64.to_le_bytes().to_vec().try_into().unwrap();
+        answer.coinbase_outputs = payout_outputs(0x11).try_into().unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, answer.clone(), None)
+            .await
+            .unwrap();
+        answer
+    }
+
+    fn queued_token_ids(manager: &ChannelManager) -> Vec<B0255Owned> {
+        manager
+            .mining_job_tokens
+            .with(|tokens| {
+                tokens
+                    .queue
+                    .iter()
+                    .map(|token| token.mining_job_token.clone())
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    // A declaration takes the token that came with the outputs in the template's downstream jobs
+    // over an older token that came with others, which stays queued.
+    #[tokio::test]
+    async fn declaration_takes_a_token_that_came_with_its_outputs() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let answer = queue_token_with_other_outputs(&mut manager).await;
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        let declaration = std::iter::from_fn(|| sent.jds.try_recv().ok())
+            .find_map(|message| match message {
+                JobDeclarationOwned::DeclareMiningJob(declaration) => Some(declaration),
+                _ => None,
+            })
+            .expect("JDC declares the template");
+        assert_eq!(declaration.mining_job_token, answer.mining_job_token);
+        assert_eq!(queued_token_ids(&manager), vec![token()]);
+    }
+
+    // A coinbase-only custom job takes the token that came with the outputs in the template's
+    // downstream jobs over an older token that came with others, which stays queued.
+    #[tokio::test]
+    async fn custom_job_takes_a_token_that_came_with_its_outputs() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::CoinbaseOnly).await;
+        let answer = queue_token_with_other_outputs(&mut manager).await;
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            recorded_custom_jobs(&manager, 2)[0].token,
+            answer.mining_job_token
+        );
+        assert_eq!(queued_token_ids(&manager), vec![token()]);
+    }
+
+    // Before the JDS's first answer, templates are handed out with the miner's own outputs: solo
+    // work, which gets no custom job even with a token in hand, and asks for none. The first
+    // answer sends the Template Provider constraints for the JDS's outputs, and the template the
+    // chain tip moves to next goes upstream with them.
+    #[tokio::test]
+    async fn work_handed_out_before_the_first_jds_answer_stays_solo() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::CoinbaseOnly).await;
+        manager
+            .output_sets
+            .set(OutputSets::new(parsed(&payout_outputs(0x22))))
+            .unwrap();
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent.pool), 0);
+        assert_eq!(queued_tokens(&manager), 1);
+        assert!(sent.jds.try_recv().is_err());
+
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            sent.tp.try_recv(),
+            Ok(TemplateDistributionOwned::CoinbaseOutputConstraints(_))
+        ));
+
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+        let custom_jobs = recorded_custom_jobs(&manager, 3);
+        assert_eq!(custom_jobs.len(), 1);
+        assert_eq!(
+            payout_script(custom_jobs[0].coinbase_tx_outputs.as_bytes()),
+            payout_script(&jds_coinbase_outputs())
+        );
+    }
+
+    // A full-template JDC asks for no transaction data of a template handed out with the miner's
+    // own outputs: that work is never declared.
+    #[tokio::test]
+    async fn solo_work_requests_no_transaction_data() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .output_sets
+            .set(OutputSets::new(parsed(&payout_outputs(0x22))))
+            .unwrap();
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        assert!(sent.tp.try_recv().is_err());
+        assert!(requested_templates(&manager).is_empty());
+    }
+
+    // Each set of outputs covers the templates from the first one handed out with it, and a new
+    // chain tip keeps only the sets the templates from it on can be paying.
+    #[test]
+    fn output_sets_follow_template_ids_and_chain_tips_prune_them() {
+        let outputs = |hash| parsed(&payout_outputs(hash));
+        let mut sets = OutputSets::new(outputs(0));
+        sets.hand_out(1);
+        sets.update(outputs(1));
+        sets.hand_out(2);
+        sets.hand_out(3);
+        sets.update(outputs(2));
+        // No template was handed out with `outputs(2)`, so `outputs(3)` replaces it.
+        sets.update(outputs(3));
+        sets.hand_out(5);
+
+        assert_eq!(sets.of(1).outputs, outputs(0));
+        assert_eq!(sets.of(3).outputs, outputs(1));
+        assert_eq!(sets.of(4).outputs, outputs(1));
+        assert_eq!(sets.of(5).outputs, outputs(3));
+        assert_eq!(sets.of(5).serialized, payout_outputs(3));
+        assert_eq!(sets.0.len(), 3);
+
+        sets.on_chain_tip(3);
+        assert_eq!(sets.0.len(), 2);
+        sets.on_chain_tip(5);
+        assert_eq!(sets.0.len(), 1);
     }
 }

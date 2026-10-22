@@ -17,7 +17,10 @@ use stratum_apps::{
             consensus::{deserialize, serialize},
         },
         common_messages_sv2::{MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol},
-        job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
+        job_declaration_sv2::{
+            AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned,
+            MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+        },
         mining_sv2::{
             MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
             MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
@@ -198,18 +201,18 @@ async fn jdc_coinbase_only_keeps_its_tokens_until_the_upstream_channel_opens() {
     jdc.jdc.shutdown().await;
 }
 
-/// Regression coverage for coinbase-only work waiting for a token, the coinbase-only counterpart of
-/// issue #905.
+/// Regression coverage for work handed out before the JDS's first token answer (issue #896).
 ///
-/// When the upstream channel opens before the JDS has answered JDC's token requests, there is no
-/// token to pay for the custom job of the chain tip the downstreams are handed. That job must
-/// wait for a token and ask the JDS for one of its own, so that it goes out once the JDS answers
-/// that request even if the earlier ones are never answered.
+/// Until the JDS answers a token request, JDC hands templates out with the miner's own outputs:
+/// solo work, which never goes upstream. With the upstream channel already open, the chain tip gets
+/// no custom job and asks for no token. Once the JDS answers, JDC sends the Template Provider
+/// constraints for the JDS's outputs, and the template the chain tip moves to next gets its custom
+/// job.
 #[tokio::test]
-async fn jdc_coinbase_only_upstream_channel_custom_job_waits_for_a_token() {
+async fn jdc_coinbase_only_chain_tip_before_the_first_token_answer_stays_solo() {
     integration_tests_sv2::start_tracing();
     let jdc = MockedJdc::start().await;
-    jdc.token_requests(2).await;
+    let token_requests = jdc.token_requests(2).await;
     jdc.send_chain_tip(1).await;
     let downstream = jdc.connect_downstream("jdc-downstream").await;
     downstream.request_extended_channel().await;
@@ -225,11 +228,22 @@ async fn jdc_coinbase_only_upstream_channel_custom_job_waits_for_a_token() {
                 ABSENCE_WINDOW,
             )
             .await,
-        "JDC must not send a custom job before it holds a token for it"
+        "JDC must not send solo work upstream"
+    );
+    assert!(
+        jdc.jds_sniffer
+            .assert_message_not_present(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "solo work must not ask the JDS for a token"
     );
 
-    let own_token_request = jdc.token_requests(1).await;
-    jdc.answer_token_requests(&own_token_request).await;
+    jdc.answer_token_requests(&token_requests).await;
+    jdc.wait_for_first_token().await;
+    jdc.send_chain_tip(2).await;
 
     assert_eq!(jdc.next_custom_job().await.token, mining_job_token(0));
 
@@ -322,18 +336,16 @@ impl MockedJdc {
         }
     }
 
-    // Brings JDC to where it mines through the Pool: a chain tip from the Template Provider, two
-    // tokens from the JDS, and one downstream whose extended channel request opened the upstream
-    // channel. Returns that downstream once its channel is open.
-    //
-    // The tokens JDC asks for once the JDS handshake completes are answered only after the chain
-    // tip has been handled, which keeps these tests independent of what JDC does with its tokens
-    // when a prevhash arrives before its upstream channel exists.
+    // Brings JDC to where it mines through the Pool: two tokens and its outputs from the JDS, a
+    // chain tip from the Template Provider handed out with those outputs, and one downstream whose
+    // extended channel request opened the upstream channel. Returns that downstream once its
+    // channel is open.
     async fn connect_with_upstream_channel(&self) -> MockedDownstream {
         let token_requests = self.token_requests(2).await;
+        self.answer_token_requests(&token_requests).await;
+        self.wait_for_first_token().await;
         self.send_chain_tip(1).await;
         let first = self.connect_downstream("jdc-downstream-first").await;
-        self.answer_token_requests(&token_requests).await;
         first.request_extended_channel().await;
         self.open_upstream_channel().await;
         first
