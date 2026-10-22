@@ -226,7 +226,10 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         if channel_state == UpstreamState::Connected {
             if self.mode.is_full_template() {
                 if let Some(template) = &template {
-                    self.request_transaction_data(template).await?;
+                    // Solo work, handed out with the miner's own outputs, is never declared.
+                    if self.goes_upstream(template)? {
+                        self.request_transaction_data(template).await?;
+                    }
                 }
             }
 

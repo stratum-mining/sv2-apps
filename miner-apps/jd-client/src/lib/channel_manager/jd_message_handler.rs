@@ -80,12 +80,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             usable_coinbase_outputs(&new_coinbase_outputs).map_err(JDCError::fallback)?;
 
         let coinbase_changed = self
-            .coinbase_outputs
-            .with(|coinbase_outputs| {
-                let changed = *coinbase_outputs != new_coinbase_outputs;
-                *coinbase_outputs = new_coinbase_outputs.clone();
-                changed
-            })
+            .output_sets
+            .with(|output_sets| output_sets.update(new_coinbase_outputs))
             .map_err(JDCError::shutdown)?;
         self.allocate_tokens
             .with(|tokens| tokens.push_back(msg.clone()))
@@ -126,9 +122,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 transaction_data,
             }) => {
                 let token = self
-                    .allocate_tokens
-                    .with(|tokens| tokens.pop_front())
-                    .map_err(JDCError::shutdown)?
+                    .take_token_for(&template)?
                     .expect("a token is queued: one was just received");
                 self.declare_template(template, transaction_data, token)
                     .await?;
