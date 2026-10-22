@@ -72,7 +72,7 @@ The `min_interval` parameter (in seconds) determines the minimum amount of time 
 
 ## Examples
 
-- `tdp_logger` - Template Distribution Protocol logger built through `bitcoin_core_sv2::runtime_api`, pinned to Bitcoin Core v31.x (change one line to target another supported version).
+- `tdp_logger` - Template Distribution Protocol logger built through `bitcoin_core_sv2::runtime_api`, pinned to Bitcoin Core v32.x (change one line to target another supported version).
 
 ## License
 

@@ -90,7 +90,7 @@ POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
 # Tagged enums (template_provider_type) take the variant as a path segment,
 # matched case-insensitively. If the file selects a different variant, the
 # environment's variant replaces it; set only one variant in the environment:
-POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=32
 POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
 # List fields (supported_extensions, required_extensions) are comma-separated.
 # A lone value is read as a 1-element list:

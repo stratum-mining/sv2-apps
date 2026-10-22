@@ -14,7 +14,7 @@
 //! `BitcoinCoreSv2TDP` will not start distributing new templates until it receives the first
 //! `CoinbaseOutputConstraints` message.
 //!
-//! This example is pinned to Bitcoin Core v31.x, although it can be adapted to work with other
+//! This example is pinned to Bitcoin Core v32.x, although it can be adapted to work with other
 //! versions.
 
 use bitcoin_core_sv2::runtime_api::{
@@ -85,7 +85,7 @@ async fn main() {
             // create a new `BitcoinCoreSv2TDP` instance
             let mut sv2_bitcoin_core: BitcoinCoreSv2TDP = match template_distribution_protocol::new(
                 // Change this line to select a different supported Bitcoin Core major version.
-                BitcoinCoreVersion::V31X,
+                BitcoinCoreVersion::V32X,
                 &bitcoin_core_unix_socket_path_clone,
                 fee_threshold,
                 min_interval,

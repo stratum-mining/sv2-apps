@@ -6,8 +6,6 @@ use integration_tests_sv2::{
 use stratum_apps::stratum_core::{job_declaration_sv2::*, template_distribution_sv2::*};
 
 // Block propagated from JDS to TP
-// Currently disabled, see https://github.com/stratum-mining/sv2-apps/issues/322
-#[ignore]
 #[tokio::test]
 async fn propagated_from_jds_to_tp() {
     start_tracing();
@@ -46,7 +44,19 @@ async fn propagated_from_jds_to_tp() {
             std::time::Duration::from_secs(1),
         )
         .await;
-    let new_block_hash = tp.get_best_block_hash().unwrap();
-    assert_ne!(current_block_hash, new_block_hash);
+    // Nothing answers a PushSolution, so the chain tip is what says Bitcoin Core took the block
+    // JDS rebuilt and submitted.
+    let mut new_block_hash = current_block_hash.clone();
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        new_block_hash = tp.get_best_block_hash().unwrap();
+        if new_block_hash != current_block_hash {
+            break;
+        }
+    }
+    assert_ne!(
+        current_block_hash, new_block_hash,
+        "Bitcoin Core must extend the chain with the block JDS submitted"
+    );
     shutdown_all!(translator, jdc, pool);
 }

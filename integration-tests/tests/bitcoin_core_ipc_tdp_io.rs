@@ -52,7 +52,6 @@ async fn tdp_io_integration_v31x() {
 }
 
 #[tokio::test]
-#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
 async fn tdp_io_integration_v32x() {
     assert_tdp_io_integration(BitcoinCoreVersion::V32X).await;
 }
@@ -68,7 +67,6 @@ async fn tdp_bootstrap_gives_way_to_cancellation_v31x() {
 }
 
 #[tokio::test]
-#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
 async fn tdp_bootstrap_gives_way_to_cancellation_v32x() {
     assert_tdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
 }
@@ -84,7 +82,6 @@ async fn tdp_runtime_gives_way_to_cancellation_v31x() {
 }
 
 #[tokio::test]
-#[ignore = "requires a Bitcoin Core 32.0 release binary; un-gate once v32.0 final is published"]
 async fn tdp_runtime_gives_way_to_cancellation_v32x() {
     assert_tdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
 }
