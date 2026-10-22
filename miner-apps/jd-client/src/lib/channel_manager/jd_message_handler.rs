@@ -91,39 +91,16 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 bitcoin::consensus::deserialize(msg.coinbase_outputs.as_bytes())
                     .map_err(JDCError::shutdown)?;
 
-            let max_additional_size: usize = deserialized_jds_coinbase_outputs
-                .iter()
-                .map(|o| o.size())
-                .sum();
-
-            // create a dummy coinbase transaction with the empty output
-            // this is used to calculate the sigops of the coinbase output
-            let dummy_coinbase = Transaction {
-                version: Version::TWO,
-                lock_time: LockTime::ZERO,
-                input: vec![TxIn {
-                    previous_output: OutPoint::null(),
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::from(vec![vec![0; 32]]),
-                }],
-                output: deserialized_jds_coinbase_outputs,
-            };
-
-            let max_additional_sigops = dummy_coinbase.total_sigop_cost(|_| None) as u16;
-
+            let constraints = coinbase_output_constraints(deserialized_jds_coinbase_outputs)
+                .map_err(JDCError::fallback)?;
             debug!(
-                max_additional_size,
-                max_additional_sigops, "Computed coinbase output constraints"
+                max_additional_size = constraints.coinbase_output_max_additional_size,
+                max_additional_sigops = constraints.coinbase_output_max_additional_sigops,
+                "Computed coinbase output constraints"
             );
 
             let coinbase_output_constraints_message =
-                TemplateDistributionOwned::CoinbaseOutputConstraints(
-                    CoinbaseOutputConstraintsOwned {
-                        coinbase_output_max_additional_size: max_additional_size as u32,
-                        coinbase_output_max_additional_sigops: max_additional_sigops,
-                    },
-                );
+                TemplateDistributionOwned::CoinbaseOutputConstraints(constraints);
 
             self.channel_manager_io
                 .tp_sender
@@ -389,5 +366,43 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         );
 
         Ok(())
+    }
+}
+
+// The `CoinbaseOutputConstraints` that reserve room in the Template Provider's templates for the
+// coinbase `outputs` the JDS hands out: their serialized size and their sigop cost. The size
+// covers the outputs alone, since the Template Provider reserves the worst case of the coinbase's
+// output count itself (sv2-spec 07, `CoinbaseOutputConstraints`). Outputs needing more than the
+// message can carry are an error, never a smaller reservation.
+fn coinbase_output_constraints(
+    outputs: Vec<TxOut>,
+) -> Result<CoinbaseOutputConstraintsOwned, JDCErrorKind> {
+    let size: usize = outputs.iter().map(TxOut::size).sum();
+    // A coinbase spending nothing but carrying `outputs`, so that its sigop cost is theirs.
+    let coinbase = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from(vec![vec![0; 32]]),
+        }],
+        output: outputs,
+    };
+    let sigops = coinbase.total_sigop_cost(|_| None);
+    match (u32::try_from(size), u16::try_from(sigops)) {
+        (Ok(size), Ok(sigops)) => Ok(CoinbaseOutputConstraintsOwned {
+            coinbase_output_max_additional_size: size,
+            coinbase_output_max_additional_sigops: sigops,
+        }),
+        _ => {
+            warn!(
+                size,
+                sigops,
+                "Coinbase outputs need more room than CoinbaseOutputConstraints can reserve"
+            );
+            Err(JDCErrorKind::CoinbaseOutputConstraintsOutOfRange)
+        }
     }
 }

@@ -1713,4 +1713,61 @@ mod tests {
         assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
         assert!(sent.tp.try_recv().is_err());
     }
+
+    // Outputs whose sigop cost doesn't fit `CoinbaseOutputConstraints` make JDC fall back rather
+    // than reserve fewer sigops than they cost, and the Template Provider gets no constraints. A
+    // thousand `OP_CHECKMULTISIG`s cost 80,000 sigops, more than its 16-bit field can carry.
+    #[tokio::test]
+    async fn outputs_costing_more_sigops_than_constraints_carry_fall_back() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(&manager);
+        answer.coinbase_outputs = consensus::serialize(&vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from_bytes(vec![0xae; 1000]),
+        }])
+        .try_into()
+        .unwrap();
+
+        let error = manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Fallback));
+        assert!(sent.tp.try_recv().is_err());
+    }
+
+    // The room reserved for the JDS's outputs is their serialized size alone, even with enough of
+    // them to grow the coinbase's output count from one byte to three: the Template Provider
+    // reserves the output count's worst case itself (sv2-spec 07, `CoinbaseOutputConstraints`).
+    #[tokio::test]
+    async fn constraints_reserve_the_outputs_size_alone() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.allocate_tokens(1).await.unwrap();
+        let outputs: Vec<TxOut> = (0..253)
+            .map(|_| TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::new(),
+            })
+            .collect();
+        let mut answer = token_success(&manager);
+        answer.coinbase_outputs = consensus::serialize(&outputs).try_into().unwrap();
+
+        manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap();
+
+        let Ok(TemplateDistributionOwned::CoinbaseOutputConstraints(constraints)) =
+            sent.tp.try_recv()
+        else {
+            panic!("JDC sends the Template Provider constraints for the new outputs");
+        };
+        let outputs_size: usize = outputs.iter().map(TxOut::size).sum();
+        assert_eq!(
+            constraints.coinbase_output_max_additional_size as usize,
+            outputs_size
+        );
+    }
 }
