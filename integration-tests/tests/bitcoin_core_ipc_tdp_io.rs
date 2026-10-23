@@ -52,6 +52,11 @@ async fn tdp_io_integration_v31x() {
 }
 
 #[tokio::test]
+async fn tdp_io_integration_v32x() {
+    assert_tdp_io_integration(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
 async fn tdp_bootstrap_gives_way_to_cancellation_v30x() {
     assert_tdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
 }
@@ -62,6 +67,11 @@ async fn tdp_bootstrap_gives_way_to_cancellation_v31x() {
 }
 
 #[tokio::test]
+async fn tdp_bootstrap_gives_way_to_cancellation_v32x() {
+    assert_tdp_bootstrap_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
+}
+
+#[tokio::test]
 async fn tdp_runtime_gives_way_to_cancellation_v30x() {
     assert_tdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V30X).await;
 }
@@ -69,6 +79,11 @@ async fn tdp_runtime_gives_way_to_cancellation_v30x() {
 #[tokio::test]
 async fn tdp_runtime_gives_way_to_cancellation_v31x() {
     assert_tdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V31X).await;
+}
+
+#[tokio::test]
+async fn tdp_runtime_gives_way_to_cancellation_v32x() {
+    assert_tdp_runtime_gives_way_to_cancellation(BitcoinCoreVersion::V32X).await;
 }
 
 async fn assert_tdp_io_integration(version: BitcoinCoreVersion) {

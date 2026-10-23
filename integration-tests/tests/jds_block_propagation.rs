@@ -6,8 +6,6 @@ use integration_tests_sv2::{
 use stratum_apps::stratum_core::{job_declaration_sv2::*, template_distribution_sv2::*};
 
 // Block propagated from JDS to TP
-// Currently disabled, see https://github.com/stratum-mining/sv2-apps/issues/322
-#[ignore]
 #[tokio::test]
 async fn propagated_from_jds_to_tp() {
     start_tracing();
