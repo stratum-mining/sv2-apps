@@ -14,11 +14,10 @@ use stratum_apps::stratum_core::{
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Str0255,
-        bitcoin::{Amount, Target, hashes::sha256d},
+        bitcoin::{Target, hashes::sha256d},
         channels_sv2::{
             Vardiff, VardiffState, client,
             extranonce_manager::ExtranonceAllocatorError,
-            outputs::deserialize_outputs,
             server::{
                 error::{ExtendedChannelError, StandardChannelError},
                 extended::ExtendedChannel,
@@ -248,11 +247,6 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
-        let coinbase_outputs = self.coinbase_outputs.get().map_err(JDCError::shutdown)?;
-
-        let mut coinbase_outputs = deserialize_outputs(coinbase_outputs)
-            .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
-
         info!(downstream_id, "Received: {}", msg);
 
         let build_error = |code: &str| {
@@ -283,8 +277,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             ));
         };
 
-        coinbase_outputs[0].value =
-            Amount::from_sat(last_future_template.coinbase_tx_value_remaining);
+        let coinbase_outputs = self.coinbase_outputs_for(&last_future_template)?;
         let nominal_hash_rate = msg.nominal_hash_rate;
         let requested_max_target = Target::from_le_bytes(msg.max_target.to_array());
         let pool_tag_string = self.pool_tag_string.get().map_err(JDCError::shutdown)?;
@@ -621,13 +614,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         .into(),
                 );
 
-                let mut coinbase_outputs =
-                    deserialize_outputs(self.coinbase_outputs.get().map_err(JDCError::shutdown)?)
-                        .map_err(|_| {
-                            JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs)
-                        })?;
-                coinbase_outputs[0].value =
-                    Amount::from_sat(last_future_template.coinbase_tx_value_remaining);
+                let coinbase_outputs = self.coinbase_outputs_for(&last_future_template)?;
                 extended_channel
                     .on_new_template(last_future_template.clone(), coinbase_outputs)
                     .map_err(|e| {

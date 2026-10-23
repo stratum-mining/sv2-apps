@@ -11,7 +11,7 @@ use std::{
 use stratum_apps::stratum_core::{
     job_declaration_sv2::{AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned},
     mining_sv2::{OpenExtendedMiningChannelOwned, SetTargetOwned, UpdateChannelOwned},
-    template_distribution_sv2::RequestTransactionDataOwned,
+    template_distribution_sv2::{RequestTransactionDataOwned, RequestTransactionDataSuccessOwned},
 };
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -113,6 +113,17 @@ const JDC_LOCAL_PREFIX_BYTES: u8 = bytes_needed(JDC_MAX_CHANNELS);
 /// ```
 pub const SOLO_FULL_EXTRANONCE_SIZE: u8 = 20;
 
+// How many templates can wait for their transaction data at once. A Template Provider answers a
+// request within moments, so normally one or two wait; the cap only matters against one that
+// keeps sending templates without answering. Past it, the oldest request is released.
+const MAX_REQUESTED_TEMPLATES: usize = 16;
+
+// How many templates for the current chain tip can wait for a token at once. The JDS answers a
+// token request within a round trip and fee-driven templates come seconds apart, so normally
+// nothing waits; the cap only matters against a JDS that stops answering while templates keep
+// coming. Past it, the oldest is dropped: its downstreams have already moved on to the newer ones.
+const MAX_WAITING_FOR_TOKEN: usize = 4;
+
 /// A `DeclaredJob` encapsulates all the relevant data associated with a single
 /// job declaration, including its template, optional messages, coinbase output,
 /// and transaction list.
@@ -132,6 +143,90 @@ pub struct DeclaredJob {
     coinbase_output: Vec<u8>,
     // The list of transactions included in the job’s template.
     tx_list: Vec<Vec<u8>>,
+}
+
+// Work on a template that was ready to go upstream while JDC held no token to pay for it.
+#[derive(Clone, Debug)]
+enum WaitingWork {
+    // A full-template declaration, from the transaction data the Template Provider sent.
+    Declaration {
+        template: NewTemplateOwned,
+        transaction_data: RequestTransactionDataSuccessOwned,
+    },
+    // A coinbase-only custom job.
+    CustomJob {
+        template: NewTemplateOwned,
+    },
+}
+
+impl WaitingWork {
+    fn template(&self) -> &NewTemplateOwned {
+        match self {
+            WaitingWork::Declaration { template, .. } | WaitingWork::CustomJob { template } => {
+                template
+            }
+        }
+    }
+}
+
+// The work waiting for a token: the current chain tip's, oldest first and up to
+// `MAX_WAITING_FOR_TOKEN`, and a future template waiting for the prevhash that activates it.
+// Downstreams mine every template of the current tip, and the shares they find on one are cached
+// until its job goes upstream, so each of those templates waits. A future template is mined only
+// once activated, so a newer one simply replaces it. A new chain tip leaves only the template it
+// activates, so the state stays bounded however long tokens take to arrive.
+#[derive(Debug, Default)]
+struct WaitingForToken {
+    current_tip: VecDeque<WaitingWork>,
+    future: Option<WaitingWork>,
+}
+
+impl WaitingForToken {
+    // Keeps `waiting` until a token arrives, and returns the work it pushes out: the oldest of the
+    // current tip's past the cap, or the future template it replaces. `chain_tip` tells a future
+    // template's declaration still waiting for its activation from one already activated, which
+    // is the current tip's work. A custom job is only ever built on the chain tip it is wanted
+    // for, so it is always the current tip's work.
+    fn wait(
+        &mut self,
+        waiting: WaitingWork,
+        chain_tip: Option<&SetNewPrevHashTdp>,
+    ) -> Option<WaitingWork> {
+        let template = waiting.template();
+        let awaits_activation = matches!(waiting, WaitingWork::Declaration { .. })
+            && template.future_template
+            && chain_tip.is_none_or(|tip| tip.template_id != template.template_id);
+        if awaits_activation {
+            return self.future.replace(waiting);
+        }
+        self.current_tip.push_back(waiting);
+        if self.current_tip.len() > MAX_WAITING_FOR_TOKEN {
+            self.current_tip.pop_front()
+        } else {
+            None
+        }
+    }
+
+    // Takes the work the next token goes to: the current chain tip's newest, whose downstreams are
+    // still adding shares to its bounded cache, then the older ones, then a future template's.
+    fn next(&mut self) -> Option<WaitingWork> {
+        self.current_tip.pop_back().or_else(|| self.future.take())
+    }
+
+    // A new chain tip activating `template_id`. Work waiting for that template becomes the new
+    // tip's, and all other waiting work, built on the previous tip or for another future
+    // template, can no longer be mined and is returned to be dropped.
+    fn on_chain_tip(&mut self, template_id: TemplateId) -> Vec<WaitingWork> {
+        let mut dropped: Vec<WaitingWork> = self.current_tip.drain(..).collect();
+        match self.future.take() {
+            Some(waiting) if waiting.template().template_id == template_id => {
+                self.current_tip.push_back(waiting)
+            }
+            Some(waiting) => dropped.push(waiting),
+            None => {}
+        }
+        dropped
+    }
 }
 
 /// Represents all communication channels managed by the Channel Manager.
@@ -264,8 +359,14 @@ pub struct ChannelManager {
     // FIFO buffer of allocation tokens received from the JDS.
     // Oldest token is consumed first to minimize risk of JDS-side expiration.
     pub allocate_tokens: SharedLock<VecDeque<AllocateMiningJobTokenSuccessOwned>>,
-    // Stores templates as they arrive, keyed by template ID.
-    pub template_store: SharedMap<TemplateId, NewTemplateOwned>,
+    // Templates whose transaction data has been requested from the Template Provider and not
+    // received yet, oldest first. Nothing else reads a stored template, so one is kept only for
+    // its request: solo and coinbase-only modes keep none. The answer to the request, a new chain
+    // tip or the cap releases it.
+    requested_templates: SharedLock<VecDeque<NewTemplateOwned>>,
+    // Work that was ready to go upstream while JDC held no token, until a token arrives to pay
+    // for it.
+    waiting_for_token: SharedLock<WaitingForToken>,
     // Stores the last declared job, keyed by the request ID used
     // when declaring the job to the JDS.
     pub last_declare_job_store: SharedMap<RequestId, DeclaredJob>,
@@ -428,7 +529,8 @@ impl ChannelManager {
             last_future_template: SharedLock::new(None),
             last_new_prev_hash: SharedLock::new(None),
             allocate_tokens: SharedLock::new(VecDeque::new()),
-            template_store: SharedMap::new(),
+            requested_templates: SharedLock::new(VecDeque::new()),
+            waiting_for_token: SharedLock::new(WaitingForToken::default()),
             last_declare_job_store: SharedMap::new(),
             template_id_to_upstream_job_id: SharedMap::new(),
             downstream_channel_id_and_job_id_to_template_id: SharedMap::new(),
@@ -527,23 +629,13 @@ impl ChannelManager {
             }
         };
 
-        let coinbase_outputs = match self.coinbase_outputs.get() {
+        let coinbase_outputs = match self.coinbase_outputs_for(&last_future_template) {
             Ok(outputs) => outputs,
             Err(e) => {
-                error!(error = ?JDCErrorKind::from(e), "Failed to access channel manager state");
+                error!(error = ?e, "Failed to compute coinbase outputs");
                 return None;
             }
         };
-        let mut coinbase_outputs = match deserialize_outputs(coinbase_outputs) {
-            Ok(outputs) => outputs,
-            Err(e) => {
-                error!(error = ?e, "Failed to deserialize coinbase outputs");
-                return None;
-            }
-        };
-
-        coinbase_outputs[0].value =
-            Amount::from_sat(last_future_template.coinbase_tx_value_remaining);
 
         if let Err(e) =
             group_channel.on_new_template(last_future_template, coinbase_outputs.clone())
@@ -1141,15 +1233,36 @@ impl ChannelManager {
         Ok(())
     }
 
-    /// Sends a transaction-data request for the template.
+    /// Sends a transaction-data request for `template`, and keeps the template until the request
+    /// is answered.
     ///
     /// Only call this when the response can be consumed (i.e., `UpstreamState::Connected`
-    /// in full-template mode). Templates received before the upstream channel opens are
-    /// covered by the re-request in `handle_open_extended_mining_channel_success`.
+    /// in full-template mode). Of the templates received before the upstream channel opens,
+    /// `handle_open_extended_mining_channel_success` requests the last future template.
     async fn request_transaction_data(
         &self,
-        template_id: TemplateId,
+        template: &NewTemplateOwned,
     ) -> JDCResult<(), error::ChannelManager> {
+        let template_id = template.template_id;
+        let released = self
+            .requested_templates
+            .with(|requested| {
+                requested.retain(|requested| requested.template_id != template_id);
+                requested.push_back(template.clone());
+                if requested.len() > MAX_REQUESTED_TEMPLATES {
+                    requested.pop_front()
+                } else {
+                    None
+                }
+            })
+            .map_err(JDCError::shutdown)?;
+        if let Some(released) = released {
+            warn!(
+                template_id = released.template_id,
+                "Releasing the oldest template waiting for its transaction data: too many requests are unanswered"
+            );
+        }
+
         let message =
             TemplateDistributionOwned::RequestTransactionData(RequestTransactionDataOwned {
                 template_id,
@@ -1160,6 +1273,47 @@ impl ChannelManager {
             .await
             .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
         Ok(())
+    }
+
+    // Keeps `waiting` until a token arrives to pay for it, and asks the JDS for that token. JDC
+    // replaces every other token as it spends it, so it holds or has asked for two tokens plus
+    // one for each piece of waiting work. Asking here, rather than counting on the tokens already
+    // on their way, gets the work out even if the JDS never answers one of the earlier requests.
+    async fn wait_for_token(&self, waiting: WaitingWork) -> JDCResult<(), error::ChannelManager> {
+        let template_id = waiting.template().template_id;
+        let chain_tip = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
+        let dropped = self
+            .waiting_for_token
+            .with(|waiting_for_token| waiting_for_token.wait(waiting, chain_tip.as_ref()))
+            .map_err(JDCError::shutdown)?;
+        info!(
+            template_id,
+            "No token available, the template waits for one"
+        );
+        if let Some(dropped) = dropped {
+            warn!(
+                template_id = dropped.template().template_id,
+                "Dropping work waiting for a token: newer templates replaced it"
+            );
+        }
+        _ = self.allocate_tokens(1).await;
+        Ok(())
+    }
+
+    // Takes `template_id` out of the templates waiting for their transaction data, if it is one.
+    #[allow(clippy::result_large_err)]
+    fn take_requested_template(
+        &self,
+        template_id: TemplateId,
+    ) -> JDCResult<Option<NewTemplateOwned>, error::ChannelManager> {
+        self.requested_templates
+            .with(|requested| {
+                let position = requested
+                    .iter()
+                    .position(|template| template.template_id == template_id)?;
+                requested.remove(position)
+            })
+            .map_err(JDCError::shutdown)
     }
 
     /// Utility method to request for more token to JDS.
@@ -1201,6 +1355,118 @@ impl ChannelManager {
 
         info!("Requested allocation of {token_to_allocate} mining job tokens to JDS");
         Ok(())
+    }
+
+    // The coinbase outputs a job built from `template` pays: the outputs the JDS handed out, with
+    // everything the template leaves for the coinbase in the first one.
+    #[allow(clippy::result_large_err)]
+    fn coinbase_outputs_for(
+        &self,
+        template: &NewTemplateOwned,
+    ) -> JDCResult<Vec<TxOut>, error::ChannelManager> {
+        let mut outputs = deserialize_outputs(
+            self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
+        )
+        .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
+        outputs[0].value = Amount::from_sat(template.coinbase_tx_value_remaining);
+        Ok(outputs)
+    }
+
+    // Builds the coinbase-only custom job that puts `template` on the upstream channel, paying
+    // the outputs from `coinbase_outputs_for`, records it, and spends a token on it.
+    //
+    // Returns `None` while there is no upstream channel, chain tip for the template, job factory
+    // or token to build the job with, and an error when the job factory rejects the template. A
+    // future template has a chain tip only once a prevhash activates it. The token is taken
+    // from the queue only once the job is built. With everything but a token in place, the
+    // template waits for one (see `wait_for_token`), and the token that arrives builds the job.
+    async fn build_coinbase_only_custom_job(
+        &self,
+        template: &NewTemplateOwned,
+    ) -> JDCResult<Option<SetCustomMiningJobOwned>, error::ChannelManager> {
+        let upstream_channel = self
+            .upstream_channel
+            .with(|channel| {
+                channel
+                    .as_ref()
+                    .map(|channel| (channel.get_channel_id(), channel.get_full_extranonce_size()))
+            })
+            .map_err(JDCError::shutdown)?;
+        let Some((upstream_channel_id, full_extranonce_size)) = upstream_channel else {
+            return Ok(None);
+        };
+        let Some(prev_hash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? else {
+            return Ok(None);
+        };
+        if template.future_template && prev_hash.template_id != template.template_id {
+            return Ok(None);
+        }
+        let has_job_factory = self
+            .job_factory
+            .with(|job_factory| job_factory.is_some())
+            .map_err(JDCError::shutdown)?;
+        if !has_job_factory {
+            return Ok(None);
+        }
+        let Some(token) = self
+            .allocate_tokens
+            .with(|tokens| tokens.front().map(|token| token.mining_job_token.clone()))
+            .map_err(JDCError::shutdown)?
+        else {
+            self.wait_for_token(WaitingWork::CustomJob {
+                template: template.clone(),
+            })
+            .await?;
+            return Ok(None);
+        };
+        let coinbase_outputs = self.coinbase_outputs_for(template)?;
+
+        let custom_job = self
+            .job_factory
+            .with(|job_factory| {
+                job_factory.as_ref().map(|job_factory| {
+                    job_factory.new_custom_job(
+                        upstream_channel_id,
+                        self.request_id_factory.fetch_add(1, Ordering::Relaxed),
+                        token,
+                        prev_hash.clone().into(),
+                        template.clone(),
+                        coinbase_outputs,
+                        full_extranonce_size,
+                    )
+                })
+            })
+            .map_err(JDCError::shutdown)?;
+        let Some(custom_job) = custom_job else {
+            return Ok(None);
+        };
+        // A rejected custom job would leave the downstreams mining work whose shares could never
+        // reach the Pool. JDC shuts down instead, as it does when the downstream channels
+        // themselves cannot build a job from a template.
+        let custom_job = custom_job.map_err(|e| {
+            error!(
+                error = ?e,
+                template_id = template.template_id,
+                "Failed to build coinbase-only custom job"
+            );
+            JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
+        })?;
+
+        self.allocate_tokens
+            .with(|tokens| tokens.pop_front())
+            .map_err(JDCError::shutdown)?;
+        self.last_declare_job_store.insert(
+            custom_job.request_id,
+            DeclaredJob {
+                declare_mining_job: None,
+                template: template.clone(),
+                prev_hash: Some(prev_hash),
+                set_custom_mining_job: Some(custom_job.clone()),
+                coinbase_output: self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
+                tx_list: Vec::new(),
+            },
+        );
+        Ok(Some(custom_job))
     }
 
     // Runs the vardiff on extended channel.
