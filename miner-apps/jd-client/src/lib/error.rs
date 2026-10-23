@@ -39,7 +39,7 @@ use stratum_apps::{
     },
     utils::types::{
         CanDisconnect, CanFallback, CanShutdown, DownstreamId, ExtensionType, JobId, MessageType,
-        RequestId, TemplateId, VardiffKey,
+        RequestId, VardiffKey,
     },
 };
 use tokio::time::error::Elapsed;
@@ -206,8 +206,6 @@ pub enum JDCErrorKind {
     LastDeclareJobNotFound(RequestId),
     /// No active job with job id
     ActiveJobNotFound(JobId),
-    /// Template not found with template ID
-    TemplateNotFound(TemplateId),
     /// Downstream not found with downstream ID
     DownstreamNotFound(DownstreamId),
     /// Future template not present
@@ -224,10 +222,14 @@ pub enum JDCErrorKind {
     FailedToCreateCustomJob,
     /// Allocate Mining job token coinbase output error
     AllocateMiningJobTokenSuccessCoinbaseOutputsError,
+    /// `AllocateMiningJobToken.Success` hands out no coinbase output.
+    AllocateMiningJobTokenSuccessNoCoinbaseOutputs,
+    /// `AllocateMiningJobToken.Success` hands out a coinbase output with a nonzero value.
+    AllocateMiningJobTokenSuccessCoinbaseOutputValue,
     /// Channel manager has bad coinbase outputs.
     ChannelManagerHasBadCoinbaseOutputs,
-    /// Declared job has bad coinbase outputs.
-    DeclaredJobHasBadCoinbaseOutputs,
+    /// Coinbase outputs need more room than `CoinbaseOutputConstraints` can reserve.
+    CoinbaseOutputConstraintsOutOfRange,
     /// Extranonce size is too large
     ExtranonceSizeTooLarge,
     /// Extranonce size is too small
@@ -317,9 +319,6 @@ impl fmt::Display for JDCErrorKind {
             ActiveJobNotFound(request_id) => {
                 write!(f, "Active Job not found for request_id: {request_id}")
             }
-            TemplateNotFound(template_id) => {
-                write!(f, "Template not found, template_id: {template_id}")
-            }
             DownstreamNotFound(downstream_id) => {
                 write!(
                     f,
@@ -350,11 +349,26 @@ impl fmt::Display for JDCErrorKind {
                     "AllocateMiningJobToken.Success coinbase outputs are not deserializable"
                 )
             }
+            AllocateMiningJobTokenSuccessNoCoinbaseOutputs => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out no coinbase output"
+                )
+            }
+            AllocateMiningJobTokenSuccessCoinbaseOutputValue => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out a coinbase output with a nonzero value"
+                )
+            }
             ChannelManagerHasBadCoinbaseOutputs => {
                 write!(f, "Channel Manager coinbase outputs are not deserializable")
             }
-            DeclaredJobHasBadCoinbaseOutputs => {
-                write!(f, "Declared job coinbase outputs are not deserializable")
+            CoinbaseOutputConstraintsOutOfRange => {
+                write!(
+                    f,
+                    "coinbase outputs need more room than CoinbaseOutputConstraints can reserve"
+                )
             }
             ExtranonceSizeTooLarge => {
                 write!(f, "Extranonce size too large")
