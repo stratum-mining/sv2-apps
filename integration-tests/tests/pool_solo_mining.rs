@@ -257,6 +257,30 @@ fn next_standard_job(sniffer: &Sniffer<'_>) -> NewMiningJobOwned {
     }
 }
 
+// Builds wire bytes explicitly so receiver-side tests can send a protocol-invalid hashrate.
+fn open_extended_frame(
+    mut message: OpenExtendedMiningChannelOwned,
+) -> stratum_apps::utils::types::OutboundFrame {
+    use stratum_apps::stratum_core::{
+        codec_sv2::{EncodableFrame, MessageFrame, SerializedFrame},
+        framing_sv2::SV2_FRAME_HEADER_SIZE,
+    };
+    let hashrate_bits = message.nominal_hash_rate.to_bits();
+    let hashrate_offset = SV2_FRAME_HEADER_SIZE + 4 + 1 + message.user_identity.as_bytes().len();
+    message.nominal_hash_rate = 0.0;
+    let frame = MessageFrame::from_message(
+        AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(message)),
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+        0,
+        false,
+    )
+    .unwrap();
+    let mut bytes = vec![0; frame.encoded_length()];
+    frame.encode_into(&mut bytes).unwrap();
+    bytes[hashrate_offset..hashrate_offset + 4].copy_from_slice(&hashrate_bits.to_le_bytes());
+    SerializedFrame::from_bytes(bytes.into()).unwrap().into()
+}
+
 #[tokio::test]
 async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
     start_tracing();
@@ -268,7 +292,7 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
         sniffer_addr,
         WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
     );
-    let send_to_pool = mock_downstream.start().await;
+    let send_to_pool = mock_downstream.start_with_frames().await;
 
     sniffer
         .wait_for_message_type_and_clean_queue(
@@ -279,15 +303,13 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
 
     // This open must fail before it binds the connection's payout policy.
     send_to_pool
-        .send(AnyMessageOwned::Mining(
-            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
-                request_id: 0,
-                user_identity: "sri/donate/worker.1".try_into().unwrap(),
-                nominal_hash_rate: -1.0,
-                max_target: [0xff; 32].into(),
-                min_extranonce_size: 8,
-            }),
-        ))
+        .send(open_extended_frame(OpenExtendedMiningChannelOwned {
+            request_id: 0,
+            user_identity: "sri/donate/worker.1".try_into().unwrap(),
+            nominal_hash_rate: -1.0,
+            max_target: [0xff; 32].into(),
+            min_extranonce_size: 8,
+        }))
         .await
         .unwrap();
     sniffer
@@ -303,17 +325,15 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
     );
 
     send_to_pool
-        .send(AnyMessageOwned::Mining(
-            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
-                request_id: 1,
-                user_identity: format!("sri/solo/{MINER_COINBASE_REWARD_ADDR}/worker.1")
-                    .try_into()
-                    .unwrap(),
-                nominal_hash_rate: 1000.0,
-                max_target: [0xff; 32].into(),
-                min_extranonce_size: 8,
-            }),
-        ))
+        .send(open_extended_frame(OpenExtendedMiningChannelOwned {
+            request_id: 1,
+            user_identity: format!("sri/solo/{MINER_COINBASE_REWARD_ADDR}/worker.1")
+                .try_into()
+                .unwrap(),
+            nominal_hash_rate: 1000.0,
+            max_target: [0xff; 32].into(),
+            min_extranonce_size: 8,
+        }))
         .await
         .unwrap();
     sniffer
@@ -332,15 +352,13 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
     // This identity would resolve to FullDonation, but the invalid channel must
     // not replace channel A's policy before the open is rejected.
     send_to_pool
-        .send(AnyMessageOwned::Mining(
-            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
-                request_id: 1,
-                user_identity: "sri/donate/worker.1".try_into().unwrap(),
-                nominal_hash_rate: -1.0,
-                max_target: [0xff; 32].into(),
-                min_extranonce_size: 8,
-            }),
-        ))
+        .send(open_extended_frame(OpenExtendedMiningChannelOwned {
+            request_id: 1,
+            user_identity: "sri/donate/worker.1".try_into().unwrap(),
+            nominal_hash_rate: -1.0,
+            max_target: [0xff; 32].into(),
+            min_extranonce_size: 8,
+        }))
         .await
         .unwrap();
     sniffer
