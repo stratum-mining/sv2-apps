@@ -162,11 +162,7 @@ impl MinerTelemetryCollector {
     }
 
     pub async fn discover(&self, cidrs: &[String]) -> Vec<DiscoveredMiner> {
-        let ips = cidrs
-            .iter()
-            .filter_map(|cidr| parse_private_ipv4_cidr(cidr))
-            .flat_map(|cidr| cidr.host_ips())
-            .collect::<Vec<_>>();
+        let ips = discovery_ips(cidrs);
 
         debug!(
             cidrs = ?cidrs,
@@ -326,6 +322,18 @@ pub fn match_discovered_miners_to_downstreams_by_worker_and_port(
     result
 }
 
+/// Expands valid discovery ranges into unique hosts so each management IP is probed once.
+fn discovery_ips(cidrs: &[String]) -> Vec<IpAddr> {
+    let mut ips = cidrs
+        .iter()
+        .filter_map(|cidr| parse_private_ipv4_cidr(cidr))
+        .flat_map(|cidr| cidr.host_ips())
+        .collect::<Vec<_>>();
+    ips.sort_unstable();
+    ips.dedup();
+    ips
+}
+
 fn parse_private_ipv4_cidr(value: &str) -> Option<Ipv4Cidr> {
     let (addr, prefix) = match value.split_once('/') {
         Some(parts) => parts,
@@ -443,6 +451,53 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2))
             ]
+        );
+    }
+
+    #[test]
+    fn discovery_probes_overlapping_and_repeated_cidrs_once() {
+        let cidrs = [
+            "192.168.1.0/30",
+            "192.168.1.1/32",
+            "192.168.1.0/30",
+            "192.168.1.2/31",
+            "10.0.0.1/32",
+            "8.8.8.0/24",
+        ]
+        .map(str::to_owned);
+        let ips = discovery_ips(&cidrs);
+        assert_eq!(
+            ips,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlapping_cidrs_leave_a_single_miner_matched() {
+        let cidrs = ["192.168.1.0/24", "192.168.1.20/32"].map(str::to_owned);
+        let miner = discovered_miner([192, 168, 1, 20], "worker-a", 34255);
+        let discovered = discovery_ips(&cidrs)
+            .into_iter()
+            .filter(|ip| *ip == miner.ip)
+            .map(|_| miner.clone())
+            .collect::<Vec<_>>();
+        let result = match_discovered_miners_to_downstreams_by_worker_and_port(
+            &[(10, "worker-a".to_string())],
+            &discovered,
+            34255,
+        );
+        assert_eq!(
+            result.management_ips_by_downstream_id.get(&10),
+            Some(&miner.ip)
+        );
+        assert_eq!(
+            result.statuses_by_downstream_id.get(&10),
+            Some(&MinerTelemetryStatus::Matched)
         );
     }
 

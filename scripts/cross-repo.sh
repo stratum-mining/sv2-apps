@@ -32,7 +32,7 @@ _cross_repo_realpath() {
       path="$HOME"
       ;;
     "~/"*)
-      path="$HOME/${path#~/}"
+      path="$HOME/${path#\~/}"
       ;;
   esac
 
