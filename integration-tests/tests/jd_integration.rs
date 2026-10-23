@@ -3,6 +3,7 @@ use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, JobDeclarationOwn
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
     mock_roles::{MockDownstream, WithSetup},
+    sniffer::Sniffer,
     start_jdc_with_user_identities,
     template_provider::DifficultyLevel,
     *,
@@ -546,6 +547,146 @@ async fn jds_reject_declare_mining_job_with_invalid_mining_job_token() {
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
         "DeclareMiningJobError should use invalid-mining-job-token for unallocated token"
     );
+
+    shutdown_all!(pool);
+}
+
+// This test verifies that JDS rejects a `DeclareMiningJob` carrying a malformed
+// `coinbase_tx_prefix` with the controlled `invalid-coinbase-tx` error, rather than panicking or
+// over-allocating while reconstructing the declared coinbase (issues #645 / Loupe #5 and #27).
+//
+// It allocates a real mining-job token (so the declaration passes token validation and reaches
+// coinbase reconstruction), then sends declarations whose prefix would previously have panicked
+// (short prefix) or driven an oversized allocation (huge declared scriptSig length). After each,
+// the JDS must respond with `invalid-coinbase-tx` and remain alive to serve further requests.
+#[tokio::test]
+async fn jds_rejects_malformed_declared_coinbase_without_panicking() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jds", jds_addr, false, vec![], None);
+    let send_to_jds = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    // complete SetupConnection handshake
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    // Allocate a real mining-job token and capture it from the success response. Each declaration
+    // consumes its token on error, so we allocate a fresh one per malformed case.
+    async fn allocate_token(
+        send_to_jds: &async_channel::Sender<AnyMessageOwned>,
+        sniffer: &Sniffer<'_>,
+        request_id: u32,
+    ) -> Vec<u8> {
+        send_to_jds
+            .send(AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(
+                    AllocateMiningJobTokenOwned {
+                        request_id,
+                        user_identifier: "malformed_coinbase".try_into().unwrap(),
+                    },
+                ),
+            ))
+            .await
+            .unwrap();
+
+        loop {
+            match sniffer.next_message_from_upstream() {
+                Some((
+                    _,
+                    AnyMessageOwned::JobDeclaration(
+                        parsers_sv2::JobDeclarationOwned::AllocateMiningJobTokenSuccess(msg),
+                    ),
+                )) if msg.request_id == request_id => {
+                    break msg.mining_job_token.as_ref().to_vec();
+                }
+                Some(_) => continue,
+                None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+    }
+
+    // Sends a `DeclareMiningJob` with the given coinbase prefix and asserts the JDS responds with
+    // `invalid-coinbase-tx` for `request_id`.
+    async fn assert_invalid_coinbase(
+        send_to_jds: &async_channel::Sender<AnyMessageOwned>,
+        sniffer: &Sniffer<'_>,
+        request_id: u32,
+        coinbase_tx_prefix: Vec<u8>,
+    ) {
+        let token = allocate_token(send_to_jds, sniffer, request_id).await;
+
+        send_to_jds
+            .send(AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::DeclareMiningJob(DeclareMiningJobOwned {
+                    request_id,
+                    mining_job_token: token.try_into().unwrap(),
+                    version: 0x20000000,
+                    coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
+                    coinbase_tx_suffix: Vec::<u8>::new().try_into().unwrap(),
+                    wtxid_list: Seq064KOwned::new(Vec::new()).unwrap(),
+                    excess_data: Vec::<u8>::new().try_into().unwrap(),
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let error = loop {
+            match sniffer.next_message_from_upstream() {
+                Some((
+                    _,
+                    AnyMessageOwned::JobDeclaration(
+                        parsers_sv2::JobDeclarationOwned::DeclareMiningJobError(msg),
+                    ),
+                )) if msg.request_id == request_id => break msg,
+                Some(_) => continue,
+                None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        };
+
+        assert_eq!(
+            error.error_code.as_utf8_or_hex(),
+            ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+            "DeclareMiningJobError should use invalid-coinbase-tx for a malformed coinbase prefix"
+        );
+    }
+
+    // Case 1: prefix shorter than the fixed 43-byte header previously panicked on an out-of-bounds
+    // slice when reading the scriptSig-length VarInt.
+    assert_invalid_coinbase(&send_to_jds, &sniffer, 1, vec![0u8; 10]).await;
+
+    // Case 2: prefix whose declared scriptSig length is a huge but well-formed VarInt
+    // (`0xffff`, encoded as the 0xFD marker plus two little-endian bytes) previously drove an
+    // oversized zero-filled extranonce allocation. Build a structurally plausible 43-byte segwit
+    // header followed by that VarInt.
+    let mut oversized_prefix = Vec::new();
+    oversized_prefix.extend([0x02, 0x00, 0x00, 0x00]); // version
+    oversized_prefix.extend([0x00, 0x01]); // segwit marker + flag
+    oversized_prefix.push(0x01); // input count
+    oversized_prefix.extend([0u8; 32]); // prev txid
+    oversized_prefix.extend([0xff, 0xff, 0xff, 0xff]); // prev vout index
+    oversized_prefix.extend([0xfd, 0xff, 0xff]); // VarInt(0xffff) = 65535
+    assert_invalid_coinbase(&send_to_jds, &sniffer, 2, oversized_prefix).await;
+
+    // The JDS must still be alive and able to serve a fresh token allocation after both malformed
+    // declarations.
+    let _ = allocate_token(&send_to_jds, &sniffer, 3).await;
 
     shutdown_all!(pool);
 }

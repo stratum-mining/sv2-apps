@@ -10,11 +10,28 @@ use std::fmt;
 
 use crate::{
     config_helpers::CoinbaseRewardScript,
-    stratum_core::bitcoin::{Amount, ScriptBuf, Transaction, TxOut, consensus::deserialize},
+    stratum_core::bitcoin::{
+        Amount, ScriptBuf, Transaction, TxOut, VarInt,
+        consensus::{Decodable, deserialize},
+    },
 };
 
 // Legacy solo identities do not encode a fee policy, so allow at most a 10% service fee.
 const MIN_LEGACY_SOLO_PAYOUT_PERCENTAGE: u8 = 90;
+
+/// Number of bytes in a coinbase transaction before the scriptSig-length VarInt.
+///
+/// Layout: `version` (4) + segwit `marker`/`flag` (2) + `input_count` (1) + previous-output
+/// `txid` (32) + previous-output `vout` index (4). The scriptSig-length VarInt and the scriptSig
+/// bytes themselves come immediately after these 43 bytes.
+const COINBASE_PREFIX_LEN: usize = 43;
+
+/// Maximum length of a coinbase scriptSig, per the BIP34 consensus rule.
+///
+/// A coinbase scriptSig must be between 2 and 100 bytes; we only enforce the upper bound here
+/// because the lower bound is checked when the reconstructed transaction is decoded and
+/// structurally validated.
+const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
 /// Represents the payout mode encoded by a mining `user_identity`.
 ///
@@ -448,6 +465,117 @@ impl fmt::Display for PayoutValidationError {
 
 impl std::error::Error for PayoutValidationError {}
 
+/// Errors produced while reconstructing a declared coinbase transaction from its untrusted parts.
+///
+/// Every variant maps to the single `invalid-coinbase-tx` error code on the wire; the granularity
+/// exists only for logging and diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredCoinbaseError {
+    /// The prefix is shorter than the fixed [`COINBASE_PREFIX_LEN`] header preceding the
+    /// scriptSig-length VarInt.
+    PrefixTooShort,
+    /// Failed to decode the scriptSig-length VarInt from the prefix.
+    InvalidScriptSigVarInt,
+    /// The declared scriptSig length exceeds the consensus bound
+    /// [`MAX_COINBASE_SCRIPT_SIG_SIZE`].
+    ScriptSigTooLarge,
+    /// The declared scriptSig length is inconsistent with the bytes present in the prefix
+    /// (the declared length is smaller than the scriptSig bytes already supplied).
+    ScriptSigLengthMismatch,
+    /// The reconstructed transaction failed to deserialize.
+    Decode(String),
+}
+
+impl fmt::Display for DeclaredCoinbaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PrefixTooShort => write!(
+                f,
+                "coinbase prefix shorter than {COINBASE_PREFIX_LEN} bytes"
+            ),
+            Self::InvalidScriptSigVarInt => {
+                write!(f, "failed to decode scriptSig length from coinbase prefix")
+            }
+            Self::ScriptSigTooLarge => write!(
+                f,
+                "declared coinbase scriptSig length exceeds {MAX_COINBASE_SCRIPT_SIG_SIZE} bytes"
+            ),
+            Self::ScriptSigLengthMismatch => write!(
+                f,
+                "declared coinbase scriptSig length is smaller than the scriptSig bytes already in the prefix"
+            ),
+            Self::Decode(e) => write!(f, "failed to decode declared coinbase transaction: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DeclaredCoinbaseError {}
+
+/// Reconstructs and decodes a declared coinbase transaction from its untrusted parts.
+///
+/// The coinbase is split into a `coinbase_tx_prefix`, a zero-filled extranonce gap, and a
+/// `coinbase_tx_suffix`. The extranonce size is derived from the scriptSig-length VarInt inside
+/// the prefix. Both parts are attacker-controlled, so this function validates every length and
+/// offset with checked arithmetic *before* slicing or allocating:
+///
+/// - the prefix must be at least [`COINBASE_PREFIX_LEN`] bytes (no out-of-bounds slice),
+/// - the declared scriptSig length is capped at [`MAX_COINBASE_SCRIPT_SIG_SIZE`], bounding the
+///   zero-filled extranonce allocation,
+/// - the declared scriptSig length must be consistent with the scriptSig bytes already present in
+///   the prefix (no `usize` underflow).
+///
+/// On any failure it returns a [`DeclaredCoinbaseError`] instead of panicking or allocating an
+/// attacker-selected amount of memory.
+pub fn decode_declared_coinbase_tx(
+    coinbase_tx_prefix: &[u8],
+    coinbase_tx_suffix: &[u8],
+) -> Result<Transaction, DeclaredCoinbaseError> {
+    // The prefix must at least cover the fixed header up to the scriptSig-length VarInt.
+    if coinbase_tx_prefix.len() < COINBASE_PREFIX_LEN {
+        return Err(DeclaredCoinbaseError::PrefixTooShort);
+    }
+
+    // Decode the scriptSig-length VarInt starting right after the fixed header.
+    let mut cursor = &coinbase_tx_prefix[COINBASE_PREFIX_LEN..];
+    let script_sig_size_u64 = VarInt::consensus_decode(&mut cursor)
+        .map_err(|_| DeclaredCoinbaseError::InvalidScriptSigVarInt)?
+        .0;
+
+    // Bound the declared scriptSig length before it can drive any allocation. Compare in `u64`
+    // space so the bound cannot be bypassed by a truncating `u64 -> usize` cast, then convert.
+    if script_sig_size_u64 > MAX_COINBASE_SCRIPT_SIG_SIZE as u64 {
+        return Err(DeclaredCoinbaseError::ScriptSigTooLarge);
+    }
+    let script_sig_size = script_sig_size_u64 as usize;
+
+    // Offset of the first scriptSig byte within the prefix. Both terms are bounded, so the
+    // addition cannot overflow.
+    let varint_size = VarInt(script_sig_size as u64).size();
+    let script_sig_offset = COINBASE_PREFIX_LEN + varint_size;
+
+    // scriptSig bytes already present in the prefix. The VarInt was decoded from
+    // `coinbase_tx_prefix[COINBASE_PREFIX_LEN..]`, so `script_sig_offset <= prefix.len()`; use
+    // saturating_sub defensively.
+    let script_sig_bytes_in_prefix = coinbase_tx_prefix.len().saturating_sub(script_sig_offset);
+
+    // The remaining scriptSig bytes form the zero-filled extranonce. If the prefix already
+    // contains more scriptSig bytes than the declared length, the declaration is inconsistent.
+    let full_extranonce_size = script_sig_size
+        .checked_sub(script_sig_bytes_in_prefix)
+        .ok_or(DeclaredCoinbaseError::ScriptSigLengthMismatch)?;
+
+    // Reconstruct prefix + zero-filled extranonce + suffix.
+    let mut coinbase = Vec::with_capacity(
+        coinbase_tx_prefix.len() + full_extranonce_size + coinbase_tx_suffix.len(),
+    );
+    coinbase.extend_from_slice(coinbase_tx_prefix);
+    coinbase.resize(coinbase.len() + full_extranonce_size, 0);
+    coinbase.extend_from_slice(coinbase_tx_suffix);
+
+    Transaction::consensus_decode(&mut &coinbase[..])
+        .map_err(|e| DeclaredCoinbaseError::Decode(e.to_string()))
+}
+
 fn script_from_address(address: &str) -> Result<CoinbaseRewardScript, PayoutModeError> {
     CoinbaseRewardScript::from_descriptor(&format!("addr({address})")).map_err(|e| {
         PayoutModeError::InvalidPayoutAddress {
@@ -783,5 +911,133 @@ mod tests {
         expected
             .validate_coinbase_tx_parts(&prefix, &suffix, FULL_EXTRANONCE_SIZE)
             .unwrap();
+    }
+
+    // ---------------------------------------------------------------------
+    // `decode_declared_coinbase_tx` regressions
+    //
+    // These cover the unsafe reconstruction paths described in issue #645:
+    // short prefixes, oversized/mismatched scriptSig lengths, offset
+    // underflow, and oversized missing-extranonce allocation. None of them may
+    // panic or allocate an attacker-selected amount of memory.
+    // ---------------------------------------------------------------------
+
+    /// Builds a segwit-layout coinbase prefix whose declared scriptSig length VarInt is set to
+    /// `declared_script_sig_len`, followed by `script_sig_bytes_in_prefix` scriptSig bytes, and a
+    /// matching suffix containing the input sequence, a single output, and the locktime.
+    ///
+    /// This lets a test decouple the *declared* scriptSig length from the bytes actually present,
+    /// which is exactly what an attacker controls.
+    fn declared_coinbase_parts(
+        declared_script_sig_len: &[u8],
+        script_sig_bytes_in_prefix: &[u8],
+    ) -> (Vec<u8>, Vec<u8>) {
+        // Segwit layout assumed by the decoder: version(4) + marker(0x00)/flag(0x01)(2) +
+        // input_count(1) + prev txid(32) + prev vout(4) = 43 bytes before the scriptSig-length
+        // VarInt.
+        let mut prefix = Vec::new();
+        prefix.extend([0x02, 0x00, 0x00, 0x00]); // version
+        prefix.push(0x00); // segwit marker
+        prefix.push(0x01); // segwit flag
+        prefix.push(0x01); // input count
+        prefix.extend([0; 32]); // prev txid
+        prefix.extend([0xff, 0xff, 0xff, 0xff]); // prev vout index
+        prefix.extend(declared_script_sig_len); // scriptSig length VarInt
+        prefix.extend(script_sig_bytes_in_prefix); // scriptSig bytes already in prefix
+
+        let mut suffix = Vec::new();
+        suffix.extend([0xff, 0xff, 0xff, 0xff]); // input sequence
+        suffix.extend(serialize(&vec![tx_out(0, MINER_ADDRESS)])); // outputs
+        // witness for the single input: 1 stack item of length 1 (value 0x00). A non-empty
+        // witness is required for the decoder to accept the segwit marker/flag.
+        suffix.push(0x01); // one witness stack item
+        suffix.push(0x01); // item length 1
+        suffix.push(0x00); // item byte
+        suffix.extend([0, 0, 0, 0]); // locktime
+
+        (prefix, suffix)
+    }
+
+    #[test]
+    fn decodes_valid_declared_coinbase() {
+        // scriptSig = 4 prefix bytes + 8 zero-filled extranonce bytes = 12, encoded as a single
+        // byte (< 0xfd).
+        let (prefix, suffix) = declared_coinbase_parts(&[12], &[0x03, 0x01, 0x02, 0x03]);
+        decode_declared_coinbase_tx(&prefix, &suffix).expect("valid declaration must decode");
+    }
+
+    #[test]
+    fn rejects_short_prefix_without_panicking() {
+        let short = vec![0u8; COINBASE_PREFIX_LEN - 1];
+        let err = decode_declared_coinbase_tx(&short, &[]).unwrap_err();
+        assert!(matches!(err, DeclaredCoinbaseError::PrefixTooShort));
+    }
+
+    #[test]
+    fn rejects_oversized_script_sig_varint_before_allocating() {
+        // A single-byte scriptSig length of 200 exceeds the 100-byte consensus bound.
+        let (prefix, suffix) = declared_coinbase_parts(&[200], &[0x03, 0x01, 0x02, 0x03]);
+        let err = decode_declared_coinbase_tx(&prefix, &suffix).unwrap_err();
+        assert!(matches!(err, DeclaredCoinbaseError::ScriptSigTooLarge));
+    }
+
+    #[test]
+    fn rejects_huge_script_sig_varint_before_allocating() {
+        // 0xfd followed by a u16 of 0xffff => a declared scriptSig length of 65535, which would
+        // previously have driven a large missing-extranonce allocation.
+        let (prefix, suffix) = declared_coinbase_parts(&[0xfd, 0xff, 0xff], &[]);
+        let err = decode_declared_coinbase_tx(&prefix, &suffix).unwrap_err();
+        assert!(matches!(err, DeclaredCoinbaseError::ScriptSigTooLarge));
+    }
+
+    #[test]
+    fn rejects_truncated_script_sig_varint() {
+        // 0xfd announces a 2-byte VarInt but provides only one byte, so decoding must fail rather
+        // than slice out of bounds.
+        let (prefix, suffix) = declared_coinbase_parts(&[0xfd, 0x10], &[]);
+        let err = decode_declared_coinbase_tx(&prefix, &suffix).unwrap_err();
+        assert!(matches!(err, DeclaredCoinbaseError::InvalidScriptSigVarInt));
+    }
+
+    #[test]
+    fn rejects_script_sig_length_underflow() {
+        // Declared scriptSig length (4) is smaller than the scriptSig bytes already present in the
+        // prefix (6). Previously this underflowed `usize` and panicked.
+        let (prefix, suffix) = declared_coinbase_parts(&[4], &[0x03, 0x01, 0x02, 0x03, 0x04, 0x05]);
+        let err = decode_declared_coinbase_tx(&prefix, &suffix).unwrap_err();
+        assert!(matches!(
+            err,
+            DeclaredCoinbaseError::ScriptSigLengthMismatch
+        ));
+    }
+
+    #[test]
+    fn rejects_structurally_invalid_reconstruction() {
+        // A valid scriptSig length but a suffix that does not deserialize into a transaction.
+        let (prefix, _) = declared_coinbase_parts(&[12], &[0x03, 0x01, 0x02, 0x03]);
+        let err = decode_declared_coinbase_tx(&prefix, &[0xde, 0xad]).unwrap_err();
+        assert!(matches!(err, DeclaredCoinbaseError::Decode(_)));
+    }
+
+    #[test]
+    fn accepts_boundary_script_sig_of_max_size() {
+        // Declared scriptSig length exactly at the 100-byte bound must be accepted (then fail only
+        // if the surrounding bytes do not form a valid transaction). Build a real one.
+        let script_sig_bytes_in_prefix = [0x03, 0x01, 0x02, 0x03];
+        let remaining = MAX_COINBASE_SCRIPT_SIG_SIZE - script_sig_bytes_in_prefix.len();
+        let (prefix, suffix) = declared_coinbase_parts(&[100], &script_sig_bytes_in_prefix);
+        // We must supply `remaining` more scriptSig bytes via the extranonce gap for the tx to be
+        // structurally consistent; the decoder fills them with zeros.
+        assert_eq!(
+            prefix.len() - COINBASE_PREFIX_LEN - VarInt(100).size(),
+            script_sig_bytes_in_prefix.len()
+        );
+        let tx = decode_declared_coinbase_tx(&prefix, &suffix)
+            .expect("boundary-size scriptSig must decode");
+        // The reconstructed scriptSig must be exactly the bounded size.
+        assert_eq!(
+            tx.input[0].script_sig.len(),
+            remaining + script_sig_bytes_in_prefix.len()
+        );
     }
 }
