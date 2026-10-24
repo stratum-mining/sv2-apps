@@ -659,7 +659,6 @@ mod tests {
         assert_eq!(full_donation_outputs[0].value.to_sat(), 1_000);
     }
 
-
     #[test]
     fn donation_split_preserves_value_at_u64_boundary() {
         let pool = script_from_address(OTHER_ADDRESS).unwrap();
@@ -672,7 +671,10 @@ mod tests {
             let expected_pool = ((u64::MAX as u128 * percentage as u128) / 100) as u64;
             assert_eq!(outputs[0].value.to_sat(), expected_pool);
             assert_eq!(outputs[1].value.to_sat(), u64::MAX - expected_pool);
-            assert_eq!(mode.expected_miner_sats(u64::MAX), u64::MAX - expected_pool);
+            assert_eq!(
+                mode.expected_miner_sats(u64::MAX),
+                u64::MAX - expected_pool
+            );
         }
     }
 
@@ -689,10 +691,10 @@ mod tests {
                 Err(PayoutValidationError::InvalidOutputAmount)
             ));
         }
-        assert!(matches!(
-            PayoutMode::FullDonation.validate_coinbase_outputs(&[tx_out(u64::MAX, OTHER_ADDRESS)]),
-            Err(PayoutValidationError::InvalidOutputAmount)
-        ));
+        let err = PayoutMode::FullDonation
+            .validate_coinbase_outputs(&[tx_out(u64::MAX, OTHER_ADDRESS)])
+            .unwrap_err();
+        assert!(matches!(err, PayoutValidationError::InvalidOutputAmount));
     }
 
     #[test]
