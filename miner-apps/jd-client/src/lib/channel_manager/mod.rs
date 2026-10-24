@@ -26,11 +26,11 @@ use stratum_apps::{
         bitcoin::{Amount, Target, TxOut},
         channels_sv2::{
             Vardiff, VardiffState,
-            target::hash_rate_to_target,
             client::extended::ExtendedChannel,
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
             outputs::deserialize_outputs,
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
+            target::hash_rate_to_target,
         },
         handlers_sv2::{
             HandleExtensionsFromServerOwnedAsync, HandleJobDeclarationMessagesFromServerOwnedAsync,
