@@ -30,6 +30,7 @@ use stratum_apps::{
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
             outputs::deserialize_outputs,
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
+            target::hash_rate_to_target,
         },
         handlers_sv2::{
             HandleExtensionsFromServerOwnedAsync, HandleJobDeclarationMessagesFromServerOwnedAsync,
@@ -112,6 +113,18 @@ const JDC_LOCAL_PREFIX_BYTES: u8 = bytes_needed(JDC_MAX_CHANNELS);
 /// |<----- SOLO_FULL_EXTRANONCE_SIZE = 20 ---------->|
 /// ```
 pub const SOLO_FULL_EXTRANONCE_SIZE: u8 = 20;
+
+/// Preserve the first downstream's actual assigned share difficulty when opening
+/// the single upstream channel. A miner's wire max_target is only an upper bound.
+fn initial_upstream_target(
+    nominal_hash_rate: f32,
+    shares_per_minute: SharesPerMinute,
+    requested_max_target: Target,
+) -> Target {
+    hash_rate_to_target(nominal_hash_rate.into(), shares_per_minute.into())
+        .map(|calculated| calculated.min(requested_max_target))
+        .unwrap_or(requested_max_target)
+}
 
 /// A `DeclaredJob` encapsulates all the relevant data associated with a single
 /// job declaration, including its template, optional messages, coinbase output,
@@ -1001,6 +1014,15 @@ impl ChannelManager {
                             .is_ok()
                         {
                             let mut upstream_message = downstream_channel_request;
+                            let requested_target =
+                                Target::from_le_bytes(upstream_message.max_target.to_array());
+                            upstream_message.max_target = initial_upstream_target(
+                                upstream_message.nominal_hash_rate,
+                                self.shares_per_minute,
+                                requested_target,
+                            )
+                            .to_le_bytes()
+                            .into();
                             let identity = self.user_identity().to_string();
                             upstream_message.user_identity =
                                 identity.as_str().try_into().map_err(JDCError::shutdown)?;
@@ -1084,11 +1106,19 @@ impl ChannelManager {
                             let upstream_min_extranonce_size = (JDC_LOCAL_PREFIX_BYTES as u16)
                                 + self.reserved_downstream_rollable_extranonce_size as u16;
                             let identity = self.user_identity().to_string();
+                            let requested_target = Target::from_le_bytes(
+                                downstream_channel_request.max_target.to_array(),
+                            );
+                            let max_target = initial_upstream_target(
+                                downstream_channel_request.nominal_hash_rate,
+                                self.shares_per_minute,
+                                requested_target,
+                            );
                             let upstream_open = OpenExtendedMiningChannelOwned {
                                 user_identity: identity.as_str().try_into().unwrap(),
                                 request_id: 1,
                                 nominal_hash_rate: downstream_channel_request.nominal_hash_rate,
-                                max_target: downstream_channel_request.max_target,
+                                max_target: max_target.to_le_bytes().into(),
                                 min_extranonce_size: upstream_min_extranonce_size,
                             };
 
