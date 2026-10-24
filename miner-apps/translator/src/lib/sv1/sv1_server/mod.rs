@@ -535,7 +535,6 @@ impl Sv1Server {
             tokio::pin!(keepalive_future);
             loop {
                 tokio::select! {
-                    biased;
                     // Handle app shutdown signal
                     _ = cancellation_token.cancelled() => {
                         debug!("SV1 Server: received shutdown signal. Exiting.");
@@ -609,7 +608,13 @@ impl Sv1Server {
                             }
                         }
                     }
-                    res = self.handle_downstream_message() => {
+                    received = self.sv1_server_io.downstream_to_sv1_server_receiver.recv() => {
+                        let res = match received {
+                            Ok((downstream_id, message)) => {
+                                self.handle_downstream_message_from_queue(downstream_id, message).await
+                            }
+                            Err(e) => Err(TproxyError::shutdown(e)),
+                        };
                         if let Err(e) = res {
                             if let LoopControl::Break = self.handle_error_action(
                                 "Sv1Server::handle_downstream_message",
@@ -622,9 +627,11 @@ impl Sv1Server {
                             }
                         }
                     }
-                    res = self.handle_upstream_message(
-                        first_target,
-                    ) => {
+                    received = self.sv1_server_io.channel_manager_receiver.recv() => {
+                        let res = match received {
+                            Ok(message) => self.handle_upstream_message_from_queue(first_target, message).await,
+                            Err(e) => Err(TproxyError::shutdown(e)),
+                        };
                         if let Err(e) = res {
                             if let LoopControl::Break = self.handle_error_action(
                                 "Sv1Server::handle_upstream_message",
@@ -688,6 +695,7 @@ impl Sv1Server {
     /// # Returns
     /// * `Ok(())` - Message processed successfully
     /// * `Err(TproxyError)` - Error processing the message
+    #[cfg(test)]
     async fn handle_downstream_message(&self) -> TproxyResult<(), error::Sv1Server> {
         let (downstream_id, downstream_message) = self
             .sv1_server_io
@@ -696,6 +704,16 @@ impl Sv1Server {
             .await
             .map_err(TproxyError::shutdown)?;
 
+        self.handle_downstream_message_from_queue(downstream_id, downstream_message)
+            .await
+    }
+
+    /// Handles a downstream message already removed from the queue.
+    async fn handle_downstream_message_from_queue(
+        &self,
+        downstream_id: DownstreamId,
+        downstream_message: json_rpc::Message,
+    ) -> TproxyResult<(), error::Sv1Server> {
         let (channel_id, subscribed, opening) =
             match self.with_registered_downstream(downstream_id, |downstream| {
                 downstream
@@ -1030,6 +1048,7 @@ impl Sv1Server {
     /// # Returns
     /// * `Ok(())` - Message processed successfully
     /// * `Err(TproxyError)` - Error processing the message
+    #[cfg(test)]
     async fn handle_upstream_message(
         &self,
         first_target: Target,
@@ -1041,6 +1060,16 @@ impl Sv1Server {
             .await
             .map_err(TproxyError::shutdown)?;
 
+        self.handle_upstream_message_from_queue(first_target, message)
+            .await
+    }
+
+    /// Handles an upstream message already removed from the queue.
+    async fn handle_upstream_message_from_queue(
+        &self,
+        first_target: Target,
+        message: MiningOwned,
+    ) -> TproxyResult<(), error::Sv1Server> {
         match message {
             MiningOwned::OpenExtendedMiningChannelSuccess(m) => {
                 debug!(
@@ -4284,6 +4313,102 @@ mod tests {
         );
         server.set_user_identity("test_user".to_string());
         (server, to_server, from_server)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upstream_target_progresses_while_downstream_queue_stays_ready() {
+        assert_busy_server_progresses_and_stops(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_exits_while_downstream_queue_stays_ready() {
+        assert_busy_server_progresses_and_stops(true).await;
+    }
+
+    async fn assert_busy_server_progresses_and_stops(fallback_shutdown: bool) {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        let (mut server, to_server, _from_server) = server_with_channels(false);
+        server.listener_addr = "127.0.0.1:0".parse().unwrap();
+        let events = register_test_downstream(&server, 7, Some(9), 100.0, false);
+
+        let sender = server.sv1_server_io.downstream_to_sv1_server_sender.clone();
+        let receiver = server
+            .sv1_server_io
+            .downstream_to_sv1_server_receiver
+            .clone();
+        let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
+            id: 1,
+            method: "mining.suggest_difficulty".to_string(),
+            params: serde_json::json!([1]),
+        });
+        // A disconnected peer's already queued messages are cheap for the server to discard.
+        // Keep that source ready while an independent upstream target arrives.
+        for _ in 0..8192 {
+            sender.try_send((usize::MAX, message.clone())).unwrap();
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let feeder_stop = stop.clone();
+        let feeder = tokio::task::spawn_blocking(move || {
+            while !feeder_stop.load(Ordering::Relaxed) {
+                while receiver.len() < 8192 && !feeder_stop.load(Ordering::Relaxed) {
+                    if sender.try_send((usize::MAX, message.clone())).is_err() {
+                        return;
+                    }
+                }
+                std::thread::yield_now();
+            }
+        });
+
+        let server = Arc::new(server);
+        let cancellation = CancellationToken::new();
+        let fallback = FallbackCoordinator::new();
+        let tasks = Arc::new(TaskManager::new());
+        server
+            .clone()
+            .start(cancellation.clone(), fallback.clone(), tasks.clone())
+            .await
+            .unwrap();
+
+        let target = hash_rate_to_target(4e11, 5.0).unwrap();
+        to_server
+            .send(MiningOwned::SetTarget(test_set_target(9, target)))
+            .await
+            .unwrap();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if read_test_data(&server, 7, |data| data.upstream_target) == Some(target) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        let stopped = if fallback_shutdown {
+            tokio::time::timeout(Duration::from_secs(2), fallback.trigger_fallback_and_wait()).await
+        } else {
+            cancellation.cancel();
+            tokio::time::timeout(Duration::from_secs(2), tasks.join_all()).await
+        };
+        stop.store(true, Ordering::Relaxed);
+        feeder.await.unwrap();
+        assert!(
+            stopped.is_ok(),
+            "shutdown stalled behind downstream traffic"
+        );
+        tokio::time::timeout(Duration::from_secs(2), tasks.join_all())
+            .await
+            .unwrap();
+        assert!(
+            delivered.is_ok(),
+            "queued upstream target stalled behind downstream traffic"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Sv1ServerEvent::SetDifficulty(_))
+        ));
     }
 
     /// Feeds a `SetNewPrevHash` and a job for `channel_id`, as the channel manager would.
