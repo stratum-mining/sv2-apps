@@ -1365,12 +1365,13 @@ impl ChannelManager {
 
         if !messages.is_empty() {
             let mut downstream_hashrate = 0.0;
-            let mut min_target = [0xff; 32];
+            let mut min_target = Target::from_le_bytes([0xff; 32]);
 
             self.downstream.for_each(|_, downstream| {
                 let mut update_from_channel = |hashrate: f32, target: &Target| {
                     downstream_hashrate += hashrate;
-                    min_target = std::cmp::min(target.to_le_bytes(), min_target);
+                    // Targets are little-endian on the wire; compare their numeric value.
+                    min_target = std::cmp::min(*target, min_target);
                 };
 
                 downstream.standard_channels.for_each(|_, channel| {
@@ -1399,7 +1400,7 @@ impl ChannelManager {
                             MiningOwned::UpdateChannel(UpdateChannelOwned {
                                 channel_id: upstream_channel.get_channel_id(),
                                 nominal_hash_rate: downstream_hashrate,
-                                max_target: min_target.into(),
+                                max_target: min_target.to_le_bytes().into(),
                             })
                             .into(),
                         );
