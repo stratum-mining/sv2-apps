@@ -15,6 +15,8 @@ use crate::{
 
 // Legacy solo identities do not encode a fee policy, so allow at most a 10% service fee.
 const MIN_LEGACY_SOLO_PAYOUT_PERCENTAGE: u8 = 90;
+// Consensus money-range ceiling. Validate output totals before payout arithmetic.
+const MAX_MONEY_SATS: u64 = 21_000_000 * 100_000_000;
 
 /// Represents the payout mode encoded by a mining `user_identity`.
 ///
@@ -82,7 +84,7 @@ impl PayoutMode {
                 script: miner_script,
                 ..
             } => {
-                let pool_value = (total_value * *percentage as u64) / 100;
+                let pool_value = ((total_value as u128 * *percentage as u128) / 100) as u64;
                 let miner_value = total_value.saturating_sub(pool_value);
 
                 vec![
@@ -126,6 +128,18 @@ impl PayoutMode {
         &self,
         outputs: &[TxOut],
     ) -> Result<(), PayoutValidationError> {
+        // Every output counts toward the Bitcoin monetary bound, including provably
+        // unspendable outputs. Check it before summing any payout subset.
+        let mut total_output_sats = 0u64;
+        for output in outputs {
+            total_output_sats = total_output_sats
+                .checked_add(output.value.to_sat())
+                .ok_or(PayoutValidationError::InvalidOutputAmount)?;
+            if total_output_sats > MAX_MONEY_SATS {
+                return Err(PayoutValidationError::InvalidOutputAmount);
+            }
+        }
+
         let Some(script_pubkey) = self.miner_script_pubkey() else {
             return Ok(());
         };
@@ -205,6 +219,9 @@ impl PayoutMode {
 
         let coinbase: Transaction = deserialize(&coinbase)
             .map_err(|e| PayoutValidationError::DecodeCoinbaseTransaction(e.to_string()))?;
+        if !coinbase.is_coinbase() {
+            return Err(PayoutValidationError::NotCoinbase);
+        }
 
         self.validate_coinbase_outputs(&coinbase.output)
     }
@@ -239,7 +256,8 @@ impl PayoutMode {
         match self {
             Self::Solo { .. } | Self::LegacySolo { .. } => total_spendable_sats,
             Self::Donate { percentage, .. } => {
-                let pool_sats = (total_spendable_sats * *percentage as u64) / 100;
+                let pool_sats =
+                    ((total_spendable_sats as u128 * *percentage as u128) / 100) as u64;
                 total_spendable_sats.saturating_sub(pool_sats)
             }
             Self::FullDonation => 0,
@@ -408,6 +426,10 @@ impl std::error::Error for PayoutModeError {}
 pub enum PayoutValidationError {
     /// The coinbase output set has no spendable outputs.
     NoSpendableOutputs,
+    /// An output or the aggregate output value is outside Bitcoin's monetary range.
+    InvalidOutputAmount,
+    /// The reconstructed transaction lacks the required coinbase input.
+    NotCoinbase,
     /// The miner payout did not match the expected distribution.
     PayoutMismatch {
         /// Address encoded by the payout mode.
@@ -429,6 +451,8 @@ impl fmt::Display for PayoutValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSpendableOutputs => write!(f, "coinbase has no spendable outputs"),
+            Self::InvalidOutputAmount => write!(f, "coinbase output amount outside money range"),
+            Self::NotCoinbase => write!(f, "transaction is not a coinbase"),
             Self::PayoutMismatch {
                 address,
                 expected_sats,
@@ -633,6 +657,53 @@ mod tests {
         let full_donation_outputs = full_donation.coinbase_outputs(1_000, &pool_script);
         assert_eq!(full_donation_outputs.len(), 1);
         assert_eq!(full_donation_outputs[0].value.to_sat(), 1_000);
+    }
+
+
+    #[test]
+    fn donation_split_preserves_value_at_u64_boundary() {
+        let pool = script_from_address(OTHER_ADDRESS).unwrap();
+        for percentage in [1u8, 10, 50, 99] {
+            let mode = PayoutMode::try_from(
+                format!("sri/donate/{percentage}/{MINER_ADDRESS}/worker").as_str(),
+            )
+            .unwrap();
+            let outputs = mode.coinbase_outputs(u64::MAX, &pool);
+            let expected_pool = ((u64::MAX as u128 * percentage as u128) / 100) as u64;
+            assert_eq!(outputs[0].value.to_sat(), expected_pool);
+            assert_eq!(outputs[1].value.to_sat(), u64::MAX - expected_pool);
+            assert_eq!(mode.expected_miner_sats(u64::MAX), u64::MAX - expected_pool);
+        }
+    }
+
+    #[test]
+    fn payout_validation_rejects_overflow_and_out_of_range_amounts() {
+        let mode = PayoutMode::try_from(MINER_ADDRESS).unwrap();
+        for outputs in [
+            vec![tx_out(u64::MAX, MINER_ADDRESS), tx_out(1, OTHER_ADDRESS)],
+            vec![tx_out(MAX_MONEY_SATS + 1, MINER_ADDRESS)],
+            vec![tx_out(MAX_MONEY_SATS, MINER_ADDRESS), tx_out(1, OTHER_ADDRESS)],
+        ] {
+            assert!(matches!(
+                mode.validate_coinbase_outputs(&outputs),
+                Err(PayoutValidationError::InvalidOutputAmount)
+            ));
+        }
+        assert!(matches!(
+            PayoutMode::FullDonation.validate_coinbase_outputs(&[tx_out(u64::MAX, OTHER_ADDRESS)]),
+            Err(PayoutValidationError::InvalidOutputAmount)
+        ));
+    }
+
+    #[test]
+    fn payout_verification_rejects_regular_transaction_with_expected_outputs() {
+        let mode = PayoutMode::try_from(MINER_ADDRESS).unwrap();
+        let (mut prefix, suffix) = coinbase_tx_parts(vec![tx_out(1000, MINER_ADDRESS)], &[]);
+        prefix[5] = 1; // non-null previous outpoint: a regular transaction, not a coinbase
+        assert!(matches!(
+            mode.validate_coinbase_tx_parts(&prefix, &suffix, FULL_EXTRANONCE_SIZE),
+            Err(PayoutValidationError::NotCoinbase)
+        ));
     }
 
     #[test]
