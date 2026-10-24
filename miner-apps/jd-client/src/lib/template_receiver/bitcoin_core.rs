@@ -8,6 +8,7 @@ use stratum_apps::{
     stratum_core::parsers_sv2::TemplateDistributionOwned,
     task_manager::TaskManager,
 };
+use tracing::{debug, error};
 
 #[derive(Clone)]
 pub struct BitcoinCoreSv2TDPConfig {
@@ -51,7 +52,7 @@ pub async fn connect_to_bitcoin_core(
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                tracing::error!("Failed to create Tokio runtime: {:?}", e);
+                error!(error = ?e, "Failed to create Tokio runtime for Bitcoin Core Template Provider");
 
                 // we can't use handle_error here because we're not in a async context yet
                 cancellation_token_clone.cancel();
@@ -77,9 +78,9 @@ pub async fn connect_to_bitcoin_core(
                 Ok(sv2_bitcoin_core) => sv2_bitcoin_core,
                 Err(e) => {
                     if e.is_cancelled() {
-                        tracing::debug!("BitcoinCoreSv2TDP bootstrap gave way to cancellation");
+                        debug!("BitcoinCoreSv2TDP bootstrap gave way to cancellation");
                     } else {
-                        tracing::error!("Failed to create BitcoinCoreToSv2: {:?}", e);
+                        error!(error = ?e, "Failed to initialize Bitcoin Core Template Provider");
                         bitcoin_core_config.cancellation_token.cancel();
                     }
                     return;

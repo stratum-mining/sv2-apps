@@ -13,7 +13,7 @@ use stratum_apps::{
     },
     utils::types::OutboundFrame,
 };
-use tracing::{error, info};
+use tracing::{debug, info, warn};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleExtensionsFromClientOwnedAsync for Downstream {
@@ -32,12 +32,9 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
         msg: RequestExtensionsOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        let requested: Vec<u16> = msg.requested_extensions.clone().into_inner();
+        debug!(downstream_id = self.downstream_id, "Received: {}", msg);
 
-        info!(
-            "Downstream {}: Received RequestExtensions: request_id={}, requested={:?}",
-            self.downstream_id, msg.request_id, requested
-        );
+        let requested: Vec<u16> = msg.requested_extensions.clone().into_inner();
 
         // Determine which requested extensions we support
         let mut supported: Vec<u16> = Vec::new();
@@ -66,9 +63,13 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
 
         if should_send_error {
             // Send error response
-            error!(
-                "Downstream {}: Extension negotiation error: requested={:?}, supported={:?}, unsupported={:?}, missing_required={:?}",
-                self.downstream_id, requested, supported, unsupported, missing_required
+            warn!(
+                downstream_id = self.downstream_id,
+                ?requested,
+                ?supported,
+                ?unsupported,
+                ?missing_required,
+                "RequestExtensions negotiation failed for downstream (non-fatal; sending RequestExtensions.Error)"
             );
 
             let error = RequestExtensionsErrorOwned {
@@ -84,9 +85,10 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
             let frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(error.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
-                error!(
-                    "Failed to send RequestExtensionsError to downstream {}: {e}",
-                    self.downstream_id
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message (channel closed)"
                 );
                 return Err(JDCError::disconnect(
                     JDCErrorKind::ChannelErrorSender,
@@ -96,17 +98,19 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
 
             // If required extensions are missing, the server SHOULD disconnect the client
             if !missing_required.is_empty() {
-                error!(
-                    "Downstream {}: Client does not support required extensions {:?}. Server MUST disconnect.",
-                    self.downstream_id, missing_required
+                warn!(
+                    downstream_id = self.downstream_id,
+                    missing_extensions = ?missing_required,
+                    "Downstream does not support required extensions (check downstream configuration)"
                 );
                 // TODO: Disconnect the client
             }
         } else {
             // Send success response with the subset of extensions we both support
             info!(
-                "Downstream {}: Extension negotiation success: requested={:?}, negotiated={:?}",
-                self.downstream_id, requested, supported
+                downstream_id = self.downstream_id,
+                negotiated = ?supported,
+                "Negotiated extensions with downstream successfully"
             );
 
             // Store the negotiated extensions
@@ -124,9 +128,10 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
             let frame = OutboundFrame::from_message(AnyMessageOwned::Extensions(success.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
-                error!(
-                    "Failed to send RequestExtensionsSuccess to downstream {}: {e}",
-                    self.downstream_id
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message (channel closed)"
                 );
                 return Err(JDCError::disconnect(
                     JDCErrorKind::ChannelErrorSender,
@@ -134,9 +139,10 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                 ));
             }
 
-            info!(
-                "Downstream {}: Stored negotiated extensions: {:?}",
-                self.downstream_id, supported
+            debug!(
+                downstream_id = self.downstream_id,
+                ?supported,
+                "Stored negotiated extensions for downstream"
             );
         }
 

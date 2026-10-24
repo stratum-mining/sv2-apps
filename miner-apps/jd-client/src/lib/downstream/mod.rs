@@ -228,7 +228,11 @@ impl Downstream {
         let fallback_token = fallback_coordinator.token();
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
-            error!(?e, "Failed to set up downstream connection");
+            warn!(
+                downstream_id = self.downstream_id,
+                error = ?e,
+                "Failed to set up downstream connection (disconnecting downstream; server unaffected)"
+            );
 
             // sleep to make sure SetupConnectionError is sent
             // before we break the TCP connection
@@ -262,7 +266,7 @@ impl Downstream {
                     }
                     res = self_clone_1.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling downstream message for {downstream_id}");
+                            error!(downstream_id, error = ?e, "Failed to handle downstream message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,
@@ -275,7 +279,11 @@ impl Downstream {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling channel manager message for {downstream_id}");
+                            error!(
+                                downstream_id,
+                                error = ?e,
+                                "Failed to handle channel manager message for downstream"
+                            );
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_channel_manager_message",
                                 &e,
@@ -297,7 +305,10 @@ impl Downstream {
             }
             self.downstream_cancellation_token.cancel();
             self.downstream_io.close();
-            warn!("Downstream: unified message loop exited.");
+            debug!(
+                downstream_id = self.downstream_id,
+                "Downstream message loop exited"
+            );
         }));
     }
 
@@ -327,9 +338,10 @@ impl Downstream {
         {
             Ok(msg) => msg,
             Err(e) => {
-                warn!(
-                    ?e,
-                    "Channel manager receiver closed - disconnecting downstream"
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Channel manager receiver closed (disconnecting downstream)"
                 );
                 return Err(JDCError::disconnect(
                     JDCErrorKind::ChannelErrorReceiver(e),
@@ -346,7 +358,11 @@ impl Downstream {
             .send(sv2_frame)
             .await
             .map_err(|e| {
-                error!(?e, "Downstream send failed");
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message (channel closed)"
+                );
                 JDCError::disconnect(JDCErrorKind::ChannelErrorSender, self.downstream_id)
             })?;
 
@@ -377,7 +393,11 @@ impl Downstream {
                     .send((self.downstream_id, message, tlv_fields))
                     .await
                     .map_err(|e| {
-                        error!(?e, "Failed to send mining message to channel manager.");
+                        debug!(
+                            downstream_id = self.downstream_id,
+                            error = ?e,
+                            "Failed to forward message (channel closed)"
+                        );
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
@@ -387,8 +407,10 @@ impl Downstream {
             }
             _ => {
                 warn!(
-                    "Received unsupported message type from downstream: {}",
-                    header.msg_type()
+                    downstream_id = self.downstream_id,
+                    msg_type = header.msg_type(),
+                    ext_type = header.ext_type(),
+                    "Received unsupported message type from downstream"
                 );
                 return Ok(());
             }

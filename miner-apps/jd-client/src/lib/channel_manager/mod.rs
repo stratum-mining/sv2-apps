@@ -507,7 +507,7 @@ impl ChannelManager {
             Ok(Some(prev_hash)) => prev_hash,
             Ok(None) => unreachable!("No new prevhash found after readiness check"),
             Err(e) => {
-                error!(error = ?JDCErrorKind::from(e), "Failed to access prevhash state");
+                error!(error = ?JDCErrorKind::from(e), "Failed to access previous block hash state");
                 return None;
             }
         };
@@ -553,7 +553,7 @@ impl ChannelManager {
         }
 
         if let Err(e) = group_channel.on_set_new_prev_hash(last_new_prev_hash) {
-            error!(error = ?e, "Failed to set new prevhash for group channel");
+            error!(error = ?e, "Failed to apply previous block hash to group channel");
             return None;
         }
 
@@ -585,7 +585,7 @@ impl ChannelManager {
         // runs in a background task, so bootstrap is never held hostage by the Template Provider.
         info!("Starting downstream server at {listening_address}");
         let server = TcpListener::bind(listening_address).await.map_err(|e| {
-            error!(error = ?e, "Failed to bind downstream server at {listening_address}");
+            error!(%listening_address, error = ?e, "Failed to bind downstream server");
             JDCError::shutdown(e)
         })?;
 
@@ -613,15 +613,14 @@ impl ChannelManager {
                     break true;
                 }
 
-                warn!("Waiting for initial template and prevhash from Template Provider...");
-                warn!("Is the Bitcoin node undergoing IBD?");
+                warn!("Waiting for initial template and previous block hash from Template Provider (check if Bitcoin node is undergoing IBD)");
                 select! {
                     _ = cancellation_token.cancelled() => {
-                        info!("Channel Manager: received shutdown while waiting for templates");
+                        debug!("Channel Manager received shutdown signal while waiting for templates");
                         break false;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("Channel Manager: received fallback while waiting for templates");
+                        debug!("Channel Manager received fallback signal while waiting for templates");
                         break false;
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
@@ -635,11 +634,11 @@ impl ChannelManager {
             loop {
                 select! {
                     _ = cancellation_token.cancelled() => {
-                        info!("Downstream Server: received shutdown signal");
+                        debug!("Downstream server received shutdown signal");
                         break;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("Downstream Server: received fallback signal");
+                        debug!("Downstream server received fallback signal");
                         break;
                     }
                     res = server.accept() => {
@@ -663,7 +662,7 @@ impl ChannelManager {
                                     let noise_stream = tokio::select! {
                                         biased;
                                         _ = cancellation_token_inner.cancelled() => {
-                                            info!("Shutdown received during handshake, dropping connection");
+                                            debug!("Shutdown received during handshake, dropping connection");
                                             return;
                                         }
                                         _ = fallback_token_inner.cancelled() => {
@@ -674,7 +673,11 @@ impl ChannelManager {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {
-                                                    error!(error = ?e, "Noise handshake failed");
+                                                    warn!(
+                                                        peer_addr = %socket_address,
+                                                        error = ?e,
+                                                        "Downstream Noise handshake failed (dropping connection; server unaffected)"
+                                                    );
                                                     return;
                                                 }
                                             }
@@ -689,7 +692,10 @@ impl ChannelManager {
                                     let group_channel = match this.bootstrap_group_channel(group_channel_id) {
                                         Some(group_channel) => group_channel,
                                         None => {
-                                            error!("Failed to bootstrap group channel - disconnecting downstream {downstream_id}");
+                                            error!(
+                                                downstream_id,
+                                                "Failed to bootstrap group channel (disconnecting downstream)"
+                                            );
                                             cancellation_token_inner.cancel();
                                             return;
                                         }
@@ -729,13 +735,16 @@ impl ChannelManager {
                                 }
 
                                 Err(e) => {
-                                    error!(error = ?e, "Failed to accept new downstream connection");
+                                    warn!(
+                                        error = ?e,
+                                        "Failed to accept downstream connection (listener unaffected)"
+                                    );
                                 }
                             }
                     }
                 }
             }
-            info!("Downstream server: Unified loop break");
+            debug!("Downstream server accept loop exited");
         }));
         Ok(())
     }
@@ -768,22 +777,22 @@ impl ChannelManager {
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
-                        info!("Channel Manager: received shutdown signal");
+                        info!("Channel Manager received shutdown signal");
                         break;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("Channel Manager: fallback triggered");
+                        info!("Channel Manager received fallback signal");
                         break;
                     }
                     res = &mut vardiff_future => {
-                        info!("Vardiff loop completed with: {res:?}");
+                        info!(result = ?res, "Vardiff loop completed");
                     }
                     res = cm_jds.handle_jds_message(),
                         if !cm.mode.is_solo_mining()
                             && !cm.channel_manager_io.jd_receiver.is_closed() =>
                     {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling JDS message");
+                            error!(error = ?e, "Failed to handle JDS message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_jds_message",
                                 &e,
@@ -799,7 +808,7 @@ impl ChannelManager {
                             && !cm.channel_manager_io.upstream_receiver.is_closed() =>
                     {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Pool message");
+                            error!(error = ?e, "Failed to handle upstream pool message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_pool_message_frame",
                                 &e,
@@ -812,7 +821,7 @@ impl ChannelManager {
                     }
                     res = cm_template.handle_template_provider_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Template Receiver message");
+                            error!(error = ?e, "Failed to handle Template Provider message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_template_provider_message",
                                 &e,
@@ -825,7 +834,7 @@ impl ChannelManager {
                     }
                     res = cm_downstreams.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Downstreams message");
+                            error!(error = ?e, "Failed to handle downstream message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_downstream_message",
                                 &e,
@@ -913,7 +922,10 @@ impl ChannelManager {
                     .await?;
             }
             _ => {
-                warn!("Received unsupported message type from upstream: {message_type}");
+                warn!(
+                    message_type,
+                    extension_type, "Received unsupported message type from upstream"
+                );
                 return Err(JDCError::log(JDCErrorKind::UnexpectedMessage(
                     extension_type,
                     message_type,
@@ -1194,12 +1206,15 @@ impl ChannelManager {
                 .send(message)
                 .await
                 .map_err(|e| {
-                    info!(error = ?e, "Failed to send AllocateMiningJobToken frame");
+                    debug!(error = ?e, "Failed to forward message (channel closed)");
                     JDCError::fallback(JDCErrorKind::ChannelErrorSender)
                 })?;
         }
 
-        info!("Requested allocation of {token_to_allocate} mining job tokens to JDS");
+        info!(
+            count = token_to_allocate,
+            "Requested allocation of mining job tokens to JDS"
+        );
         Ok(())
     }
 
@@ -1246,7 +1261,9 @@ impl ChannelManager {
                 debug!("Updated target for extended channel_id={channel_id} to {updated_target:?}",);
             }
             Err(e) => warn!(
-                "Failed to update extended channel channel_id={channel_id} during vardiff {e:?}"
+                channel_id,
+                error = ?e,
+                "Failed to update extended channel during vardiff"
             ),
         }
     }
@@ -1293,7 +1310,9 @@ impl ChannelManager {
                 );
             }
             Err(e) => warn!(
-                "Failed to update standard channel channel_id={channel_id} during vardiff {e:?}"
+                channel_id,
+                error = ?e,
+                "Failed to update standard channel during vardiff"
             ),
         }
     }
@@ -1307,10 +1326,10 @@ impl ChannelManager {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             ticker.tick().await;
-            info!("Starting vardiff loop for downstreams");
+            debug!("Starting vardiff loop for downstreams");
 
             if let Err(e) = self.run_vardiff().await {
-                error!(error = ?e, "Vardiff iteration failed");
+                warn!(error = ?e, "Vardiff iteration failed");
             }
         }
     }
@@ -1394,7 +1413,11 @@ impl ChannelManager {
 
                         upstream_channel.set_nominal_hashrate(downstream_hashrate);
 
-                        info!("Sending update channel message upstream");
+                        info!(
+                            channel_id = upstream_channel.get_channel_id(),
+                            nominal_hash_rate = downstream_hashrate,
+                            "Sending UpdateChannel to upstream"
+                        );
                         messages.push(
                             MiningOwned::UpdateChannel(UpdateChannelOwned {
                                 channel_id: upstream_channel.get_channel_id(),
@@ -1413,11 +1436,11 @@ impl ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
-        info!("Vardiff update cycle complete");
+        debug!("Vardiff update cycle complete");
         Ok(())
     }
 
@@ -1471,7 +1494,7 @@ impl ChannelManager {
             .send(TemplateDistributionOwned::CoinbaseOutputConstraints(msg))
             .await
             .map_err(|e| {
-                error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
+                error!(error = ?e, "Failed to send CoinbaseOutputConstraints to Template Provider");
                 JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
             })?;
 

@@ -62,13 +62,12 @@ mod template_data;
 /// - A `u64` for the fee delta threshold in satoshis
 /// - A `u8` for the minimum interval in seconds between mempool-driven template updates (chain tip
 ///   updates are never throttled)
-/// - A [`async_channel::Receiver`] for incoming
-///   [`stratum_core::parsers_sv2::TemplateDistribution`] messages (handles
-///   [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`],
+/// - A [`async_channel::Receiver`] for incoming [`stratum_core::parsers_sv2::TemplateDistribution`]
+///   messages (handles [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`],
 ///   [`stratum_core::template_distribution_sv2::RequestTransactionData`], and
 ///   [`stratum_core::template_distribution_sv2::SubmitSolution`])
-/// - A [`async_channel::Sender`] for outgoing
-///   [`stratum_core::parsers_sv2::TemplateDistribution`] messages
+/// - A [`async_channel::Sender`] for outgoing [`stratum_core::parsers_sv2::TemplateDistribution`]
+///   messages
 /// - A [`tokio_util::sync::CancellationToken`] to stop the internally spawned tasks
 ///
 /// The instance waits for the first
@@ -264,8 +263,8 @@ impl BitcoinCoreSv2TDP {
     ///   message as a response
     /// - incoming [`stratum_core::template_distribution_sv2::SubmitSolution`] messages, for which
     ///   it will submit the solution to the Bitcoin Core IPC client
-    /// - incoming [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`]
-    ///   messages, for which it will update the coinbase output constraints
+    /// - incoming [`stratum_core::template_distribution_sv2::CoinbaseOutputConstraints`] messages,
+    ///   for which it will update the coinbase output constraints
     ///
     /// Blocks until the cancellation token is activated. Every request to Bitcoin Core gives way
     /// to it, so a node that stops answering cannot hold shutdown.

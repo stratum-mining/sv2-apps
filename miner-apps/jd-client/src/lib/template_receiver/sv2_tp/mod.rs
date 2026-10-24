@@ -145,29 +145,33 @@ impl Sv2Tp {
         const MAX_RETRIES: usize = 3;
 
         for attempt in 1..=MAX_RETRIES {
-            info!(attempt, MAX_RETRIES, "Connecting to template provider");
+            info!(
+                attempt,
+                max_retries = MAX_RETRIES,
+                "Connecting to Template Provider"
+            );
 
             match timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(tp_address.as_str()))
                 .await
                 .map_err(JDCError::shutdown)?
             {
                 Ok(stream) => {
-                    info!(
+                    debug!(
                         attempt,
-                        "TCP connection established, starting Noise handshake"
+                        "TCP connection established with Template Provider, starting Noise handshake"
                     );
 
                     tokio::select! {
                         biased;
 
                          _ = cancellation_token.cancelled() => {
-                            info!("Shutdown received during handshake, dropping connection");
+                            info!("Shutdown signal received during Template Provider handshake, aborting connection");
                             return Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem));
                         }
                         result = connect_with_noise(stream, public_key) => {
                             match result {
                                 Ok(noise_stream) => {
-                                    info!(attempt, "Noise handshake completed successfully");
+                                    debug!(attempt, "Noise handshake with Template Provider completed successfully");
 
                                     let (noise_stream_reader, noise_stream_writer) =
                                         noise_stream.into_split();
@@ -175,7 +179,7 @@ impl Sv2Tp {
                                     let (inbound_tx, inbound_rx) = unbounded::<InboundFrame>();
                                     let (outbound_tx, outbound_rx) = unbounded::<OutboundFrame>();
 
-                                    info!(attempt, "Spawning IO tasks for template receiver");
+                                    debug!(attempt, "Spawning IO tasks for Template Provider connection");
                                     spawn_io_tasks(
                                         task_manager.clone(),
                                         noise_stream_reader,
@@ -193,7 +197,7 @@ impl Sv2Tp {
                                         tp_sender: outbound_tx,
                                     };
 
-                                    info!(attempt, "TemplateReceiver initialized successfully");
+                                    info!(attempt, "Connected to Template Provider successfully");
                                     return Ok(Sv2Tp {
                                         sv2_tp_io,
                                         tp_address,
@@ -203,14 +207,14 @@ impl Sv2Tp {
                                     return Err(JDCError::shutdown(JDCErrorKind::InvalidKey));
                                 }
                                 Err(e) => {
-                                    error!(attempt, error = ?e, "Noise handshake failed");
+                                    warn!(attempt, error = ?e, "Noise handshake with Template Provider failed");
                                 }
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    warn!(attempt, MAX_RETRIES, error = ?e, "Failed to connect to template provider");
+                    warn!(attempt, max_retries = MAX_RETRIES, error = ?e, "Failed to connect to Template Provider");
                 }
             }
 
@@ -220,7 +224,7 @@ impl Sv2Tp {
             }
         }
 
-        error!("Exhausted all connection attempts, shutting down TemplateReceiver");
+        error!("Exhausted all connection attempts to Template Provider; shutting down");
         Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem))
     }
 
@@ -239,14 +243,14 @@ impl Sv2Tp {
         cancellation_token: CancellationToken,
         task_manager: Arc<TaskManager>,
     ) -> JDCResult<(), error::TemplateProvider> {
-        info!("Initialized state for starting template receiver");
+        debug!("Initialized state for starting Template Provider receiver");
         if let Err(e) = self.setup_connection(socket_address).await {
-            error!("TemplateReceiver setup connection failed: {e:?}");
+            error!(error = ?e, "Failed to set up connection with Template Provider");
             self.sv2_tp_io.close();
             return Err(e);
         }
 
-        info!("Setup Connection done. connection with template receiver is now done");
+        info!("Template Provider setup connection completed");
         task_manager.spawn(async move {
             loop {
                 let mut self_clone_1 = self.clone();
@@ -255,12 +259,12 @@ impl Sv2Tp {
                     biased;
 
                     _ = cancellation_token.cancelled() => {
-                        info!("TemplateReceiver received shutdown signal");
+                        info!("Template Provider receiver received shutdown signal");
                         break;
                     }
                     res = self_clone_1.handle_template_provider_message() => {
                         if let Err(e) = res {
-                            error!("TemplateReceiver template provider handler failed: {e:?}");
+                            error!(error = ?e, "Failed to handle Template Provider message");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "TemplateReceiver::handle_template_provider_message",
                                 &e,
@@ -272,7 +276,7 @@ impl Sv2Tp {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!("TemplateReceiver channel manager handler failed: {e:?}");
+                            error!(error = ?e, "Failed to handle Channel Manager message for Template Provider");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "TemplateReceiver::handle_channel_manager_message",
                                 &e,
@@ -285,7 +289,7 @@ impl Sv2Tp {
                 }
             }
             self.sv2_tp_io.close();
-            warn!("TemplateReceiver: unified message loop exited.");
+            debug!("Template Provider receiver message loop exited");
         });
         Ok(())
     }
@@ -313,10 +317,10 @@ impl Sv2Tp {
 
         match protocol_message_type(extension_type, message_type) {
             MessageType::Common => {
-                info!(
+                debug!(
                     ext_type = ?extension_type,
                     msg_type = ?message_type,
-                    "Handling common message from Template provider."
+                    "Handling common message from Template Provider"
                 );
                 self.handle_common_message_frame_from_server(None, header, sv2_frame.payload())
                     .await?;
@@ -330,12 +334,15 @@ impl Sv2Tp {
                     .send(message)
                     .await
                     .map_err(|e| {
-                        error!(error=?e, "Failed to send template distribution message to channel manager.");
+                        debug!(error = ?e, "Failed to forward message (channel closed)");
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
             _ => {
-                warn!("Received unsupported message type from template provider: {message_type}");
+                warn!(
+                    message_type,
+                    extension_type, "Received unsupported message type from Template Provider"
+                );
             }
         }
         Ok(())
@@ -369,24 +376,24 @@ impl Sv2Tp {
         addr: String,
     ) -> JDCResult<(), error::TemplateProvider> {
         let socket = resolve_host_port(&addr).await.map_err(|e| {
-            error!(%addr, "Failed to resolve template provider address: {e}");
+            error!(%addr, error = %e, "Failed to resolve Template Provider address");
             JDCError::shutdown(JDCErrorKind::InvalidSocketAddress(addr.clone()))
         })?;
 
-        info!(%socket, "Building setup connection message for upstream");
+        debug!(%socket, "Building SetupConnection message for Template Provider");
         let setup_msg = get_setup_connection_message_tp(socket);
         let frame = OutboundFrame::from_message(Message::Common(setup_msg.into()))
             .map_err(JDCError::shutdown)?;
 
-        info!("Sending setup connection message to upstream");
-        self.sv2_tp_io.tp_sender.send(frame).await.map_err(|_| {
-            error!("Failed to send setup connection message upstream");
+        info!("Sending SetupConnection to Template Provider");
+        self.sv2_tp_io.tp_sender.send(frame).await.map_err(|e| {
+            debug!(error = ?e, "Failed to forward message (channel closed)");
             JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
         })?;
 
-        info!("Waiting for upstream handshake response");
+        debug!("Waiting for Template Provider handshake response");
         let mut incoming: InboundFrame = self.sv2_tp_io.tp_receiver.recv().await.map_err(|e| {
-            error!(?e, "Upstream connection closed during handshake");
+            warn!(error = ?e, "Template Provider connection closed during handshake");
             JDCError::shutdown(noise_sv2::Error::ExpectedIncomingHandshakeMessage)
         })?;
 
@@ -409,7 +416,7 @@ impl Sv2Tp {
 
         self.handle_common_message_frame_from_server(None, header, incoming.payload())
             .await?;
-        info!("Handshake with upstream completed successfully");
+        info!("Template Provider handshake completed successfully");
         Ok(())
     }
 }

@@ -6,7 +6,7 @@ use stratum_apps::stratum_core::{
     handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
     parsers_sv2::Tlv,
 };
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     error::{self, JDCError, JDCErrorKind},
@@ -30,7 +30,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         msg: SetupConnectionSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         Ok(())
     }
@@ -41,7 +41,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         msg: ChannelEndpointChangedOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         Ok(())
     }
 
@@ -51,7 +51,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         msg: ReconnectOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         Ok(())
     }
 
@@ -61,7 +61,12 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         msg: SetupConnectionErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
+        let error_code = msg.error_code.as_utf8_or_hex();
+        warn!(
+            error_code = %error_code,
+            "SetupConnection rejected by upstream; preparing fallback"
+        );
         Err(JDCError::fallback(JDCErrorKind::SetupConnectionError))
     }
 }
