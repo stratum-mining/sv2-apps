@@ -7,7 +7,7 @@ use error::JDCErrorKind;
 use jdc_runtime::{Init, JdcRuntime, RuntimeEvent};
 use stratum_apps::bitcoin_core_sv2::CancellationToken;
 use tokio::sync::Notify;
-use tracing::{error, info};
+use tracing::{debug, error};
 
 use crate::config::JobDeclaratorClientConfig;
 
@@ -79,7 +79,7 @@ impl JobDeclaratorClient {
             Ok(running) => running,
             Err(bootstrap_err) => {
                 let (kind, runtime) = bootstrap_err.into_parts();
-                error!(?kind, "Failed to bootstrap JDC");
+                error!(error = ?kind, "Failed to bootstrap JDC");
                 runtime.shutdown().await;
                 return Err(kind);
             }
@@ -98,7 +98,7 @@ impl JobDeclaratorClient {
                         Ok(new_running) => new_running,
                         Err(bootstrap_err) => {
                             let (kind, runtime) = bootstrap_err.into_parts();
-                            error!(?kind, "Failed to reconnect JDC");
+                            error!(error = ?kind, "Failed to reconnect JDC during fallback");
                             runtime.shutdown().await;
                             return Err(kind);
                         }
@@ -122,7 +122,7 @@ impl JobDeclaratorClient {
 
 impl Drop for JobDeclaratorClient {
     fn drop(&mut self) {
-        info!("JobDeclaratorClient dropped");
+        debug!("JobDeclaratorClient dropped");
         self.cancellation_token.cancel();
     }
 }

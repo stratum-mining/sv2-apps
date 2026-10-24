@@ -199,9 +199,13 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: CloseChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
+        info!(
+            downstream_id,
+            channel_id = msg.channel_id,
+            "Downstream closed mining channel"
+        );
         self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .group_channel
@@ -253,7 +257,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let mut coinbase_outputs = deserialize_outputs(coinbase_outputs)
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
 
-        info!(downstream_id, "Received: {}", msg);
+        debug!(downstream_id, "Received: {}", msg);
 
         let build_error = |code: &str| {
             MiningOwned::OpenMiningChannelError(OpenMiningChannelErrorOwned {
@@ -267,7 +271,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             .get()
             .map_err(JDCError::shutdown)?;
         let Some(last_future_template) = last_future_template else {
-            error!("Missing last_future_template, cannot open channel");
+            warn!(
+                downstream_id,
+                "Cannot open standard channel: template from Template Provider is not available yet"
+            );
             return Err(JDCError::disconnect(
                 JDCErrorKind::FutureTemplateNotPresent,
                 downstream_id,
@@ -276,7 +283,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
 
         let last_new_prev_hash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
         let Some(last_new_prev_hash) = last_new_prev_hash else {
-            error!("Missing last_new_prev_hash, cannot open channel");
+            warn!(
+                downstream_id,
+                "Cannot open standard channel: previous block hash from Template Provider is not available yet"
+            );
             return Err(JDCError::disconnect(
                 JDCErrorKind::LastNewPrevhashNotFound,
                 downstream_id,
@@ -397,7 +407,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 standard_channel
                     .on_set_new_prev_hash(last_new_prev_hash)
                     .map_err(|e| {
-                        error!(?e, "Failed to apply prevhash to standard channel");
+                        error!(error = ?e, "Failed to apply previous block hash to standard channel");
                         JDCError::shutdown(e)
                     })?;
                 messages.push(
@@ -442,7 +452,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
@@ -475,7 +485,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
 
-        info!(downstream_id, "Received: {}", msg);
+        debug!(downstream_id, "Received: {}", msg);
         let request_id = msg.request_id;
 
         let nominal_hash_rate = msg.nominal_hash_rate;
@@ -494,6 +504,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             .get()
             .map_err(JDCError::shutdown)?;
         let Some(last_future_template) = last_future_template else {
+            warn!(
+                downstream_id,
+                "Cannot open extended channel: template from Template Provider is not available yet"
+            );
             return Err(JDCError::disconnect(
                 JDCErrorKind::FutureTemplateNotPresent,
                 downstream_id,
@@ -501,6 +515,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         };
         let last_new_prev_hash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
         let Some(last_new_prev_hash) = last_new_prev_hash else {
+            warn!(
+                downstream_id,
+                "Cannot open extended channel: previous block hash from Template Provider is not available yet"
+            );
             return Err(JDCError::disconnect(
                 JDCErrorKind::LastNewPrevhashNotFound,
                 downstream_id,
@@ -665,7 +683,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 extended_channel
                     .on_set_new_prev_hash(last_new_prev_hash)
                     .map_err(|e| {
-                        error!(?e, "Failed to set prevhash on extended channel");
+                        error!(error = ?e, "Failed to set previous block hash on extended channel");
                         JDCError::shutdown(e)
                     })?;
                 messages.push(
@@ -707,7 +725,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
@@ -734,7 +752,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: UpdateChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         let channel_id = msg.channel_id;
         let new_nominal_hash_rate = msg.nominal_hash_rate;
         let requested_max_target = Target::from_le_bytes(msg.max_target.to_array());
@@ -878,7 +896,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
@@ -902,7 +920,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SubmitSharesStandardOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received SubmitSharesStandard");
+        debug!("Received SubmitSharesStandard");
         let channel_id = msg.channel_id;
         let downstream_job_id = msg.job_id;
         let downstream_id =
@@ -917,7 +935,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         };
 
         let Some(prev_hash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? else {
-            warn!("No prev_hash available yet, ignoring share");
+            warn!(
+                channel_id,
+                "SubmitSharesStandard ignored: previous block hash not available yet"
+            );
             return Err(JDCError::disconnect(
                 JDCErrorKind::LastNewPrevhashNotFound,
                 downstream_id,
@@ -942,23 +963,33 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 new_submits_accepted_count: share_accounting.get_last_batch_accepted(),
                                 new_shares_sum: share_accounting.get_last_batch_work_sum(),
                             };
-                            info!("SubmitSharesStandard on downstream channel: {} ✅", success);
+                            info!(
+                                channel_id,
+                                accepted_count = success.new_submits_accepted_count,
+                                work_sum = success.new_shares_sum,
+                                "Acknowledged standard share batch from downstream"
+                            );
                             messages.push((downstream.downstream_id, MiningOwned::SubmitSharesSuccess(success)).into());
                         } else {
-                            info!(
-                                "SubmitSharesStandard on downstream channel: valid share | channel_id: {}, sequence_number: {}, share_hash: {} ☑️",
-                                channel_id, msg.sequence_number, share_hash
+                            debug!(
+                                channel_id,
+                                sequence_number = msg.sequence_number,
+                                share_hash = %share_hash,
+                                "SubmitSharesStandard on downstream channel: valid share"
                             );
                         }
                         downstream_share_hash = Some(share_hash);
                         is_downstream_share_valid = true;
                     }
                     Ok(ShareValidationResult::BlockFound(share_hash, template_id, coinbase)) => {
-                        info!("SubmitSharesStandard on downstream channel: 💰 Block Found!!! 💰{share_hash}");
+                        info!(
+                            channel_id,
+                            share_hash = %share_hash,
+                            "💰 Block Found!!! 💰 Propagating solution to Template Provider"
+                        );
                         downstream_share_hash = Some(share_hash);
                         is_downstream_share_valid = true;
                         if let Some(template_id) = template_id {
-                            info!("SubmitSharesStandard: Propagating solution to the Template Provider.");
                             let solution = SubmitSolutionOwned {
                                 template_id,
                                 version: msg.version,
@@ -980,7 +1011,11 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     Err(ShareValidationError::SeenSharesBudgetExhausted) => {
                         // share rate far outran the channel's configured expectation, filling the
                         // per-tip dedup cache; no error code to report, so close the downstream.
-                        warn!("closing downstream {}: channel {} exhausted its accepted-share dedup budget 🛑", downstream_id, channel_id);
+                        warn!(
+                            downstream_id,
+                            channel_id,
+                            "Disconnecting downstream: standard channel share rate too high (check miner difficulty target)"
+                        );
                         return Err(JDCError::disconnect(
                             ShareValidationError::SeenSharesBudgetExhausted,
                             downstream_id,
@@ -996,9 +1031,11 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                             ShareValidationError::VersionRollingNotAllowed(code) => code,
                             _ => unreachable!(),
                         };
-                        error!(
-                            "❌ SubmitSharesError: ch={}, seq={}, error={code}",
-                            channel_id, msg.sequence_number
+                        debug!(
+                            channel_id,
+                            sequence_number = msg.sequence_number,
+                            error_code = code,
+                            "Rejected invalid standard share from downstream"
                         );
                         messages.push((downstream_id, build_error(code)).into());
                     }
@@ -1054,16 +1091,23 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                     Ok(client::share_accounting::ShareValidationResult::Valid(share_hash)) => {
                                         upstream_message.sequence_number =
                                             self.sequence_number_factory.fetch_add(1, Ordering::Relaxed);
-                                            info!(
-                                        "SubmitSharesStandard, forwarding it to upstream: valid share | channel_id: {}, sequence_number: {}, share_hash: {}  ✅",
-                                        channel_id, upstream_message.sequence_number, share_hash
-                                    );
+                                        debug!(
+                                            channel_id,
+                                            sequence_number = upstream_message.sequence_number,
+                                            share_hash = %share_hash,
+                                            "Forwarding valid standard share to upstream"
+                                        );
                                         messages.push(MiningOwned::SubmitSharesExtended(upstream_message).into());
                                     }
                                     Ok(client::share_accounting::ShareValidationResult::BlockFound(share_hash)) => {
                                         upstream_message.sequence_number =
                                             self.sequence_number_factory.fetch_add(1, Ordering::Relaxed);
-                                        info!("SubmitSharesStandard forwarding it to upstream: 💰 Block Found!!! 💰{share_hash}");
+                                        info!(
+                                            channel_id,
+                                            sequence_number = upstream_message.sequence_number,
+                                            share_hash = %share_hash,
+                                            "💰 Block Found!!! 💰 Forwarding solution to upstream"
+                                        );
                                         let push_solution = PushSolutionOwned {
                                             extranonce: standard_channel
                                                 .get_extranonce_prefix()
@@ -1155,7 +1199,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
@@ -1179,7 +1223,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SubmitSharesExtendedOwned,
         tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received SubmitSharesExtended");
+        debug!("Received SubmitSharesExtended");
         let channel_id = msg.channel_id;
         let downstream_job_id = msg.job_id;
         let downstream_id =
@@ -1195,7 +1239,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         };
 
         let Some(prev_hash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? else {
-            warn!("No prev_hash available yet, ignoring share");
+            warn!(
+                channel_id,
+                "SubmitSharesExtended ignored: previous block hash not available yet"
+            );
             return Err(JDCError::disconnect(
                 JDCErrorKind::LastNewPrevhashNotFound,
                 downstream_id,
@@ -1237,22 +1284,32 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 new_submits_accepted_count: share_accounting.get_last_batch_accepted(),
                                 new_shares_sum: share_accounting.get_last_batch_work_sum(),
                             };
-                            info!("SubmitSharesExtended on downstream channel: {} ✅", success);
+                            info!(
+                                channel_id,
+                                accepted_count = success.new_submits_accepted_count,
+                                work_sum = success.new_shares_sum,
+                                "Acknowledged extended share batch from downstream"
+                            );
                             messages.push((downstream.downstream_id, MiningOwned::SubmitSharesSuccess(success)).into());
                         } else {
-                            info!(
-                                "SubmitSharesExtended on downstream channel: valid share | channel_id: {}, sequence_number: {}, share_hash: {} ☑️",
-                                channel_id, msg.sequence_number, share_hash
+                            debug!(
+                                channel_id,
+                                sequence_number = msg.sequence_number,
+                                share_hash = %share_hash,
+                                "SubmitSharesExtended on downstream channel: valid share"
                             );
                         }
                         downstream_share_hash = Some(share_hash);
                         is_downstream_share_valid = true;
                     }
                     Ok(ShareValidationResult::BlockFound(share_hash, template_id, coinbase)) => {
-                        info!("SubmitSharesExtended on downstream channel: 💰 Block Found!!! 💰{share_hash}");
+                        info!(
+                            channel_id,
+                            share_hash = %share_hash,
+                            "💰 Block Found!!! 💰 Propagating solution to Template Provider"
+                        );
                         downstream_share_hash = Some(share_hash);
                         if let Some(template_id) = template_id {
-                            info!("SubmitSharesExtended: Propagating solution to the Template Provider.");
                             let solution = SubmitSolutionOwned {
                                 template_id,
                                 version: msg.version,
@@ -1275,7 +1332,11 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                     Err(ShareValidationError::SeenSharesBudgetExhausted) => {
                         // share rate far outran the channel's configured expectation, filling the
                         // per-tip dedup cache; no error code to report, so close the downstream.
-                        warn!("closing downstream {}: channel {} exhausted its accepted-share dedup budget 🛑", downstream_id, channel_id);
+                        warn!(
+                            downstream_id,
+                            channel_id,
+                            "Disconnecting downstream: extended channel share rate too high (check miner difficulty target)"
+                        );
                         return Err(JDCError::disconnect(
                             ShareValidationError::SeenSharesBudgetExhausted,
                             downstream_id,
@@ -1292,9 +1353,11 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                             ShareValidationError::VersionRollingNotAllowed(code) => code,
                             _ => unreachable!(),
                         };
-                        error!(
-                            "❌ SubmitSharesError on downstream channel: ch={}, seq={}, error={code}",
-                            channel_id, msg.sequence_number
+                        debug!(
+                            channel_id,
+                            sequence_number = msg.sequence_number,
+                            error_code = code,
+                            "Rejected invalid extended share from downstream"
                         );
                         messages.push((downstream_id, build_error(code)).into());
                     }
@@ -1350,9 +1413,11 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                     Ok(client::share_accounting::ShareValidationResult::Valid(share_hash)) => {
                                         upstream_message.sequence_number =
                                             self.sequence_number_factory.fetch_add(1, Ordering::Relaxed);
-                                        info!(
-                                            "SubmitSharesExtended forwarding it to upstream: valid share | channel_id: {}, sequence_number: {}, share_hash: {}  ✅",
-                                            channel_id, upstream_message.sequence_number, share_hash
+                                        debug!(
+                                            channel_id,
+                                            sequence_number = upstream_message.sequence_number,
+                                            share_hash = %share_hash,
+                                            "Forwarding valid extended share to upstream"
                                         );
                                         messages.push(
                                             MiningOwned::SubmitSharesExtended(upstream_message).into(),
@@ -1361,7 +1426,12 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                     Ok(client::share_accounting::ShareValidationResult::BlockFound(share_hash)) => {
                                         upstream_message.sequence_number =
                                             self.sequence_number_factory.fetch_add(1, Ordering::Relaxed);
-                                        info!("SubmitSharesExtended forwarding it to upstream: 💰 Block Found!!! 💰{share_hash}");
+                                        info!(
+                                            channel_id,
+                                            sequence_number = upstream_message.sequence_number,
+                                            share_hash = %share_hash,
+                                            "💰 Block Found!!! 💰 Forwarding solution to upstream"
+                                        );
                                         let mut channel_extranonce =
                                             upstream_channel.get_extranonce_prefix().to_vec();
                                         channel_extranonce
@@ -1458,7 +1528,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
@@ -1472,7 +1542,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         msg: SetCustomMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
+        warn!(
+            "SetCustomMiningJob unexpected: JDC does not accept custom mining jobs from downstream"
+        );
         Err(JDCError::log(JDCErrorKind::UnexpectedMessage(
             0,
             MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,

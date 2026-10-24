@@ -227,7 +227,7 @@ impl ChannelManager {
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         if discovery_cidrs.is_empty() {
-            info!("JDC miner telemetry discovery disabled: no miner_telemetry cidrs configured");
+            debug!("JDC miner telemetry discovery disabled (no CIDRs configured)");
             return;
         }
 
@@ -238,9 +238,9 @@ impl ChannelManager {
         let mut last_discovery = None::<Instant>;
 
         info!(
-            "Starting JDC miner telemetry loop with interval of {} seconds and discovery interval of {} seconds",
-            refresh_interval.as_secs(),
-            MINER_TELEMETRY_DISCOVERY_INTERVAL.as_secs()
+            refresh_interval_secs = refresh_interval.as_secs(),
+            discovery_interval_secs = MINER_TELEMETRY_DISCOVERY_INTERVAL.as_secs(),
+            "Starting JDC miner telemetry loop"
         );
 
         loop {

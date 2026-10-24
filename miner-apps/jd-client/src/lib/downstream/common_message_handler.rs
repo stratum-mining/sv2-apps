@@ -18,7 +18,7 @@ use stratum_apps::{
     },
     utils::types::{OutboundFrame, SUPPORTED_PROTOCOL_VERSION},
 };
-use tracing::{error, info};
+use tracing::{debug, warn};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
@@ -63,11 +63,13 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         msg: SetupConnectionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         if msg.protocol != Protocol::MiningProtocol {
-            info!(
-                "Rejecting connection: SetupConnection asking for other protocols than mining protocol."
+            warn!(
+                downstream_id = self.downstream_id,
+                protocol = ?msg.protocol,
+                "SetupConnection rejected: unsupported protocol (check downstream configuration)"
             );
             let response = SetupConnectionErrorOwned {
                 flags: 0,
@@ -79,9 +81,10 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
-                error!(
-                    "Failed to send SetupConnectionError to downstream {}: {e}",
-                    self.downstream_id
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message (channel closed)"
                 );
             }
 
@@ -94,9 +97,12 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         if SUPPORTED_PROTOCOL_VERSION < msg.min_version
             || SUPPORTED_PROTOCOL_VERSION > msg.max_version
         {
-            info!(
-                "Rejecting connection: no supported protocol version in requested range [{}, {}] (supported: {SUPPORTED_PROTOCOL_VERSION}).",
-                msg.min_version, msg.max_version
+            warn!(
+                downstream_id = self.downstream_id,
+                min_version = msg.min_version,
+                max_version = msg.max_version,
+                supported_version = SUPPORTED_PROTOCOL_VERSION,
+                "SetupConnection rejected: protocol version mismatch (check downstream configuration)"
             );
             let response = SetupConnectionErrorOwned {
                 flags: 0,
@@ -108,9 +114,10 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
-                error!(
-                    "Failed to send SetupConnectionError to downstream {}: {e}",
-                    self.downstream_id
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message (channel closed)"
                 );
             }
 
@@ -121,7 +128,10 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         }
 
         if has_work_selection(msg.flags) {
-            info!("Rejecting: work selection not allowed.");
+            warn!(
+                downstream_id = self.downstream_id,
+                "SetupConnection rejected: work selection is not supported (check downstream configuration)"
+            );
             let response = SetupConnectionErrorOwned {
                 flags: 0b0000_0000_0000_0010,
                 error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS
@@ -132,9 +142,10 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             let frame = OutboundFrame::from_message(AnyMessageOwned::Common(response.into()))
                 .map_err(JDCError::shutdown)?;
             if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
-                error!(
-                    "Failed to send SetupConnectionError to downstream {}: {e}",
-                    self.downstream_id
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message (channel closed)"
                 );
             }
 
@@ -168,9 +179,10 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
             .map_err(JDCError::shutdown)?;
 
         if let Err(e) = self.downstream_io.downstream_sender.send(frame).await {
-            error!(
-                "Failed to send SetupConnectionSuccess to downstream {}: {e}",
-                self.downstream_id
+            debug!(
+                downstream_id = self.downstream_id,
+                error = ?e,
+                "Failed to forward message (channel closed)"
             );
             return Err(JDCError::disconnect(
                 JDCErrorKind::ChannelErrorSender,
