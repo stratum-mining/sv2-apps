@@ -1,4 +1,9 @@
-use crate::utils::{create_downstream, create_upstream, message_from_frame, wait_for_client};
+use crate::{
+    interceptor::MessageDirection,
+    sniffer::Sniffer,
+    start_sniffer,
+    utils::{create_downstream, create_upstream, message_from_frame, wait_for_client},
+};
 use async_channel::{Receiver, Sender};
 use std::{convert::TryInto, net::SocketAddr, time::Duration};
 use stratum_apps::{
@@ -9,7 +14,12 @@ use stratum_apps::{
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccessOwned,
         },
-        parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, IsSv2Message},
+        mining_sv2::{OpenExtendedMiningChannelOwned, OpenExtendedMiningChannelSuccessOwned},
+        parsers_sv2::{
+            AnyMessageOwned, CommonMessagesOwned, IsSv2Message, MiningOwned,
+            TemplateDistributionOwned,
+        },
+        template_distribution_sv2::{NewTemplateOwned, SetNewPrevHashOwned},
     },
     utils::types::OutboundFrame,
 };
@@ -309,6 +319,128 @@ pub fn truncated_setup_connection_success() -> OutboundFrame {
     )
     .expect("a header with an empty payload is a whole frame");
     OutboundFrame::Raw(frame)
+}
+
+/// A known-good template under `template_id`, also used by the channel job-factory tests.
+pub fn template(template_id: u64, future_template: bool) -> NewTemplateOwned {
+    NewTemplateOwned {
+        template_id,
+        future_template,
+        version: 536_870_912,
+        coinbase_tx_version: 2,
+        coinbase_prefix: vec![82, 0]
+            .try_into()
+            .expect("coinbase prefix must fit into B0255"),
+        coinbase_tx_input_sequence: u32::MAX,
+        coinbase_tx_value_remaining: 5_000_000_000,
+        coinbase_tx_outputs_count: 1,
+        coinbase_tx_outputs: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 226, 246, 28, 63, 113, 209,
+            222, 253, 63, 169, 153, 223, 163, 105, 83, 117, 92, 105, 6, 137, 121, 153, 98, 180,
+            139, 235, 216, 54, 151, 78, 140, 249,
+        ]
+        .try_into()
+        .expect("coinbase outputs must fit into B064K"),
+        coinbase_tx_locktime: 0,
+        merkle_path: vec![].try_into().expect("empty merkle path must be valid"),
+    }
+}
+
+/// Sends `template` from the mock Template Provider behind `tp`.
+pub async fn send_template(tp: &Sender<AnyMessageOwned>, template: NewTemplateOwned) {
+    tp.send(AnyMessageOwned::TemplateDistribution(
+        TemplateDistributionOwned::NewTemplate(template),
+    ))
+    .await
+    .expect("mock TP should send NewTemplate");
+}
+
+/// Sends, from the mock Template Provider behind `tp`, future template `template_id` and the
+/// prevhash activating it.
+pub async fn send_chain_tip(tp: &Sender<AnyMessageOwned>, template_id: u64) {
+    send_template(tp, template(template_id, true)).await;
+    tp.send(AnyMessageOwned::TemplateDistribution(
+        TemplateDistributionOwned::SetNewPrevHash(SetNewPrevHashOwned {
+            template_id,
+            prev_hash: [template_id as u8; 32].into(),
+            ntime_start: 1_700_000_000,
+            n_bits: 0x1d00ffff,
+            target: [0xff; 32].into(),
+        }),
+    ))
+    .await
+    .expect("mock TP should send SetNewPrevHash");
+}
+
+/// A Pool's success for `request`, opening the channel with what the request asked for.
+pub fn channel_open_success(
+    request: &OpenExtendedMiningChannelOwned,
+) -> OpenExtendedMiningChannelSuccessOwned {
+    OpenExtendedMiningChannelSuccessOwned {
+        request_id: request.request_id,
+        channel_id: 9,
+        target: request.max_target.clone(),
+        extranonce_size: request.min_extranonce_size,
+        extranonce_prefix: vec![0; 4]
+            .try_into()
+            .expect("extranonce prefix must fit into B032"),
+        group_channel_id: 1,
+    }
+}
+
+/// A downstream's request for an extended channel, with `max_target` in little-endian, as on the
+/// wire.
+pub fn extended_channel_request(max_target: [u8; 32]) -> AnyMessageOwned {
+    AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+        OpenExtendedMiningChannelOwned {
+            request_id: 1,
+            user_identity: "mock-downstream".try_into().unwrap(),
+            nominal_hash_rate: 1_000.0,
+            max_target: max_target.into(),
+            min_extranonce_size: 0,
+        },
+    ))
+}
+
+/// A mock downstream connected to a server through a sniffer, so a test sends what the downstream
+/// sends and observes what the server sends back.
+pub struct SniffedDownstream {
+    pub sniffer: Sniffer<'static>,
+    sender: Sender<AnyMessageOwned>,
+}
+
+impl SniffedDownstream {
+    /// Connects to `server` through a sniffer named `identifier`, and returns once the server has
+    /// accepted the connection.
+    pub async fn connect(server: SocketAddr, identifier: &'static str) -> Self {
+        let (sniffer, sniffer_address) = start_sniffer(identifier, server, false, vec![], None);
+        let sender = MockDownstream::new(
+            sniffer_address,
+            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        )
+        .start()
+        .await;
+        let downstream = Self { sniffer, sender };
+        downstream
+            .wait_for(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
+            .await;
+        downstream
+    }
+
+    /// Asks for an extended channel with the easiest `max_target`.
+    pub async fn request_extended_channel(&self) {
+        self.sender
+            .send(extended_channel_request([0xff; 32]))
+            .await
+            .expect("mock downstream should request an extended channel");
+    }
+
+    /// Waits for the server to send this downstream a message of `message_type`.
+    pub async fn wait_for(&self, message_type: u8) {
+        self.sniffer
+            .wait_for_message_type(MessageDirection::ToDownstream, message_type)
+            .await;
+    }
 }
 
 #[cfg(test)]

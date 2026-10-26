@@ -129,6 +129,9 @@ pub const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// internal readiness signal.
 pub const ROLE_STARTUP_DELAY: Duration = Duration::from_secs(1);
 
+/// How long a test waits for a message that must never be sent.
+pub const ABSENCE_WINDOW: Duration = Duration::from_millis(2000);
+
 /// Joins `thread` once it finishes, panicking if it has not done so within `timeout`.
 pub async fn join_within<T>(thread: std::thread::JoinHandle<T>, timeout: Duration) -> T {
     let deadline = Instant::now() + timeout;

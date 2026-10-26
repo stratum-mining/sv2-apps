@@ -40,7 +40,7 @@ use stratum_apps::{
         parsers_sv2::{JobDeclarationOwned, MiningOwned, Tlv},
         template_distribution_sv2::SetNewPrevHashOwned as SetNewPrevHashTdp,
     },
-    utils::types::{ChannelId, DownstreamId, Hashrate, JobId},
+    utils::types::{ChannelId, DownstreamId, JobId},
 };
 use tracing::{debug, info};
 
@@ -274,19 +274,6 @@ impl PendingChannelRequest {
                 downstream_id: _,
                 message: open_channel_message,
             } => MiningOwned::OpenStandardMiningChannel(open_channel_message),
-        }
-    }
-
-    pub fn hashrate(&self) -> Hashrate {
-        match self {
-            PendingChannelRequest::ExtendedChannel {
-                downstream_id: _,
-                message: m,
-            } => m.nominal_hash_rate,
-            PendingChannelRequest::StandardChannel {
-                downstream_id: _,
-                message: m,
-            } => m.nominal_hash_rate,
         }
     }
 }
