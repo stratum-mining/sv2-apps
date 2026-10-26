@@ -1,15 +1,19 @@
 use crate::utils::{create_downstream, create_upstream, message_from_frame, wait_for_client};
 use async_channel::Sender;
 use std::{convert::TryInto, net::SocketAddr, time::Duration};
-use stratum_apps::stratum_core::{
-    codec_sv2::MessageFrame,
-    common_messages_sv2::{
-        ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION, Protocol,
-        SetupConnectionErrorOwned, SetupConnectionOwned, SetupConnectionSuccessOwned,
+use stratum_apps::{
+    stratum_core::{
+        codec_sv2::{MessageFrame, SerializedFrame},
+        common_messages_sv2::{
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
+            SetupConnectionOwned, SetupConnectionSuccessOwned,
+        },
+        parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, IsSv2Message},
     },
-    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, IsSv2Message},
+    utils::types::OutboundFrame,
 };
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tracing::info;
 
 pub enum WithSetup {
@@ -247,6 +251,45 @@ impl MockUpstream {
 
         proxy_sender
     }
+}
+
+/// Accepts every connection a client opens to `address` and answers its `SetupConnection` with
+/// `reply`, so a test decides what the client gets back, malformed frames included.
+pub async fn answer_setup_connections(address: SocketAddr, reply: fn() -> OutboundFrame) {
+    let listener = TcpListener::bind(address)
+        .await
+        .expect("the mock role's address is available");
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("the client connects");
+            tokio::spawn(async move {
+                let (receiver, sender) = create_downstream(stream)
+                    .await
+                    .expect("the noise handshake completes");
+                let setup_connection = receiver
+                    .recv()
+                    .await
+                    .expect("the client sends SetupConnection");
+                assert_eq!(
+                    setup_connection.header().msg_type(),
+                    MESSAGE_TYPE_SETUP_CONNECTION
+                );
+                sender.send(reply()).await.expect("the reply is sent");
+                // Keeps the connection open until the client closes it.
+                while receiver.recv().await.is_ok() {}
+            });
+        }
+    });
+}
+
+/// A `SetupConnection.Success` header with an empty payload: the six bytes of `used_version` and
+/// `flags` are missing, so the message can't be parsed.
+pub fn truncated_setup_connection_success() -> OutboundFrame {
+    let frame = SerializedFrame::from_bytes(
+        vec![0, 0, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, 0, 0, 0].into(),
+    )
+    .expect("a header with an empty payload is a whole frame");
+    OutboundFrame::Raw(frame)
 }
 
 #[cfg(test)]
