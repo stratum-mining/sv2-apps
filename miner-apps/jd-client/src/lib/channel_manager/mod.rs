@@ -50,8 +50,8 @@ use stratum_apps::{
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
         types::{
-            ChannelId, DownstreamId, InboundFrame, OutboundFrame, RequestId, SharesBatchSize,
-            SharesPerMinute, TemplateId, UpstreamJobId, VardiffKey,
+            ChannelId, DownstreamId, Hashrate, InboundFrame, OutboundFrame, RequestId,
+            SharesBatchSize, SharesPerMinute, TemplateId, UpstreamJobId, VardiffKey,
         },
     },
 };
@@ -66,7 +66,7 @@ use crate::{
     jd_mode::JDMode,
     utils::{
         AtomicUpstreamState, DownstreamChannelJobId, DownstreamMessage, PendingChannelRequest,
-        SharesOrderedByDiff, UpstreamState,
+        SharesOrderedByDiff, UpstreamState, upstream_channel_update,
     },
 };
 #[cfg(feature = "monitoring")]
@@ -1912,23 +1912,8 @@ impl ChannelManager {
         }
 
         if !messages.is_empty() {
-            let mut downstream_hashrate = 0.0;
-            let mut min_target = [0xff; 32];
-
-            self.downstream.for_each(|_, downstream| {
-                let mut update_from_channel = |hashrate: f32, target: &Target| {
-                    downstream_hashrate += hashrate;
-                    min_target = std::cmp::min(target.to_le_bytes(), min_target);
-                };
-
-                downstream.standard_channels.for_each(|_, channel| {
-                    update_from_channel(channel.get_nominal_hashrate(), channel.get_target());
-                });
-
-                downstream.extended_channels.for_each(|_, channel| {
-                    update_from_channel(channel.get_nominal_hashrate(), channel.get_target());
-                });
-            });
+            let (downstream_hashrate, min_target) =
+                upstream_channel_update(self.downstream_channels());
 
             self.upstream_channel
                 .with(|maybe_upstream_channel| {
@@ -1947,7 +1932,7 @@ impl ChannelManager {
                             MiningOwned::UpdateChannel(UpdateChannelOwned {
                                 channel_id: upstream_channel.get_channel_id(),
                                 nominal_hash_rate: downstream_hashrate,
-                                max_target: min_target.into(),
+                                max_target: min_target.to_le_bytes().into(),
                             })
                             .into(),
                         );
@@ -1967,6 +1952,20 @@ impl ChannelManager {
 
         info!("Vardiff update cycle complete");
         Ok(())
+    }
+
+    // The nominal hashrate and target of every downstream channel, standard and extended.
+    fn downstream_channels(&self) -> Vec<(Hashrate, Target)> {
+        let mut channels = Vec::new();
+        self.downstream.for_each(|_, downstream| {
+            downstream.standard_channels.for_each(|_, channel| {
+                channels.push((channel.get_nominal_hashrate(), *channel.get_target()));
+            });
+            downstream.extended_channels.for_each(|_, channel| {
+                channels.push((channel.get_nominal_hashrate(), *channel.get_target()));
+            });
+        });
+        channels
     }
 
     /// Runs `f` while holding the downstream map entry guard.

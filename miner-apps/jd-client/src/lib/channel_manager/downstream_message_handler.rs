@@ -45,7 +45,7 @@ use crate::{
         ChannelManager, ChannelManagerIo, SOLO_FULL_EXTRANONCE_SIZE, SharesOrderedByDiff,
     },
     error::{self, JDCError, JDCErrorKind},
-    utils::{add_share_to_cache, create_close_channel_msg},
+    utils::{add_share_to_cache, create_close_channel_msg, upstream_channel_update},
 };
 
 fn extranonce_allocation_error_code(
@@ -830,22 +830,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
             }
         };
 
-        let mut downstream_hashrate = 0.0;
-        let mut min_target = Target::from_le_bytes([0xff; 32]);
-        self.downstream.for_each(|_, downstream| {
-            let mut update_from_channel = |hashrate: f32, target: &Target| {
-                downstream_hashrate += hashrate;
-                min_target = std::cmp::min(*target, min_target);
-            };
-
-            downstream.standard_channels.for_each(|_, channel| {
-                update_from_channel(channel.get_nominal_hashrate(), channel.get_target());
-            });
-
-            downstream.extended_channels.for_each(|_, channel| {
-                update_from_channel(channel.get_nominal_hashrate(), channel.get_target());
-            });
-        });
+        let (downstream_hashrate, min_target) = upstream_channel_update(self.downstream_channels());
 
         self.upstream_channel
             .with(|upstream_channel| {
