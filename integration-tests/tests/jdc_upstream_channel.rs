@@ -11,7 +11,8 @@ use stratum_apps::stratum_core::{
     common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
     mining_sv2::{
         MESSAGE_TYPE_CLOSE_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_UPDATE_CHANNEL,
+        MESSAGE_TYPE_UPDATE_CHANNEL_ERROR,
     },
 };
 
@@ -257,6 +258,46 @@ async fn jdc_opens_the_channels_queued_behind_a_disconnected_requester() {
     waiting
         .wait_for(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
+
+    jdc.jdc.shutdown().await;
+}
+
+// An `UpdateChannel` naming a channel its downstream doesn't have, or one the channel refuses,
+// changes nothing: the downstream gets its `UpdateChannelError`, and the Pool hears nothing of it.
+#[tokio::test]
+async fn jdc_answers_a_refused_update_channel_only_to_its_downstream() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    downstream.request_extended_channel().await;
+    let request = jdc.upstream_channel_request().await;
+    jdc.send_upstream_channel_success(channel_open_success(&request))
+        .await;
+    let channel_id = downstream.opened_channel_id().await;
+
+    downstream.update_channel(channel_id + 1, [0xff; 32]).await;
+    downstream
+        .sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_UPDATE_CHANNEL_ERROR,
+        )
+        .await;
+    // No channel can take a `max_target` of zero.
+    downstream.update_channel(channel_id, [0; 32]).await;
+    downstream.wait_for(MESSAGE_TYPE_UPDATE_CHANNEL_ERROR).await;
+
+    assert!(
+        jdc.pool_sniffer
+            .assert_message_not_present(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_UPDATE_CHANNEL,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "a refused update must not reach the Pool"
+    );
 
     jdc.jdc.shutdown().await;
 }

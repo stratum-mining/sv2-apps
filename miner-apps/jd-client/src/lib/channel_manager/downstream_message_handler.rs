@@ -706,7 +706,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
     // Workflow:
     // 1. Update the target for the corresponding downstream channel (standard or extended).
     //    - On success, reply with a `SetTarget`.
-    //    - On failure, return an `UpdateChannelError`.
+    //    - On failure, reply with an `UpdateChannelError`, and stop there.
     // 2. Recompute aggregate downstream state:
     //    - Sum all downstream nominal hashrates.
     //    - Determine the minimum target across all downstream channels.
@@ -735,8 +735,9 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 error_code: code.to_string().try_into().expect("valid error code"),
             })
         };
-        let mut messages = self.with_registered_downstream(downstream_id, |downstream| {
-            let channel_messages = if let Some(messages_) =
+        // The messages for an update the channel accepted, or the error for one it refused.
+        let update = self.with_registered_downstream(downstream_id, |downstream| {
+            let update: Result<Vec<RouteMessageTo>, RouteMessageTo> = if let Some(update) =
                 downstream
                     .standard_channels
                     .with_mut(&channel_id, |standard_channel| {
@@ -753,7 +754,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 _ => "internal-error",
                             };
                             if err_code != "internal-error" {
-                                return vec![(downstream_id, build_error(err_code)).into()];
+                                return Err((downstream_id, build_error(err_code)).into());
                             }
                             warn!("Failed to update standard channel {channel_id}");
                         }
@@ -768,10 +769,10 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                             )
                                 .into(),
                         );
-                        messages
+                        Ok(messages)
                     }) {
-                messages_
-            } else if let Some(messages_) =
+                update
+            } else if let Some(update) =
                 downstream
                     .extended_channels
                     .with_mut(&channel_id, |extended_channel| {
@@ -788,7 +789,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                                 _ => "internal-error",
                             };
                             if err_code != "internal-error" {
-                                return vec![(downstream_id, build_error(err_code)).into()];
+                                return Err((downstream_id, build_error(err_code)).into());
                             }
                             warn!("Failed to update extended channel {channel_id}");
                         }
@@ -803,21 +804,31 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                             )
                                 .into(),
                         );
-                        messages
+                        Ok(messages)
                     })
             {
-                messages_
+                update
             } else {
-                vec![
-                    (
-                        downstream_id,
-                        build_error(ERROR_CODE_UPDATE_CHANNEL_INVALID_CHANNEL_ID),
-                    )
-                        .into(),
-                ]
+                Err((
+                    downstream_id,
+                    build_error(ERROR_CODE_UPDATE_CHANNEL_INVALID_CHANNEL_ID),
+                )
+                    .into())
             };
-            Ok(channel_messages)
+            Ok(update)
         })?;
+
+        // A refused update changes no channel, so the downstream that sent it gets its error and
+        // nothing else happens: no other channel, the upstream channel or the Pool hears of it.
+        let mut messages = match update {
+            Ok(messages) => messages,
+            Err(error) => {
+                if let Err(e) = error.forward(&self.channel_manager_io).await {
+                    tracing::error!("Failed to forward message {e:?}");
+                }
+                return Ok(());
+            }
+        };
 
         let mut downstream_hashrate = 0.0;
         let mut min_target = Target::from_le_bytes([0xff; 32]);

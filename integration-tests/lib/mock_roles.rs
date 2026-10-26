@@ -18,7 +18,10 @@ use stratum_apps::{
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccessOwned,
         },
-        mining_sv2::{OpenExtendedMiningChannelOwned, OpenExtendedMiningChannelSuccessOwned},
+        mining_sv2::{
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, OpenExtendedMiningChannelOwned,
+            OpenExtendedMiningChannelSuccessOwned, UpdateChannelOwned,
+        },
         parsers_sv2::{
             AnyMessageOwned, CommonMessagesOwned, IsSv2Message, MiningOwned,
             TemplateDistributionOwned,
@@ -443,6 +446,37 @@ impl SniffedDownstream {
             .send(extended_channel_request(max_target))
             .await
             .expect("mock downstream should request an extended channel");
+    }
+
+    /// Sends an `UpdateChannel` for `channel_id`, with `max_target` in little-endian, as on the
+    /// wire.
+    pub async fn update_channel(&self, channel_id: u32, max_target: [u8; 32]) {
+        self.sender
+            .send(AnyMessageOwned::Mining(MiningOwned::UpdateChannel(
+                UpdateChannelOwned {
+                    channel_id,
+                    nominal_hash_rate: 1_000.0,
+                    max_target: max_target.into(),
+                },
+            )))
+            .await
+            .expect("mock downstream should send UpdateChannel");
+    }
+
+    /// Waits for the server to open this downstream's extended channel, and returns the channel's
+    /// ID.
+    pub async fn opened_channel_id(&self) -> u32 {
+        self.wait_for(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+            .await;
+        loop {
+            if let Some((
+                _,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(success)),
+            )) = self.sniffer.next_message_from_upstream()
+            {
+                return success.channel_id;
+            }
+        }
     }
 
     /// Waits for the server to send this downstream a message of `message_type`.
