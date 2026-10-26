@@ -16,7 +16,7 @@ use stratum_apps::stratum_core::{
     parsers_sv2::Tlv,
     template_distribution_sv2::{SetNewPrevHashOwned as SetNewPrevHashTdpOwned, *},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     channel_manager::{ChannelManager, DeclaredJob},
@@ -43,7 +43,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: NewTemplateOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         self.template_store.insert(msg.template_id, msg.clone());
         if msg.future_template {
@@ -114,7 +114,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     group_channel
                         .on_new_template(msg.clone(), coinbase_outputs.clone())
                         .map_err(|e| {
-                            tracing::error!("Error while adding template to group channel: {e:?}");
+                            error!(error = ?e, "Failed to add template to group channel");
                             JDCError::shutdown(e)
                         })?;
 
@@ -184,7 +184,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 messages.push(
                     (
                         downstream_id,
-                        MiningOwned::NewExtendedMiningJob(group_channel_job.get_job_message().clone()),
+                        MiningOwned::NewExtendedMiningJob(
+                            group_channel_job.get_job_message().clone(),
+                        ),
                     )
                         .into(),
                 );
@@ -203,8 +205,10 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                         standard_channel
                             .on_group_channel_job(group_channel_job.clone())
                             .map_err(|e| {
-                                tracing::error!(
-                                    "Error while adding group channel job to standard channel: {channel_id:?} {e:?}"
+                                error!(
+                                    channel_id,
+                                    error = ?e,
+                                    "Failed to add group channel job to standard channel"
                                 );
                                 JDCError::shutdown(e)
                             })?;
@@ -212,8 +216,10 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                         standard_channel
                             .on_new_template(msg.clone(), coinbase_outputs.clone())
                             .map_err(|e| {
-                                tracing::error!(
-                                    "Error while adding template to standard channel: {channel_id:?} {e:?}"
+                                error!(
+                                    channel_id,
+                                    error = ?e,
+                                    "Failed to add template to standard channel"
                                 );
                                 JDCError::shutdown(e)
                             })?;
@@ -264,8 +270,10 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     extended_channel
                         .on_group_channel_job(group_channel_job.clone())
                         .map_err(|e| {
-                            tracing::error!(
-                                "Error while adding group channel job to extended channel: {channel_id:?} {e:?}"
+                            error!(
+                                channel_id,
+                                error = ?e,
+                                "Failed to add group channel job to extended channel"
                             );
                             JDCError::shutdown(e)
                         })?;
@@ -280,7 +288,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
         for message in messages {
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 
@@ -293,7 +301,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
         let error_code = msg.error_code.as_utf8_or_hex();
 
         if matches!(
@@ -312,7 +320,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         // Transaction data is only ever requested in full-template mode while the
         // upstream channel is open. Ignore anything else as unsolicited or late, so
@@ -346,8 +354,8 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
         let Some(token) = token else {
             warn!(
-                "No token available, discarding template id: {}",
-                msg.template_id
+                template_id = msg.template_id,
+                "Cannot declare mining job: no mining job token available"
             );
             _ = self.allocate_tokens(1).await;
             return Ok(());
@@ -355,7 +363,10 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         _ = self.allocate_tokens(1).await;
 
         let Some(template_message) = template_message else {
-            error!("Template not found, template id: {}", msg.template_id);
+            error!(
+                template_id = msg.template_id,
+                "Template not found for transaction data"
+            );
             return Err(JDCError::log(JDCErrorKind::TemplateNotFound(
                 msg.template_id,
             )));
@@ -469,7 +480,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetNewPrevHashTdpOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let outputs = deserialize_outputs(self.coinbase_outputs.get().map_err(JDCError::shutdown)?)
             .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
@@ -591,8 +602,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     group_channel
                         .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
-                            tracing::error!(
-                                "Error while adding new prev hash to group channel: {e:?}"
+                            error!(
+                                error = ?e,
+                                "Failed to apply previous block hash to group channel"
                             );
                             JDCError::fallback(e)
                         })?;
@@ -643,8 +655,10 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     standard_channel
                         .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
-                            tracing::error!(
-                                "Error while adding new prev hash to standard channel: {channel_id:?} {e:?}"
+                            error!(
+                                channel_id,
+                                error = ?e,
+                                "Failed to apply previous block hash to standard channel"
                             );
                             JDCError::fallback(e)
                         })?;
@@ -681,8 +695,9 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     extended_channel
                         .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
-                            tracing::error!(
-                                "Error while adding new prev hash to extended channel: {e:?}"
+                            error!(
+                                error = ?e,
+                                "Failed to apply previous block hash to extended channel"
                             );
                             JDCError::fallback(e)
                         })
@@ -696,7 +711,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
         for message in messages {
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
 

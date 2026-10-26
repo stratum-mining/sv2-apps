@@ -19,7 +19,7 @@ use stratum_apps::{
     },
     utils::types::OutboundFrame,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     channel_manager::ChannelManager,
@@ -54,7 +54,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         msg: AllocateMiningJobTokenSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
         let coinbase_changed = self
@@ -140,19 +140,20 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         msg: DeclareMiningJobErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let error_code = msg.error_code.as_utf8_or_hex();
         if error_code == ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP {
-            warn!(
-                "Received non-fatal DeclareMiningJobError from JDS: stale-chain-tip (request_id={})",
-                msg.request_id
+            info!(
+                request_id = msg.request_id,
+                "DeclareMiningJob rejected by JDS: stale chain tip (ignoring)"
             );
             return Ok(());
         }
 
         warn!(
-            "⚠️ JDS refused the declared job with a DeclareMiningJobError ❌. Starting fallback mechanism."
+            error_code = %error_code,
+            "DeclareMiningJob rejected by JDS; starting fallback"
         );
         Err(JDCError::fallback(JDCErrorKind::DeclareMiningJobError))
     }
@@ -179,12 +180,12 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         msg: DeclareMiningJobSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let Some(last_declare_job) = self.last_declare_job_store.get_cloned(&msg.request_id) else {
-            error!(
-                "No last_declare_job found for request_id={}",
-                msg.request_id
+            warn!(
+                request_id = msg.request_id,
+                "No declared job found for JDS confirmation"
             );
             return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
                 msg.request_id,
@@ -192,7 +193,10 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         };
 
         let Some(prevhash) = last_declare_job.prev_hash else {
-            error!("Prevhash not found for request_id = {}", msg.request_id);
+            warn!(
+                request_id = msg.request_id,
+                "Cannot apply declared job: previous block hash is not available yet"
+            );
             return Err(JDCError::log(JDCErrorKind::LastNewPrevhashNotFound));
         };
 
@@ -284,15 +288,12 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         let request_id = msg.request_id;
 
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let tx_store_entry = self.last_declare_job_store.get_cloned(&request_id);
 
         let Some(entry) = tx_store_entry else {
-            warn!(
-                "No transaction list found for request_id={}",
-                msg.request_id
-            );
+            warn!(request_id, "No transaction list found for JDS request");
             return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
                 msg.request_id,
             )));
@@ -318,7 +319,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             .collect();
 
         if missing_txns.is_empty() {
-            warn!("No matching transactions found for request_id={request_id}");
+            warn!(request_id, "No matching transactions found for JDS request");
         }
 
         let response = ProvideMissingTransactionsSuccessOwned {
@@ -334,7 +335,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
 
         info!(
-            "Successfully sent ProvideMissingTransactionsSuccess to the JDS with request_id: {request_id}"
+            request_id,
+            "Successfully sent ProvideMissingTransactionsSuccess to the JDS"
         );
 
         Ok(())

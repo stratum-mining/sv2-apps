@@ -334,9 +334,11 @@ pub fn validate_cached_share(
             upstream_message.sequence_number =
                 sequence_number_factory.fetch_add(1, Ordering::Relaxed);
 
-            info!(
-                "Cached SubmitSharesExtended: valid share, forwarding it to upstream | channel_id: {}, sequence_number: {}, share_hash: {}  ✅",
-                upstream_message.channel_id, upstream_message.sequence_number, share_hash
+            debug!(
+                channel_id = upstream_message.channel_id,
+                sequence_number = upstream_message.sequence_number,
+                share_hash = %share_hash,
+                "Forwarding valid cached extended share to upstream"
             );
 
             messages.push(MiningOwned::SubmitSharesExtended(upstream_message).into());
@@ -346,7 +348,12 @@ pub fn validate_cached_share(
             upstream_message.sequence_number =
                 sequence_number_factory.fetch_add(1, Ordering::Relaxed);
 
-            info!("💰 Block Found (cached extended)!!! 💰 {share_hash}");
+            info!(
+                channel_id = upstream_message.channel_id,
+                sequence_number = upstream_message.sequence_number,
+                share_hash = %share_hash,
+                "💰 Block Found (cached extended)!!! 💰 Forwarding solution to upstream"
+            );
 
             let mut channel_extranonce = upstream_channel.get_extranonce_prefix().to_vec();
             channel_extranonce.extend_from_slice(upstream_message.extranonce.as_bytes());

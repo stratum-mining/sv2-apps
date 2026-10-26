@@ -71,9 +71,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: OpenStandardMiningChannelSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
-        info!(
-            "⚠️ JDC can only open extended channels with the upstream server, preparing fallback."
+        debug!("Received: {}", msg);
+        warn!(
+            "OpenStandardMiningChannel.Success unexpected: JDC only opens extended channels upstream; preparing fallback"
         );
         Err(JDCError::fallback(
             JDCErrorKind::OpenStandardMiningChannelError,
@@ -97,7 +97,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: OpenExtendedMiningChannelSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let coinbase_outputs = self.coinbase_outputs.get().map_err(JDCError::shutdown)?;
 
@@ -156,7 +156,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         ) {
             Ok(allocator) => allocator,
             Err(e) => {
-                warn!("Failed to build extranonce allocator: {e:?}");
+                warn!(error = ?e, "OpenExtendedMiningChannel.Success: failed to build extranonce allocator");
                 self.upstream_state.set(UpstreamState::NoChannel);
                 let close_channel =
                     create_close_channel_msg(msg.channel_id, "downstream not available");
@@ -191,7 +191,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             Err(e) => {
                 // an upstream that hands out a target no share can meet is misbehaving, so
                 // fall back
-                warn!("Upstream OpenExtendedMiningChannelSuccess rejected: {e:?}");
+                warn!(error = ?e, "OpenExtendedMiningChannel.Success rejected by channel manager");
                 return Err(JDCError::fallback(e));
             }
         };
@@ -338,8 +338,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: OpenMiningChannelErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
-        warn!("⚠️ Cannot open extended channel with the upstream server, preparing fallback.");
+        debug!("Received: {}", msg);
+        warn!("OpenMiningChannelError received from upstream; preparing fallback");
 
         Err(JDCError::fallback(JDCErrorKind::OpenMiningChannelError))
     }
@@ -351,7 +351,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: UpdateChannelErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
+        let error_code = msg.error_code.as_utf8_or_hex();
+        warn!(error_code = %error_code, "UpdateChannel rejected by upstream");
         Ok(())
     }
 
@@ -365,7 +367,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: CloseChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        warn!(message = %msg, "CloseChannel received from upstream; preparing fallback");
 
         self.upstream_channel
             .set(None)
@@ -384,7 +386,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetExtranoncePrefixOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         let mut messages_results: Vec<Result<RouteMessageTo, Self::Error>> = vec![];
         self.upstream_channel
             .with(|upstream_channel| -> Result<(), Self::Error> {
@@ -536,7 +538,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
             }
         }
         Ok(())
@@ -549,7 +551,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SubmitSharesSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {} ✅", msg);
+        debug!("Received: {} ✅", msg);
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -572,8 +574,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SubmitSharesErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {} ❌", msg);
+        debug!("Received: {}", msg);
         let error_code = msg.error_code.as_utf8_or_hex();
+        warn!(error_code = %error_code, "SubmitSharesError received from upstream");
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -593,8 +596,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: NewMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
-        warn!("⚠️ JDC does not expect jobs from the upstream server — ignoring.");
+        debug!("Received: {}", msg);
+        warn!("NewMiningJob ignored: JDC does not expect jobs from upstream");
         Ok(())
     }
 
@@ -605,8 +608,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: NewExtendedMiningJobOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
-        warn!("⚠️ JDC does not expect jobs from the upstream server — ignoring.");
+        debug!("Received: {}", msg);
+        warn!("NewExtendedMiningJob ignored: JDC does not expect jobs from upstream");
         Ok(())
     }
 
@@ -617,8 +620,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetNewPrevHashOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
-        warn!("⚠️ JDC does not expect prevhash updates from the upstream server — ignoring.");
+        debug!("Received: {}", msg);
+        warn!("JDC does not expect previous block hash updates from upstream; ignoring");
         Ok(())
     }
 
@@ -634,7 +637,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetCustomMiningJobSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {} ✅", msg);
+        debug!("Received: {} ✅", msg);
 
         let mut shares_to_submit_upstream = Vec::new();
 
@@ -642,7 +645,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         else {
             warn!(
                 request_id = msg.request_id,
-                "No matching declare job found for custom job success"
+                "SetCustomMiningJob.Success ignored: no declared job found in store"
             );
             return Err(JDCError::fallback(JDCErrorKind::LastDeclareJobNotFound(
                 msg.request_id,
@@ -679,10 +682,18 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 if let Err(e) = upstream_channel
                     .on_set_custom_mining_job_success(set_custom_job, set_custom_job_success)
                 {
-                    error!("SetCustomMiningJob.Success validation failed: {e:#?}");
                     return match e {
-                        ExtendedChannelError::ChainTipMismatch => Err(JDCError::log(e)),
-                        _ => Err(JDCError::fallback(e)),
+                        ExtendedChannelError::ChainTipMismatch => {
+                            info!(
+                                request_id = msg.request_id,
+                                "SetCustomMiningJob rejected by upstream: stale chain tip (ignoring)"
+                            );
+                            Err(JDCError::log(e))
+                        }
+                        _ => {
+                            error!(error = ?e, "SetCustomMiningJob.Success validation failed");
+                            Err(JDCError::fallback(e))
+                        }
                     };
                 }
 
@@ -730,13 +741,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetCustomMiningJobErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         let error_code = msg.error_code.as_utf8_or_hex();
         if error_code == ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP {
-            warn!(
-                "Received non-fatal SetCustomMiningJobError from upstream: stale-chain-tip (request_id={})",
-                msg.request_id
+            info!(
+                request_id = msg.request_id,
+                "SetCustomMiningJob rejected by upstream: stale chain tip (ignoring)"
             );
             if let Some((_, declared_job)) = self.last_declare_job_store.remove(&msg.request_id) {
                 self.cached_shares
@@ -746,7 +757,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         }
 
         warn!(
-            "⚠️ Upstream rejected the custom job with a SetCustomMiningJobError ❌. Starting fallback mechanism."
+            error_code = %error_code,
+            "SetCustomMiningJob rejected by upstream; starting fallback"
         );
         Err(JDCError::fallback(JDCErrorKind::CustomJobError))
     }
@@ -760,7 +772,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetTargetOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         self.upstream_channel
             .with(|upstream_channel| -> Result<(), Self::Error> {
                 if let Some(upstream) = upstream_channel.as_mut() {
@@ -771,7 +783,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                         .map_err(|e| {
                             // an upstream that hands out a target no share can meet is
                             // misbehaving, so fall back
-                            warn!("Upstream SetTarget rejected: {e:?}");
+                            warn!(error = ?e, "Upstream SetTarget rejected");
                             JDCError::fallback(e)
                         })?;
                 }
@@ -788,8 +800,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetGroupChannelOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
-        warn!("⚠️ JDC does not expect group channel updates from the upstream server — ignoring.");
+        debug!("Received: {}", msg);
+        warn!("SetGroupChannel ignored: JDC does not expect group channel updates from upstream");
         Ok(())
     }
 }

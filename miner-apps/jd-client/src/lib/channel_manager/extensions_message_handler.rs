@@ -13,7 +13,7 @@ use stratum_apps::{
     },
     utils::types::OutboundFrame,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
@@ -34,9 +34,9 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
         msg: RequestExtensionsSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        let supported: Vec<u16> = msg.supported_extensions.into_inner();
+        debug!("Received: {}", msg);
 
-        info!("Extension negotiation success: supported={:?}", supported);
+        let supported: Vec<u16> = msg.supported_extensions.into_inner();
 
         // Check if all of the proxy's required extensions are supported by the server
         let missing_required: Vec<u16> = self
@@ -48,8 +48,8 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
 
         if !missing_required.is_empty() {
             error!(
-                "Server does not support our required extensions {:?}. Connection should fail over to another upstream.",
-                missing_required
+                missing_extensions = ?missing_required,
+                "RequestExtensions rejected: upstream does not support required extensions (falling back)"
             );
             return Err(JDCError::fallback(
                 JDCErrorKind::RequiredExtensionsNotSupported(missing_required),
@@ -63,7 +63,10 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
             })
             .map_err(JDCError::fallback)?;
 
-        info!("Successfully negotiated extensions: {:?}", supported);
+        info!(
+            ?supported,
+            "Negotiated extensions with upstream successfully"
+        );
 
         Ok(())
     }
@@ -74,13 +77,10 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
         msg: RequestExtensionsErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
+        debug!("Received: {}", msg);
+
         let unsupported: Vec<u16> = msg.unsupported_extensions.into_inner();
         let required_by_server: Vec<u16> = msg.required_extensions.into_inner();
-
-        error!(
-            "Extension negotiation error: unsupported={:?}, required_by_server={:?}",
-            unsupported, required_by_server
-        );
 
         // Check if any of our required extensions were not supported by the server
         let missing_required: Vec<u16> = self
@@ -92,8 +92,8 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
 
         if !missing_required.is_empty() {
             error!(
-                "Server does not support our required extensions {:?}. Connection should fail over to another upstream.",
-                missing_required
+                missing_extensions = ?missing_required,
+                "RequestExtensions rejected: upstream does not support required extensions (falling back)"
             );
             return Err(JDCError::fallback(
                 JDCErrorKind::RequiredExtensionsNotSupported(missing_required),
@@ -119,8 +119,8 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
             if !cannot_support.is_empty() {
                 // Server requires extensions we don't support - must fail over
                 error!(
-                    "Server requires extensions {:?} that we don't support. Connection should fail over to another upstream.",
-                    cannot_support
+                    unsupported_extensions = ?cannot_support,
+                    "RequestExtensions failed: upstream requires unsupported extensions (falling back)"
                 );
                 return Err(JDCError::fallback(
                     JDCErrorKind::ServerRequiresUnsupportedExtensions(cannot_support),
@@ -129,8 +129,8 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
 
             // All required extensions are supported - we should retry with them included
             info!(
-                "Server requires extensions {:?} that we support. Proxy should retry RequestExtensions with these included.",
-                can_support
+                required_extensions = ?can_support,
+                "Retrying RequestExtensions with upstream-required extensions"
             );
 
             let new_require_extensions = RequestExtensionsOwned {
@@ -148,7 +148,7 @@ impl HandleExtensionsFromServerOwnedAsync for ChannelManager {
                 .send(sv2_frame)
                 .await
                 .map_err(|e| {
-                    error!("Failed to send message to upstream: {:?}", e);
+                    debug!(error = ?e, "Failed to forward message (channel closed)");
                     JDCError::fallback(JDCErrorKind::ChannelErrorSender)
                 })?;
         }

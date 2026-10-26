@@ -18,7 +18,7 @@ use stratum_apps::{
     tp_type::{TemplateProviderType, resolve_ipc_socket_path},
     utils::types::{DownstreamId, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, InboundFrame, OutboundFrame},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     JobDeclaratorClient,
@@ -154,10 +154,10 @@ impl<State> JdcRuntime<State> {
         let shutdown_signal = async move {
             tokio::select! {
                 _ = cancellation_token_clone.cancelled() => {
-                    info!("Monitoring server: received shutdown signal.");
+                    info!("Monitoring server received shutdown signal");
                 }
                 _ = fallback_coordinator_token.cancelled() => {
-                    info!("Monitoring server: fallback triggered.");
+                    info!("Monitoring server fallback triggered");
                 }
             }
         };
@@ -166,11 +166,11 @@ impl<State> JdcRuntime<State> {
             let cancellation_token = self.jd_client.cancellation_token.clone();
             async move {
                 if let Err(e) = monitoring_server.run(shutdown_signal).await {
-                    error!("Monitoring server error: {:?}", e);
+                    error!(error = ?e, "Monitoring server encountered an error");
                     cancellation_token.cancel();
                 }
 
-                info!("Monitoring server task exited");
+                debug!("Monitoring server task exited");
             }
         }));
 
@@ -183,7 +183,7 @@ impl<State> JdcRuntime<State> {
                     .run_miner_telemetry_loop(refresh_interval, cancellation_token, fallback_token)
                     .await;
 
-                info!("JDC miner telemetry task exited");
+                debug!("JDC miner telemetry task exited");
             }
         }));
 
@@ -198,7 +198,7 @@ impl<State> JdcRuntime<State> {
         // Start monitoring server if configured
         #[cfg(feature = "monitoring")]
         if let Some(monitoring_addr) = self.jd_client.config.monitoring_address() {
-            info!("Initializing monitoring server on http://{monitoring_addr}");
+            info!(address = %monitoring_addr, "Initializing monitoring server");
             self.start_monitoring_tasks(&channel_manager, monitoring_addr)
                 .map_err(JDCErrorKind::MonitoringServerError)?;
         }
@@ -264,16 +264,18 @@ impl<State> JdcRuntime<State> {
         if let Some(bitcoin_core_sv2) = self.bitcoin_core_sv2 {
             bitcoin_core_sv2.cancellation_token.cancel();
 
-            info!("Waiting for BitcoinCoreSv2TDP dedicated thread to shutdown...");
+            debug!("Waiting for Bitcoin Core Template Provider thread to shut down");
             match bitcoin_core_sv2.join_handle.join() {
-                Ok(_) => info!("BitcoinCoreSv2TDP dedicated thread shutdown complete."),
-                Err(e) => error!("BitcoinCoreSv2TDP dedicated thread error: {e:?}"),
+                Ok(_) => debug!("Bitcoin Core Template Provider thread shutdown complete"),
+                Err(e) => {
+                    error!(error = ?e, "Bitcoin Core Template Provider thread panicked or errored")
+                }
             }
         }
 
-        warn!(
-            "Graceful shutdown: waiting {} seconds for tasks to finish",
-            GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+        info!(
+            timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+            "Graceful shutdown: waiting for tasks to finish"
         );
         match tokio::time::timeout(
             std::time::Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
@@ -286,17 +288,17 @@ impl<State> JdcRuntime<State> {
             }
             Err(_) => {
                 warn!(
-                    "Tasks did not finish within {} seconds, aborting",
-                    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+                    timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+                    "Tasks did not finish within timeout; aborting"
                 );
                 self.task_manager.abort_all().await;
-                info!("Joining aborted tasks...");
+                debug!("Joining aborted tasks");
                 self.task_manager.join_all().await;
                 warn!("Forced shutdown complete");
             }
         }
         self.jd_client.mark_stopped();
-        info!("JD Client shutdown complete.");
+        info!("JDC shutdown complete");
     }
 }
 
@@ -422,7 +424,7 @@ impl JdcRuntime<IoReady> {
                 {
                     Ok(template_receiver) => template_receiver,
                     Err(e) => {
-                        error!(error = ?e, "Failed to initialize SV2 template receiver");
+                        error!(error = ?e, "Failed to initialize SV2 Template Provider");
                         return Err((e.kind, self));
                     }
                 };
@@ -434,11 +436,11 @@ impl JdcRuntime<IoReady> {
                     .start(address, cancellation_token_tp, task_manager_cl)
                     .await
                 {
-                    error!(error = ?e, "Failed to start SV2 template receiver");
+                    error!(error = ?e, "Failed to start SV2 Template Provider");
                     return Err((e.kind, self));
                 }
 
-                info!("Sv2 Template Provider setup done");
+                info!("SV2 Template Provider setup completed");
             }
             TemplateProviderType::BitcoinCoreIpc {
                 version,
@@ -451,15 +453,15 @@ impl JdcRuntime<IoReady> {
                     Some(unix_socket_path) => unix_socket_path,
                     None => {
                         error!(
-                            "Could not determine Bitcoin data directory. Please set data_dir in config."
+                            "Could not determine Bitcoin data directory; please set data_dir in config"
                         );
                         return Err((JDCErrorKind::InvalidBitcoinDataDir, self));
                     }
                 };
 
                 info!(
-                    "Using Bitcoin Core IPC socket at: {}",
-                    unix_socket_path.display()
+                    socket_path = %unix_socket_path.display(),
+                    "Using Bitcoin Core IPC socket"
                 );
 
                 // incoming and outgoing TDP channels from the perspective of BitcoinCoreSv2TDP
@@ -527,8 +529,7 @@ impl JdcRuntime<TemplateProviderReady> {
             Err((JDCErrorKind::NoUpstreamConfig(mode), runtime)) => {
                 error!(
                     ?mode,
-                    "Invalid configuration: JDC mode is non-solo ({:?}) but no upstream server addresses were configured",
-                    mode
+                    "Invalid configuration: JDC mode is non-solo but no upstream server addresses were configured"
                 );
                 Err((JDCErrorKind::NoUpstreamConfig(mode), runtime).into())
             }
@@ -594,7 +595,7 @@ impl JdcRuntime<ChannelManagerReady> {
             ));
         }
 
-        info!("Attempting to initialize upstream...");
+        info!("Attempting to initialize upstream");
 
         match self.initialize_jd().await {
             Ok((upstream, job_declarator, user_identity)) => {
@@ -639,7 +640,7 @@ impl JdcRuntime<ChannelManagerReady> {
                 })
             }
             Err(e) => {
-                tracing::error!("Failed to initialize upstream: {:?}", e);
+                error!(error = ?e, "Failed to initialize upstream");
                 Err((e, self))
             }
         }
@@ -673,13 +674,13 @@ impl JdcRuntime<ChannelManagerReady> {
         for i in 0..upstream_len {
             let upstream_entry = self.upstream_addresses[i].clone();
             info!(
-                "Trying upstream {} of {}: pool={}:{}, jds={}:{}",
-                i + 1,
-                upstream_len,
-                upstream_entry.pool_host,
-                upstream_entry.pool_port,
-                upstream_entry.jds_host,
-                upstream_entry.jds_port,
+                target_index = i + 1,
+                total_targets = upstream_len,
+                pool_host = %upstream_entry.pool_host,
+                pool_port = upstream_entry.pool_port,
+                jds_host = %upstream_entry.jds_host,
+                jds_port = upstream_entry.jds_port,
+                "Attempting connection to upstream target"
             );
 
             tokio::select! {
@@ -692,8 +693,10 @@ impl JdcRuntime<ChannelManagerReady> {
             }
 
             if upstream_entry.tried_or_flagged {
-                info!(
-                    "Upstream previously marked as malicious, skipping initial attempt warnings."
+                warn!(
+                    pool_host = %upstream_entry.pool_host,
+                    jds_host = %upstream_entry.jds_host,
+                    "Upstream previously marked as malicious, skipping initial attempt warnings"
                 );
                 continue;
             }
@@ -706,7 +709,11 @@ impl JdcRuntime<ChannelManagerReady> {
                     return Err(JDCErrorKind::CouldNotInitiateSystem);
                 }
 
-                info!("Connection attempt {}/{}...", attempt, MAX_RETRIES);
+                info!(
+                    attempt,
+                    max_retries = MAX_RETRIES,
+                    "Connecting to upstream and JDS"
+                );
 
                 match self.try_initialize_single(&upstream_entry).await {
                     Ok((upstream, jd)) => {
@@ -714,7 +721,7 @@ impl JdcRuntime<ChannelManagerReady> {
                         return Ok((upstream, jd, upstream_entry.user_identity.clone()));
                     }
                     Err(e) => {
-                        tracing::error!("Upstream and JDS connection terminated");
+                        debug!(attempt, "Upstream and JDS connection attempt terminated");
 
                         tokio::select! {
                             biased;
@@ -735,22 +742,22 @@ impl JdcRuntime<ChannelManagerReady> {
                         }
 
                         warn!(
-                            "Attempt {}/{} failed for pool={}:{}, jds={}:{}: {:?}",
                             attempt,
-                            MAX_RETRIES,
-                            upstream_entry.pool_host,
-                            upstream_entry.pool_port,
-                            upstream_entry.jds_host,
-                            upstream_entry.jds_port,
-                            e
+                            max_retries = MAX_RETRIES,
+                            pool_host = %upstream_entry.pool_host,
+                            pool_port = upstream_entry.pool_port,
+                            jds_host = %upstream_entry.jds_host,
+                            jds_port = upstream_entry.jds_port,
+                            error = ?e,
+                            "Upstream and JDS connection attempt failed"
                         );
                         if attempt == MAX_RETRIES {
                             warn!(
-                                "Max retries reached for pool={}:{}, jds={}:{}, moving to next upstream",
-                                upstream_entry.pool_host,
-                                upstream_entry.pool_port,
-                                upstream_entry.jds_host,
-                                upstream_entry.jds_port,
+                                pool_host = %upstream_entry.pool_host,
+                                pool_port = upstream_entry.pool_port,
+                                jds_host = %upstream_entry.jds_host,
+                                jds_port = upstream_entry.jds_port,
+                                "Max connection retries reached, moving to next upstream target"
                             );
                         }
                     }
@@ -759,7 +766,10 @@ impl JdcRuntime<ChannelManagerReady> {
             self.upstream_addresses[i].tried_or_flagged = true;
         }
 
-        tracing::error!("All upstreams failed after {} retries each", MAX_RETRIES);
+        error!(
+            max_retries = MAX_RETRIES,
+            "All upstream targets failed; unable to initiate connection"
+        );
         Err(JDCErrorKind::CouldNotInitiateSystem)
     }
 
@@ -769,7 +779,7 @@ impl JdcRuntime<ChannelManagerReady> {
         &self,
         upstream_entry: &UpstreamEntry,
     ) -> JDCResult<(Upstream, JobDeclarator), super::error::JobDeclaratorClient> {
-        info!("Upstream connection in-progress at initialize single");
+        debug!("Initializing upstream and JDS connections");
         let upstream = Upstream::new(
             upstream_entry,
             self.state.io.upstream_to_channel_manager_sender.clone(),
@@ -785,7 +795,7 @@ impl JdcRuntime<ChannelManagerReady> {
             _ => JDCError::fallback(err.kind),
         })?;
 
-        info!("Upstream connection done at initialize single");
+        debug!("Upstream and JDS connections established");
 
         let job_declarator = JobDeclarator::new(
             upstream_entry,
@@ -867,7 +877,7 @@ pub(super) enum RuntimeEvent {
 
 impl JdcRuntime<Running> {
     pub(super) async fn wait(&self) -> RuntimeEvent {
-        info!("Spawning status listener task...");
+        debug!("Spawning status listener task");
         let fallback_token = self.fallback_coordinator.token();
 
         tokio::select! {
@@ -877,7 +887,7 @@ impl JdcRuntime<Running> {
                 RuntimeEvent::Shutdown
             }
             _ = fallback_token.cancelled() => {
-                warn!("Upstream/Job Declarator connection dropped — attempting reconnection...");
+                warn!("Upstream or JDS connection dropped; attempting reconnection");
                 RuntimeEvent::Fallback
             }
         }
@@ -889,7 +899,7 @@ impl JdcRuntime<Running> {
         info!("All components finished fallback cleanup");
 
         self.mode.set_solo_mining();
-        info!("Existing Upstream or JD instance taken out. Preparing fallback.");
+        info!("Previous upstream and JDS instances cleaned up; preparing fallback");
 
         let (channel_manager_to_upstream_sender, channel_manager_to_upstream_receiver) =
             unbounded();

@@ -154,9 +154,11 @@ impl Upstream {
         let candidate_addrs = resolve_host(&upstream_entry.pool_host, upstream_entry.pool_port)
             .await
             .map_err(|e| {
-                error!(
-                    "Failed to resolve pool address {}:{}: {e}",
-                    upstream_entry.pool_host, upstream_entry.pool_port
+                warn!(
+                    host = %upstream_entry.pool_host,
+                    port = upstream_entry.pool_port,
+                    error = %e,
+                    "Failed to resolve upstream address (triggering fallback)"
                 );
                 JDCError::fallback(JDCErrorKind::NetworkHelpersError(e.into()))
             })?;
@@ -171,13 +173,13 @@ impl Upstream {
         .map_err(JDCError::fallback)?
         .map_err(JDCError::fallback)?;
         let addr = stream.peer_addr().map_err(JDCError::fallback)?;
-        info!("Connected to upstream at {}", addr);
+        info!(%addr, "Connected to upstream");
         debug!("Begin with noise setup in upstream connection");
 
         let (noise_stream_reader, noise_stream_writer) = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
-                info!("Shutdown received during handshake, dropping connection");
+                info!("Shutdown signal received during upstream Noise handshake, aborting connection");
                 Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem))
             }
             result = connect_with_noise(stream, Some(upstream_entry.authority_pubkey)) => {
@@ -223,7 +225,7 @@ impl Upstream {
         min_version: u16,
         max_version: u16,
     ) -> JDCResult<(), error::Upstream> {
-        info!("Upstream: initiating SV2 handshake...");
+        debug!("Initiating SV2 handshake with upstream");
         let setup_connection =
             get_setup_connection_message(min_version, max_version, &self.address)
                 .map_err(JDCError::shutdown)?;
@@ -234,10 +236,10 @@ impl Upstream {
 
         // Send SetupConnection
         if let Err(e) = self.upstream_io.upstream_sender.send(sv2_frame).await {
-            error!(?e, "Failed to send `SetupConnection` frame to upstream");
+            debug!(error = ?e, "Failed to forward message (channel closed)");
             return Err(JDCError::fallback(JDCErrorKind::ChannelErrorSender));
         }
-        info!("Sent `SetupConnection` to upstream, awaiting response...");
+        info!("Sent SetupConnection to upstream");
 
         let incoming_frame = match self.upstream_io.upstream_receiver.recv().await {
             Ok(frame) => {
@@ -245,7 +247,7 @@ impl Upstream {
                 frame
             }
             Err(e) => {
-                error!(?e, "Upstream closed connection during handshake");
+                warn!(error = ?e, "Upstream connection closed during handshake");
                 return Err(JDCError::fallback(e));
             }
         };
@@ -255,7 +257,11 @@ impl Upstream {
 
         let header = incoming.header();
 
-        info!(ext_type = ?header.ext_type(), msg_type = ?header.msg_type(), "Dispatching inbound handshake message");
+        debug!(
+            ext_type = ?header.ext_type(),
+            msg_type = ?header.msg_type(),
+            "Dispatching inbound handshake message from upstream"
+        );
 
         if header.ext_type() != 0
             || !matches!(
@@ -284,9 +290,9 @@ impl Upstream {
     /// The supported extensions are stored for potential retry if the server requires additional
     /// extensions.
     async fn send_request_extensions(&mut self) -> JDCResult<(), error::Upstream> {
-        info!(
-            "Sending RequestExtensions to upstream with required extensions: {:?}",
-            self.required_extensions
+        debug!(
+            required_extensions = ?self.required_extensions,
+            "Preparing RequestExtensions for upstream"
         );
         if self.required_extensions.is_empty() {
             return Ok(());
@@ -301,8 +307,8 @@ impl Upstream {
         };
 
         info!(
-            "Sending RequestExtensions to upstream with required extensions: {:?}",
-            self.required_extensions
+            required_extensions = ?self.required_extensions,
+            "Sending RequestExtensions to upstream"
         );
 
         let sv2_frame =
@@ -314,11 +320,11 @@ impl Upstream {
             .send(sv2_frame)
             .await
             .map_err(|e| {
-                error!(?e, "Failed to send RequestExtensions to upstream");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
                 JDCError::fallback(JDCErrorKind::ChannelErrorSender)
             })?;
 
-        info!("Sent RequestExtensions to upstream");
+        debug!("Sent RequestExtensions to upstream");
         Ok(())
     }
 
@@ -341,7 +347,7 @@ impl Upstream {
     ) {
         let setup_fallback_token = fallback_coordinator.token();
         if let Err(e) = self.setup_connection(min_version, max_version).await {
-            error!(error = ?e, "Upstream: connection setup failed.");
+            error!(error = ?e, "Failed to set up connection with upstream");
             if let LoopControl::Break = Self::handle_error_action(
                 "Upstream::setup_connection",
                 &e,
@@ -364,16 +370,16 @@ impl Upstream {
                     biased;
 
                     _ = cancellation_token.cancelled() => {
-                        info!("Upstream: received shutdown signal");
+                        info!("Upstream received shutdown signal");
                         break;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("Upstream: fallback triggered");
+                        info!("Upstream fallback triggered");
                         break;
                     }
                     res = self_clone_1.handle_pool_message_frame() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Upstream: error handling pool message.");
+                            error!(error = ?e, "Failed to handle upstream message");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "Upstream::handle_pool_message_frame",
                                 &e,
@@ -386,7 +392,7 @@ impl Upstream {
                     }
                     res = self_clone_2.handle_channel_manager_message_frame() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Upstream: error handling channel manager message.");
+                            error!(error = ?e, "Failed to handle Channel Manager message for upstream");
                             if let LoopControl::Break = Self::handle_error_action(
                                 "Upstream::handle_channel_manager_message_frame",
                                 &e,
@@ -401,7 +407,7 @@ impl Upstream {
                 }
             }
             self.upstream_io.close();
-            warn!("Upstream: unified message loop exited.");
+            debug!("Upstream message loop exited");
         }));
     }
 
@@ -425,7 +431,11 @@ impl Upstream {
 
         match protocol_message_type(extension_type, message_type) {
             MessageType::Common => {
-                info!(ext_type = ?extension_type, msg_type = ?message_type, "Handling common message from Upstream.");
+                debug!(
+                    ext_type = ?extension_type,
+                    msg_type = ?message_type,
+                    "Handling common message from upstream"
+                );
                 self.handle_common_message_frame_from_server(None, header, sv2_frame.payload())
                     .await?;
             }
@@ -435,12 +445,15 @@ impl Upstream {
                     .send(sv2_frame)
                     .await
                     .map_err(|e| {
-                        error!(error=?e, "Failed to send mining message to channel manager.");
+                        debug!(error = ?e, "Failed to forward message (channel closed)");
                         JDCError::shutdown(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
             _ => {
-                warn!("Received unsupported message type from upstream: {message_type}");
+                warn!(
+                    message_type,
+                    extension_type, "Received unsupported message type from upstream"
+                );
             }
         }
         Ok(())
@@ -458,12 +471,12 @@ impl Upstream {
                     .send(sv2_frame)
                     .await
                     .map_err(|e| {
-                        error!(error=?e, "Failed to send sv2 frame to upstream.");
+                        debug!(error = ?e, "Failed to forward message (channel closed)");
                         JDCError::fallback(JDCErrorKind::ChannelErrorSender)
                     })?;
             }
             Err(e) => {
-                warn!(error=?e, "Channel manager receiver closed or errored.");
+                debug!(error = ?e, "Channel manager receiver closed");
             }
         }
         Ok(())
