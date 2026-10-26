@@ -9,8 +9,8 @@ use stratum_apps::stratum_core::{
 };
 
 use stratum_apps::stratum_core::{
-    bitcoin::{Amount, Transaction, consensus, hashes::Hash},
-    channels_sv2::{chain_tip::ChainTip, outputs::deserialize_outputs},
+    bitcoin::{Transaction, consensus, hashes::Hash},
+    channels_sv2::chain_tip::ChainTip,
     handlers_sv2::HandleTemplateDistributionMessagesFromServerOwnedAsync,
     mining_sv2::SetNewPrevHashOwned as SetNewPrevHashMp,
     parsers_sv2::Tlv,
@@ -52,11 +52,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 .map_err(JDCError::shutdown)?;
         }
 
-        let mut coinbase_outputs = deserialize_outputs(
-            self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
-        )
-        .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
-        coinbase_outputs[0].value = Amount::from_sat(msg.coinbase_tx_value_remaining);
+        let coinbase_outputs = self.coinbase_outputs_for(&msg)?;
 
         // Only request transaction data when the response can be consumed: building a
         // `DeclareMiningJob` requires the upstream channel and job factory, which only
@@ -70,7 +66,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         // Every downstream mines this template under the same custom job on the single upstream
         // channel, so the job is built, and a token spent on it, once per template.
         let custom_job = if !msg.future_template && self.mode.is_coinbase_only() {
-            self.build_coinbase_only_custom_job(&msg, &coinbase_outputs)?
+            self.build_coinbase_only_custom_job(&msg)?
         } else {
             None
         };
@@ -262,11 +258,6 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         let transactions_data = msg.transaction_list;
         let excess_data = msg.excess_data;
 
-        let mut deserialized_outputs = deserialize_outputs(
-            self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
-        )
-        .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
-
         let token = self
             .allocate_tokens
             .with(|tokens| tokens.pop_front())
@@ -296,8 +287,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         };
 
         let mining_token = token.mining_job_token.clone();
-        deserialized_outputs[0].value =
-            Amount::from_sat(template_message.coinbase_tx_value_remaining);
+        let deserialized_outputs = self.coinbase_outputs_for(&template_message)?;
         let reserialized_outputs = consensus::serialize(&deserialized_outputs);
 
         let tx_list: Vec<Transaction> = transactions_data
@@ -405,9 +395,6 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
-        let outputs = deserialize_outputs(self.coinbase_outputs.get().map_err(JDCError::shutdown)?)
-            .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
-
         self.cached_shares.clear();
 
         self.upstream_channel
@@ -479,6 +466,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
                     let chain_tip =
                         ChainTip::new(msg.prev_hash.clone(), msg.n_bits, msg.ntime_start);
+                    let outputs = self.coinbase_outputs_for(&template)?;
 
                     let custom_job = self
                         .job_factory
@@ -491,29 +479,39 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                                 token.mining_job_token,
                                 chain_tip,
                                 template.clone(),
-                                outputs.clone(),
+                                outputs,
                                 full_extranonce_size,
                             )
                         })
                         .map_err(JDCError::shutdown)?;
-
-                    if let Ok(custom_job) = custom_job {
-                        self.last_declare_job_store.insert(
-                            request_id,
-                            DeclaredJob {
-                                declare_mining_job: None,
-                                template,
-                                prev_hash: Some(msg.clone()),
-                                set_custom_mining_job: Some(custom_job.clone()),
-                                coinbase_output: self
-                                    .coinbase_outputs
-                                    .get()
-                                    .map_err(JDCError::shutdown)?,
-                                tx_list: vec![],
-                            },
+                    // The downstream channels were handed this template's jobs when it arrived,
+                    // built from the same outputs, and activate them below. Their shares have
+                    // nowhere upstream to go without this custom job, so a rejected one shuts JDC
+                    // down, as it does in `handle_new_template`.
+                    let custom_job = custom_job.map_err(|e| {
+                        error!(
+                            error = ?e,
+                            template_id = template.template_id,
+                            "Failed to build coinbase-only custom job"
                         );
-                        messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
-                    }
+                        JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
+                    })?;
+
+                    self.last_declare_job_store.insert(
+                        request_id,
+                        DeclaredJob {
+                            declare_mining_job: None,
+                            template,
+                            prev_hash: Some(msg.clone()),
+                            set_custom_mining_job: Some(custom_job.clone()),
+                            coinbase_output: self
+                                .coinbase_outputs
+                                .get()
+                                .map_err(JDCError::shutdown)?,
+                            tx_list: vec![],
+                        },
+                    );
+                    messages.push(MiningOwned::SetCustomMiningJob(custom_job).into());
                 }
             }
         }
@@ -647,7 +645,7 @@ mod tests {
         key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
         stratum_core::{
             binary_sv2::B0255Owned,
-            bitcoin::{ScriptBuf, Target, TxOut},
+            bitcoin::{Amount, ScriptBuf, Target, TxOut},
             channels_sv2::{
                 client::extended::ExtendedChannel, extranonce_manager::ExtranoncePrefix,
                 server::jobs::factory::JobFactory,
@@ -662,6 +660,7 @@ mod tests {
 
     use crate::{
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
+        error::Action,
         jd_mode::JDMode,
     };
 
@@ -809,6 +808,14 @@ mod tests {
         }
     }
 
+    // A template whose coinbase prefix leaves no room in the scriptSig for JDC's tags and
+    // extranonce, which the job factory rejects.
+    fn oversized_template(template_id: u64, future_template: bool) -> NewTemplateOwned {
+        let mut template = template(template_id, future_template);
+        template.coinbase_prefix = vec![0; 100].try_into().unwrap();
+        template
+    }
+
     fn prev_hash(template_id: u64) -> SetNewPrevHashTdpOwned {
         SetNewPrevHashTdpOwned {
             template_id,
@@ -849,5 +856,85 @@ mod tests {
             panic!("expected one custom job, the Pool got {sent:?}");
         };
         assert_eq!(custom_job.token, token());
+    }
+
+    // A template whose custom job is rejected shuts JDC down rather than leave its downstreams
+    // mining work whose shares could never reach the Pool, and nothing goes to the Pool.
+    #[tokio::test]
+    async fn template_whose_custom_job_is_rejected_shuts_jdc_down() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+
+        let error = manager
+            .handle_new_template(None, oversized_template(2, false), None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.kind, JDCErrorKind::FailedToCreateCustomJob));
+        assert!(matches!(error.action, Action::Shutdown));
+        assert!(sent_to_pool(&sent_to_pool_receiver).is_empty());
+    }
+
+    // The downstream channels were handed an activated template's jobs when it arrived. Their
+    // shares have nowhere upstream to go without its custom job, so a rejected one shuts JDC
+    // down, and nothing goes to the Pool.
+    #[tokio::test]
+    async fn activation_whose_custom_job_is_rejected_shuts_jdc_down() {
+        let (mut manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+        manager
+            .last_future_template
+            .set(Some(oversized_template(2, true)))
+            .unwrap();
+
+        let error = manager
+            .handle_set_new_prev_hash(None, prev_hash(2), None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.kind, JDCErrorKind::FailedToCreateCustomJob));
+        assert!(matches!(error.action, Action::Shutdown));
+        assert!(sent_to_pool(&sent_to_pool_receiver).is_empty());
+    }
+
+    // Between a future template and the prevhash that activates it, the chain tip is still the
+    // previous block's, so the template gets no custom job and its token stays queued. Opening
+    // the upstream channel in that window asks for this job.
+    #[tokio::test]
+    async fn future_template_the_chain_tip_has_not_activated_gets_no_custom_job() {
+        let (manager, sent_to_pool_receiver, _sent_to_jds) = channel_manager().await;
+
+        let custom_job = manager
+            .build_coinbase_only_custom_job(&template(2, true))
+            .unwrap();
+
+        assert!(custom_job.is_none());
+        assert_eq!(
+            manager.allocate_tokens.with(|tokens| tokens.len()).unwrap(),
+            1
+        );
+        assert!(sent_to_pool(&sent_to_pool_receiver).is_empty());
+    }
+
+    // A coinbase-only custom job is recorded with the outputs it pays, the template's reward
+    // included, as a declaration is.
+    #[tokio::test]
+    async fn custom_job_is_recorded_with_the_outputs_it_pays() {
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+
+        let mut recorded = None;
+        manager.last_declare_job_store.for_each(|_, declared_job| {
+            if declared_job.template.template_id == 2 {
+                recorded = Some(declared_job.coinbase_output.clone());
+            }
+        });
+        let recorded = recorded.expect("the custom job is recorded");
+        assert_eq!(
+            consensus::deserialize::<Vec<TxOut>>(&recorded).unwrap(),
+            manager.coinbase_outputs_for(&template(2, false)).unwrap()
+        );
     }
 }

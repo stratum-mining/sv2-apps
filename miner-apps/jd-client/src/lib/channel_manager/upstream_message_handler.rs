@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use stratum_apps::stratum_core::mining_sv2::{
     CloseChannelOwned, NewExtendedMiningJobOwned, NewMiningJobOwned,
     OpenExtendedMiningChannelSuccessOwned, OpenMiningChannelErrorOwned,
@@ -14,7 +13,6 @@ use stratum_apps::{
         channels_sv2::{
             client::{error::ExtendedChannelError, extended::ExtendedChannel},
             extranonce_manager::{ExtranonceAllocator, ExtranoncePrefix, MAX_EXTRANONCE_LEN},
-            outputs::deserialize_outputs,
             server::jobs::factory::JobFactory,
         },
         handlers_sv2::{
@@ -30,7 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     channel_manager::{
-        ChannelManager, DeclaredJob, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
+        ChannelManager, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
         downstream_message_handler::RouteMessageTo,
     },
     error::{self, JDCError, JDCErrorKind},
@@ -98,11 +96,6 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
-
-        let coinbase_outputs = self.coinbase_outputs.get().map_err(JDCError::shutdown)?;
-
-        let outputs = deserialize_outputs(coinbase_outputs)
-            .map_err(|_| JDCError::shutdown(JDCErrorKind::DeclaredJobHasBadCoinbaseOutputs))?;
 
         let reserved_downstream_rollable = self.reserved_downstream_rollable_extranonce_size;
         let min_extranonce_size =
@@ -201,65 +194,6 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             debug!("Applied last_new_prev_hash to new extended channel");
         }
 
-        let last_future_template = self
-            .last_future_template
-            .get()
-            .map_err(JDCError::shutdown)?;
-        let last_new_prev_hash = self.last_new_prev_hash.get().map_err(JDCError::shutdown)?;
-        let had_job_factory = self
-            .job_factory
-            .with(|job_factory| job_factory.is_some())
-            .map_err(JDCError::shutdown)?;
-        let set_custom_job = if self.mode.is_coinbase_only()
-            && had_job_factory
-            && last_future_template.is_some()
-            && last_new_prev_hash.is_some()
-        {
-            if let Some(token) = self
-                .allocate_tokens
-                .with(|tokens| tokens.pop_front())
-                .map_err(JDCError::shutdown)?
-            {
-                let template = last_future_template.expect("checked above");
-                let prevhash = last_new_prev_hash.expect("checked above");
-                let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
-                let full_extranonce_size = extended_channel.get_full_extranonce_size();
-
-                if let Ok(custom_job) = job_factory.new_custom_job(
-                    extended_channel.get_channel_id(),
-                    request_id,
-                    token.mining_job_token,
-                    prevhash.clone().into(),
-                    template.clone(),
-                    outputs,
-                    full_extranonce_size,
-                ) {
-                    self.last_declare_job_store.insert(
-                        request_id,
-                        DeclaredJob {
-                            declare_mining_job: None,
-                            template,
-                            prev_hash: Some(prevhash),
-                            set_custom_mining_job: Some(custom_job.clone()),
-                            coinbase_output: self
-                                .coinbase_outputs
-                                .get()
-                                .map_err(JDCError::shutdown)?,
-                            tx_list: vec![],
-                        },
-                    );
-                    Some(custom_job)
-                } else {
-                    None
-                }
-            } else {
-                warn!("No token available, discarding custom job");
-                None
-            }
-        } else {
-            None
-        };
-
         let full_extranonce_size = extended_channel.get_full_extranonce_size();
         self.extranonce_allocator
             .set(extranonce_allocator)
@@ -291,24 +225,31 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
         if channel_state == UpstreamState::Connected {
             if self.mode.is_full_template() {
-                if let Some(template) = template {
+                if let Some(template) = &template {
                     self.request_transaction_data(template.template_id).await?;
                 }
             }
 
-            if self.mode.is_coinbase_only() {
-                if let Some(custom_job) = set_custom_job {
-                    let set_custom_job = MiningOwned::SetCustomMiningJob(custom_job);
-                    let sv2_frame =
-                        OutboundFrame::from_message(AnyMessageOwned::Mining(set_custom_job))
-                            .map_err(JDCError::shutdown)?;
-                    self.channel_manager_io
-                        .upstream_sender
-                        .send(sv2_frame)
-                        .await
-                        .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
-                    _ = self.allocate_tokens(1).await;
+            // The downstreams waiting below are handed a job for the chain tip as their channels
+            // open, and in coinbase-only mode their shares on it go upstream under a custom job
+            // for that same template, so the custom job goes out first.
+            let custom_job = match &template {
+                Some(template) if self.mode.is_coinbase_only() => {
+                    self.build_coinbase_only_custom_job(template)?
                 }
+                _ => None,
+            };
+            if let Some(custom_job) = custom_job {
+                let set_custom_job = MiningOwned::SetCustomMiningJob(custom_job);
+                let sv2_frame =
+                    OutboundFrame::from_message(AnyMessageOwned::Mining(set_custom_job))
+                        .map_err(JDCError::shutdown)?;
+                self.channel_manager_io
+                    .upstream_sender
+                    .send(sv2_frame)
+                    .await
+                    .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
+                _ = self.allocate_tokens(1).await;
             }
 
             let pending_downstreams = self
