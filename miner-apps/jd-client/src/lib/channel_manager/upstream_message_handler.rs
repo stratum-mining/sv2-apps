@@ -31,7 +31,7 @@ use crate::{
         ChannelManager, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
         downstream_message_handler::RouteMessageTo,
     },
-    error::{self, JDCError, JDCErrorKind},
+    error::{self, Action, JDCError, JDCErrorKind},
     utils::{UpstreamState, create_close_channel_msg, validate_cached_share},
 };
 
@@ -295,11 +295,26 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 .with(std::mem::take)
                 .map_err(JDCError::shutdown)?;
 
+            // Each request belongs to its own downstream, so one that fails for its downstream
+            // alone, such as a downstream that disconnected while waiting, costs that downstream
+            // its request and the rest still get their channels. Any other failure stops here.
             for pending_downstream_message in pending_downstreams {
                 let downstream_id = pending_downstream_message.downstream_id();
                 let message = pending_downstream_message.message();
-                self.handle_mining_message_from_client(Some(downstream_id), message, None)
-                    .await?;
+                if let Err(e) = self
+                    .handle_mining_message_from_client(Some(downstream_id), message, None)
+                    .await
+                {
+                    let Action::Disconnect(downstream_id) = e.action else {
+                        return Err(e);
+                    };
+                    warn!(
+                        downstream_id,
+                        error_kind = ?e.kind,
+                        "Dropping a waiting channel request, disconnecting its downstream"
+                    );
+                    self.remove_downstream(downstream_id);
+                }
             }
         }
 

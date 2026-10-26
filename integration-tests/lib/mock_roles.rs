@@ -2,7 +2,11 @@ use crate::{
     interceptor::MessageDirection,
     sniffer::Sniffer,
     start_sniffer,
-    utils::{create_downstream, create_upstream, message_from_frame, wait_for_client},
+    types::InboundFrame,
+    utils::{
+        CONNECT_RETRY_INTERVAL, create_downstream, create_upstream, message_from_frame,
+        wait_for_client,
+    },
 };
 use async_channel::{Receiver, Sender};
 use std::{convert::TryInto, net::SocketAddr, time::Duration};
@@ -447,6 +451,57 @@ impl SniffedDownstream {
             .wait_for_message_type(MessageDirection::ToDownstream, message_type)
             .await;
     }
+}
+
+/// Connects a downstream straight to `server`, without a mock role or a sniffer, so the test reads
+/// every frame the server sends and closes the connection by closing the sender. Returns once the
+/// server has accepted the connection's `SetupConnection`.
+pub async fn connect_closable_downstream(
+    server: SocketAddr,
+) -> (Receiver<InboundFrame>, Sender<OutboundFrame>) {
+    let stream = loop {
+        match TcpStream::connect(server).await {
+            Ok(stream) => break stream,
+            Err(_) => tokio::time::sleep(CONNECT_RETRY_INTERVAL).await,
+        }
+    };
+    let (receiver, sender) = create_upstream(stream)
+        .await
+        .expect("the noise handshake completes");
+    let WithSetup::Yes(setup_connection) =
+        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0)
+    else {
+        unreachable!("a SetupConnection was asked for");
+    };
+    send_message(
+        &sender,
+        AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(setup_connection)),
+    )
+    .await;
+    assert_eq!(
+        next_message_type(&receiver).await,
+        MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS
+    );
+    (receiver, sender)
+}
+
+/// Frames `message` and sends it on a connection from [`connect_closable_downstream`].
+pub async fn send_message(sender: &Sender<OutboundFrame>, message: AnyMessageOwned) {
+    sender
+        .send(OutboundFrame::from_message(message).expect("the message can be framed"))
+        .await
+        .expect("the downstream connection is open");
+}
+
+/// Waits for the next frame on a connection from [`connect_closable_downstream`], and returns its
+/// message type.
+pub async fn next_message_type(receiver: &Receiver<InboundFrame>) -> u8 {
+    receiver
+        .recv()
+        .await
+        .expect("the server keeps the connection open")
+        .header()
+        .msg_type()
 }
 
 #[cfg(test)]

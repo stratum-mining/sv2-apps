@@ -1,7 +1,12 @@
 use integration_tests_sv2::{
-    interceptor::MessageDirection, mock_roles::channel_open_success, mocked_jdc::MockedJdc,
+    interceptor::MessageDirection,
+    mock_roles::{
+        channel_open_success, connect_closable_downstream, extended_channel_request, send_message,
+    },
+    mocked_jdc::MockedJdc,
     utils::ABSENCE_WINDOW,
 };
+use std::time::Duration;
 use stratum_apps::stratum_core::{
     common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
     mining_sv2::{
@@ -224,6 +229,34 @@ async fn jdc_falls_back_from_a_pool_extranonce_too_large_for_the_coinbase() {
             .await,
         "no downstream channel may open on an extranonce too large for the coinbase"
     );
+
+    jdc.jdc.shutdown().await;
+}
+
+// A downstream that asks for a channel and disconnects before the Pool opens the upstream channel
+// leaves a request nobody waits for any more. The downstreams queued behind it still get their
+// channels once the upstream channel opens.
+#[tokio::test]
+async fn jdc_opens_the_channels_queued_behind_a_disconnected_requester() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let waiting = jdc.connect_downstream("jdc-downstream-waiting").await;
+    let (_, gone) = connect_closable_downstream(jdc.address).await;
+    send_message(&gone, extended_channel_request([0xff; 32])).await;
+    let request = jdc.upstream_channel_request().await;
+    waiting.request_extended_channel().await;
+
+    // Nothing JDC sends shows when it has queued the second request or noticed the first
+    // downstream is gone, so the test gives it a moment before the Pool answers.
+    gone.close();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    jdc.send_upstream_channel_success(channel_open_success(&request))
+        .await;
+    waiting
+        .wait_for(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
 
     jdc.jdc.shutdown().await;
 }
