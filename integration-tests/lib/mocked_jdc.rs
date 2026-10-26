@@ -2,7 +2,7 @@ use crate::{
     interceptor::MessageDirection,
     mock_roles::{MockUpstream, SniffedDownstream, WithSetup, send_chain_tip},
     sniffer::Sniffer,
-    start_jdc, start_sniffer, sv2_tp_config,
+    start_jdc_with_user_identities, start_sniffer, sv2_tp_config,
     utils::get_available_address,
 };
 use async_channel::Sender;
@@ -32,6 +32,11 @@ pub struct MockedJdc {
 impl MockedJdc {
     /// Starts JDC with its mocked peers.
     pub async fn start() -> Self {
+        Self::start_with_signature("JDC").await
+    }
+
+    /// Starts JDC with its mocked peers and `jdc_signature` as the miner tag of its coinbases.
+    pub async fn start_with_signature(jdc_signature: &str) -> Self {
         let tp_address = get_available_address();
         let tp = MockUpstream::new(
             tp_address,
@@ -75,16 +80,21 @@ impl MockedJdc {
         .start()
         .await;
 
-        let (jdc, address, _) = start_jdc(
+        let (jdc, address, _) = start_jdc_with_user_identities(
             &[
-                (pool_sniffer_address, jds_address),
-                (next_pool_sniffer_address, next_jds_address),
+                (pool_sniffer_address, jds_address, "IT_TEST".to_string()),
+                (
+                    next_pool_sniffer_address,
+                    next_jds_address,
+                    "IT_TEST".to_string(),
+                ),
             ],
             sv2_tp_config(tp_address),
             vec![],
             vec![],
             false,
             None,
+            jdc_signature,
         );
 
         Self {

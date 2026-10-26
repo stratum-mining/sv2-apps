@@ -83,12 +83,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     // Only the answer to the open JDC is waiting for is acted on (see `pending_upstream_open`),
     // and any other success is ignored and logged. That answer establishes a client-side extended
     // channel, with the hashrate JDC asked for:
-    // - With no downstream waiting for it, or an extranonce layout JDC can't build its extranonce
-    //   allocator from, the channel is closed and the upstream state goes back from `Pending` to
-    //   `NoChannel`.
-    // - A channel JDC can't use, with an extranonce too small for JDC's prefix and the rollable
-    //   bytes it reserves, a target easier than the `max_target` JDC asked for, or one
-    //   `ExtendedChannel` refuses, such as a target no share can meet, makes JDC fall back.
+    // - With no downstream waiting for it, the channel is closed and the upstream state goes back
+    //   from `Pending` to `NoChannel`.
+    // - A channel JDC can't use makes JDC fall back before anything is installed: an extranonce too
+    //   small for JDC's prefix and the rollable bytes it reserves, a target easier than the
+    //   `max_target` JDC asked for, a layout JDC can't build its extranonce allocator from, a full
+    //   extranonce too large for the coinbase scriptSig, or one `ExtendedChannel` refuses, such as
+    //   a target no share can meet.
     // - Otherwise, we configure the extranonce factory, create a new `ExtendedChannel` and
     //   `JobFactory`, and update the upstream state from `Pending` to `Connected`.
     //
@@ -176,29 +177,18 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             "Calculated extranonce ranges"
         );
 
-        let extranonce_allocator = match ExtranonceAllocator::from_upstream_prefix(
+        // The Pool chose the extranonce layout, so one JDC can't allocate downstream extranonces
+        // from makes JDC fall back from the Pool.
+        let extranonce_allocator = ExtranonceAllocator::from_upstream_prefix(
             msg.extranonce_prefix.to_owned_bytes(),
             Vec::new(),
             total_len as u8,
             JDC_MAX_CHANNELS,
-        ) {
-            Ok(allocator) => allocator,
-            Err(e) => {
-                warn!("Failed to build extranonce allocator: {e:?}");
-                self.upstream_state.set(UpstreamState::NoChannel);
-                let close_channel =
-                    create_close_channel_msg(msg.channel_id, "downstream not available");
-                let close_channel = MiningOwned::CloseChannel(close_channel);
-                let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(close_channel))
-                    .map_err(JDCError::shutdown)?;
-                self.channel_manager_io
-                    .upstream_sender
-                    .send(sv2_frame)
-                    .await
-                    .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
-                return Ok(());
-            }
-        };
+        )
+        .map_err(|e| {
+            warn!("Pool granted an extranonce layout JDC can't allocate from, preparing fallback: {e:?}");
+            JDCError::fallback(e)
+        })?;
 
         let pool_tag_string = self.pool_tag_string.get().map_err(JDCError::shutdown)?;
         let job_factory =
@@ -224,12 +214,24 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             }
         };
 
+        // Every downstream group channel builds its coinbases with the same tags as `job_factory`,
+        // so a full extranonce this factory can't fit in the coinbase scriptSig is one no group
+        // can take. The Pool chose its size, so JDC falls back from the Pool before anything is
+        // installed, rather than leave the groups to refuse it.
+        let full_extranonce_size = extended_channel.get_full_extranonce_size();
+        if !job_factory.fits_script_sig_budget(full_extranonce_size) {
+            warn!(
+                full_extranonce_size,
+                "Pool granted a full extranonce too large for the coinbase scriptSig, preparing fallback"
+            );
+            return Err(JDCError::fallback(JDCErrorKind::ExtranonceSizeTooLarge));
+        }
+
         if let Some(prevhash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? {
             _ = extended_channel.on_chain_tip_update(prevhash.clone().into());
             debug!("Applied last_new_prev_hash to new extended channel");
         }
 
-        let full_extranonce_size = extended_channel.get_full_extranonce_size();
         self.extranonce_allocator
             .set(extranonce_allocator)
             .map_err(JDCError::shutdown)?;
@@ -247,7 +249,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)?;
         self.downstream.try_for_each(|_, downstream| {
             // the outer Result is the lock guard, the inner one is the group channel rejecting a
-            // `full_extranonce_size` that would overflow the coinbase scriptSig budget
+            // `full_extranonce_size` that would overflow the coinbase scriptSig budget, which the
+            // check above rules out
             downstream
                 .group_channel
                 .with(|group_channel| group_channel.set_full_extranonce_size(full_extranonce_size))

@@ -156,3 +156,74 @@ async fn jdc_falls_back_from_a_pool_assigning_a_target_easier_than_requested() {
 
     jdc.jdc.shutdown().await;
 }
+
+// A Pool that grants an extranonce prefix and size adding up to more than any extranonce can
+// hold leaves JDC no extranonce to allocate downstream channels from: JDC falls back from it
+// without opening any downstream channel.
+#[tokio::test]
+async fn jdc_falls_back_from_a_pool_extranonce_layout_it_cannot_allocate_from() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    downstream.request_extended_channel().await;
+    let request = jdc.upstream_channel_request().await;
+
+    // One byte more than the 32 an extranonce can hold.
+    let mut success = channel_open_success(&request);
+    success.extranonce_prefix = vec![0; 33 - request.min_extranonce_size as usize]
+        .try_into()
+        .expect("extranonce prefix must fit into B032");
+    jdc.send_upstream_channel_success(success).await;
+
+    jdc.wait_for_fallback().await;
+    assert!(
+        downstream
+            .sniffer
+            .assert_message_not_present(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "no downstream channel may open on an extranonce layout JDC can't allocate from"
+    );
+
+    jdc.jdc.shutdown().await;
+}
+
+// The coinbase scriptSig holds at most 100 bytes: up to 8 for the template's prefix, 8 for push
+// opcodes, "Sv2" and tag delimiters, the miner tag and the full extranonce. With a 60-byte miner
+// tag, a downstream's 20-byte solo extranonce fits (96 bytes) but the 32-byte one the Pool grants
+// does not (108), so no downstream group could take it: JDC falls back from the Pool instead of
+// shutting down.
+#[tokio::test]
+async fn jdc_falls_back_from_a_pool_extranonce_too_large_for_the_coinbase() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start_with_signature(&"x".repeat(60)).await;
+    jdc.send_chain_tip().await;
+    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    downstream.request_extended_channel().await;
+    let request = jdc.upstream_channel_request().await;
+
+    let mut success = channel_open_success(&request);
+    success.extranonce_prefix = vec![0; 32 - request.min_extranonce_size as usize]
+        .try_into()
+        .expect("extranonce prefix must fit into B032");
+    jdc.send_upstream_channel_success(success).await;
+
+    jdc.wait_for_fallback().await;
+    assert!(
+        downstream
+            .sniffer
+            .assert_message_not_present(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "no downstream channel may open on an extranonce too large for the coinbase"
+    );
+
+    jdc.jdc.shutdown().await;
+}

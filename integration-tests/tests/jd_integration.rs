@@ -1845,6 +1845,7 @@ async fn jdc_per_upstream_identity_switches_on_fallback() {
         vec![],
         false,
         None,
+        "JDC",
     );
 
     primary_jds_sniffer

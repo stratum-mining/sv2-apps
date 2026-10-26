@@ -229,9 +229,12 @@ pub fn start_jdc(
         required_extensions,
         enable_monitoring,
         jdc_mode,
+        "JDC",
     )
 }
 
+/// Like [`start_jdc`], with a user identity per upstream and `jdc_signature` as the miner tag JDC
+/// writes in the coinbase scriptSig of its jobs.
 pub fn start_jdc_with_user_identities(
     pool: &[(SocketAddr, SocketAddr, String)], /* (pool_address, jds_address,
                                                 * per_upstream_user_identity) */
@@ -240,6 +243,7 @@ pub fn start_jdc_with_user_identities(
     required_extensions: Vec<u16>,
     enable_monitoring: bool,
     jdc_mode: Option<ConfigJDCMode>,
+    jdc_signature: &str,
 ) -> (JobDeclaratorClient, SocketAddr, Option<SocketAddr>) {
     use jd_client_sv2::config::{JobDeclaratorClientConfig, PoolConfig, ProtocolConfig, Upstream};
     let jdc_address = get_available_address();
@@ -287,7 +291,7 @@ pub fn start_jdc_with_user_identities(
         3600,
         template_provider_config,
         upstreams,
-        "JDC".to_string(),
+        jdc_signature.to_string(),
         jdc_mode,
         supported_extensions,
         required_extensions,
