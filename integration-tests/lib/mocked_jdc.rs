@@ -1,4 +1,5 @@
 use crate::{
+    interceptor::MessageDirection,
     mock_roles::{MockUpstream, SniffedDownstream, WithSetup, send_chain_tip},
     sniffer::Sniffer,
     start_jdc, start_sniffer, sv2_tp_config,
@@ -8,7 +9,7 @@ use async_channel::Sender;
 use jd_client_sv2::JobDeclaratorClient;
 use std::{net::SocketAddr, time::Duration};
 use stratum_apps::stratum_core::{
-    common_messages_sv2::Protocol,
+    common_messages_sv2::{MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol},
     mining_sv2::{
         OpenExtendedMiningChannelOwned, OpenExtendedMiningChannelSuccessOwned,
         OpenMiningChannelErrorOwned,
@@ -94,6 +95,16 @@ impl MockedJdc {
             pool_sniffer,
             next_pool_sniffer,
         }
+    }
+
+    /// Waits for JDC to fall back from the first Pool/JDS pair and set up the next Pool.
+    pub async fn wait_for_fallback(&self) {
+        self.next_pool_sniffer
+            .wait_for_message_type(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            )
+            .await;
     }
 
     /// The Template Provider sends future template 1 and the prevhash activating it.

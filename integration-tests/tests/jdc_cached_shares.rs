@@ -69,10 +69,10 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
         MiningOwned::OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccessOwned {
             request_id: open_channel_msg.request_id,
             channel_id,
-            // Set the target to the maximum value (lowest difficulty)
-            // to guarantee the miner can easily generate valid shares.
-            // This helps ensure the first received share is valid.
-            target: [0xff_u8; 32].into(),
+            // The easiest target a compliant Pool may assign is the `max_target` JDC asked for,
+            // and every share the miner finds for its downstream channel meets it, so the first
+            // share JDC receives is one it can send upstream.
+            target: open_channel_msg.max_target.clone(),
             extranonce_size: open_channel_msg.min_extranonce_size,
             extranonce_prefix: vec![0x00, 0x00, 0x00, 0x00].try_into().unwrap(),
             group_channel_id: 1,

@@ -239,6 +239,8 @@ pub enum JDCErrorKind {
     ExtranonceSizeTooLarge,
     /// Extranonce size is too small
     ExtranonceSizeTooSmall,
+    /// An upstream opened a channel with a target easier than the requested `max_target`.
+    InitialTargetAboveMaxTarget,
     /// Could not create group channel
     FailedToCreateGroupChannel(GroupChannelError),
     ///Channel Errors
@@ -385,6 +387,10 @@ impl fmt::Display for JDCErrorKind {
             ExtranonceSizeTooSmall => {
                 write!(f, "Extranonce size too small")
             }
+            InitialTargetAboveMaxTarget => write!(
+                f,
+                "upstream opened a channel with a target easier than the requested max_target"
+            ),
             FailedToCreateGroupChannel(e) => {
                 write!(f, "Failed to create group channel: {e:?}")
             }

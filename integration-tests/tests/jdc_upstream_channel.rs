@@ -119,3 +119,40 @@ async fn jdc_ignores_upstream_channel_open_answers_for_another_request() {
 
     jdc.jdc.shutdown().await;
 }
+
+// A Pool that opens the upstream channel with a target easier than the `max_target` JDC asked for
+// breaks the spec: JDC falls back from it without opening any downstream channel on that channel.
+#[tokio::test]
+async fn jdc_falls_back_from_a_pool_assigning_a_target_easier_than_requested() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    // 2^248 - 1, in little-endian: the all-ones target the Pool assigns below is easier.
+    let mut max_target = [0xff; 32];
+    max_target[31] = 0;
+    downstream
+        .request_extended_channel_with_max_target(max_target)
+        .await;
+    let request = jdc.upstream_channel_request().await;
+    assert_eq!(request.max_target.to_array(), max_target);
+
+    let mut success = channel_open_success(&request);
+    success.target = [0xff; 32].into();
+    jdc.send_upstream_channel_success(success).await;
+
+    jdc.wait_for_fallback().await;
+    assert!(
+        downstream
+            .sniffer
+            .assert_message_not_present(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "no downstream channel may open on an upstream channel with a target above the requested max"
+    );
+
+    jdc.jdc.shutdown().await;
+}

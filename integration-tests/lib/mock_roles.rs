@@ -429,8 +429,14 @@ impl SniffedDownstream {
 
     /// Asks for an extended channel with the easiest `max_target`.
     pub async fn request_extended_channel(&self) {
+        self.request_extended_channel_with_max_target([0xff; 32])
+            .await;
+    }
+
+    /// Asks for an extended channel with `max_target`, in little-endian, as on the wire.
+    pub async fn request_extended_channel_with_max_target(&self, max_target: [u8; 32]) {
         self.sender
-            .send(extended_channel_request([0xff; 32]))
+            .send(extended_channel_request(max_target))
             .await
             .expect("mock downstream should request an extended channel");
     }

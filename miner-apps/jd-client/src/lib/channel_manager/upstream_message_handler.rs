@@ -87,8 +87,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     //   allocator from, the channel is closed and the upstream state goes back from `Pending` to
     //   `NoChannel`.
     // - A channel JDC can't use, with an extranonce too small for JDC's prefix and the rollable
-    //   bytes it reserves, or one `ExtendedChannel` refuses, such as a target no share can meet,
-    //   makes JDC fall back.
+    //   bytes it reserves, a target easier than the `max_target` JDC asked for, or one
+    //   `ExtendedChannel` refuses, such as a target no share can meet, makes JDC fall back.
     // - Otherwise, we configure the extranonce factory, create a new `ExtendedChannel` and
     //   `JobFactory`, and update the upstream state from `Pending` to `Connected`.
     //
@@ -147,6 +147,24 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 .await
                 .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
             return Ok(());
+        }
+
+        // The target the Pool assigns must not be easier than the `max_target` JDC asked for, and a
+        // Pool that can't meet it must refuse the open (sv2-spec 05,
+        // `OpenExtendedMiningChannel.Success`). A Pool that breaks this is left before any channel
+        // state is installed.
+        let initial_target = Target::from_le_bytes(*msg.target.as_array());
+        let requested_max_target = Target::from_le_bytes(requested.max_target.to_array());
+        if initial_target > requested_max_target {
+            warn!(
+                channel_id = msg.channel_id,
+                %initial_target,
+                %requested_max_target,
+                "Pool opened the upstream channel with a target easier than the requested max_target, preparing fallback"
+            );
+            return Err(JDCError::fallback(
+                JDCErrorKind::InitialTargetAboveMaxTarget,
+            ));
         }
 
         let prefix_len = msg.extranonce_prefix.len();
