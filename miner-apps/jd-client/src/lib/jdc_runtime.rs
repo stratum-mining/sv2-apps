@@ -747,9 +747,10 @@ impl JdcRuntime<ChannelManagerReady> {
 
     // Attempts to initialize a single upstream (pool + JDS pair).
     //
-    // The pair is usable only once the Pool has answered its `SetupConnection`, so a failed setup
-    // fails the attempt like a failed connection does, whatever action its error carries.
-    // Returning drops the connection, so JDC closes its side of it.
+    // The pair is usable only once both the Pool and the JDS have answered their
+    // `SetupConnection`, so a failed setup fails the attempt like a failed connection does,
+    // whatever action its error carries. Returning drops the connections opened for the pair, so
+    // JDC closes its side of each.
     #[cfg_attr(not(test), hotpath::measure)]
     async fn try_initialize_single(
         &self,
@@ -777,7 +778,7 @@ impl JdcRuntime<ChannelManagerReady> {
 
         info!("Upstream connection done at initialize single");
 
-        let job_declarator = JobDeclarator::new(
+        let mut job_declarator = JobDeclarator::new(
             upstream_entry,
             self.state.io.jd_to_channel_manager_sender.clone(),
             self.state.io.channel_manager_to_jd_receiver.clone(),
@@ -788,6 +789,10 @@ impl JdcRuntime<ChannelManagerReady> {
         )
         .await
         .map_err(Self::failed_attempt)?;
+        job_declarator
+            .setup_connection()
+            .await
+            .map_err(Self::failed_attempt)?;
 
         Ok((upstream, job_declarator))
     }

@@ -1,5 +1,5 @@
 use crate::utils::{create_downstream, create_upstream, message_from_frame, wait_for_client};
-use async_channel::Sender;
+use async_channel::{Receiver, Sender};
 use std::{convert::TryInto, net::SocketAddr, time::Duration};
 use stratum_apps::{
     stratum_core::{
@@ -254,14 +254,20 @@ impl MockUpstream {
 }
 
 /// Accepts every connection a client opens to `address` and answers its `SetupConnection` with
-/// `reply`, so a test decides what the client gets back, malformed frames included.
-pub async fn answer_setup_connections(address: SocketAddr, reply: fn() -> OutboundFrame) {
+/// `reply`, so a test decides what the client gets back, malformed frames included. Each
+/// connection is reported on the returned receiver once the client has closed it.
+pub async fn answer_setup_connections(
+    address: SocketAddr,
+    reply: fn() -> OutboundFrame,
+) -> Receiver<()> {
     let listener = TcpListener::bind(address)
         .await
         .expect("the mock role's address is available");
+    let (closed_sender, closed_receiver) = async_channel::unbounded();
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.expect("the client connects");
+            let closed_sender = closed_sender.clone();
             tokio::spawn(async move {
                 let (receiver, sender) = create_downstream(stream)
                     .await
@@ -275,11 +281,24 @@ pub async fn answer_setup_connections(address: SocketAddr, reply: fn() -> Outbou
                     MESSAGE_TYPE_SETUP_CONNECTION
                 );
                 sender.send(reply()).await.expect("the reply is sent");
-                // Keeps the connection open until the client closes it.
+                // The stream ends once the client closes the connection.
                 while receiver.recv().await.is_ok() {}
+                _ = closed_sender.send(()).await;
             });
         }
     });
+    closed_receiver
+}
+
+/// A `SetupConnection.Success` accepting version 2 with no flags.
+pub fn setup_connection_success() -> OutboundFrame {
+    OutboundFrame::from_message(AnyMessageOwned::Common(
+        CommonMessagesOwned::SetupConnectionSuccess(SetupConnectionSuccessOwned {
+            used_version: 2,
+            flags: 0,
+        }),
+    ))
+    .expect("SetupConnection.Success can be framed")
 }
 
 /// A `SetupConnection.Success` header with an empty payload: the six bytes of `used_version` and

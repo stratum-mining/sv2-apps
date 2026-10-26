@@ -196,29 +196,18 @@ impl JobDeclarator {
         })
     }
 
-    /// Starts the JobDeclarator message loop.
+    /// Starts the JobDeclarator message loop, once [`Self::setup_connection`] has succeeded.
     ///
     /// - Waits for shutdown signals.
     /// - Handles incoming messages from Job Declarator and Channel Manager.
     /// - Cleans up on termination.
     pub async fn start(
-        mut self,
+        self,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) {
         let fallback_token = fallback_coordinator.token();
-        if let Err(e) = self.setup_connection().await {
-            _ = Self::handle_error_action(
-                "JobDeclarator::setup_connection",
-                &e,
-                &cancellation_token,
-                &fallback_token,
-            );
-            self.job_declarator_io.close();
-            return;
-        }
-
         task_manager.spawn(fallback_coordinator.track(async move {
             loop {
                 let mut self_clone_1 = self.clone();
