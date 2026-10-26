@@ -64,8 +64,8 @@ pub struct JobDeclaratorClientConfig {
     /// Protocol extensions JDC grants a downstream that asks for them.
     #[serde(default)]
     supported_downstream_extensions: Vec<u16>,
-    /// Protocol extensions every downstream must ask for. JDC refuses the extension negotiation
-    /// of a downstream that leaves one out.
+    /// Protocol extensions every downstream must ask for. JDC refuses a downstream that leaves one
+    /// out, and disconnects it.
     #[serde(default)]
     required_downstream_extensions: Vec<u16>,
     /// Optional monitoring server bind address

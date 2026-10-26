@@ -161,7 +161,7 @@ JDC negotiates protocol extensions on both of its sides, with a pair of settings
   Pool requires extensions itself, JDC agrees to the ones in `supported_extensions` and moves on
   otherwise.
 - `supported_downstream_extensions` and `required_downstream_extensions` are for downstreams. JDC
-  grants a downstream the supported ones it asks for, and refuses the negotiation of a downstream
+  grants a downstream the supported ones it asks for, and refuses and disconnects a downstream
   that leaves out a required one.
 
 All four are empty by default.

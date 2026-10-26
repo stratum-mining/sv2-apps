@@ -263,6 +263,19 @@ impl Downstream {
                     res = self_clone_1.handle_downstream_message() => {
                         if let Err(e) = res {
                             error!(?e, "Error handling downstream message for {downstream_id}");
+                            // A cancelled connection's writer drops the frames still queued, so a
+                            // downstream refused for leaving out a required extension keeps its
+                            // connection for a second, until its RequestExtensionsError has gone
+                            // out, as a refused SetupConnection does. The wait runs here, once the
+                            // select! has picked this branch, because the select! drops a branch
+                            // still waiting as soon as the channel manager sends this downstream a
+                            // message.
+                            if matches!(
+                                e.kind,
+                                JDCErrorKind::ClientDoesNotSupportRequiredExtensions(_)
+                            ) {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,

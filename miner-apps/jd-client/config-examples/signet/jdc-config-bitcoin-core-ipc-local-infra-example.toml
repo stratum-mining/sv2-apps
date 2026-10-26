@@ -53,7 +53,7 @@ supported_extensions = [
 supported_downstream_extensions = [
     0x0002,  # Worker-Specific Hashrate Tracking
 ]
-# Extensions every downstream must ask for (JDC refuses a downstream that leaves one out):
+# Extensions every downstream must ask for (JDC disconnects a downstream that leaves one out):
 # required_downstream_extensions = []
 
 # Monitoring HTTP server address for exposing channel data (optional)

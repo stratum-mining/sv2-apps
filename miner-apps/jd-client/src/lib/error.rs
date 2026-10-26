@@ -257,6 +257,8 @@ pub enum JDCErrorKind {
     RequiredExtensionsNotSupported(Vec<u16>),
     /// Server requires extensions that the translator doesn't support
     ServerRequiresUnsupportedExtensions(Vec<u16>),
+    /// Client does not support required extensions
+    ClientDoesNotSupportRequiredExtensions(Vec<u16>),
     /// BitcoinCoreSv2TDP cancellation token activated
     BitcoinCoreSv2TDPCancellationTokenActivated,
     /// Failed to create BitcoinCoreSv2TDP tokio runtime
@@ -428,6 +430,12 @@ impl fmt::Display for JDCErrorKind {
                 write!(
                     f,
                     "Server requires extensions that the translator doesn't support: {extensions:?}"
+                )
+            }
+            ClientDoesNotSupportRequiredExtensions(extensions) => {
+                write!(
+                    f,
+                    "Client does not support required extensions: {extensions:?}"
                 )
             }
             BitcoinCoreSv2TDPCancellationTokenActivated => {
