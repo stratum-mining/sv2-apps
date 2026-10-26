@@ -23,12 +23,11 @@ use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::accept_noise_connection,
     stratum_core::{
-        bitcoin::{Amount, Target, TxOut, consensus},
+        bitcoin::{Amount, Target, TxOut},
         channels_sv2::{
             Vardiff, VardiffState,
             client::extended::ExtendedChannel,
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
-            outputs::deserialize_outputs,
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
         },
         handlers_sv2::{
@@ -139,8 +138,8 @@ pub struct DeclaredJob {
     // The `SetCustomMiningJob` message associated with this job,
     // if a custom job was created.
     set_custom_mining_job: Option<SetCustomMiningJobOwned>,
-    // The coinbase output for this job.
-    coinbase_output: Vec<u8>,
+    // The outputs the job's coinbase pays.
+    coinbase_outputs: Vec<TxOut>,
     // The list of transactions included in the job’s template.
     tx_list: Vec<Vec<u8>>,
 }
@@ -422,7 +421,7 @@ pub struct ChannelManager {
     pub downstream_channel_id_and_job_id_to_template_id:
         SharedMap<DownstreamChannelJobId, TemplateId>,
     // The coinbase outputs currently in use.
-    pub coinbase_outputs: SharedLock<Vec<u8>>,
+    pub coinbase_outputs: SharedLock<Vec<TxOut>>,
     // The active upstream extended channel (client-side instance), if any.
     pub upstream_channel: SharedLock<Option<ExtendedChannel>>,
     // Optional "pool tag" string identifying the upstream pool.
@@ -534,7 +533,7 @@ impl ChannelManager {
         tp_sender: Sender<TemplateDistributionOwned>,
         tp_receiver: Receiver<TemplateDistributionOwned>,
         downstream_receiver: Receiver<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
-        coinbase_outputs: Vec<u8>,
+        coinbase_outputs: Vec<TxOut>,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
         mode: JDMode,
@@ -1415,10 +1414,7 @@ impl ChannelManager {
         &self,
         template: &NewTemplateOwned,
     ) -> JDCResult<Vec<TxOut>, error::ChannelManager> {
-        let mut outputs = deserialize_outputs(
-            self.coinbase_outputs.get().map_err(JDCError::shutdown)?,
-        )
-        .map_err(|_| JDCError::shutdown(JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs))?;
+        let mut outputs = self.coinbase_outputs.get().map_err(JDCError::shutdown)?;
         outputs[0].value = Amount::from_sat(template.coinbase_tx_value_remaining);
         Ok(outputs)
     }
@@ -1471,7 +1467,6 @@ impl ChannelManager {
             return Ok(None);
         };
         let coinbase_outputs = self.coinbase_outputs_for(template)?;
-        let coinbase_output = consensus::serialize(&coinbase_outputs);
 
         let custom_job = self
             .job_factory
@@ -1483,7 +1478,7 @@ impl ChannelManager {
                         token.mining_job_token.clone(),
                         prev_hash.clone().into(),
                         template.clone(),
-                        coinbase_outputs,
+                        coinbase_outputs.clone(),
                         full_extranonce_size,
                     )
                 })
@@ -1514,7 +1509,7 @@ impl ChannelManager {
                 template: template.clone(),
                 prev_hash: Some(prev_hash),
                 set_custom_mining_job: Some(custom_job.clone()),
-                coinbase_output,
+                coinbase_outputs,
                 tx_list: Vec::new(),
             },
         );

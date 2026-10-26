@@ -514,7 +514,6 @@ impl ChannelManager {
 
         let mining_token = token.mining_job_token.clone();
         let deserialized_outputs = self.coinbase_outputs_for(&template)?;
-        let reserialized_outputs = consensus::serialize(&deserialized_outputs);
 
         let tx_list: Vec<Transaction> = transactions_data
             .iter_bytes()
@@ -553,62 +552,79 @@ impl ChannelManager {
             })
             .map_err(JDCError::shutdown)?;
 
-        let declare_job = if let Some(full_extranonce_size) = upstream_full_extranonce_size {
-            self.job_factory
+        let coinbase_parts = match upstream_full_extranonce_size {
+            Some(full_extranonce_size) => self
+                .job_factory
                 .with(|job_factory| {
-                    let job_factory = job_factory.as_mut()?;
-                    if let Ok((coinbase_tx_prefix, coinbase_tx_suffix)) = job_factory
-                        .new_coinbase_tx_prefix_and_suffix(
+                    job_factory.as_mut().map(|job_factory| {
+                        job_factory.new_coinbase_tx_prefix_and_suffix(
                             template.clone(),
                             deserialized_outputs.clone(),
                             full_extranonce_size,
                         )
-                    {
-                        let declare_job = DeclareMiningJobOwned {
-                            request_id,
-                            mining_job_token: mining_token,
-                            version: template.version,
-                            coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
-                            coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
-                            wtxid_list: wtx_ids,
-                            excess_data,
-                        };
-
-                        self.last_declare_job_store.insert(
-                            request_id,
-                            DeclaredJob {
-                                declare_mining_job: Some(declare_job.clone()),
-                                template,
-                                prev_hash: prevhash,
-                                set_custom_mining_job: None,
-                                coinbase_output: reserialized_outputs,
-                                tx_list: transactions_data
-                                    .iter_bytes()
-                                    .map(|tx| tx.to_vec())
-                                    .collect(),
-                            },
-                        );
-
-                        return Some(declare_job);
-                    }
-                    None
+                    })
                 })
-                .map_err(JDCError::shutdown)?
-        } else {
-            None
+                .map_err(JDCError::shutdown)?,
+            None => None,
         };
+        let Some(coinbase_parts) = coinbase_parts else {
+            return Ok(());
+        };
+        // A template whose declaration can't be built would leave the downstreams mining work
+        // whose shares could never reach the Pool. JDC shuts down instead, as it does when a
+        // coinbase-only custom job can't be built. The JDS's outputs were checked when its token
+        // answer arrived, so only Template Provider input gets here.
+        let (coinbase_tx_prefix, coinbase_tx_suffix) = coinbase_parts.map_err(|e| {
+            error!(
+                error = ?e,
+                template_id = template.template_id,
+                "Failed to build a job declaration"
+            );
+            JDCError::shutdown(JDCErrorKind::FailedToDeclareJob)
+        })?;
+        let (Ok(coinbase_tx_prefix), Ok(coinbase_tx_suffix)) =
+            (coinbase_tx_prefix.try_into(), coinbase_tx_suffix.try_into())
+        else {
+            error!(
+                template_id = template.template_id,
+                "A job declaration's coinbase does not fit DeclareMiningJob"
+            );
+            return Err(JDCError::shutdown(JDCErrorKind::FailedToDeclareJob));
+        };
+
+        let declare_job = DeclareMiningJobOwned {
+            request_id,
+            mining_job_token: mining_token,
+            version: template.version,
+            coinbase_tx_prefix,
+            coinbase_tx_suffix,
+            wtxid_list: wtx_ids,
+            excess_data,
+        };
+        self.last_declare_job_store.insert(
+            request_id,
+            DeclaredJob {
+                declare_mining_job: Some(declare_job.clone()),
+                template,
+                prev_hash: prevhash,
+                set_custom_mining_job: None,
+                coinbase_outputs: deserialized_outputs,
+                tx_list: transactions_data
+                    .iter_bytes()
+                    .map(|tx| tx.to_vec())
+                    .collect(),
+            },
+        );
 
         if is_activated_future_template {
             return Ok(());
         }
 
-        if let Some(declare_job) = declare_job {
-            _ = self
-                .channel_manager_io
-                .jd_sender
-                .send(JobDeclarationOwned::DeclareMiningJob(declare_job))
-                .await;
-        }
+        _ = self
+            .channel_manager_io
+            .jd_sender
+            .send(JobDeclarationOwned::DeclareMiningJob(declare_job))
+            .await;
 
         Ok(())
     }
@@ -720,7 +736,7 @@ mod tests {
             tp_sender,
             tp_receiver,
             downstream_receiver,
-            jds_coinbase_outputs(),
+            consensus::deserialize(&jds_coinbase_outputs()).unwrap(),
             vec![],
             vec![],
             jd_mode.clone(),
@@ -959,12 +975,12 @@ mod tests {
         let mut recorded = None;
         manager.last_declare_job_store.for_each(|_, declared_job| {
             if declared_job.template.template_id == 2 {
-                recorded = Some(declared_job.coinbase_output.clone());
+                recorded = Some(declared_job.coinbase_outputs.clone());
             }
         });
         let recorded = recorded.expect("the custom job is recorded");
         assert_eq!(
-            consensus::deserialize::<Vec<TxOut>>(&recorded).unwrap(),
+            recorded,
             manager.coinbase_outputs_for(&template(2, false)).unwrap()
         );
     }
@@ -1863,5 +1879,150 @@ mod tests {
             constraints.coinbase_output_max_additional_size as usize,
             outputs_size
         );
+    }
+
+    // The largest outputs a JDS can hand out are those whose declaration, with the template's
+    // witness commitment, fills `DeclareMiningJob.coinbase_tx_suffix` exactly: they are accepted
+    // and declared. One byte more is refused.
+    #[tokio::test]
+    async fn largest_usable_outputs_fill_a_declaration_exactly() {
+        let outputs = |script_len: usize| {
+            consensus::serialize(&vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(
+                    [vec![0x6a], vec![0; script_len - 1]].concat(),
+                ),
+            }])
+        };
+
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(&manager);
+        answer.coinbase_outputs = outputs(65_435).try_into().unwrap();
+        let error = manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error.action, Action::Fallback));
+
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.allocate_tokens(1).await.unwrap();
+        let mut answer = token_success(&manager);
+        answer.coinbase_outputs = outputs(65_434).try_into().unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, answer, None)
+            .await
+            .unwrap();
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        let declaration = std::iter::from_fn(|| sent.jds.try_recv().ok())
+            .find_map(|message| match message {
+                JobDeclarationOwned::DeclareMiningJob(declaration) => Some(declaration),
+                _ => None,
+            })
+            .expect("JDC declares the template");
+        assert_eq!(declaration.coinbase_tx_suffix.len(), u16::MAX as usize);
+    }
+
+    // A declaration the job factory can't build, here because the template leaves no room in the
+    // scriptSig for JDC's tags, shuts JDC down, as a coinbase-only custom job does, and nothing is
+    // declared.
+    #[tokio::test]
+    async fn declaration_that_cant_be_built_shuts_jdc_down() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, oversized_template(2, false), None)
+            .await
+            .unwrap();
+
+        let error = manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Shutdown));
+        assert_eq!(declarations_sent(&sent.jds), 0);
+    }
+
+    // A custom job the job factory rejects after the JDS accepted its declaration shuts JDC down,
+    // as a coinbase-only custom job does, and nothing goes to the Pool.
+    #[tokio::test]
+    async fn custom_job_rejected_after_its_declaration_shuts_jdc_down() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let outputs = manager.coinbase_outputs_for(&template(2, false)).unwrap();
+        manager.last_declare_job_store.insert(
+            7,
+            DeclaredJob {
+                declare_mining_job: None,
+                template: oversized_template(2, false),
+                prev_hash: Some(prev_hash(1)),
+                set_custom_mining_job: None,
+                coinbase_outputs: outputs,
+                tx_list: Vec::new(),
+            },
+        );
+
+        let error = manager
+            .handle_declare_mining_job_success(
+                None,
+                stratum_apps::stratum_core::job_declaration_sv2::DeclareMiningJobSuccessOwned {
+                    request_id: 7,
+                    new_mining_job_token: token(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.action, Action::Shutdown));
+        assert!(sent_to_pool(&sent.pool).is_empty());
+    }
+
+    // A token answer whose outputs JDC can't use makes JDC fall back, and changes nothing: no
+    // token is queued, JDC keeps its outputs, and the Template Provider gets no constraints.
+    #[tokio::test]
+    async fn unusable_token_answers_fall_back_and_change_nothing() {
+        let output = |sats, script: Vec<u8>| TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: ScriptBuf::from_bytes(script),
+        };
+        let unusable_outputs = [
+            // Not a list of outputs: a CompactSize cut short.
+            vec![0xfd],
+            // No output to pay the template's reward into.
+            consensus::serialize(&Vec::<TxOut>::new()),
+            // A value in the pool payout output, or in another one.
+            consensus::serialize(&vec![output(1, vec![])]),
+            consensus::serialize(&vec![output(0, vec![]), output(1, vec![])]),
+            // More sigops than `CoinbaseOutputConstraints` can carry.
+            consensus::serialize(&vec![output(0, vec![0xae; 1000])]),
+            // Too big for a job's coinbase: one output filling the whole 64 KiB field.
+            consensus::serialize(&vec![output(0, [vec![0x6a], vec![0; 65_522]].concat())]),
+        ];
+
+        for coinbase_outputs in unusable_outputs {
+            let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+            let outputs = manager.coinbase_outputs.get().unwrap();
+            manager.allocate_tokens(1).await.unwrap();
+            let mut answer = token_success(&manager);
+            answer.coinbase_outputs = coinbase_outputs.try_into().unwrap();
+
+            let error = manager
+                .handle_allocate_mining_job_token_success(None, answer, None)
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error.action, Action::Fallback));
+            assert_eq!(queued_tokens(&manager), 1);
+            assert_eq!(manager.coinbase_outputs.get().unwrap(), outputs);
+            assert!(sent.tp.try_recv().is_err());
+        }
     }
 }
