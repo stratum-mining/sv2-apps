@@ -346,6 +346,10 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 "Released the custom jobs the chain tip moved past"
             );
         }
+        // Downstream jobs of every other template are stale now, and a share on one is rejected
+        // before routing is read, so their routing entries go too.
+        self.downstream_channel_id_and_job_id_to_template_id
+            .retain(|_, template_id| *template_id == msg.template_id);
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -3195,5 +3199,29 @@ mod tests {
         assert!(!manager.vardiff.contains_key(&(1, 5).into()));
         assert!(manager.vardiff.contains_key(&(1, 6).into()));
         assert_eq!(routed_channels(&manager), vec![6, 6]);
+    }
+
+    // A new chain tip keeps the routing entries of the template it activates and releases those
+    // of every other template: the previous tip's jobs, and those of a future template it doesn't
+    // activate.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_the_routing_entries_it_leaves_behind() {
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        for (job_id, template_id) in [(1, 2), (2, 3), (3, 4)] {
+            manager
+                .downstream_channel_id_and_job_id_to_template_id
+                .insert((1, 5, job_id).into(), template_id);
+        }
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+
+        let mut routed = Vec::new();
+        manager
+            .downstream_channel_id_and_job_id_to_template_id
+            .for_each(|key, template_id| routed.push((key.job_id, *template_id)));
+        assert_eq!(routed, vec![(2, 3)]);
     }
 }
