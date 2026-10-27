@@ -343,9 +343,11 @@ pub(crate) fn tlv_user_identity_from_sv1_worker_name(
         }
         let tlv_user_identity = &sv1_worker_name[..end];
         warn!(
-            "extension 0x0002 negotiated; sv1_worker_name '{}' exceeds {} bytes ({} bytes), \
-             truncating TLV user_identity to '{}'",
-            sv1_worker_name, MAX_USER_IDENTITY_LENGTH, len, tlv_user_identity
+            worker_name = %sv1_worker_name,
+            len,
+            max_len = MAX_USER_IDENTITY_LENGTH,
+            truncated = %tlv_user_identity,
+            "SV1 worker name exceeds maximum length: truncating for extension 0x0002",
         );
         tlv_user_identity
     };

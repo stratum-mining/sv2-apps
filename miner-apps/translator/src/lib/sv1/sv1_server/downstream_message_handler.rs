@@ -4,7 +4,7 @@ use stratum_apps::stratum_core::sv1_api::{
     json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be, VERSION_ROLLING_MASK},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     error::{self, TproxyError},
@@ -27,7 +27,10 @@ impl IsServer for Sv1Server {
     ) -> Result<(Option<server_to_client::VersionRollingParams>, Option<bool>), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
-        info!("Received mining.configure from SV1 downstream");
+        debug!(
+            downstream_id,
+            "Received mining.configure from SV1 downstream"
+        );
         debug!("Downstream {downstream_id}: mining.configure = {}", request);
 
         self.with_registered_downstream(downstream_id, |downstream| {
@@ -63,7 +66,10 @@ impl IsServer for Sv1Server {
     ) -> Result<Vec<(String, String)>, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
-        info!("Received mining.subscribe from Sv1 downstream");
+        debug!(
+            downstream_id,
+            "Received mining.subscribe from SV1 downstream"
+        );
         debug!("Down: Handling mining.subscribe: {}", request);
 
         let set_difficulty_sub = (
@@ -85,7 +91,10 @@ impl IsServer for Sv1Server {
         request: &client_to_server::Authorize,
     ) -> Result<bool, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
-        info!("Received mining.authorize from Sv1 downstream {downstream_id}");
+        debug!(
+            downstream_id,
+            "Received mining.authorize from SV1 downstream"
+        );
         debug!("Down: Handling mining.authorize: {}", request);
         Ok(true)
     }
@@ -136,17 +145,17 @@ impl IsServer for Sv1Server {
                     let channel_id = match data.channel_id {
                         Some(id) => id,
                         None => {
-                            error!(
-                                "Cannot submit share: channel_id is None \
-                         (waiting for OpenExtendedMiningChannelSuccess)"
+                            warn!(
+                                downstream_id,
+                                "Cannot submit share: channel is not open yet (waiting for OpenExtendedMiningChannelSuccess)"
                             );
                             return Ok(SubmitOutcome::Rejected(SubmitError::Other));
                         }
                     };
 
-                    info!(
-                        "Received mining.submit from SV1 downstream for channel id: {}",
-                        channel_id
+                    debug!(
+                        downstream_id,
+                        channel_id, "Received mining.submit from SV1 downstream"
                     );
 
                     let Some(job_context) = data.job_validation_context(job_id) else {
@@ -340,7 +349,7 @@ impl IsServer for Sv1Server {
     }
 
     fn notify(&mut self, _client_id: Option<usize>) -> Result<json_rpc::Message, Self::Error> {
-        warn!("notify() called on Sv1Server - this method is not implemented for Sv1Server");
+        warn!("notify() called on Sv1Server: method is not implemented");
         Err(
             stratum_apps::stratum_core::sv1_api::error::Error::UnexpectedMessage(
                 "notify".to_string(),

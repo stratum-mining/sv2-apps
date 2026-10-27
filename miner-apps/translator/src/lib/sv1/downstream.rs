@@ -25,7 +25,7 @@ use stratum_apps::{
     utils::types::{ChannelId, DownstreamId, Hashrate},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// tProxy-local work queued by the SV1 server for a single downstream task.
 ///
@@ -484,17 +484,17 @@ impl Downstream {
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
-                        info!("Downstream {downstream_id}: received app shutdown signal");
+                        debug!(downstream_id, "Downstream received application shutdown signal");
                         break;
                     }
                     _ = fallback_token.cancelled() => {
-                        info!("Downstream {downstream_id}: fallback triggered");
+                        debug!(downstream_id, "Downstream fallback triggered");
                         break;
                     }
                     // Handle downstream -> server message
                     res = self.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!("Downstream {downstream_id}: error in downstream message handler: {e:?}");
+                            error!(downstream_id, error = ?e, "Failed to handle downstream message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,
@@ -509,7 +509,7 @@ impl Downstream {
                     // Handle server -> downstream message
                     res = self.handle_sv1_server_message() => {
                         if let Err(e) = res {
-                            error!("Downstream {downstream_id}: error in server message handler: {e:?}");
+                            error!(downstream_id, error = ?e, "Failed to handle server message for downstream");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_sv1_server_message",
                                 &e,
@@ -522,13 +522,13 @@ impl Downstream {
                     }
 
                     else => {
-                        warn!("Downstream {downstream_id}: all channels closed; exiting task");
+                        debug!(downstream_id, "All channels closed; exiting downstream task");
                         break;
                     }
                 }
             }
 
-            warn!("Downstream {downstream_id}: unified task shutting down");
+            debug!(downstream_id, "Downstream unified task shutting down");
             self.downstream_cancellation_token.cancel();
             self.downstream_io.close();
             on_disconnect().await;
@@ -611,7 +611,11 @@ impl Downstream {
         let message = match self.downstream_io.downstream_sv1_receiver.recv().await {
             Ok(msg) => msg,
             Err(e) => {
-                error!("Error receiving downstream message: {:?}", e);
+                debug!(
+                    downstream_id,
+                    error = ?e,
+                    "Downstream channel closed (disconnecting downstream)"
+                );
                 return Err(TproxyError::disconnect(e, downstream_id));
             }
         };
@@ -675,7 +679,7 @@ impl Downstream {
         let Some((difficulty, extranonce)) = messages else {
             warn!(
                 downstream_id = self.downstream_id,
-                "Disconnecting SV1 miner before a job requiring unannounced mining.set_extranonce support"
+                "Disconnecting SV1 miner: job requires unannounced mining.set_extranonce support"
             );
             self.disconnect();
             return Ok(());
@@ -693,7 +697,11 @@ impl Downstream {
                 .send(message)
                 .await
                 .map_err(|error| {
-                    error!("Down: Failed to send mining job messages: {error:?}");
+                    debug!(
+                        downstream_id = self.downstream_id,
+                        error = ?error,
+                        "Failed to forward mining job messages (channel closed)"
+                    );
                     TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, self.downstream_id)
                 })?;
         }

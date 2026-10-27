@@ -352,9 +352,10 @@ impl Sv1Server {
             // Broadcast to every connected downstream.
             for (downstream_id, sender) in downstream_senders {
                 if let Err(e) = sender.send(Sv1ServerEvent::Notify(msg.clone())).await {
-                    warn!(
-                        "Failed to send notify to downstream {}: channel closed: {}",
-                        downstream_id, e
+                    debug!(
+                        downstream_id,
+                        error = %e,
+                        "Failed to send notify to downstream (channel closed)"
                     );
                 }
             }
@@ -372,9 +373,10 @@ impl Sv1Server {
             let Some(sender) = sender else { return };
 
             if let Err(e) = sender.send(Sv1ServerEvent::Notify(msg)).await {
-                warn!(
-                    "Failed to send notify to downstream {}: channel closed: {}",
-                    downstream_id, e
+                debug!(
+                    downstream_id,
+                    error = %e,
+                    "Failed to send notify to downstream (channel closed)"
                 );
             }
         }
@@ -500,7 +502,7 @@ impl Sv1Server {
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) -> TproxyResult<(), error::Sv1Server> {
-        info!("Starting SV1 server on {}", self.listener_addr);
+        info!(address = %self.listener_addr, "Starting SV1 server");
 
         // get the first target for the first set difficulty message
         let first_target: Target = hash_rate_to_target(
@@ -516,11 +518,11 @@ impl Sv1Server {
         let keepalive_future = self.clone().spawn_job_keepalive_loop();
 
         let listener = TcpListener::bind(self.listener_addr).await.map_err(|e| {
-            error!("Failed to bind to {}: {}", self.listener_addr, e);
+            error!(address = %self.listener_addr, error = %e, "Failed to bind SV1 listener");
             TproxyError::shutdown(e)
         })?;
 
-        info!("Translator Proxy: listening on {}", self.listener_addr);
+        info!(address = %self.listener_addr, "Listening for SV1 downstream connections");
 
         let task_manager_clone = task_manager.clone();
         let vardiff_enabled = self.config.downstream_difficulty_config.enable_vardiff;
@@ -545,14 +547,14 @@ impl Sv1Server {
 
                     // Handle fallback trigger
                     _ = fallback_token.cancelled() => {
-                        info!("SV1 Server: fallback triggered, clearing state");
+                        info!("SV1 server fallback triggered; clearing state");
                         self.cleanup();
                         break;
                     }
                     result = listener.accept() => {
                         match result {
                             Ok((stream, addr)) => {
-                                info!("New SV1 downstream connection from {}", addr);
+                                info!(peer_addr = %addr, "Accepted new SV1 downstream connection");
                                 let connection_token = cancellation_token.child_token();
                                 let connection = ConnectionSV1::new(
                                     stream,
@@ -578,7 +580,10 @@ impl Sv1Server {
                                     connection_token,
                                 );
                                 self.downstreams.insert(downstream_id, downstream.clone());
-                                info!("Downstream {} registered successfully (channel will be opened after first message)", downstream_id);
+                                info!(
+                                    downstream_id,
+                                    "Downstream registered successfully (channel will open on first message)"
+                                );
 
                                 let sv1_server = self.clone();
                                 let disconnect_cancellation_token = cancellation_token.clone();
@@ -605,7 +610,7 @@ impl Sv1Server {
                                 );
                             }
                             Err(e) => {
-                                warn!("Failed to accept new connection: {:?}", e);
+                                warn!(error = ?e, "Failed to accept new SV1 connection");
                             }
                         }
                     }
@@ -739,8 +744,10 @@ impl Sv1Server {
                     .send(response.into())
                     .await
                     .map_err(|error| {
-                        error!(
-                            "Down: Failed to send not-subscribed response to downstream: {error:?}"
+                        debug!(
+                            downstream_id,
+                            error = ?error,
+                            "Failed to send not-subscribed response to downstream (channel closed)"
                         );
                         TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
                     })?;
@@ -824,7 +831,11 @@ impl Sv1Server {
                     .send(response_msg.into())
                     .await
                     .map_err(|error| {
-                        error!("Down: Failed to send SV1 response to downstream: {error:?}");
+                        debug!(
+                            downstream_id,
+                            error = ?error,
+                            "Failed to send SV1 response to downstream (channel closed)"
+                        );
                         TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
                     })?;
 
@@ -851,8 +862,10 @@ impl Sv1Server {
                             .send(Sv1ServerEvent::SetupComplete)
                             .await
                             .map_err(|error| {
-                                error!(
-                                    "Down: Failed to queue setup completion for downstream: {error:?}"
+                                debug!(
+                                    downstream_id,
+                                    error = ?error,
+                                    "Failed to queue setup completion for downstream (channel closed)"
                                 );
                                 TproxyError::disconnect(
                                     TproxyErrorKind::ChannelErrorSender,
@@ -866,7 +879,7 @@ impl Sv1Server {
                 // Message was handled but no response needed
             }
             Err(e) => {
-                error!("Down: Error handling downstream message: {:?}", e);
+                error!(downstream_id, error = ?e, "Failed to handle downstream message");
                 return Err(e);
             }
         }
@@ -900,7 +913,10 @@ impl Sv1Server {
         let job_version = match message.job_version {
             Some(version) => version,
             None => {
-                warn!("Received share submission without valid job version, skipping");
+                warn!(
+                    downstream_id = message.downstream_id,
+                    "Received share submission without valid job version (skipping)"
+                );
                 return Ok(());
             }
         };
@@ -917,8 +933,8 @@ impl Sv1Server {
                 share.job_id = original_job_id;
             } else {
                 warn!(
-                    "Failed to extract original job_id from keepalive job_id {}, rejecting share",
-                    job_id_str
+                    job_id = %job_id_str,
+                    "Failed to extract original job ID from keepalive job ID (rejecting share)"
                 );
                 return Ok(());
             }
@@ -936,25 +952,23 @@ impl Sv1Server {
         )
         .map_err(TproxyError::shutdown)?;
 
-        let worker_name = match self.with_registered_downstream(
-            message.downstream_id,
-            |downstream| {
+        let worker_name =
+            match self.with_registered_downstream(message.downstream_id, |downstream| {
                 downstream
                     .downstream_data
                     .with(|data| data.sv1_worker_name.clone())
                     .map_err(TproxyError::shutdown)
-            },
-        ) {
-            Ok(worker_name) => worker_name,
-            Err(e) if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) => {
-                warn!(
-                    "Downstream {} disconnected before its share could be forwarded; dropping share",
-                    message.downstream_id
-                );
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
+            }) {
+                Ok(worker_name) => worker_name,
+                Err(e) if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) => {
+                    debug!(
+                        downstream_id = message.downstream_id,
+                        "Downstream disconnected before share was forwarded (dropping share)"
+                    );
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
         let sv1_worker_name = (!worker_name.is_empty()).then_some(worker_name);
 
         self.sv1_server_io
@@ -975,14 +989,14 @@ impl Sv1Server {
         downstream_id: DownstreamId,
     ) -> TproxyResult<(), error::Sv1Server> {
         info!(
-            "SV1 server: opening extended mining channel for downstream {} after first message",
-            downstream_id
+            downstream_id,
+            "Opening extended mining channel for downstream after first message"
         );
 
         if !self.downstreams.contains_key(&downstream_id) {
-            error!(
-                "Downstream {} not found when attempting to open channel",
-                downstream_id
+            warn!(
+                downstream_id,
+                "Downstream not found when attempting to open channel"
             );
             return Err(TproxyError::disconnect(
                 TproxyErrorKind::DownstreamNotPresent(downstream_id),
@@ -1138,10 +1152,10 @@ impl Sv1Server {
 
                         // Process all queued messages now that channel is established
                         if !queued_messages.is_empty() {
-                            info!(
-                                "Processing {} queued Sv1 messages for downstream {}",
-                                queued_messages.len(),
-                                downstream_id
+                            debug!(
+                                downstream_id,
+                                count = queued_messages.len(),
+                                "Processing queued SV1 messages for downstream"
                             );
 
                             for message in queued_messages {
@@ -1159,7 +1173,11 @@ impl Sv1Server {
                     }
                     Err(e) => {
                         if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) {
-                            error!("Downstream not found for downstream_id: {}", downstream_id);
+                            warn!(
+                                downstream_id,
+                                channel_id = m.channel_id,
+                                "Downstream disconnected before OpenExtendedMiningChannelSuccess; closing channel"
+                            );
                             let reason_code =
                                 Str0255Owned::try_from("downstream disconnected".to_string())
                                     .unwrap();
@@ -1420,9 +1438,11 @@ impl Sv1Server {
             })
             .await
             .map_err(|error| {
-                error!(
+                debug!(
                     downstream_id,
-                    channel_id, "Failed to queue mining.set_extranonce: {error:?}"
+                    channel_id,
+                    error = ?error,
+                    "Failed to queue mining.set_extranonce (channel closed)"
                 );
                 TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
             })
@@ -1449,9 +1469,9 @@ impl Sv1Server {
     ) -> TproxyResult<(), error::Sv1Server> {
         let config = &self.config.downstream_difficulty_config;
         if !self.downstreams.contains_key(&downstream_id) {
-            warn!(
-                "Downstream {} disconnected before channel could be opened, skipping",
-                downstream_id
+            debug!(
+                downstream_id,
+                "Downstream disconnected before channel could be opened (skipping)"
             );
             return Err(TproxyError::disconnect(
                 TproxyErrorKind::DownstreamNotPresent(downstream_id),
@@ -1534,15 +1554,17 @@ impl Sv1Server {
 
         if let Some((downstream_id, downstream)) = current_downstream {
             info!(
-                "🔌 Downstream: {downstream_id} disconnected and removed from sv1 server downstreams"
+                downstream_id,
+                "Downstream disconnected and removed from SV1 server"
             );
             // In aggregated mode, send UpdateChannel to reflect the new state (only if vardiff
             // enabled)
             if self.config.downstream_difficulty_config.enable_vardiff {
                 if let Err(e) = self.send_update_channel_on_downstream_state_change().await {
                     error!(
-                        "Failed to send UpdateChannel after downstream {} disconnect: {:?}",
-                        downstream_id, e
+                        downstream_id,
+                        error = ?e,
+                        "Failed to send UpdateChannel after downstream disconnect"
                     );
                 }
             }
@@ -1562,7 +1584,10 @@ impl Sv1Server {
                 // only forwards the `CloseChannel` upstream in non-aggregated mode;
                 // in aggregated mode the upstream channel is shared across
                 // all downstreams and must stay open.
-                info!("Sending CloseChannel message: {channel_id} for downstream: {downstream_id}");
+                debug!(
+                    downstream_id,
+                    channel_id, "Sending CloseChannel message for downstream"
+                );
                 let reason_code =
                     Str0255Owned::try_from("downstream disconnected".to_string()).unwrap();
                 _ = self
@@ -1594,8 +1619,8 @@ impl Sv1Server {
         let check_interval =
             Duration::from_secs(keepalive_interval_secs as u64 / 2).max(Duration::from_secs(5));
         info!(
-            "Starting job keepalive loop with interval of {} seconds",
-            keepalive_interval_secs
+            interval_secs = keepalive_interval_secs,
+            "Starting job keepalive loop"
         );
 
         loop {
@@ -1754,7 +1779,10 @@ impl Sv1Server {
             .sv1_server_to_downstream_sender
             .get_cloned(&downstream_id)
         else {
-            warn!("No sender found for downstream {}", downstream_id);
+            warn!(
+                downstream_id,
+                "No sender found for downstream on keepalive job"
+            );
             return Ok(());
         };
         if sender
@@ -1762,9 +1790,9 @@ impl Sv1Server {
             .await
             .is_err()
         {
-            warn!(
-                "Failed to send keepalive job to downstream {}",
-                downstream_id
+            debug!(
+                downstream_id,
+                "Failed to send keepalive job to downstream (channel closed)"
             );
             return Ok(());
         }

@@ -126,9 +126,9 @@ impl<State> TranslatorRuntime<State> {
     pub(super) async fn shutdown(self) {
         self.translator.cancellation_token.cancel();
 
-        warn!(
-            "Graceful shutdown: waiting {} seconds for tasks to finish",
-            GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+        info!(
+            timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+            "Graceful shutdown: waiting for tasks to finish"
         );
         match tokio::time::timeout(
             Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
@@ -141,17 +141,17 @@ impl<State> TranslatorRuntime<State> {
             }
             Err(_) => {
                 warn!(
-                    "Tasks did not finish within {} seconds, aborting",
-                    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+                    timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+                    "Tasks did not finish within timeout; aborting"
                 );
                 self.task_manager.abort_all().await;
-                info!("Joining aborted tasks...");
+                debug!("Joining aborted tasks");
                 self.task_manager.join_all().await;
                 warn!("Forced shutdown complete");
             }
         }
         self.translator.mark_stopped();
-        info!("TranslatorSv2 shutdown complete.");
+        info!("Translator proxy shutdown complete");
     }
 
     fn payout_mode(&self, user_identity: &str) -> Result<Option<PayoutMode>, TproxyErrorKind> {
@@ -166,8 +166,8 @@ impl<State> TranslatorRuntime<State> {
             })?;
         if let Some(distribution) = &expected_payout_distribution {
             info!(
-                "Payout verification enabled for configured user_identity: {}",
-                distribution
+                distribution = %distribution,
+                "Payout verification enabled for configured user identity"
             );
         }
         Ok(expected_payout_distribution)
@@ -340,13 +340,14 @@ impl TranslatorRuntime<Sv1ServerReady> {
         request: ReconnectRequest,
     ) -> Result<TranslatorRuntime<UpstreamReady>, BootstrapError> {
         let upstream = request.into_upstream();
-        info!("Reconnecting to {}:{}", upstream.host, upstream.port);
+        info!(host = %upstream.host, port = upstream.port, "Reconnecting to upstream");
         match self.connect_with_retries(&upstream).await {
             Ok(true) => Ok(self.into_upstream_ready()),
             Ok(false) => {
                 warn!(
-                    "Could not reconnect to {}:{}; trying the configured upstreams",
-                    upstream.host, upstream.port
+                    host = %upstream.host,
+                    port = upstream.port,
+                    "Could not reconnect to upstream endpoint; trying configured upstreams"
                 );
                 self.try_upstream().await
             }
@@ -392,11 +393,11 @@ impl TranslatorRuntime<Sv1ServerReady> {
             }
 
             info!(
-                "Trying upstream {} of {}: {}:{}",
-                i + 1,
-                upstream_len,
-                self.upstream_addresses[i].host,
-                self.upstream_addresses[i].port
+                index = i + 1,
+                total = upstream_len,
+                host = %self.upstream_addresses[i].host,
+                port = self.upstream_addresses[i].port,
+                "Connecting to upstream target"
             );
 
             let upstream = self.upstream_addresses[i].clone();
@@ -407,9 +408,9 @@ impl TranslatorRuntime<Sv1ServerReady> {
             }
         }
 
-        tracing::error!(
-            "All upstreams failed after {} retries each",
-            MAX_UPSTREAM_RETRIES
+        error!(
+            max_retries = MAX_UPSTREAM_RETRIES,
+            "All upstream targets failed; unable to initiate connection"
         );
         Err(TproxyErrorKind::CouldNotInitiateSystem)
     }
@@ -423,7 +424,11 @@ impl TranslatorRuntime<Sv1ServerReady> {
         upstream: &UpstreamEntry,
     ) -> Result<bool, TproxyErrorKind> {
         for attempt in 1..=MAX_UPSTREAM_RETRIES {
-            info!("Connection attempt {}/{}...", attempt, MAX_UPSTREAM_RETRIES);
+            info!(
+                attempt,
+                max_retries = MAX_UPSTREAM_RETRIES,
+                "Attempting upstream connection"
+            );
             tokio::time::sleep(Duration::from_secs(1)).await;
 
             match self.try_initialize_upstream_single(upstream).await {
@@ -439,20 +444,25 @@ impl TranslatorRuntime<Sv1ServerReady> {
                 }
                 Err(e) => {
                     if e.action.is_shutdown() {
-                        error!("Fatal shutdown signal during upstream setup: {:?}", e.kind);
+                        error!(error = ?e.kind, "Fatal shutdown signal during upstream setup");
                         return Err(e.kind);
                     }
 
                     warn!(
-                        "Attempt {}/{} failed for {}:{}: {:?}",
-                        attempt, MAX_UPSTREAM_RETRIES, upstream.host, upstream.port, e
+                        attempt,
+                        max_retries = MAX_UPSTREAM_RETRIES,
+                        host = %upstream.host,
+                        port = upstream.port,
+                        error = ?e,
+                        "Upstream connection attempt failed"
                     );
                 }
             }
         }
         warn!(
-            "Max retries reached for {}:{}, moving to next upstream",
-            upstream.host, upstream.port
+            host = %upstream.host,
+            port = upstream.port,
+            "Max connection retries reached, moving to next upstream target"
         );
         Ok(false)
     }
@@ -490,7 +500,7 @@ impl TranslatorRuntime<UpstreamReady> {
     /// Activates the background execution loops of the SV1 server, [`ChannelManager`], and
     /// monitoring server, transitioning the runtime to [`Running`].
     pub(super) async fn start_services(self) -> Result<TranslatorRuntime<Running>, BootstrapError> {
-        info!("Launching SV1 server...");
+        info!("Launching SV1 server");
         if let Err(e) = self
             .state
             .sv1_server
@@ -502,11 +512,11 @@ impl TranslatorRuntime<UpstreamReady> {
             )
             .await
         {
-            error!("SV1 server startup failed: {e:?}");
+            error!(error = ?e, "SV1 server startup failed");
             return Err(BootstrapError::from((e.kind, self)));
         }
 
-        info!("Launching ChannelManager tasks...");
+        info!("Launching ChannelManager tasks");
         ChannelManager::run_channel_manager_tasks(
             self.state.channel_manager.clone(),
             self.translator.cancellation_token.clone(),
@@ -517,9 +527,9 @@ impl TranslatorRuntime<UpstreamReady> {
 
         #[cfg(feature = "monitoring")]
         if let Some(monitoring_addr) = self.translator.config.monitoring_address() {
-            info!("Initializing monitoring server on http://{monitoring_addr}");
+            info!(address = %monitoring_addr, "Initializing monitoring server");
             if let Err(e) = self.start_monitoring_tasks(monitoring_addr) {
-                error!("Failed to initialize monitoring tasks: {e}");
+                error!(error = %e, "Failed to initialize monitoring tasks");
                 return Err(BootstrapError::from((e, self)));
             }
         }
@@ -562,10 +572,10 @@ impl TranslatorRuntime<UpstreamReady> {
         let shutdown_signal = async move {
             tokio::select! {
                 _ = cancellation_token_clone.cancelled() => {
-                    info!("Monitoring server: received shutdown signal.");
+                    info!("Monitoring server received shutdown signal");
                 }
                 _ = fallback_coordinator_token.cancelled() => {
-                    info!("Monitoring server: fallback triggered.");
+                    info!("Monitoring server fallback triggered");
                 }
             }
         };
@@ -574,11 +584,11 @@ impl TranslatorRuntime<UpstreamReady> {
             let cancellation_token = self.translator.cancellation_token.clone();
             async move {
                 if let Err(e) = monitoring_server.run(shutdown_signal).await {
-                    error!("Monitoring server error: {:?}", e);
+                    error!(error = ?e, "Monitoring server encountered an error");
                     cancellation_token.cancel();
                 }
 
-                info!("Monitoring server task exited");
+                debug!("Monitoring server task exited");
             }
         }));
 
@@ -591,7 +601,7 @@ impl TranslatorRuntime<UpstreamReady> {
                     .run_miner_telemetry_loop(refresh_interval, cancellation_token, fallback_token)
                     .await;
 
-                info!("SV1 miner telemetry task exited");
+                debug!("SV1 miner telemetry task exited");
             }
         }));
 

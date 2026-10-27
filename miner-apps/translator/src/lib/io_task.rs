@@ -4,12 +4,15 @@ use async_channel::{Receiver, Sender};
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
-    network_helpers::noise_stream::{NoiseTcpReadHalf, NoiseTcpWriteHalf},
+    network_helpers::{
+        Error as NetworkError,
+        noise_stream::{NoiseTcpReadHalf, NoiseTcpWriteHalf},
+    },
     task_manager::TaskManager,
     utils::types::{InboundFrame, OutboundFrame},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, error, trace, warn};
+use tracing::{Instrument as _, debug, error, trace};
 
 #[cfg_attr(not(test), hotpath::measure)]
 #[track_caller]
@@ -51,12 +54,17 @@ pub fn spawn_io_tasks(
                                 trace!("Received inbound frame");
                                 if let Err(e) = inbound_tx.send(sv2_frame).await {
                                     inbound_tx.close();
-                                    error!(error=?e, "Failed to forward inbound frame");
+                                    debug!(error = ?e, "Inbound channel closed, stopping reader");
                                     break;
                                 }
                             }
+                            Err(NetworkError::SocketClosed) => {
+                                debug!("Socket closed by remote peer");
+                                inbound_tx.close();
+                                break;
+                            }
                             Err(e) => {
-                                error!(error=?e, "Reader error");
+                                error!(error = %e, "Failed to read or decode frame from peer; terminating connection");
                                 inbound_tx.close();
                                 break;
                             }
@@ -69,7 +77,7 @@ pub fn spawn_io_tasks(
             drop(inbound_tx);
             drop(outbound_rx_clone);
 
-            warn!("Reader task exited.");
+            debug!("Reader task exited");
         }
         .instrument(tracing::trace_span!(
             "reader_task",
@@ -99,15 +107,23 @@ pub fn spawn_io_tasks(
                         match res {
                             Ok(frame) => {
                                 trace!("Sending outbound frame");
-                                if let Err(e) = writer.write_frame(frame).await {
-                                    error!(error=?e, "Writer error");
-                                    outbound_rx.close_and_drain();
-                                    break;
+                                match writer.write_frame(frame).await {
+                                    Ok(()) => {}
+                                    Err(NetworkError::SocketClosed) => {
+                                        debug!("Socket closed by remote peer while writing");
+                                        outbound_rx.close_and_drain();
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, "Failed to encode or send frame to peer; terminating connection");
+                                        outbound_rx.close_and_drain();
+                                        break;
+                                    }
                                 }
                             }
                             Err(_) => {
                                 outbound_rx.close_and_drain();
-                                warn!("Outbound channel closed");
+                                debug!("Outbound channel closed");
                                 break;
                             }
                         }
@@ -119,7 +135,7 @@ pub fn spawn_io_tasks(
             drop(outbound_rx);
             drop(inbound_tx_clone);
 
-            warn!("Writer task exited.");
+            debug!("Writer task exited");
         }
         .instrument(tracing::trace_span!(
             "writer_task",

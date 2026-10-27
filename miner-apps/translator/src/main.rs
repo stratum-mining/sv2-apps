@@ -1,5 +1,6 @@
 mod args;
 use stratum_apps::{config_helpers::logging::init_logging, utils::shutdown::ShutdownListener};
+use tracing::{error, info, warn};
 pub use translator_sv2::{TranslatorSv2, config, error, sv1, sv2};
 
 use crate::args::process_cli_args;
@@ -31,18 +32,18 @@ async fn inner_main() {
 
     let translator = TranslatorSv2::new(proxy_config);
     let mut shutdown_listener = ShutdownListener::new().unwrap_or_else(|e| {
-        tracing::error!("Translator proxy could not listen for shutdown signals: {e}");
+        error!(error = %e, "Failed to listen for shutdown signals");
         std::process::exit(1);
     });
     tokio::spawn({
         let translator = translator.clone();
         async move {
             let signal = shutdown_listener.wait().await;
-            tracing::info!("{signal} received — initiating graceful shutdown...");
+            info!(signal = %signal, "Initiating graceful shutdown");
             tokio::select! {
                 _ = translator.shutdown() => {}
                 signal = shutdown_listener.wait() => {
-                    tracing::warn!("{signal} received again — abandoning graceful shutdown");
+                    warn!(signal = %signal, "Abandoning graceful shutdown; exiting immediately");
                     std::process::exit(signal.exit_code());
                 }
             }

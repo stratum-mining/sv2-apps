@@ -42,12 +42,12 @@ impl Sv1Server {
     /// This method implements the SV1 server's variable difficulty logic for all downstreams.
     /// Every 60 seconds, this method updates the difficulty state for each downstream.
     pub(super) async fn spawn_vardiff_loop(self: Arc<Self>) -> TproxyResult<(), error::Sv1Server> {
-        info!("Variable difficulty adjustment enabled - starting vardiff loop");
+        info!("Variable difficulty adjustment enabled, starting vardiff loop");
 
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             ticker.tick().await;
-            info!("Starting vardiff loop for downstreams");
+            debug!("Starting vardiff loop for downstreams");
 
             self.handle_vardiff_updates().await?;
         }
@@ -106,8 +106,11 @@ impl Sv1Server {
                     ) {
                         Ok(target) => target,
                         Err(e) => {
-                            error!(
-                                "Failed to calculate target for downstream {downstream_id} hashrate {new_hashrate}: {e:?}; skipping vardiff update"
+                            warn!(
+                                downstream_id,
+                                hashrate = new_hashrate,
+                                error = ?e,
+                                "Failed to calculate target from hashrate (skipping vardiff update)"
                             );
                             return Ok(());
                         }
@@ -147,7 +150,11 @@ impl Sv1Server {
                 Err(e) => {
                     // A vardiff failure for one downstream should not take down the
                     // proxy; skip this downstream's update.
-                    error!("Failed to update vardiff for downstream {downstream_id}: {e:?}; skipping");
+                    warn!(
+                        downstream_id,
+                        error = ?e,
+                        "Failed to update vardiff for downstream (skipping)"
+                    );
                 }
             }
             Ok(())
@@ -169,9 +176,10 @@ impl Sv1Server {
                 if !matches!(e.action, Action::Disconnect(_)) {
                     return Err(e);
                 }
-                warn!(
-                    "Failed to send mining.set_difficulty to downstream {downstream_id}: {:?}; skipping (likely disconnected)",
-                    e.kind
+                debug!(
+                    downstream_id,
+                    error = ?e.kind,
+                    "Failed to send mining.set_difficulty to downstream (downstream disconnecting)"
                 );
             }
         }
@@ -242,7 +250,7 @@ impl Sv1Server {
             .send((MiningOwned::UpdateChannel(update_channel), None))
             .await
             .map_err(|e| {
-                error!("Failed to send aggregated UpdateChannel: {:?}", e);
+                error!(error = ?e, "Failed to send aggregated UpdateChannel to channel manager");
                 TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
             })
     }
@@ -269,8 +277,9 @@ impl Sv1Server {
                 .await
                 .map_err(|e| {
                     error!(
-                        "Failed to send UpdateChannel for downstream {}: {:?}",
-                        downstream_id, e
+                        downstream_id,
+                        error = ?e,
+                        "Failed to send UpdateChannel to channel manager"
                     );
                     TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
                 })?;
@@ -312,8 +321,11 @@ impl Sv1Server {
             let target = match hash_rate_to_target(hashrate as f64, shares_per_minute) {
                 Ok(target) => target,
                 Err(e) => {
-                    error!(
-                        "Failed to calculate exact target for downstream {downstream_id} hashrate {hashrate}: {e:?}; excluding from aggregated UpdateChannel"
+                    warn!(
+                        downstream_id,
+                        hashrate,
+                        error = ?e,
+                        "Failed to calculate exact target from hashrate (excluding from aggregated UpdateChannel)"
                     );
                     return Ok(());
                 }
@@ -386,7 +398,10 @@ impl Sv1Server {
             })?;
         } else {
             let Some(downstream_id) = self.channel_owner(set_target.channel_id) else {
-                warn!("No downstream found for channel {}", set_target.channel_id);
+                warn!(
+                    channel_id = set_target.channel_id,
+                    "No downstream found for channel on SetTarget"
+                );
                 return Ok(());
             };
             if let Err(e) = self.with_registered_downstream(downstream_id, |downstream| {
@@ -396,7 +411,10 @@ impl Sv1Server {
                     .map_err(TproxyError::shutdown)
             }) {
                 if matches!(e.kind, TproxyErrorKind::DownstreamNotPresent(_)) {
-                    warn!("No downstream found for downstream_id {}", downstream_id);
+                    warn!(
+                        downstream_id,
+                        "No downstream found for downstream ID on SetTarget"
+                    );
                     return Ok(());
                 }
                 return Err(e);
@@ -453,8 +471,11 @@ impl Sv1Server {
                     let difficulty = match sv1_difficulty(target) {
                         Ok(difficulty) => difficulty,
                         Err(e) => {
-                            error!(
-                                "Failed to build mining.set_difficulty for downstream {downstream_id} from target {target}: {e:?}; keeping its current difficulty"
+                            warn!(
+                                downstream_id,
+                                target = %target,
+                                error = ?e,
+                                "Failed to build mining.set_difficulty from target (keeping current difficulty)"
                             );
                             return None;
                         }
@@ -492,7 +513,7 @@ impl Sv1Server {
         match hash_rate_from_target(target.to_le_bytes().into(), self.shares_per_minute as f64) {
             Ok(hashrate) => Some(hashrate as Hashrate),
             Err(e) => {
-                warn!("Failed to derive hashrate from upstream target {target}: {e:?}");
+                warn!(target = %target, error = ?e, "Failed to derive hashrate from upstream target");
                 None
             }
         }
@@ -537,8 +558,8 @@ impl Sv1Server {
             .await
             .map_err(|e| {
                 error!(
-                    "Failed to send UpdateChannel after downstream state change: {:?}",
-                    e
+                    error = ?e,
+                    "Failed to send UpdateChannel after downstream state change"
                 );
                 TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
             })

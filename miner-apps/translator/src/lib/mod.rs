@@ -17,7 +17,7 @@ use std::sync::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub use stratum_apps::stratum_core::sv1_api::server_to_client;
 
@@ -83,7 +83,7 @@ impl TranslatorSv2 {
     /// 4. **Teardown:** Performs a coordinated graceful cleanup of all services and tasks upon
     ///    termination.
     pub async fn start(&self) -> Result<(), TproxyErrorKind> {
-        info!("Starting Translator Proxy...");
+        info!("Starting Translator Proxy");
 
         let runtime = match TranslatorRuntime::<Init>::new(self.clone()) {
             Ok(runtime) => runtime,
@@ -97,7 +97,7 @@ impl TranslatorSv2 {
             Ok(running) => running,
             Err(bootstrap_err) => {
                 let (kind, runtime) = bootstrap_err.into_parts();
-                error!(?kind, "Failed to bootstrap Translator Proxy");
+                error!(error = ?kind, "Failed to bootstrap Translator Proxy");
                 runtime.shutdown().await;
                 return Err(kind);
             }
@@ -126,14 +126,14 @@ impl TranslatorSv2 {
                     Ok(running) => running,
                     Err(bootstrap_err) => {
                         let (kind, runtime) = bootstrap_err.into_parts();
-                        error!(?kind, "Failed to start services for Translator Proxy");
+                        error!(error = ?kind, "Failed to start services for Translator Proxy");
                         runtime.shutdown().await;
                         return Err(kind);
                     }
                 },
                 Err(bootstrap_err) => {
                     let (kind, runtime) = bootstrap_err.into_parts();
-                    error!(?kind, "Failed to reconnect Translator Proxy");
+                    error!(error = ?kind, "Failed to reconnect Translator Proxy");
                     runtime.shutdown().await;
                     return Err(kind);
                 }
@@ -155,7 +155,7 @@ impl TranslatorSv2 {
 
 impl Drop for TranslatorSv2 {
     fn drop(&mut self) {
-        info!("TranslatorSv2 dropped");
+        debug!("TranslatorSv2 dropped");
         self.cancellation_token.cancel();
     }
 }

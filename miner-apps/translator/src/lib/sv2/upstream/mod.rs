@@ -204,19 +204,20 @@ impl Upstream {
                     // The runtime follows the request once every component has shut down,
                     // through the same coordinated teardown as a fallback.
                     Ok(true) => {
-                        info!("{context}: {request}");
+                        info!(%request, "Upstream requested reconnect");
                         fallback_token.cancel();
                         LoopControl::Break
                     }
                     Ok(false) => {
                         warn!(
-                            "{context}: {request}, ignored because the last reconnect was followed less than {:?} ago",
-                            PROTOCOL_RECONNECT_MIN_INTERVAL
+                            %request,
+                            min_interval_secs = PROTOCOL_RECONNECT_MIN_INTERVAL.as_secs(),
+                            "Upstream requested reconnect ignored (within minimum interval)"
                         );
                         LoopControl::Continue
                     }
                     Err(_) => {
-                        error!("{context}: failed to record the requested reconnect");
+                        error!("Failed to record requested reconnect");
                         cancellation_token.cancel();
                         LoopControl::Break
                     }
@@ -275,12 +276,13 @@ impl Upstream {
         protocol_reconnect: SharedLock<ProtocolReconnect>,
     ) -> TproxyResult<Self, error::Upstream> {
         info!(
-            "Trying to connect to upstream at {}:{}",
-            upstream.host, upstream.port
+            host = %upstream.host,
+            port = upstream.port,
+            "Connecting to upstream"
         );
 
         if cancellation_token.is_cancelled() {
-            info!("Shutdown signal received during upstream connection attempt. Aborting.");
+            info!("Shutdown signal received during upstream connection attempt; aborting");
             return Err(TproxyError::shutdown(
                 TproxyErrorKind::CouldNotInitiateSystem,
             ));
@@ -289,9 +291,11 @@ impl Upstream {
         let candidate_addrs = resolve_host(&upstream.host, upstream.port)
             .await
             .map_err(|e| {
-                error!(
-                    "Failed to resolve upstream address {}:{}: {e}",
-                    upstream.host, upstream.port
+                warn!(
+                    host = %upstream.host,
+                    port = upstream.port,
+                    error = %e,
+                    "Failed to resolve upstream address (triggering fallback)"
                 );
                 TproxyError::fallback(TproxyErrorKind::NetworkHelpersError(e.into()))
             })?;
@@ -307,12 +311,12 @@ impl Upstream {
         {
             Ok(socket) => {
                 let resolved_addr = socket.peer_addr().map_err(TproxyError::fallback)?;
-                info!("Connected to upstream at {}", resolved_addr);
+                info!(addr = %resolved_addr, "Connected to upstream");
 
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
-                        info!("Shutdown received during handshake, dropping connection");
+                        info!("Shutdown signal received during upstream Noise handshake, aborting connection");
                         Err(TproxyError::shutdown(TproxyErrorKind::CouldNotInitiateSystem))
                     }
                     result = connect_with_noise(socket, Some(upstream.authority_pubkey)) => {
@@ -356,9 +360,10 @@ impl Upstream {
                                 Err(TproxyError::fallback(TproxyErrorKind::InvalidKey))
                             }
                             Err(e) => {
-                                error!(
-                                    "Failed Noise handshake with {}: {e}.",
-                                    resolved_addr
+                                warn!(
+                                    addr = %resolved_addr,
+                                    error = %e,
+                                    "Failed Noise handshake with upstream (triggering fallback)"
                                 );
                                 Err(TproxyError::fallback(
                                     TproxyErrorKind::NetworkHelpersError(e),
@@ -369,7 +374,11 @@ impl Upstream {
                 }
             }
             Err(e) => {
-                error!("Failed to connect to any of {:?}: {e}.", candidate_addrs);
+                warn!(
+                    candidates = ?candidate_addrs,
+                    error = %e,
+                    "Failed to connect to upstream candidate addresses (triggering fallback)"
+                );
                 Err(TproxyError::fallback(e))
             }
         }
@@ -398,18 +407,18 @@ impl Upstream {
             biased;
 
             _ = cancellation_token.cancelled() => {
-                info!("Upstream: shutdown signal received during connection setup.");
+                info!("Shutdown signal received during upstream connection setup");
                 self.upstream_io.close();
                 return Ok(());
             }
             _ = fallback_token.cancelled() => {
-                info!("Upstream: fallback signal received during connection setup.");
+                info!("Fallback signal received during upstream connection setup");
                 self.upstream_io.close();
                 return Ok(());
             }
             result = self.setup_connection() => {
                 if let Err(e) = result {
-                    error!("Upstream: failed to set up SV2 connection: {e:?}");
+                    error!(error = ?e, "Failed to set up connection with upstream");
                     return Err(e);
                 }
             }
@@ -436,7 +445,7 @@ impl Upstream {
             .map_err(TproxyError::shutdown)?;
         let sv2_frame = OutboundFrame::from_message(Message::Common(setup_conn_msg.into()))
             .map_err(|error| {
-                error!("Failed to serialize SetupConnection message: {error:?}");
+                error!(error = ?error, "Failed to serialize SetupConnection message");
                 TproxyError::shutdown(error)
             })?;
 
@@ -446,7 +455,7 @@ impl Upstream {
             .send(sv2_frame)
             .await
             .map_err(|e| {
-                error!("Failed to send SetupConnection to upstream: {:?}", e);
+                debug!(error = ?e, "Failed to forward message (channel closed)");
                 TproxyError::fallback(TproxyErrorKind::ChannelErrorSender)
             })?;
 
@@ -456,7 +465,7 @@ impl Upstream {
                 frame
             }
             Err(e) => {
-                error!("Failed to receive handshake response from upstream: {}", e);
+                warn!(error = %e, "Upstream connection closed during handshake");
                 return Err(TproxyError::fallback(e));
             }
         };
@@ -489,9 +498,9 @@ impl Upstream {
                     .map_err(TproxyError::shutdown)?,
             };
 
-            info!(
-                "Sending RequestExtensions message to upstream: {:?}",
-                require_extensions
+            debug!(
+                required_extensions = ?self.required_extensions,
+                "Sending RequestExtensions to upstream"
             );
 
             let sv2_frame =
@@ -503,7 +512,7 @@ impl Upstream {
                 .send(sv2_frame)
                 .await
                 .map_err(|e| {
-                    error!("Failed to send message to upstream: {:?}", e);
+                    debug!(error = ?e, "Failed to forward message (channel closed)");
                     TproxyError::fallback(TproxyErrorKind::ChannelErrorSender)
                 })?;
         }
@@ -524,10 +533,10 @@ impl Upstream {
 
         match protocol_message_type(header.ext_type(), header.msg_type()) {
             MessageType::Common => {
-                info!(
+                debug!(
                     extension_type = header.ext_type(),
                     message_type = header.msg_type(),
-                    "Handling common message from Upstream."
+                    "Handling common message from upstream"
                 );
                 self.handle_common_message_frame_from_server(None, header, sv2_frame.payload())
                     .await?;
@@ -538,7 +547,7 @@ impl Upstream {
                     .send(sv2_frame)
                     .await
                     .map_err(|e| {
-                        error!("Failed to send mining message to channel manager: {:?}", e);
+                        debug!(error = ?e, "Failed to forward message (channel closed)");
                         TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender)
                     })?;
             }
@@ -546,7 +555,7 @@ impl Upstream {
                 warn!(
                     extension_type = header.ext_type(),
                     message_type = header.msg_type(),
-                    "Received unsupported message type from upstream."
+                    "Received unsupported message type from upstream"
                 );
                 return Err(TproxyError::fallback(TproxyErrorKind::UnexpectedMessage(
                     header.ext_type(),
@@ -576,7 +585,7 @@ impl Upstream {
             .send(sv2_frame)
             .await
             .map_err(|e| {
-                error!("Upstream: failed to send sv2 frame: {e:?}");
+                debug!(error = ?e, "Failed to forward message (channel closed)");
                 TproxyError::fallback(TproxyErrorKind::ChannelErrorSender)
             })?;
 
@@ -599,13 +608,13 @@ impl Upstream {
 
                     // Handle app shutdown signal
                     _ = cancellation_token.cancelled() => {
-                        info!("Upstream: received shutdown signal. Exiting loop.");
+                        info!("Upstream received shutdown signal");
                         break;
                     }
 
                     // Handle fallback trigger
                     _ = fallback_token.cancelled() => {
-                        info!("Upstream: fallback triggered");
+                        info!("Upstream fallback triggered");
                         break;
                     }
 
@@ -637,7 +646,7 @@ impl Upstream {
             }
 
             self.upstream_io.close();
-            warn!("Upstream: task shutting down cleanly.");
+            debug!("Upstream message loop exited");
         }));
 
         Ok(())
