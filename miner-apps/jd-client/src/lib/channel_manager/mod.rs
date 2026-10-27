@@ -167,7 +167,8 @@ enum CustomJobStage {
     },
 }
 
-// The custom jobs of the templates JDC sends upstream, one per template.
+// The custom jobs of the templates JDC sends upstream, one per template, until the chain tip
+// moves past their template.
 #[derive(Debug, Default)]
 struct CustomJobs(HashMap<TemplateId, CustomJob>);
 
@@ -296,6 +297,15 @@ impl CustomJobs {
                     ProposalAnswer::Answers(job, custom_job)
                 }),
         }
+    }
+
+    // A new chain tip activating `template_id`. Every other template's job, whatever its stage, was
+    // for the previous chain tip or for a future template this tip doesn't activate, so its shares
+    // can no longer count: it is released. Returns how many were.
+    fn on_chain_tip(&mut self, template_id: TemplateId) -> usize {
+        let before = self.0.len();
+        self.0.retain(|kept, _| *kept == template_id);
+        before - self.0.len()
     }
 
     // The job ID shares on `template_id` go upstream with, once its custom job is acknowledged.

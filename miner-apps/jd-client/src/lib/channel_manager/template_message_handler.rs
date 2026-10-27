@@ -15,7 +15,7 @@ use stratum_apps::stratum_core::{
     parsers_sv2::Tlv,
     template_distribution_sv2::{SetNewPrevHashOwned as SetNewPrevHashTdpOwned, *},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     channel_manager::{ChannelManager, CustomJob, CustomJobStage, WaitingWork},
@@ -335,6 +335,17 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         self.output_sets
             .with(|output_sets| output_sets.on_chain_tip(msg.template_id))
             .map_err(JDCError::shutdown)?;
+        // An answer that still arrives for a released custom job is ignored.
+        let released = self
+            .custom_jobs
+            .with(|jobs| jobs.on_chain_tip(msg.template_id))
+            .map_err(JDCError::shutdown)?;
+        if released > 0 {
+            debug!(
+                released,
+                "Released the custom jobs the chain tip moved past"
+            );
+        }
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -2993,5 +3004,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(disclosures_sent(&sent_to_jds), 0);
+    }
+
+    fn recorded_templates(manager: &ChannelManager) -> Vec<u64> {
+        let mut templates: Vec<u64> = manager
+            .custom_jobs
+            .with(|jobs| jobs.0.keys().copied().collect())
+            .unwrap();
+        templates.sort();
+        templates
+    }
+
+    // A new chain tip releases every custom job but the one of the template it activates: a
+    // declaration held for a future template it doesn't activate, which will never be sent, and
+    // a declaration from the previous tip still waiting for the JDS. The activated template's
+    // declaration is sent.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_the_custom_jobs_it_leaves_behind() {
+        let (mut manager, sent, _) = manager_with_a_declaration().await;
+        for template_id in [3, 4] {
+            manager
+                .handle_new_template(None, template(template_id, true), None)
+                .await
+                .unwrap();
+            manager
+                .handle_request_tx_data_success(None, transaction_data(template_id), None)
+                .await
+                .unwrap();
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(recorded_templates(&manager), vec![2, 3, 4]);
+        let _ = declarations_sent(&sent.jds);
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(4), None)
+            .await
+            .unwrap();
+
+        assert_eq!(recorded_templates(&manager), vec![4]);
+        assert_eq!(declarations_sent(&sent.jds), 1);
+    }
+
+    // A custom job the Pool acknowledged keeps its upstream job ID only while its template is on
+    // the chain tip, and an acknowledgement that arrives after the tip moved past it is ignored.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_acknowledged_custom_jobs() {
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        manager
+            .upstream_channel
+            .with(|channel| {
+                channel
+                    .as_mut()
+                    .unwrap()
+                    .on_chain_tip_update(prev_hash(1).into())
+                    .unwrap()
+            })
+            .unwrap();
+        for template_id in [2, 3] {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+            manager.allocate_tokens(1).await.unwrap();
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+                .await
+                .unwrap();
+        }
+        let acknowledged = recorded_request_id(&manager, 2);
+        let late = recorded_request_id(&manager, 3);
+        pool_success(&mut manager, custom_job_success(acknowledged, 7))
+            .await
+            .unwrap();
+        manager
+            .handle_new_template(None, template(4, true), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(4), None)
+            .await
+            .unwrap();
+        pool_success(&mut manager, custom_job_success(late, 7))
+            .await
+            .unwrap();
+
+        let upstream_job_ids = manager
+            .custom_jobs
+            .with(|jobs| (jobs.upstream_job_id(2), jobs.upstream_job_id(3)))
+            .unwrap();
+        assert_eq!(upstream_job_ids, (None, None));
+        assert_eq!(recorded_templates(&manager), vec![4]);
     }
 }

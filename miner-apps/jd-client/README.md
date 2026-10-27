@@ -124,7 +124,8 @@ never sent, or a second answer to one already answered, is ignored instead.
 Answers to declarations and custom jobs follow the same split. A `DeclareMiningJob.Error` or
 `SetCustomMiningJob.Error` with any code but `stale-chain-tip`, or a Pool answer naming another
 channel than the custom job it answers, makes JDC fall back. An answer to a declaration or custom
-job JDC never sent, or a second answer to one, is ignored.
+job JDC never sent, a second answer to one, or an answer for a job JDC released when the chain tip
+moved past its template, is ignored.
 
 ### Miner Telemetry
 
