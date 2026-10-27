@@ -166,6 +166,21 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 "Received non-fatal DeclareMiningJobError from JDS: stale-chain-tip (request_id={})",
                 msg.request_id
             );
+            // Nothing else answers a rejected declaration, so it goes, with its transactions and
+            // the shares cached for its template. Only a declaration JDC sent and the JDS hasn't
+            // answered yet can be rejected: one a prevhash hasn't activated yet was never sent,
+            // and a coinbase-only custom job was never declared.
+            let rejected =
+                self.last_declare_job_store
+                    .remove_if(&msg.request_id, |_, declared_job| {
+                        declared_job.declare_mining_job.is_some()
+                            && !declared_job.template.future_template
+                            && declared_job.set_custom_mining_job.is_none()
+                    });
+            if let Some((_, declared_job)) = rejected {
+                self.cached_shares
+                    .remove(&declared_job.template.template_id);
+            }
             return Ok(());
         }
 
