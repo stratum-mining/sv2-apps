@@ -708,8 +708,9 @@ mod tests {
                 ProvideMissingTransactionsOwned,
             },
             mining_sv2::{
-                ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, SetCustomMiningJobErrorOwned,
-                SetCustomMiningJobOwned, SetCustomMiningJobSuccessOwned,
+                CloseChannelOwned, ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
+                SetCustomMiningJobErrorOwned, SetCustomMiningJobOwned,
+                SetCustomMiningJobSuccessOwned,
             },
             parsers_sv2::{Mining, TemplateDistributionOwned},
         },
@@ -3098,5 +3099,101 @@ mod tests {
             .unwrap();
         assert_eq!(upstream_job_ids, (None, None));
         assert_eq!(recorded_templates(&manager), vec![4]);
+    }
+
+    // The downstream `downstream_id` closes its channel `channel_id`.
+    async fn close_channel(manager: &mut ChannelManager, downstream_id: usize, channel_id: u32) {
+        use stratum_apps::stratum_core::handlers_sv2::HandleMiningMessagesFromClientOwnedAsync;
+        manager
+            .handle_close_channel(
+                Some(downstream_id),
+                CloseChannelOwned {
+                    channel_id,
+                    reason_code: "".to_string().try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    fn routed_channels(manager: &ChannelManager) -> Vec<u32> {
+        let mut channels = Vec::new();
+        manager
+            .downstream_channel_id_and_job_id_to_template_id
+            .for_each(|key, _| channels.push(key.channel_id));
+        channels.sort();
+        channels
+    }
+
+    // A channel a downstream closes takes what JDC keeps for it with it: the channel, its place in
+    // the downstream's group, its vardiff state and the routing entries of its jobs. The
+    // downstream's other channel keeps all of its own.
+    #[tokio::test]
+    async fn a_closed_channel_takes_what_jdc_keeps_for_it_with_it() {
+        use stratum_apps::stratum_core::channels_sv2::{
+            VardiffState, server::extended::ExtendedChannel as DownstreamChannel,
+        };
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        let mut group_channel = GroupChannel::new_for_job_declaration_client(
+            1,
+            SOLO_FULL_EXTRANONCE_SIZE as usize,
+            true,
+            None,
+            "test-jdc".to_string(),
+        )
+        .unwrap();
+        for channel_id in [5, 6] {
+            group_channel
+                .add_channel_id(channel_id, SOLO_FULL_EXTRANONCE_SIZE as usize)
+                .unwrap();
+        }
+        let downstream = Downstream::for_test(1, group_channel);
+        for channel_id in [5, 6] {
+            let extranonce_prefix = manager
+                .extranonce_allocator
+                .with(|allocator| allocator.allocate_extended(0))
+                .unwrap()
+                .unwrap();
+            let rollable_extranonce_size =
+                SOLO_FULL_EXTRANONCE_SIZE as usize - extranonce_prefix.len();
+            let channel = DownstreamChannel::new_for_job_declaration_client(
+                channel_id,
+                "test-user".to_string(),
+                extranonce_prefix,
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                rollable_extranonce_size as u16,
+                1,
+                1.0,
+                None,
+                "test-jdc".to_string(),
+                None,
+            )
+            .unwrap();
+            downstream.extended_channels.insert(channel_id, channel);
+            manager
+                .vardiff
+                .insert((1, channel_id).into(), VardiffState::new().unwrap());
+            for job_id in [1, 2] {
+                manager
+                    .downstream_channel_id_and_job_id_to_template_id
+                    .insert((1, channel_id, job_id).into(), 2);
+            }
+        }
+        manager.downstream.insert(1, downstream.clone());
+
+        close_channel(&mut manager, 1, 5).await;
+
+        assert_eq!(downstream.extended_channels.keys(), vec![6]);
+        let grouped = downstream
+            .group_channel
+            .with(|group| (group.has_channel_id(5), group.has_channel_id(6)))
+            .unwrap();
+        assert_eq!(grouped, (false, true));
+        assert!(!manager.vardiff.contains_key(&(1, 5).into()));
+        assert!(manager.vardiff.contains_key(&(1, 6).into()));
+        assert_eq!(routed_channels(&manager), vec![6, 6]);
     }
 }

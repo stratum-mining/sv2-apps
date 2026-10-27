@@ -1362,6 +1362,28 @@ impl ChannelManager {
             .remove(&downstream_id);
     }
 
+    // Releases what JDC keeps for `downstream`'s channel `channel_id` once the channel closes,
+    // whichever side closed it: the channel, its place in the downstream's group, its vardiff
+    // state and the routing entries of its jobs. The downstream's other channels keep theirs.
+    #[allow(clippy::result_large_err)]
+    fn release_downstream_channel(
+        &self,
+        downstream: &Downstream,
+        channel_id: ChannelId,
+    ) -> JDCResult<(), error::ChannelManager> {
+        let downstream_id = downstream.downstream_id;
+        downstream
+            .group_channel
+            .with(|group_channel| group_channel.remove_channel_id(channel_id))
+            .map_err(JDCError::shutdown)?;
+        downstream.extended_channels.remove(&channel_id);
+        downstream.standard_channels.remove(&channel_id);
+        self.vardiff.remove(&(downstream_id, channel_id).into());
+        self.downstream_channel_id_and_job_id_to_template_id
+            .retain(|key, _| key.downstream_id != downstream_id || key.channel_id != channel_id);
+        Ok(())
+    }
+
     /// Handles messages received from the JDS subsystem.  
     ///  
     /// This method listens for incoming frames on the `jd_receiver` channel.  
