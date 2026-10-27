@@ -39,7 +39,7 @@ use stratum_apps::{
     },
     utils::types::{
         CanDisconnect, CanFallback, CanShutdown, DownstreamId, ExtensionType, JobId, MessageType,
-        RequestId, TemplateId, VardiffKey,
+        RequestId, VardiffKey,
     },
 };
 use tokio::time::error::Elapsed;
@@ -206,10 +206,10 @@ pub enum JDCErrorKind {
     LastDeclareJobNotFound(RequestId),
     /// No active job with job id
     ActiveJobNotFound(JobId),
-    /// Template not found with template ID
-    TemplateNotFound(TemplateId),
     /// Downstream not found with downstream ID
     DownstreamNotFound(DownstreamId),
+    /// No mining job token queued for work that needs one
+    MiningJobTokenNotFound,
     /// Future template not present
     FutureTemplateNotPresent,
     /// Last new prevhash not found
@@ -226,8 +226,6 @@ pub enum JDCErrorKind {
     AllocateMiningJobTokenSuccessCoinbaseOutputsError,
     /// Channel manager has bad coinbase outputs.
     ChannelManagerHasBadCoinbaseOutputs,
-    /// Declared job has bad coinbase outputs.
-    DeclaredJobHasBadCoinbaseOutputs,
     /// Extranonce size is too large
     ExtranonceSizeTooLarge,
     /// Extranonce size is too small
@@ -317,14 +315,14 @@ impl fmt::Display for JDCErrorKind {
             ActiveJobNotFound(request_id) => {
                 write!(f, "Active Job not found for request_id: {request_id}")
             }
-            TemplateNotFound(template_id) => {
-                write!(f, "Template not found, template_id: {template_id}")
-            }
             DownstreamNotFound(downstream_id) => {
                 write!(
                     f,
                     "Downstream not found with downstream_id: {downstream_id}"
                 )
+            }
+            MiningJobTokenNotFound => {
+                write!(f, "No mining job token queued for work that needs one")
             }
             FutureTemplateNotPresent => {
                 write!(f, "Future template not present")
@@ -352,9 +350,6 @@ impl fmt::Display for JDCErrorKind {
             }
             ChannelManagerHasBadCoinbaseOutputs => {
                 write!(f, "Channel Manager coinbase outputs are not deserializable")
-            }
-            DeclaredJobHasBadCoinbaseOutputs => {
-                write!(f, "Declared job coinbase outputs are not deserializable")
             }
             ExtranonceSizeTooLarge => {
                 write!(f, "Extranonce size too large")
