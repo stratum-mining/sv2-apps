@@ -130,11 +130,12 @@ impl Sv1Server {
                     updates.push((downstream_id, channel_id, new_target, new_hashrate));
                 }
                 Ok(None) => {
+                    let stable = !vardiff_state.is_holding_on_silence();
                     if let Err(e) = self.with_registered_downstream(downstream_id, |downstream| {
                         downstream
                             .downstream_data
                             .with(|data| {
-                                data.stable_hashrate = true;
+                                data.stable_hashrate = stable;
                             })
                             .map_err(crate::error::TproxyError::shutdown)
                     }) {

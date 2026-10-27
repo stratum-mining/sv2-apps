@@ -555,7 +555,7 @@ impl ChannelManager {
         };
 
         let Some(new_hashrate) = new_hashrate_opt else {
-            channel_state.set_stable_hashrate(true);
+            channel_state.set_stable_hashrate(!vardiff_state.is_holding_on_silence());
             return;
         };
 
@@ -601,7 +601,7 @@ impl ChannelManager {
         };
 
         let Some(new_hashrate) = new_hashrate_opt else {
-            channel.set_stable_hashrate(true);
+            channel.set_stable_hashrate(!vardiff_state.is_holding_on_silence());
             return;
         };
 
