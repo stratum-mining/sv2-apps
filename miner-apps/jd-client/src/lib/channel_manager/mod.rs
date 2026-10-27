@@ -151,11 +151,11 @@ enum CustomJobStage {
         declaration: DeclareMiningJobOwned,
         transactions: Vec<Vec<u8>>,
     },
-    // A declaration sent and not answered yet, on the chain tip `prev_hash`, with its template's
-    // transactions.
+    // A declaration sent and not answered yet, on the chain tip `prev_hash`. Its template's
+    // transactions are kept until the JDS asks for them, which it may do once.
     Declared {
         prev_hash: SetNewPrevHashTdp,
-        transactions: Vec<Vec<u8>>,
+        transactions: Option<Vec<Vec<u8>>>,
     },
     // A custom job sent and not answered yet.
     Proposed {
@@ -241,22 +241,22 @@ impl CustomJobs {
         let transactions = std::mem::take(transactions);
         job.stage = CustomJobStage::Declared {
             prev_hash: prev_hash.clone(),
-            transactions,
+            transactions: Some(transactions),
         };
         job.template.future_template = false;
         Some(declaration)
     }
 
-    // The transactions of the job of `request_id`, while its declaration is kept.
-    fn transactions(&self, request_id: RequestId) -> Option<Vec<Vec<u8>>> {
-        self.0
-            .values()
-            .find(|job| job.request_id == request_id)
-            .and_then(|job| match &job.stage {
-                CustomJobStage::Undeclared { transactions, .. }
-                | CustomJobStage::Declared { transactions, .. } => Some(transactions.clone()),
-                CustomJobStage::Proposed { .. } | CustomJobStage::Acknowledged { .. } => None,
-            })
+    // Hands out the transactions of the `Declared` job of `request_id`, the first time they are
+    // asked for: a declaration's transactions are disclosed only between sending it and the JDS's
+    // answer, once.
+    fn missing_transactions(&mut self, request_id: RequestId) -> Option<Vec<Vec<u8>>> {
+        self.0.values_mut().find_map(|job| match &mut job.stage {
+            CustomJobStage::Declared { transactions, .. } if job.request_id == request_id => {
+                transactions.take()
+            }
+            _ => None,
+        })
     }
 
     // Takes the `Declared` job of `request_id` out, for the answer to its declaration, with the

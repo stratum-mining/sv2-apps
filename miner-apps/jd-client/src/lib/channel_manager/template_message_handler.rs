@@ -639,7 +639,7 @@ impl ChannelManager {
         let stage = match prevhash {
             Some(prev_hash) if !awaits_activation => CustomJobStage::Declared {
                 prev_hash,
-                transactions,
+                transactions: Some(transactions),
             },
             _ => CustomJobStage::Undeclared {
                 declaration: declare_job.clone(),
@@ -694,6 +694,7 @@ mod tests {
             job_declaration_sv2::{
                 AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
                 DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                ProvideMissingTransactionsOwned,
             },
             mining_sv2::{
                 ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, SetCustomMiningJobErrorOwned,
@@ -2085,7 +2086,7 @@ mod tests {
                     coinbase_outputs: outputs,
                     stage: CustomJobStage::Declared {
                         prev_hash: prev_hash(1),
-                        transactions: Vec::new(),
+                        transactions: Some(Vec::new()),
                     },
                 })
             })
@@ -2913,5 +2914,84 @@ mod tests {
             .with(|jobs| jobs.upstream_job_id(2))
             .unwrap();
         assert_eq!(upstream_job_id, Some(9));
+    }
+
+    fn missing_transactions(request_id: u32) -> ProvideMissingTransactionsOwned {
+        ProvideMissingTransactionsOwned {
+            request_id,
+            unknown_tx_position_list: vec![0].try_into().unwrap(),
+        }
+    }
+
+    fn disclosures_sent(receiver: &Receiver<JobDeclarationOwned>) -> usize {
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter(|message| {
+                matches!(
+                    message,
+                    JobDeclarationOwned::ProvideMissingTransactionsSuccess(_)
+                )
+            })
+            .count()
+    }
+
+    // A declaration's transactions are disclosed once, while the JDS hasn't answered the
+    // declaration: a repeated request gets nothing more.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_once() {
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+
+        for _ in 0..2 {
+            manager
+                .handle_provide_missing_transactions(None, missing_transactions(request_id), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(disclosures_sent(&sent.jds), 1);
+    }
+
+    // Transactions are disclosed only for a declaration JDC sent and the JDS hasn't answered yet:
+    // not for one a prevhash hasn't activated yet, which was never sent, not once the JDS has
+    // accepted the declaration, and never for a coinbase-only custom job.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_only_for_a_pending_declaration() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        let held = recorded_request_id(&manager, 3);
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(held), None)
+            .await
+            .unwrap();
+        assert_eq!(disclosures_sent(&sent.jds), 0);
+
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(request_id), None)
+            .await
+            .unwrap();
+        assert_eq!(disclosures_sent(&sent.jds), 0);
+
+        let (mut manager, _sent_to_pool, sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        let proposed = recorded_request_id(&manager, 2);
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(proposed), None)
+            .await
+            .unwrap();
+        assert_eq!(disclosures_sent(&sent_to_jds), 0);
     }
 }

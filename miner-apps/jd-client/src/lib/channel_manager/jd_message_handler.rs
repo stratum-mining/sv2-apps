@@ -302,7 +302,9 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     //
     // The JDS provides a list of transaction positions it could not resolve.
     // We then:
-    // - Retrieve the full transaction list for the given `request_id`.
+    // - Retrieve the full transaction list for the given `request_id`. Only a declaration JDC sent
+    //   and the JDS hasn't answered yet has its transactions disclosed, once: any other request is
+    //   ignored and logged.
     // - Identify which transactions are missing based on the provided positions.
     // - Collect and package those transactions into a `ProvideMissingTransactionsSuccess`.
     // - Send the response back to the JDS.
@@ -318,17 +320,15 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
         let transactions = self
             .custom_jobs
-            .with(|jobs| jobs.transactions(request_id))
+            .with(|jobs| jobs.missing_transactions(request_id))
             .map_err(JDCError::shutdown)?;
 
         let Some(transactions) = transactions else {
             warn!(
-                "No transaction list found for request_id={}",
-                msg.request_id
+                request_id,
+                "Ignoring ProvideMissingTransactions for a declaration whose transactions JDC is not disclosing"
             );
-            return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
-                msg.request_id,
-            )));
+            return Ok(());
         };
 
         let full_tx_list: Vec<B016MOwned> = transactions
