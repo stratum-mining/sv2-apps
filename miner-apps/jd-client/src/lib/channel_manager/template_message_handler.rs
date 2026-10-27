@@ -652,7 +652,10 @@ mod tests {
                 server::jobs::factory::JobFactory,
             },
             codec_sv2::EncodableFrame as _,
-            job_declaration_sv2::AllocateMiningJobTokenSuccessOwned,
+            job_declaration_sv2::{
+                AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
+                ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+            },
             mining_sv2::SetCustomMiningJobOwned,
             parsers_sv2::{Mining, TemplateDistributionOwned},
         },
@@ -2436,5 +2439,96 @@ mod tests {
                 Some(constraints(12, 8)),
             ]
         );
+    }
+
+    // The request ID of the job JDC recorded for `template_id`.
+    fn recorded_request_id(manager: &ChannelManager, template_id: u64) -> u32 {
+        let mut request_id = None;
+        manager
+            .last_declare_job_store
+            .for_each(|recorded_request_id, declared_job| {
+                if declared_job.template.template_id == template_id {
+                    request_id = Some(recorded_request_id);
+                }
+            });
+        request_id.expect("JDC recorded a job for the template")
+    }
+
+    fn stale_chain_tip(request_id: u32) -> DeclareMiningJobErrorOwned {
+        DeclareMiningJobErrorOwned {
+            request_id,
+            error_code: ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
+                .to_string()
+                .try_into()
+                .unwrap(),
+            error_details: vec![].try_into().unwrap(),
+        }
+    }
+
+    // A declaration the JDS rejects as stale gets no other answer, so it goes with its
+    // transactions and the shares cached for its template, while JDC carries on.
+    #[tokio::test]
+    async fn stale_rejection_releases_the_declaration() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        manager.cached_shares.with_mut_or_default(2, |_| {});
+
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                stale_chain_tip(recorded_request_id(&manager, 2)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(declared_templates(&manager).is_empty());
+        assert!(!manager.cached_shares.contains_key(&2));
+    }
+
+    // A stale rejection naming work JDC never declared to the JDS leaves it alone: a declaration a
+    // prevhash hasn't activated yet was never sent, and a coinbase-only custom job is the Pool's.
+    #[tokio::test]
+    async fn stale_rejection_leaves_work_never_declared_alone() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                stale_chain_tip(recorded_request_id(&manager, 3)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(declared_templates(&manager), vec![3]);
+
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                stale_chain_tip(recorded_request_id(&manager, 2)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
     }
 }
