@@ -995,8 +995,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 let template_id = self
                     .downstream_channel_id_and_job_id_to_template_id
                     .get_cloned(&mapping_key);
-                let upstream_job_id = template_id
-                    .and_then(|tid| self.template_id_to_upstream_job_id.get_cloned(&tid));
+                let upstream_job_id = self.upstream_job_id_for(template_id)?;
 
                 self.upstream_channel
                     .with(|maybe_upstream_channel| -> Result<(), Self::Error> {
@@ -1291,8 +1290,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 let template_id = self
                     .downstream_channel_id_and_job_id_to_template_id
                     .get_cloned(&mapping_key);
-                let upstream_job_id = template_id
-                    .and_then(|tid| self.template_id_to_upstream_job_id.get_cloned(&tid));
+                let upstream_job_id = self.upstream_job_id_for(template_id)?;
 
                 self.upstream_channel
                     .with(|maybe_upstream_channel| -> Result<(), Self::Error> {

@@ -209,8 +209,6 @@ pub enum JDCErrorKind {
     ActiveJobNotFound(JobId),
     /// Downstream not found with downstream ID
     DownstreamNotFound(DownstreamId),
-    /// No mining job token queued for work that needs one
-    MiningJobTokenNotFound,
     /// Future template not present
     FutureTemplateNotPresent,
     /// Last new prevhash not found
@@ -333,9 +331,6 @@ impl fmt::Display for JDCErrorKind {
                     f,
                     "Downstream not found with downstream_id: {downstream_id}"
                 )
-            }
-            MiningJobTokenNotFound => {
-                write!(f, "No mining job token queued for work that needs one")
             }
             FutureTemplateNotPresent => {
                 write!(f, "Future template not present")
