@@ -133,6 +133,7 @@ mod tests {
             vec![],
             TproxyMode::Aggregated,
             None,
+            crate::share_audit::ShareAudit::disabled(),
             true,
         )
     }

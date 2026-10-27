@@ -31,6 +31,7 @@ ext-config = { version = "0.14.0", features = ["toml"], package = "config" }
 tracing = { version = "0.1" }
 clap = { version = "4.5.39", features = ["derive"] }
 hex = "0.4.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hotpath = "0.14.0"
 
 [features]
