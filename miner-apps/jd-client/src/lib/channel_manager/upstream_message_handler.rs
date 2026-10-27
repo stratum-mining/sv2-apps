@@ -28,7 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     channel_manager::{
-        ChannelManager, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
+        ChannelManager, CustomJobStage, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
         downstream_message_handler::RouteMessageTo,
     },
     error::{self, Action, JDCError, JDCErrorKind},
@@ -629,10 +629,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
     // Handles `SetCustomMiningJobSuccess` messages from upstream.
     //
-    // On success:
-    // - Updates the `job_id_to_template_id` mapping.
+    // Only a custom job JDC proposed on the channel the message names, and the Pool hasn't
+    // answered yet, is acknowledged, once. A success naming another channel than its custom job
+    // went on is one JDC can't use, and makes it fall back. Any other success answers nothing JDC
+    // is waiting for, and is ignored and logged. On success:
     // - Updates the channel state accordingly.
-    // - Removes the associated `last_declare_job`, completing its lifecycle.
+    // - Keeps the job as acknowledged, with the upstream job ID its shares go upstream with.
+    // - Sends the shares cached for its template upstream.
     async fn handle_set_custom_mining_job_success(
         &mut self,
         _server_id: Option<usize>,
@@ -643,21 +646,17 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
         let mut shares_to_submit_upstream = Vec::new();
 
-        let Some((_, last_declare_job)) = self.last_declare_job_store.remove(&msg.request_id)
+        let Some((mut job, set_custom_job)) = self
+            .custom_jobs
+            .with(|jobs| jobs.proposal_answered(msg.request_id, msg.channel_id))
+            .map_err(JDCError::shutdown)?
+            .into_proposed("SetCustomMiningJob.Success", msg.request_id, msg.channel_id)?
         else {
-            warn!(
-                request_id = msg.request_id,
-                "No matching declare job found for custom job success"
-            );
-            return Err(JDCError::fallback(JDCErrorKind::LastDeclareJobNotFound(
-                msg.request_id,
-            )));
+            return Ok(());
         };
 
-        let template_id = last_declare_job.template.template_id;
+        let template_id = job.template.template_id;
         let job_id = msg.job_id;
-        self.template_id_to_upstream_job_id
-            .insert(template_id, job_id);
         let cached_shares = self
             .cached_shares
             .remove(&template_id)
@@ -669,11 +668,6 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 let Some(upstream_channel) = upstream_channel.as_mut() else {
                     debug!("No upstream channel available");
                     return Err(JDCError::log(JDCErrorKind::UpstreamNotFound));
-                };
-
-                let Some(set_custom_job) = last_declare_job.set_custom_mining_job else {
-                    error!("DeclareMiningJob present but SetCustomMiningJob missing");
-                    return Err(JDCError::shutdown(JDCErrorKind::CustomJobError));
                 };
 
                 let set_custom_job_success = SetCustomMiningJobSuccess {
@@ -713,6 +707,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             })
             .map_err(JDCError::shutdown)??;
 
+        job.stage = CustomJobStage::Acknowledged {
+            upstream_job_id: job_id,
+        };
+        self.custom_jobs
+            .with(|jobs| jobs.insert(job))
+            .map_err(JDCError::shutdown)?;
+
         // The result can be safely ignored. A send failure usually means the channel
         // endpoint has been dropped (e.g., during disconnect or shutdown).
         // Lifecycle and error handling are managed elsewhere.
@@ -737,16 +738,26 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", msg);
 
+        // Only a custom job JDC proposed on the channel the message names, and the Pool hasn't
+        // answered yet, can be rejected. An error naming another channel than its custom job went
+        // on is one JDC can't use, and makes it fall back. Any other error answers nothing JDC is
+        // waiting for.
+        let Some((rejected, _)) = self
+            .custom_jobs
+            .with(|jobs| jobs.proposal_answered(msg.request_id, msg.channel_id))
+            .map_err(JDCError::shutdown)?
+            .into_proposed("SetCustomMiningJob.Error", msg.request_id, msg.channel_id)?
+        else {
+            return Ok(());
+        };
+
         let error_code = msg.error_code.as_utf8_or_hex();
         if error_code == ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP {
             warn!(
                 "Received non-fatal SetCustomMiningJobError from upstream: stale-chain-tip (request_id={})",
                 msg.request_id
             );
-            if let Some((_, declared_job)) = self.last_declare_job_store.remove(&msg.request_id) {
-                self.cached_shares
-                    .remove(&declared_job.template.template_id);
-            }
+            self.cached_shares.remove(&rejected.template.template_id);
             return Ok(());
         }
 

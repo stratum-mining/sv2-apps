@@ -1,7 +1,7 @@
 #[cfg(feature = "monitoring")]
 use std::net::IpAddr;
 use std::{
-    collections::{BinaryHeap, HashSet, VecDeque},
+    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{
         Arc, OnceLock,
@@ -29,7 +29,7 @@ use stratum_apps::{
         bitcoin::{Amount, Target, TxOut, consensus},
         channels_sv2::{
             Vardiff, VardiffState,
-            client::extended::ExtendedChannel,
+            client::{error::ExtendedChannelError, extended::ExtendedChannel},
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
         },
@@ -130,25 +130,181 @@ const MAX_REQUESTED_TEMPLATES: usize = 16;
 // coming. Past it, the oldest is dropped: its downstreams have already moved on to the newer ones.
 const MAX_WAITING_FOR_TOKEN: usize = 4;
 
-/// A `DeclaredJob` encapsulates all the relevant data associated with a single
-/// job declaration, including its template, optional messages, coinbase output,
-/// and transaction list.
+// The custom job of one template, from its declaration in full-template mode to the Pool's
+// acknowledgement. Its `DeclareMiningJob` and its `SetCustomMiningJob` carry the same request ID.
 #[derive(Clone, Debug)]
-pub struct DeclaredJob {
-    // The original `DeclareMiningJob` message associated with this job,
-    // if one was sent.
-    declare_mining_job: Option<DeclareMiningJobOwned>,
-    // The template associated with the declared job.
+struct CustomJob {
+    request_id: RequestId,
     template: NewTemplateOwned,
-    // The `SetNewPrevHashTdp` message associated with this job, if available.
-    prev_hash: Option<SetNewPrevHashTdp>,
-    // The `SetCustomMiningJob` message associated with this job,
-    // if a custom job was created.
-    set_custom_mining_job: Option<SetCustomMiningJobOwned>,
     // The outputs the job's coinbase pays.
     coinbase_outputs: Vec<TxOut>,
-    // The list of transactions included in the job’s template.
-    tx_list: Vec<Vec<u8>>,
+    stage: CustomJobStage,
+}
+
+// How far a custom job has got. Each message about a job moves it on from the stage that message
+// answers, once.
+#[derive(Clone, Debug)]
+enum CustomJobStage {
+    // A declaration built for a template no prevhash has activated yet. The prevhash that does
+    // sends it.
+    Undeclared {
+        declaration: DeclareMiningJobOwned,
+        transactions: Vec<Vec<u8>>,
+    },
+    // A declaration sent and not answered yet, on the chain tip `prev_hash`, with its template's
+    // transactions.
+    Declared {
+        prev_hash: SetNewPrevHashTdp,
+        transactions: Vec<Vec<u8>>,
+    },
+    // A custom job sent and not answered yet.
+    Proposed {
+        custom_job: SetCustomMiningJobOwned,
+    },
+    // A custom job acknowledged under `upstream_job_id`, the job ID its shares go upstream with.
+    Acknowledged {
+        upstream_job_id: UpstreamJobId,
+    },
+}
+
+// The custom jobs of the templates JDC sends upstream, one per template.
+#[derive(Debug, Default)]
+struct CustomJobs(HashMap<TemplateId, CustomJob>);
+
+// What the Pool's answer to a custom job finds among the custom jobs.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum ProposalAnswer {
+    // The `Proposed` job it answers, taken out, with the custom job it was proposed as.
+    Answers(CustomJob, SetCustomMiningJobOwned),
+    // A `Proposed` job with its request ID, proposed on another channel than the answer names.
+    OtherChannel,
+    // No `Proposed` job has its request ID.
+    Unknown,
+}
+
+impl ProposalAnswer {
+    // The proposed job the Pool's `answer` is for, with the custom job it was proposed as. An
+    // answer naming another channel than its custom job went on is one JDC can't use, and makes it
+    // fall back; one for no proposed job answers nothing JDC is waiting for, and is ignored.
+    #[allow(clippy::result_large_err)]
+    fn into_proposed(
+        self,
+        answer: &str,
+        request_id: RequestId,
+        channel_id: u32,
+    ) -> JDCResult<Option<(CustomJob, SetCustomMiningJobOwned)>, error::ChannelManager> {
+        match self {
+            ProposalAnswer::Answers(job, custom_job) => Ok(Some((job, custom_job))),
+            ProposalAnswer::OtherChannel => {
+                warn!(
+                    request_id,
+                    channel_id, "{answer} names another channel than its custom job went on"
+                );
+                Err(JDCError::fallback(ExtendedChannelError::ChannelIdMismatch))
+            }
+            ProposalAnswer::Unknown => {
+                warn!(
+                    request_id,
+                    channel_id, "Ignoring {answer} for a custom job JDC is not waiting on"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl CustomJobs {
+    // Keeps `job` as its template's custom job, unless the template already has one, which it
+    // keeps.
+    fn insert(&mut self, job: CustomJob) {
+        self.0.entry(job.template.template_id).or_insert(job);
+    }
+
+    fn contains(&self, template_id: TemplateId) -> bool {
+        self.0.contains_key(&template_id)
+    }
+
+    // Declares the `Undeclared` job of the template `prev_hash` activates: the job becomes
+    // `Declared` on that chain tip, and its declaration is returned to send. A template whose job
+    // is past `Undeclared`, or has none, returns `None`.
+    fn declare(&mut self, prev_hash: &SetNewPrevHashTdp) -> Option<DeclareMiningJobOwned> {
+        let job = self.0.get_mut(&prev_hash.template_id)?;
+        let CustomJobStage::Undeclared {
+            declaration,
+            transactions,
+        } = &mut job.stage
+        else {
+            return None;
+        };
+        let declaration = declaration.clone();
+        let transactions = std::mem::take(transactions);
+        job.stage = CustomJobStage::Declared {
+            prev_hash: prev_hash.clone(),
+            transactions,
+        };
+        job.template.future_template = false;
+        Some(declaration)
+    }
+
+    // The transactions of the job of `request_id`, while its declaration is kept.
+    fn transactions(&self, request_id: RequestId) -> Option<Vec<Vec<u8>>> {
+        self.0
+            .values()
+            .find(|job| job.request_id == request_id)
+            .and_then(|job| match &job.stage {
+                CustomJobStage::Undeclared { transactions, .. }
+                | CustomJobStage::Declared { transactions, .. } => Some(transactions.clone()),
+                CustomJobStage::Proposed { .. } | CustomJobStage::Acknowledged { .. } => None,
+            })
+    }
+
+    // Takes the `Declared` job of `request_id` out, for the answer to its declaration, with the
+    // chain tip it was declared on.
+    fn declaration_answered(
+        &mut self,
+        request_id: RequestId,
+    ) -> Option<(CustomJob, SetNewPrevHashTdp)> {
+        let (template_id, prev_hash) = self.0.values().find_map(|job| match &job.stage {
+            CustomJobStage::Declared { prev_hash, .. } if job.request_id == request_id => {
+                Some((job.template.template_id, prev_hash.clone()))
+            }
+            _ => None,
+        })?;
+        self.0.remove(&template_id).map(|job| (job, prev_hash))
+    }
+
+    // Takes the `Proposed` job of `request_id` out, for the Pool's answer to its custom job, if
+    // that custom job went on `channel_id`. A `Proposed` job of `request_id` on another channel
+    // stays.
+    fn proposal_answered(&mut self, request_id: RequestId, channel_id: u32) -> ProposalAnswer {
+        let proposed = self.0.values().find_map(|job| match &job.stage {
+            CustomJobStage::Proposed { custom_job } if job.request_id == request_id => {
+                Some((job.template.template_id, custom_job.clone()))
+            }
+            _ => None,
+        });
+        match proposed {
+            None => ProposalAnswer::Unknown,
+            Some((_, custom_job)) if custom_job.channel_id != channel_id => {
+                ProposalAnswer::OtherChannel
+            }
+            Some((template_id, custom_job)) => self
+                .0
+                .remove(&template_id)
+                .map_or(ProposalAnswer::Unknown, |job| {
+                    ProposalAnswer::Answers(job, custom_job)
+                }),
+        }
+    }
+
+    // The job ID shares on `template_id` go upstream with, once its custom job is acknowledged.
+    fn upstream_job_id(&self, template_id: TemplateId) -> Option<UpstreamJobId> {
+        match self.0.get(&template_id)?.stage {
+            CustomJobStage::Acknowledged { upstream_job_id } => Some(upstream_job_id),
+            _ => None,
+        }
+    }
 }
 
 // The mining job tokens JDC asks the JDS for, from the request to the job that spends the token.
@@ -190,23 +346,10 @@ impl MiningJobTokens {
     // still holds such a token, and otherwise the job still goes out, so that the work it carries
     // counts with a JDS that doesn't.
     fn peek_for(&self, outputs: &[u8]) -> Option<&AllocateMiningJobTokenSuccessOwned> {
-        self.queue.get(self.position_for(outputs)?)
-    }
-
-    // Takes the token a job paying the serialized `outputs` spends out of the queue (see
-    // `peek_for`).
-    fn take_for(&mut self, outputs: &[u8]) -> Option<AllocateMiningJobTokenSuccessOwned> {
-        let position = self.position_for(outputs)?;
-        self.queue.remove(position)
-    }
-
-    // Where the token `peek_for` and `take_for` choose sits in the queue.
-    fn position_for(&self, outputs: &[u8]) -> Option<usize> {
-        let matching = self
-            .queue
+        self.queue
             .iter()
-            .position(|token| token.coinbase_outputs.as_bytes() == outputs);
-        matching.or((!self.queue.is_empty()).then_some(0))
+            .find(|token| token.coinbase_outputs.as_bytes() == outputs)
+            .or(self.queue.front())
     }
 
     // Takes out the token the answer to `request_id` brought, once a job built with it is sent.
@@ -574,11 +717,8 @@ pub struct ChannelManager {
     // Work that was ready to go upstream while JDC held no token, until a token arrives to pay
     // for it.
     waiting_for_token: SharedLock<WaitingForToken>,
-    // Stores the last declared job, keyed by the request ID used
-    // when declaring the job to the JDS.
-    pub last_declare_job_store: SharedMap<RequestId, DeclaredJob>,
-    // Maps a template ID to the corresponding upstream job ID.
-    pub template_id_to_upstream_job_id: SharedMap<TemplateId, UpstreamJobId>,
+    // The custom job of each template JDC sends upstream (see `CustomJob`).
+    custom_jobs: SharedLock<CustomJobs>,
     // Maps a downstream ID + channel ID + job ID to the corresponding template ID.
     pub downstream_channel_id_and_job_id_to_template_id:
         SharedMap<DownstreamChannelJobId, TemplateId>,
@@ -742,8 +882,7 @@ impl ChannelManager {
             mining_job_tokens: SharedLock::new(MiningJobTokens::default()),
             requested_templates: SharedLock::new(VecDeque::new()),
             waiting_for_token: SharedLock::new(WaitingForToken::default()),
-            last_declare_job_store: SharedMap::new(),
-            template_id_to_upstream_job_id: SharedMap::new(),
+            custom_jobs: SharedLock::new(CustomJobs::default()),
             downstream_channel_id_and_job_id_to_template_id: SharedMap::new(),
             output_sets: SharedLock::new(OutputSets::new(coinbase_outputs)),
             upstream_channel: SharedLock::new(None),
@@ -1636,18 +1775,6 @@ impl ChannelManager {
             .map_err(JDCError::shutdown)
     }
 
-    // Takes the token for `template`'s upstream job out of the queue (see `token_for`).
-    #[allow(clippy::result_large_err)]
-    fn take_token_for(
-        &self,
-        template: &NewTemplateOwned,
-    ) -> JDCResult<Option<AllocateMiningJobTokenSuccessOwned>, error::ChannelManager> {
-        let outputs = self.serialized_outputs_of(template)?;
-        self.mining_job_tokens
-            .with(|tokens| tokens.take_for(&outputs))
-            .map_err(JDCError::shutdown)
-    }
-
     // The outputs JDC put in `template`'s downstream jobs, serialized as a token answer carries
     // them.
     #[allow(clippy::result_large_err)]
@@ -1660,15 +1787,30 @@ impl ChannelManager {
             .map_err(JDCError::shutdown)
     }
 
+    // The job ID shares on `template_id` go upstream with, once its custom job is acknowledged.
+    #[allow(clippy::result_large_err)]
+    fn upstream_job_id_for(
+        &self,
+        template_id: Option<TemplateId>,
+    ) -> JDCResult<Option<UpstreamJobId>, error::ChannelManager> {
+        let Some(template_id) = template_id else {
+            return Ok(None);
+        };
+        self.custom_jobs
+            .with(|jobs| jobs.upstream_job_id(template_id))
+            .map_err(JDCError::shutdown)
+    }
+
     // Builds the coinbase-only custom job that puts `template` on the upstream channel, paying
     // the outputs from `coinbase_outputs_for`, records it, and spends a token on it.
     //
     // Returns `None` while there is no upstream channel, chain tip for the template, job factory
     // or token to build the job with, and an error when the job factory rejects the template. A
     // future template has a chain tip only once a prevhash activates it, and a template handed
-    // out with the miner's own outputs is solo work, so it gets no job either. The token is taken
-    // from the queue only once the job is built. With everything but a token in place, the
-    // template waits for one (see `wait_for_token`), and the token that arrives builds the job.
+    // out with the miner's own outputs is solo work, so it gets no job either, nor does a template
+    // whose custom job was built already. The token is taken from the queue only once the job is
+    // built. With everything but a token in place, the template waits for one (see
+    // `wait_for_token`), and the token that arrives builds the job.
     async fn build_coinbase_only_custom_job(
         &self,
         template: &NewTemplateOwned,
@@ -1695,6 +1837,15 @@ impl ChannelManager {
             .with(|job_factory| job_factory.is_some())
             .map_err(JDCError::shutdown)?;
         if !has_job_factory || !self.goes_upstream(template)? {
+            return Ok(None);
+        }
+        // A template has a single custom job: the upstream channel opening, or a token arriving
+        // for a template, finds its job built already.
+        if self
+            .custom_jobs
+            .with(|jobs| jobs.contains(template.template_id))
+            .map_err(JDCError::shutdown)?
+        {
             return Ok(None);
         }
         let Some(token) = self.token_for(template)? else {
@@ -1740,17 +1891,18 @@ impl ChannelManager {
         self.mining_job_tokens
             .with(|tokens| tokens.spend(token.request_id))
             .map_err(JDCError::shutdown)?;
-        self.last_declare_job_store.insert(
-            custom_job.request_id,
-            DeclaredJob {
-                declare_mining_job: None,
-                template: template.clone(),
-                prev_hash: Some(prev_hash),
-                set_custom_mining_job: Some(custom_job.clone()),
-                coinbase_outputs,
-                tx_list: Vec::new(),
-            },
-        );
+        self.custom_jobs
+            .with(|jobs| {
+                jobs.insert(CustomJob {
+                    request_id: custom_job.request_id,
+                    template: template.clone(),
+                    coinbase_outputs,
+                    stage: CustomJobStage::Proposed {
+                        custom_job: custom_job.clone(),
+                    },
+                })
+            })
+            .map_err(JDCError::shutdown)?;
         Ok(Some(custom_job))
     }
 

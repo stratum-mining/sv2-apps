@@ -212,6 +212,36 @@ impl Downstream {
         }
     }
 
+    // A downstream with no connection behind it, for tests that need one registered with the
+    // channel manager.
+    #[cfg(test)]
+    pub(crate) fn for_test(downstream_id: DownstreamId, group_channel: GroupChannel) -> Self {
+        let (channel_manager_sender, _) = unbounded();
+        let (_, channel_manager_receiver) = unbounded();
+        let (downstream_sender, _) = unbounded();
+        let (_, downstream_receiver) = unbounded();
+        Downstream {
+            downstream_io: DownstreamIo {
+                channel_manager_sender,
+                channel_manager_receiver,
+                downstream_sender,
+                downstream_receiver,
+            },
+            #[cfg(feature = "monitoring")]
+            client_kind: SharedLock::new(Sv2ClientKind::Unknown),
+            require_std_job: Arc::new(AtomicBool::new(false)),
+            group_channel: SharedLock::new(group_channel),
+            extended_channels: SharedMap::new(),
+            standard_channels: SharedMap::new(),
+            channel_id_factory: Arc::new(AtomicU32::new(1)),
+            negotiated_extensions: SharedLock::new(Vec::new()),
+            supported_extensions: Vec::new(),
+            required_extensions: Vec::new(),
+            downstream_id,
+            downstream_cancellation_token: CancellationToken::new(),
+        }
+    }
+
     /// Starts the downstream loop.
     ///
     /// Responsibilities:
