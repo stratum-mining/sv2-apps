@@ -151,11 +151,12 @@ enum CustomJobStage {
         declaration: DeclareMiningJobOwned,
         transactions: Vec<Vec<u8>>,
     },
-    // A declaration sent and not answered yet, on the chain tip `prev_hash`, with its template's
-    // transactions.
+    // A declaration sent and not answered yet, on the chain tip `prev_hash`. Each of its
+    // template's transactions is kept, at its position in the declaration, until it is
+    // disclosed to the JDS.
     Declared {
         prev_hash: SetNewPrevHashTdp,
-        transactions: Vec<Vec<u8>>,
+        transactions: Vec<Option<Vec<u8>>>,
     },
     // A custom job sent and not answered yet.
     Proposed {
@@ -242,22 +243,38 @@ impl CustomJobs {
         let transactions = std::mem::take(transactions);
         job.stage = CustomJobStage::Declared {
             prev_hash: prev_hash.clone(),
-            transactions,
+            transactions: transactions.into_iter().map(Some).collect(),
         };
         job.template.future_template = false;
         Some(declaration)
     }
 
-    // The transactions of the job of `request_id`, while its declaration is kept.
-    fn transactions(&self, request_id: RequestId) -> Option<Vec<Vec<u8>>> {
-        self.0
-            .values()
-            .find(|job| job.request_id == request_id)
-            .and_then(|job| match &job.stage {
-                CustomJobStage::Undeclared { transactions, .. }
-                | CustomJobStage::Declared { transactions, .. } => Some(transactions.clone()),
-                CustomJobStage::Proposed { .. } | CustomJobStage::Acknowledged { .. } => None,
-            })
+    // Hands out the transactions at `positions` of the `Declared` job of `request_id`, in that
+    // order: a declaration's transactions are disclosed only between sending it and the JDS's
+    // answer, each one once, however many requests that takes. An answer has to list every
+    // transaction its request names, so a request naming a position with no transaction left, or
+    // naming one twice, hands out nothing.
+    fn missing_transactions(
+        &mut self,
+        request_id: RequestId,
+        positions: &[u16],
+    ) -> Option<Vec<Vec<u8>>> {
+        self.0.values_mut().find_map(|job| match &mut job.stage {
+            CustomJobStage::Declared { transactions, .. } if job.request_id == request_id => {
+                let mut named = HashSet::with_capacity(positions.len());
+                let answerable = positions.iter().all(|&position| {
+                    named.insert(position)
+                        && matches!(transactions.get(position as usize), Some(Some(_)))
+                });
+                answerable.then(|| {
+                    positions
+                        .iter()
+                        .filter_map(|&position| transactions.get_mut(position as usize)?.take())
+                        .collect()
+                })
+            }
+            _ => None,
+        })
     }
 
     // Takes the `Declared` job of `request_id` out, for the answer to its declaration, with the

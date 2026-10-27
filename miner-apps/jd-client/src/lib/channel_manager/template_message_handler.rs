@@ -629,7 +629,7 @@ impl ChannelManager {
             wtxid_list: wtx_ids,
             excess_data,
         };
-        let transactions = transactions_data
+        let transactions: Vec<Vec<u8>> = transactions_data
             .iter_bytes()
             .map(|tx| tx.to_vec())
             .collect();
@@ -639,7 +639,7 @@ impl ChannelManager {
         let stage = match prevhash {
             Some(prev_hash) if !awaits_activation => CustomJobStage::Declared {
                 prev_hash,
-                transactions,
+                transactions: transactions.into_iter().map(Some).collect(),
             },
             _ => CustomJobStage::Undeclared {
                 declaration: declare_job.clone(),
@@ -684,7 +684,9 @@ mod tests {
         key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
         stratum_core::{
             binary_sv2::B0255Owned,
-            bitcoin::{Amount, ScriptBuf, Target, TxOut},
+            bitcoin::{
+                Amount, ScriptBuf, Target, TxIn, TxOut, absolute::LockTime, transaction::Version,
+            },
             channels_sv2::{
                 client::extended::ExtendedChannel,
                 extranonce_manager::ExtranoncePrefix,
@@ -694,6 +696,7 @@ mod tests {
             job_declaration_sv2::{
                 AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
                 DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                ProvideMissingTransactionsOwned,
             },
             mining_sv2::{
                 ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP, SetCustomMiningJobErrorOwned,
@@ -2909,5 +2912,222 @@ mod tests {
             .with(|jobs| jobs.upstream_job_id(2))
             .unwrap();
         assert_eq!(upstream_job_id, Some(9));
+    }
+
+    // Transactions a Template Provider could send, told apart by their lock time.
+    fn declared_transactions() -> Vec<Vec<u8>> {
+        (0..3)
+            .map(|lock_time| {
+                consensus::serialize(&Transaction {
+                    version: Version::TWO,
+                    lock_time: LockTime::from_consensus(lock_time),
+                    input: vec![TxIn::default()],
+                    output: vec![TxOut {
+                        value: Amount::ZERO,
+                        script_pubkey: ScriptBuf::new(),
+                    }],
+                })
+            })
+            .collect()
+    }
+
+    // The data of a template with `declared_transactions`.
+    fn data_with_transactions(template_id: u64) -> RequestTransactionDataSuccessOwned {
+        let transactions = declared_transactions()
+            .into_iter()
+            .map(|transaction| transaction.try_into().unwrap())
+            .collect();
+        RequestTransactionDataSuccessOwned {
+            transaction_list: Seq064KOwned::new(transactions).unwrap(),
+            ..transaction_data(template_id)
+        }
+    }
+
+    // A full-template JDC whose declaration of template 2, with `declared_transactions`, the JDS
+    // hasn't answered yet.
+    async fn manager_with_declared_transactions() -> (ChannelManager, Sent, u32) {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, data_with_transactions(2), None)
+            .await
+            .unwrap();
+        let request_id = recorded_request_id(&manager, 2);
+        (manager, sent, request_id)
+    }
+
+    fn missing_transactions(request_id: u32, positions: &[u16]) -> ProvideMissingTransactionsOwned {
+        ProvideMissingTransactionsOwned {
+            request_id,
+            unknown_tx_position_list: positions.to_vec().try_into().unwrap(),
+        }
+    }
+
+    // The transactions of each answer sent to the JDS.
+    fn disclosures_sent(receiver: &Receiver<JobDeclarationOwned>) -> Vec<Vec<Vec<u8>>> {
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter_map(|message| match message {
+                JobDeclarationOwned::ProvideMissingTransactionsSuccess(answer) => Some(
+                    answer
+                        .transaction_list
+                        .iter_bytes()
+                        .map(|transaction| transaction.to_vec())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Each of a declaration's transactions is disclosed once, while the JDS hasn't answered the
+    // declaration: a repeated request gets nothing more.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_once() {
+        let (mut manager, sent, request_id) = manager_with_declared_transactions().await;
+
+        for positions in [&[0, 1, 2][..], &[0, 1, 2], &[1]] {
+            manager
+                .handle_provide_missing_transactions(
+                    None,
+                    missing_transactions(request_id, positions),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(disclosures_sent(&sent.jds), vec![declared_transactions()]);
+    }
+
+    // The JDS can ask for a declaration's transactions over several requests, and each answer
+    // lists them in the order its request named them.
+    #[tokio::test]
+    async fn missing_transactions_can_take_several_requests() {
+        let (mut manager, sent, request_id) = manager_with_declared_transactions().await;
+
+        for positions in [&[2, 0][..], &[1]] {
+            manager
+                .handle_provide_missing_transactions(
+                    None,
+                    missing_transactions(request_id, positions),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let declared = declared_transactions();
+        assert_eq!(
+            disclosures_sent(&sent.jds),
+            vec![
+                vec![declared[2].clone(), declared[0].clone()],
+                vec![declared[1].clone()]
+            ]
+        );
+    }
+
+    // A request JDC can't answer in full discloses nothing, whether it names a transaction twice,
+    // out of range or already disclosed, and the transactions it names stay for a later request.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_answered_in_full_discloses_nothing() {
+        let (mut manager, sent, request_id) = manager_with_declared_transactions().await;
+
+        for positions in [&[0][..], &[1, 1], &[1, 3], &[0, 1], &[1, 2]] {
+            manager
+                .handle_provide_missing_transactions(
+                    None,
+                    missing_transactions(request_id, positions),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let declared = declared_transactions();
+        assert_eq!(
+            disclosures_sent(&sent.jds),
+            vec![
+                vec![declared[0].clone()],
+                vec![declared[1].clone(), declared[2].clone()]
+            ]
+        );
+    }
+
+    // The transactions of a template no prevhash has activated yet wait with its declaration, and
+    // can be asked for once the prevhash that activates it has sent the declaration.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_after_a_prevhash_sends_the_declaration() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, data_with_transactions(3), None)
+            .await
+            .unwrap();
+        let request_id = recorded_request_id(&manager, 3);
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(request_id, &[1]), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            disclosures_sent(&sent.jds),
+            vec![vec![declared_transactions()[1].clone()]]
+        );
+    }
+
+    // Transactions are disclosed only for a declaration JDC sent and the JDS hasn't answered yet:
+    // not for one a prevhash hasn't activated yet, which was never sent, not once the JDS has
+    // accepted the declaration, and never for a coinbase-only custom job.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_only_for_a_pending_declaration() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, data_with_transactions(3), None)
+            .await
+            .unwrap();
+        let held = recorded_request_id(&manager, 3);
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(held, &[0]), None)
+            .await
+            .unwrap();
+        assert!(disclosures_sent(&sent.jds).is_empty());
+
+        let (mut manager, sent, request_id) = manager_with_declared_transactions().await;
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(request_id, &[0]), None)
+            .await
+            .unwrap();
+        assert!(disclosures_sent(&sent.jds).is_empty());
+
+        let (mut manager, _sent_to_pool, sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        let proposed = recorded_request_id(&manager, 2);
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(proposed, &[0]), None)
+            .await
+            .unwrap();
+        assert!(disclosures_sent(&sent_to_jds).is_empty());
     }
 }

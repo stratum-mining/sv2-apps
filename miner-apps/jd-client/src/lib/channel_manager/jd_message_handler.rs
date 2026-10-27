@@ -300,11 +300,15 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
     // Handles a `ProvideMissingTransactions` request from the JDS.
     //
-    // The JDS provides a list of transaction positions it could not resolve.
+    // The JDS provides a list of transaction positions it could not resolve, and can ask as many
+    // times as it needs for the ones it hasn't received.
     // We then:
-    // - Retrieve the full transaction list for the given `request_id`.
-    // - Identify which transactions are missing based on the provided positions.
-    // - Collect and package those transactions into a `ProvideMissingTransactionsSuccess`.
+    // - Take the transactions at those positions for the given `request_id`. Only a declaration JDC
+    //   sent and the JDS hasn't answered yet has its transactions disclosed, each one once. A
+    //   request naming one already disclosed, out of range or twice, and any other request, is
+    //   ignored and logged, and the declaration keeps waiting for the JDS's answer.
+    // - Collect and package those transactions, in the order requested, into a
+    //   `ProvideMissingTransactionsSuccess`.
     // - Send the response back to the JDS.
     async fn handle_provide_missing_transactions(
         &mut self,
@@ -316,41 +320,25 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
         info!("Received: {}", msg);
 
+        let unknown_positions: Vec<u16> = msg.unknown_tx_position_list.into_inner();
         let transactions = self
             .custom_jobs
-            .with(|jobs| jobs.transactions(request_id))
+            .with(|jobs| jobs.missing_transactions(request_id, &unknown_positions))
             .map_err(JDCError::shutdown)?;
 
         let Some(transactions) = transactions else {
             warn!(
-                "No transaction list found for request_id={}",
-                msg.request_id
+                request_id,
+                unknown_positions = unknown_positions.len(),
+                "Ignoring ProvideMissingTransactions: no declaration is waiting on this request ID, or it names a transaction already disclosed, out of range or twice"
             );
-            return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
-                msg.request_id,
-            )));
+            return Ok(());
         };
 
-        let full_tx_list: Vec<B016MOwned> = transactions
+        let missing_txns: Vec<B016MOwned> = transactions
             .into_iter()
             .map(|raw| raw.try_into().map_err(JDCError::shutdown))
             .collect::<Result<_, _>>()?;
-
-        let unknown_positions: Vec<u16> = msg.unknown_tx_position_list.into_inner();
-        debug!(
-            total_known = full_tx_list.len(),
-            unknown_positions = unknown_positions.len(),
-            "Resolving missing transactions"
-        );
-
-        let missing_txns: Vec<B016MOwned> = unknown_positions
-            .iter()
-            .filter_map(|&pos| full_tx_list.get(pos as usize).cloned())
-            .collect();
-
-        if missing_txns.is_empty() {
-            warn!("No matching transactions found for request_id={request_id}");
-        }
 
         let response = ProvideMissingTransactionsSuccessOwned {
             request_id: msg.request_id,
