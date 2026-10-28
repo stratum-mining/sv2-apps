@@ -1782,7 +1782,10 @@ impl ChannelManager {
         &self,
         coinbase_outputs: Vec<TxOut>,
     ) -> JDCResult<(), error::ChannelManager> {
-        let msg = coinbase_output_constraints_message(coinbase_outputs);
+        let msg = coinbase_output_constraints_message(coinbase_outputs).map_err(|e| {
+            error!(error = %e, "Configured coinbase outputs don't fit CoinbaseOutputConstraints");
+            JDCError::shutdown(JDCErrorKind::CoinbaseOutputConstraints(e))
+        })?;
 
         self.channel_manager_io
             .tp_sender

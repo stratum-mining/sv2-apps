@@ -1,3 +1,4 @@
+use std::fmt;
 use stratum_core::{
     bitcoin::{
         absolute::LockTime,
@@ -26,22 +27,57 @@ const OFFSET_ADDITIONAL_SIZE: u32 = 43;
 /// The value 4 sigops accounts for p2pkh's higher signature operation count.
 const OFFSET_MAX_SIGOPS: u16 = 4;
 
+/// Coinbase outputs needing more room than a `CoinbaseOutputConstraints` message can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoinbaseOutputConstraintsError {
+    /// The outputs' serialized size, with any offset, is above `u32::MAX` bytes.
+    SizeOutOfRange,
+    /// The outputs' sigop cost, with any offset, is above `u16::MAX`.
+    SigopsOutOfRange,
+}
+
+impl fmt::Display for CoinbaseOutputConstraintsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SizeOutOfRange => write!(
+                f,
+                "coinbase outputs need more bytes than CoinbaseOutputConstraints can reserve"
+            ),
+            Self::SigopsOutOfRange => write!(
+                f,
+                "coinbase outputs need more sigops than CoinbaseOutputConstraints can reserve"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CoinbaseOutputConstraintsError {}
+
 /// Creates a CoinbaseOutputConstraints message from a list of coinbase outputs.
 ///
 /// This function calculates the exact maximum additional size and sigops required
 /// by the given coinbase outputs. No safety margins are added - the values reflect
 /// precisely what the provided outputs require.
 ///
+/// The size counts the outputs' serialized bytes alone. The CompactSize that counts the
+/// coinbase's outputs grows from one byte to three past 252 outputs, and the Template Provider
+/// reserves its worst case itself (sv2-spec 07, `CoinbaseOutputConstraints`), so counting it here
+/// would reserve it twice.
+///
 /// # Arguments
 /// * `coinbase_outputs` - List of transaction outputs that will be included in the coinbase
 ///
 /// # Returns
 /// CoinbaseOutputConstraints with exact size and sigops values based on the provided outputs
+///
+/// # Errors
+/// Outputs whose size or sigop cost doesn't fit the message's fields return an error, never a
+/// smaller reservation.
 pub fn coinbase_output_constraints_message(
     coinbase_outputs: Vec<TxOut>,
-) -> CoinbaseOutputConstraintsOwned {
+) -> Result<CoinbaseOutputConstraintsOwned, CoinbaseOutputConstraintsError> {
     // calculate the max coinbase output size for CoinbaseOutputConstraints
-    let max_size: u32 = coinbase_outputs.iter().map(|o| o.size() as u32).sum();
+    let max_size: usize = coinbase_outputs.iter().map(TxOut::size).sum();
     tracing::debug!(
         max_size,
         outputs_count = coinbase_outputs.len(),
@@ -62,13 +98,15 @@ pub fn coinbase_output_constraints_message(
         output: coinbase_outputs,
     };
 
-    let max_sigops = dummy_coinbase.total_sigop_cost(|_| None) as u16;
+    let max_sigops = dummy_coinbase.total_sigop_cost(|_| None);
     tracing::debug!(max_sigops, "Calculated max sigops for coinbase");
 
-    CoinbaseOutputConstraintsOwned {
-        coinbase_output_max_additional_size: max_size,
-        coinbase_output_max_additional_sigops: max_sigops,
-    }
+    Ok(CoinbaseOutputConstraintsOwned {
+        coinbase_output_max_additional_size: u32::try_from(max_size)
+            .map_err(|_| CoinbaseOutputConstraintsError::SizeOutOfRange)?,
+        coinbase_output_max_additional_sigops: u16::try_from(max_sigops)
+            .map_err(|_| CoinbaseOutputConstraintsError::SigopsOutOfRange)?,
+    })
 }
 
 /// Creates a CoinbaseOutputConstraints message with safety margins (offsets) applied.
@@ -91,17 +129,30 @@ pub fn coinbase_output_constraints_message(
 /// # Offsets Applied
 /// - **Size**: +43 bytes to accommodate Pay-to-Taproot (p2tr) addresses
 /// - **Sigops**: +4 to accommodate Pay-to-Public-Key-Hash (p2pkh) addresses
+///
+/// # Errors
+/// Outputs whose size or sigop cost, with the offsets added, doesn't fit the message's fields
+/// return an error, never a smaller reservation.
 pub fn coinbase_output_constraints_message_with_offset(
     coinbase_outputs: Vec<TxOut>,
-) -> CoinbaseOutputConstraintsOwned {
-    let constraints = coinbase_output_constraints_message(coinbase_outputs);
+) -> Result<CoinbaseOutputConstraintsOwned, CoinbaseOutputConstraintsError> {
+    with_offset(coinbase_output_constraints_message(coinbase_outputs)?)
+}
 
-    CoinbaseOutputConstraintsOwned {
-        coinbase_output_max_additional_size: constraints.coinbase_output_max_additional_size
-            + OFFSET_ADDITIONAL_SIZE,
-        coinbase_output_max_additional_sigops: constraints.coinbase_output_max_additional_sigops
-            + OFFSET_MAX_SIGOPS,
-    }
+// `constraints` with the safety offsets added.
+fn with_offset(
+    constraints: CoinbaseOutputConstraintsOwned,
+) -> Result<CoinbaseOutputConstraintsOwned, CoinbaseOutputConstraintsError> {
+    Ok(CoinbaseOutputConstraintsOwned {
+        coinbase_output_max_additional_size: constraints
+            .coinbase_output_max_additional_size
+            .checked_add(OFFSET_ADDITIONAL_SIZE)
+            .ok_or(CoinbaseOutputConstraintsError::SizeOutOfRange)?,
+        coinbase_output_max_additional_sigops: constraints
+            .coinbase_output_max_additional_sigops
+            .checked_add(OFFSET_MAX_SIGOPS)
+            .ok_or(CoinbaseOutputConstraintsError::SigopsOutOfRange)?,
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -203,7 +254,7 @@ mod tests {
             .unwrap(),
         }];
 
-        let result = coinbase_output_constraints_message(coinbase_outputs.clone());
+        let result = coinbase_output_constraints_message(coinbase_outputs.clone()).unwrap();
 
         let expected_size: u32 = coinbase_outputs.iter().map(|o| o.size() as u32).sum();
         let dummy_coinbase = Transaction {
@@ -238,8 +289,8 @@ mod tests {
         }];
 
         let result_with_offset =
-            coinbase_output_constraints_message_with_offset(coinbase_outputs.clone());
-        let result_exact = coinbase_output_constraints_message(coinbase_outputs);
+            coinbase_output_constraints_message_with_offset(coinbase_outputs.clone()).unwrap();
+        let result_exact = coinbase_output_constraints_message(coinbase_outputs).unwrap();
 
         assert_eq!(
             result_with_offset.coinbase_output_max_additional_size,
@@ -265,8 +316,9 @@ mod tests {
             script_pubkey: addr.script_pubkey(),
         }];
 
-        let exact = coinbase_output_constraints_message(coinbase_outputs.clone());
-        let with_offset = coinbase_output_constraints_message_with_offset(coinbase_outputs);
+        let exact = coinbase_output_constraints_message(coinbase_outputs.clone()).unwrap();
+        let with_offset =
+            coinbase_output_constraints_message_with_offset(coinbase_outputs).unwrap();
 
         assert_eq!(
             with_offset.coinbase_output_max_additional_size,
@@ -276,5 +328,97 @@ mod tests {
             with_offset.coinbase_output_max_additional_sigops,
             exact.coinbase_output_max_additional_sigops + OFFSET_MAX_SIGOPS
         );
+    }
+
+    // One output whose script is `opcode` repeated `count` times.
+    fn output_with_script(opcode: u8, count: usize) -> Vec<TxOut> {
+        vec![TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from_bytes(vec![opcode; count]),
+        }]
+    }
+
+    const OP_CHECKSIG: u8 = 0xac;
+    const OP_CHECKMULTISIG: u8 = 0xae;
+
+    /// A sigop cost the message's 16-bit field can't carry is an error, never a smaller
+    /// reservation: 1,000 `OP_CHECKMULTISIG` cost 80,000 sigops, and each legacy `OP_CHECKSIG`
+    /// costs 4, so 16,383 of them fit the field and 16,384 don't.
+    #[test]
+    fn sigop_costs_the_message_cannot_carry_are_an_error() {
+        assert_eq!(
+            coinbase_output_constraints_message(output_with_script(OP_CHECKMULTISIG, 1_000)),
+            Err(CoinbaseOutputConstraintsError::SigopsOutOfRange)
+        );
+        assert_eq!(
+            coinbase_output_constraints_message(output_with_script(OP_CHECKSIG, 16_383))
+                .unwrap()
+                .coinbase_output_max_additional_sigops,
+            65_532
+        );
+        assert_eq!(
+            coinbase_output_constraints_message(output_with_script(OP_CHECKSIG, 16_384)),
+            Err(CoinbaseOutputConstraintsError::SigopsOutOfRange)
+        );
+    }
+
+    /// The offsets are added with checks: outputs costing 65,532 sigops fit the field exactly,
+    /// but not with the 4-sigop offset, and either field one past its largest value with the
+    /// offset is an error.
+    #[test]
+    fn offsets_past_the_message_fields_are_an_error() {
+        assert_eq!(
+            coinbase_output_constraints_message_with_offset(output_with_script(
+                OP_CHECKSIG,
+                16_383
+            )),
+            Err(CoinbaseOutputConstraintsError::SigopsOutOfRange)
+        );
+
+        let constraints = |size, sigops| CoinbaseOutputConstraintsOwned {
+            coinbase_output_max_additional_size: size,
+            coinbase_output_max_additional_sigops: sigops,
+        };
+        assert_eq!(
+            with_offset(constraints(u32::MAX - OFFSET_ADDITIONAL_SIZE, 0)),
+            Ok(constraints(u32::MAX, OFFSET_MAX_SIGOPS))
+        );
+        assert_eq!(
+            with_offset(constraints(u32::MAX - OFFSET_ADDITIONAL_SIZE + 1, 0)),
+            Err(CoinbaseOutputConstraintsError::SizeOutOfRange)
+        );
+        assert_eq!(
+            with_offset(constraints(0, u16::MAX - OFFSET_MAX_SIGOPS)),
+            Ok(constraints(OFFSET_ADDITIONAL_SIZE, u16::MAX))
+        );
+        assert_eq!(
+            with_offset(constraints(0, u16::MAX - OFFSET_MAX_SIGOPS + 1)),
+            Err(CoinbaseOutputConstraintsError::SigopsOutOfRange)
+        );
+    }
+
+    /// The size is the outputs' serialized bytes alone, on both sides of the 253 outputs where
+    /// the CompactSize counting them grows from one byte to three: the Template Provider reserves
+    /// that count's worst case itself.
+    #[test]
+    fn the_size_leaves_the_output_count_to_the_template_provider() {
+        for count in [252, 253] {
+            let outputs = vec![
+                TxOut {
+                    value: Amount::from_sat(0),
+                    script_pubkey: ScriptBuf::new(),
+                };
+                count
+            ];
+            let size: usize = outputs.iter().map(TxOut::size).sum();
+
+            let constraints = coinbase_output_constraints_message(outputs).unwrap();
+
+            assert_eq!(
+                constraints.coinbase_output_max_additional_size as usize,
+                size
+            );
+            assert_eq!(size, count * 9);
+        }
     }
 }

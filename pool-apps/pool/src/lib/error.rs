@@ -7,6 +7,7 @@ use std::{
 use stratum_apps::stratum_core::parsers_sv2::MiningOwned;
 
 use stratum_apps::{
+    coinbase_output_constraints::CoinbaseOutputConstraintsError,
     stratum_core::{
         binary_sv2, bitcoin,
         channels_sv2::{
@@ -183,6 +184,8 @@ pub enum PoolErrorKind {
     FailedToCreateBitcoinCoreTokioRuntime,
     /// Failed to send CoinbaseOutputConstraints message
     FailedToSendCoinbaseOutputConstraints,
+    /// Coinbase outputs need more room than `CoinbaseOutputConstraints` can reserve.
+    CoinbaseOutputConstraints(CoinbaseOutputConstraintsError),
     /// BitcoinCoreSv2TDP cancellation token activated
     BitcoinCoreSv2TDPCancellationTokenActivated,
     /// Unsupported Protocol
@@ -277,6 +280,7 @@ impl std::fmt::Display for PoolErrorKind {
             FailedToSendCoinbaseOutputConstraints => {
                 write!(f, "Failed to send CoinbaseOutputConstraints message")
             }
+            CoinbaseOutputConstraints(e) => write!(f, "{e}"),
             BitcoinCoreSv2TDPCancellationTokenActivated => {
                 write!(f, "BitcoinCoreSv2TDP cancellation token activated")
             }

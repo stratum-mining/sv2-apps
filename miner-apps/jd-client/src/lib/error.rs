@@ -18,6 +18,7 @@ use std::{
     sync::PoisonError,
 };
 use stratum_apps::{
+    coinbase_output_constraints::CoinbaseOutputConstraintsError,
     network_helpers,
     stratum_core::{
         binary_sv2, bitcoin,
@@ -226,6 +227,8 @@ pub enum JDCErrorKind {
     AllocateMiningJobTokenSuccessCoinbaseOutputsError,
     /// Channel manager has bad coinbase outputs.
     ChannelManagerHasBadCoinbaseOutputs,
+    /// Coinbase outputs need more room than `CoinbaseOutputConstraints` can reserve.
+    CoinbaseOutputConstraints(CoinbaseOutputConstraintsError),
     /// Extranonce size is too large
     ExtranonceSizeTooLarge,
     /// Extranonce size is too small
@@ -351,6 +354,7 @@ impl fmt::Display for JDCErrorKind {
             ChannelManagerHasBadCoinbaseOutputs => {
                 write!(f, "Channel Manager coinbase outputs are not deserializable")
             }
+            CoinbaseOutputConstraints(e) => write!(f, "{e}"),
             ExtranonceSizeTooLarge => {
                 write!(f, "Extranonce size too large")
             }
