@@ -277,14 +277,15 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
         )
         .await;
 
-    // This open must fail before it binds the connection's payout policy.
+    // A zero max target is rejected during channel construction, before the
+    // connection's payout policy is bound.
     send_to_pool
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 0,
                 user_identity: "sri/donate/worker.1".try_into().unwrap(),
-                nominal_hash_rate: -1.0,
-                max_target: [0xff; 32].into(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0; 32].into(),
                 min_extranonce_size: 8,
             }),
         ))
@@ -297,9 +298,9 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
         )
         .await;
     let rejected_open = next_open_channel_error(&sniffer);
-    assert_ne!(
+    assert_eq!(
         rejected_open.error_code.as_utf8_or_hex(),
-        "incompatible-payout-mode"
+        ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE
     );
 
     send_to_pool
@@ -329,14 +330,14 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
         MINER_COINBASE_REWARD_ADDR
     );
 
-    // This identity would resolve to FullDonation, but the invalid channel must
-    // not replace channel A's policy before the open is rejected.
+    // This identity would resolve to FullDonation, which conflicts with
+    // channel A's policy; the rejected open must not replace it.
     send_to_pool
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
                 user_identity: "sri/donate/worker.1".try_into().unwrap(),
-                nominal_hash_rate: -1.0,
+                nominal_hash_rate: 1000.0,
                 max_target: [0xff; 32].into(),
                 min_extranonce_size: 8,
             }),
