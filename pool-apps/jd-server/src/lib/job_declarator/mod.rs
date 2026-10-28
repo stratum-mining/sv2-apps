@@ -277,6 +277,10 @@ impl JobDeclarator {
                             }
                             Err(e) => {
                                 error!(error = ?e, "Failed to accept new downstream connection");
+                                // accept() fails without consuming the pending connection when descriptors or
+                                // socket buffers run out, so the listener stays readable and an immediate retry
+                                // fails again. Pace the retries so the loop neither spins nor floods the log.
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                             }
                         }
                     }

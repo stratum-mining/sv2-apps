@@ -533,6 +533,9 @@ impl Sv1Server {
         task_manager_clone.spawn(fallback_coordinator.clone().track(async move {
             tokio::pin!(vardiff_future);
             tokio::pin!(keepalive_future);
+            // Set after a failed accept() to pause accepting until this instant, while the other
+            // arms keep relaying for downstreams that are already connected.
+            let mut accept_retry_at: Option<tokio::time::Instant> = None;
             loop {
                 tokio::select! {
                     biased;
@@ -549,7 +552,10 @@ impl Sv1Server {
                         self.cleanup();
                         break;
                     }
-                    result = listener.accept() => {
+                    _ = tokio::time::sleep_until(accept_retry_at.unwrap_or_else(tokio::time::Instant::now)), if accept_retry_at.is_some() => {
+                        accept_retry_at = None;
+                    }
+                    result = listener.accept(), if accept_retry_at.is_none() => {
                         match result {
                             Ok((stream, addr)) => {
                                 info!("New SV1 downstream connection from {}", addr);
@@ -606,6 +612,11 @@ impl Sv1Server {
                             }
                             Err(e) => {
                                 warn!("Failed to accept new connection: {:?}", e);
+                                // accept() fails without consuming the pending connection when descriptors or
+                                // socket buffers run out, so the listener stays readable and an immediate retry
+                                // fails again. Pause accepting so the loop neither spins nor floods the log,
+                                // without sleeping here, which would also stall the arms below.
+                                accept_retry_at = Some(tokio::time::Instant::now() + Duration::from_millis(100));
                             }
                         }
                     }
