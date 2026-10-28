@@ -897,8 +897,6 @@ mod tests {
         let (coinbase_tx, value_remaining) =
             coinbase_tx_from_ipc(coinbase_tx_reader).expect("coinbase tx should convert");
 
-        println!("coinbase_tx: {:?}", coinbase_tx);
-
         assert_eq!(value_remaining, 5_000_000_000);
         assert_eq!(coinbase_tx.version, TransactionVersion::TWO);
         assert_eq!(coinbase_tx.lock_time.to_consensus_u32(), 840_000);
