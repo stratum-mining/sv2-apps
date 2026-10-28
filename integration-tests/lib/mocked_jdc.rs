@@ -92,6 +92,8 @@ impl MockedJdc {
             sv2_tp_config(tp_address),
             vec![],
             vec![],
+            vec![],
+            vec![],
             false,
             None,
             jdc_signature,

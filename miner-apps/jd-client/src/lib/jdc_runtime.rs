@@ -229,8 +229,8 @@ impl<State> JdcRuntime<State> {
                 cancellation_token.clone(),
                 fallback_coordinator,
                 downstream_to_channel_manager_sender,
-                config.supported_extensions().to_vec(),
-                config.required_extensions().to_vec(),
+                config.supported_downstream_extensions().to_vec(),
+                config.required_downstream_extensions().to_vec(),
             )
             .await
             .map_err(|e| e.kind)?;

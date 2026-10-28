@@ -602,9 +602,9 @@ pub struct ChannelManager {
     pub vardiff: SharedMap<VardiffKey, VardiffState>,
     /// Extensions that have been successfully negotiated with the upstream server.
     pub negotiated_extensions: SharedLock<Vec<u16>>,
-    /// Extensions that the JDC supports.
+    /// Extensions JDC agrees to use with its upstream when the upstream requires them.
     pub supported_extensions: Vec<u16>,
-    /// Extensions that the JDC requires.
+    /// Extensions JDC requires its upstream to support.
     pub required_extensions: Vec<u16>,
     /// Cached shares waiting for `SetCustomMiningJob.Success` before they can be
     /// validated again and propagated upstream.
@@ -899,7 +899,8 @@ impl ChannelManager {
         Some(group_channel)
     }
 
-    /// Starts the downstream server, and accepts new connection request.
+    /// Starts the downstream server, and accepts new connection request. Each downstream negotiates
+    /// extensions against `supported_downstream_extensions` and `required_downstream_extensions`.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_downstream_server(
         self,
@@ -911,8 +912,8 @@ impl ChannelManager {
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
-        supported_extensions: Vec<u16>,
-        required_extensions: Vec<u16>,
+        supported_downstream_extensions: Vec<u16>,
+        required_downstream_extensions: Vec<u16>,
     ) -> JDCResult<(), error::ChannelManager> {
         // todo: let start downstream accept channel manager as `Arc`, instead of clone
         let this = Arc::new(self);
@@ -992,8 +993,10 @@ impl ChannelManager {
                                 let fallback_coordinator_inner = fallback_coordinator.clone();
                                 let channel_manager_sender_inner = channel_manager_sender.clone();
                                 let task_manager_inner = task_manager_clone.clone();
-                                let supported_extensions_inner = supported_extensions.clone();
-                                let required_extensions_inner = required_extensions.clone();
+                                let supported_extensions_inner =
+                                    supported_downstream_extensions.clone();
+                                let required_extensions_inner =
+                                    required_downstream_extensions.clone();
 
                                 // Tracked from the handshake on, so a connection accepted by this
                                 // generation is never set up after fallback has completed; the

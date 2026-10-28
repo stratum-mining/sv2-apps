@@ -12,12 +12,14 @@ use async_channel::{Receiver, Sender};
 use std::{convert::TryInto, net::SocketAddr, time::Duration};
 use stratum_apps::{
     stratum_core::{
+        binary_sv2::Seq064KOwned,
         codec_sv2::{MessageFrame, SerializedFrame},
         common_messages_sv2::{
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccessOwned,
         },
+        extensions_sv2::RequestExtensionsOwned,
         mining_sv2::{
             MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, OpenExtendedMiningChannelOwned,
             OpenExtendedMiningChannelSuccessOwned, UpdateChannelOwned,
@@ -407,6 +409,18 @@ pub fn extended_channel_request(max_target: [u8; 32]) -> AnyMessageOwned {
             min_extranonce_size: 0,
         },
     ))
+}
+
+/// A downstream's `RequestExtensions` asking for `extensions`.
+pub fn request_extensions(extensions: Vec<u16>) -> AnyMessageOwned {
+    AnyMessageOwned::Extensions(
+        RequestExtensionsOwned {
+            request_id: 1,
+            requested_extensions: Seq064KOwned::new(extensions)
+                .expect("the extensions fit into Seq064K"),
+        }
+        .into(),
+    )
 }
 
 /// A mock downstream connected to a server through a sniffer, so a test sends what the downstream

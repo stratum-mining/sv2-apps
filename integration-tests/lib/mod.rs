@@ -227,20 +227,27 @@ pub fn start_jdc(
         template_provider_config,
         supported_extensions,
         required_extensions,
+        vec![],
+        vec![],
         enable_monitoring,
         jdc_mode,
         "JDC",
     )
 }
 
-/// Like [`start_jdc`], with a user identity per upstream and `jdc_signature` as the miner tag JDC
-/// writes in the coinbase scriptSig of its jobs.
+/// Like [`start_jdc`], with a user identity per upstream, the extensions JDC negotiates with its
+/// downstreams, and `jdc_signature` as the miner tag JDC writes in the coinbase scriptSig of its
+/// jobs. `supported_extensions` and `required_extensions` are the ones JDC negotiates with its
+/// Pool.
+#[allow(clippy::too_many_arguments)]
 pub fn start_jdc_with_user_identities(
     pool: &[(SocketAddr, SocketAddr, String)], /* (pool_address, jds_address,
                                                 * per_upstream_user_identity) */
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
+    supported_downstream_extensions: Vec<u16>,
+    required_downstream_extensions: Vec<u16>,
     enable_monitoring: bool,
     jdc_mode: Option<ConfigJDCMode>,
     jdc_signature: &str,
@@ -282,7 +289,7 @@ pub fn start_jdc_with_user_identities(
         None
     };
     let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
-    let jd_client_proxy = JobDeclaratorClientConfig::new(
+    let mut jd_client_proxy = JobDeclaratorClientConfig::new(
         jdc_address,
         protocol_config,
         10.0,
@@ -298,6 +305,10 @@ pub fn start_jdc_with_user_identities(
         monitoring_address,
         monitoring_cache_refresh_secs,
         None,
+    );
+    jd_client_proxy.set_downstream_extensions(
+        supported_downstream_extensions,
+        required_downstream_extensions,
     );
     let ret = jd_client_sv2::JobDeclaratorClient::new(jd_client_proxy);
     let ret_clone = ret.clone();

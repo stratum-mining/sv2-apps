@@ -221,6 +221,8 @@ async fn jdc_sends_per_upstream_identity() {
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
+        vec![],
+        vec![],
         false,
         None,
         "JDC",

@@ -1843,6 +1843,8 @@ async fn jdc_per_upstream_identity_switches_on_fallback() {
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
+        vec![],
+        vec![],
         false,
         None,
         "JDC",
