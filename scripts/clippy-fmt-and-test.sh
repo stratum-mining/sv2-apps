@@ -12,6 +12,9 @@ set -e
 
 APPS="pool_sv2 jd_server_sv2 jd_client_sv2 translator_sv2"
 
+echo "Running script regression tests"
+python3 -B -m unittest discover -s scripts/tests -v
+
 echo "Executing clippy"
 cargo +1.88.0 clippy -p stratum-apps --all-features -- -D warnings -A dead-code
 for crate in $APPS bitcoin_core_sv2 integration_tests_sv2; do
