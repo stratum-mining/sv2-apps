@@ -351,10 +351,18 @@ impl TranslatorRuntime<IoReady> {
         let cancel = self.translator.cancellation_token.clone();
         let fallback_token = self.fallback_coordinator.token();
         let audit_for_task = audit.clone();
-        self.task_manager.spawn(self.fallback_coordinator.track(async move {
-            crate::chain_status::run(rx, client, audit_for_task, policy, cancel, fallback_token)
+        self.task_manager
+            .spawn(self.fallback_coordinator.track(async move {
+                crate::chain_status::run(
+                    rx,
+                    client,
+                    audit_for_task,
+                    policy,
+                    cancel,
+                    fallback_token,
+                )
                 .await;
-        }));
+            }));
         audit.with_chain_checks(tx)
     }
 }

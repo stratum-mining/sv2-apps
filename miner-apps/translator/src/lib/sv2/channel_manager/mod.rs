@@ -8,7 +8,8 @@ use crate::{
     share_audit::{ForwardedShare, ShareAudit},
     utils::{
         AGGREGATED_CHANNEL_ID, AggregatedState, AtomicAggregatedState, Sv1ShareMetadata,
-        aggregated_upstream_user_identity, tlv_user_identity_from_sv1_worker_name,
+        aggregated_upstream_user_identity, format_share_hash,
+        tlv_user_identity_from_sv1_worker_name,
     },
 };
 use async_channel::{Receiver, Sender};
@@ -806,13 +807,16 @@ impl ChannelManager {
 
                             self.audit_forwarded_share(
                                 AGGREGATED_CHANNEL_ID,
-                                worker,
-                                downstream_channel_id,
-                                upstream_extended_channel_id,
-                                m.job_id,
-                                m.sequence_number,
-                                &share_hash.to_string(),
-                                block_candidate,
+                                ForwardedShare {
+                                    worker,
+                                    downstream_channel_id,
+                                    upstream_channel_id: upstream_extended_channel_id,
+                                    job_id: m.job_id,
+                                    sequence_number: m.sequence_number,
+                                    share_hash: format_share_hash(share_hash),
+                                    block_candidate,
+                                    nbits: None,
+                                },
                             );
                         }
                         Some(Err(ShareValidationError::DoesNotMeetTarget(error_code))) => {
@@ -898,13 +902,16 @@ impl ChannelManager {
 
                             self.audit_forwarded_share(
                                 m.channel_id,
-                                worker,
-                                downstream_channel_id,
-                                m.channel_id,
-                                m.job_id,
-                                m.sequence_number,
-                                &share_hash.to_string(),
-                                block_candidate,
+                                ForwardedShare {
+                                    worker,
+                                    downstream_channel_id,
+                                    upstream_channel_id: m.channel_id,
+                                    job_id: m.job_id,
+                                    sequence_number: m.sequence_number,
+                                    share_hash: format_share_hash(share_hash),
+                                    block_candidate,
+                                    nbits: None,
+                                },
                             );
                         }
                         Some(Err(ShareValidationError::DoesNotMeetTarget(error_code))) => {
@@ -1417,13 +1424,7 @@ impl ChannelManager {
     fn audit_forwarded_share(
         &self,
         validation_channel_key: ChannelId,
-        worker: Option<&str>,
-        downstream_channel_id: ChannelId,
-        upstream_channel_id: ChannelId,
-        job_id: u32,
-        sequence_number: u32,
-        share_hash: &str,
-        block_candidate: bool,
+        mut share: ForwardedShare<'_>,
     ) {
         let (nbits, blocks_found) = self
             .extended_channels
@@ -1433,17 +1434,18 @@ impl ChannelManager {
                 (nbits, blocks_found)
             })
             .unwrap_or((None, 0));
+        share.nbits = nbits;
         let nbits_hex = nbits.map(|bits| format!("0x{bits:08x}"));
 
-        if block_candidate {
+        if share.block_candidate {
             warn!(
                 event = "block_candidate",
-                worker,
-                downstream_channel_id,
-                upstream_channel_id,
-                job_id,
-                sequence_number,
-                share_hash,
+                worker = share.worker,
+                downstream_channel_id = share.downstream_channel_id,
+                upstream_channel_id = share.upstream_channel_id,
+                job_id = share.job_id,
+                sequence_number = share.sequence_number,
+                share_hash = share.share_hash.as_str(),
                 nbits = nbits_hex.as_deref().unwrap_or(""),
                 blocks_found,
                 meets_network_target = true,
@@ -1454,26 +1456,17 @@ impl ChannelManager {
 
         info!(
             event = "share_forwarded",
-            worker,
-            downstream_channel_id,
-            upstream_channel_id,
-            job_id,
-            sequence_number,
-            share_hash,
-            block_candidate,
+            worker = share.worker,
+            downstream_channel_id = share.downstream_channel_id,
+            upstream_channel_id = share.upstream_channel_id,
+            job_id = share.job_id,
+            sequence_number = share.sequence_number,
+            share_hash = share.share_hash.as_str(),
+            block_candidate = share.block_candidate,
             "share_forwarded"
         );
 
-        self.share_audit.record_forwarded(ForwardedShare {
-            worker,
-            downstream_channel_id,
-            upstream_channel_id,
-            job_id,
-            sequence_number,
-            share_hash: share_hash.to_string(),
-            block_candidate,
-            nbits,
-        });
+        self.share_audit.record_forwarded(share);
     }
 
     /// Gets the next sequence number for a valid share and increments the counter.
