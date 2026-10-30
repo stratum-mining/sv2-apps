@@ -35,8 +35,8 @@ struct Io {
     upstream_to_channel_manager_receiver: Receiver<InboundFrame>,
     channel_manager_to_sv1_server_sender: Sender<MiningOwned>,
     channel_manager_to_sv1_server_receiver: Receiver<MiningOwned>,
-    sv1_server_to_channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
-    sv1_server_to_channel_manager_receiver: Receiver<(MiningOwned, Option<String>)>,
+    sv1_server_to_channel_manager_sender: Sender<(MiningOwned, crate::utils::Sv1ShareMetadata)>,
+    sv1_server_to_channel_manager_receiver: Receiver<(MiningOwned, crate::utils::Sv1ShareMetadata)>,
 }
 
 /// Connection attempts made to an upstream before moving on.
@@ -260,6 +260,22 @@ impl TranslatorRuntime<Init> {
 
 impl TranslatorRuntime<IoReady> {
     fn bootstrap_channel_manager(self) -> TranslatorRuntime<ChannelManagerReady> {
+        let share_audit = match crate::share_audit::ShareAudit::open_audits(
+            self.translator.config.share_audit_path(),
+            self.translator.config.share_audit_block_candidates_only(),
+            self.translator.config.block_candidate_audit_path(),
+        ) {
+            Ok(audit) => audit,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to open share audit files; continuing without JSONL audit"
+                );
+                crate::share_audit::ShareAudit::disabled()
+            }
+        };
+        let share_audit = self.start_chain_status_if_configured(share_audit);
+
         let channel_manager = Arc::new(ChannelManager::new(
             self.state.io.channel_manager_to_upstream_sender.clone(),
             self.state.io.upstream_to_channel_manager_receiver.clone(),
@@ -269,6 +285,7 @@ impl TranslatorRuntime<IoReady> {
             self.translator.config.required_extensions.clone(),
             self.tproxy_mode,
             self.translator.config.max_past_jobs,
+            share_audit,
             #[cfg(feature = "monitoring")]
             self.translator
                 .config
@@ -289,6 +306,64 @@ impl TranslatorRuntime<IoReady> {
                 channel_manager,
             },
         }
+    }
+
+    /// Starts the bitcoind poller when an RPC URL is configured.
+    ///
+    /// The task registers with the fallback coordinator so an upstream reconnect waits for it
+    /// to stop, then bootstrap starts a new poller with the new channel manager. Hashes already
+    /// queued are not resumed. RPC failures do not shut the translator down.
+    fn start_chain_status_if_configured(
+        &self,
+        audit: crate::share_audit::ShareAudit,
+    ) -> crate::share_audit::ShareAudit {
+        let Some(settings) = self.translator.config.bitcoin_rpc() else {
+            return audit;
+        };
+        let client = match crate::chain_status::BitcoinRpcClient::new(
+            &settings.url,
+            settings.cookie_path.clone(),
+            settings.user.clone(),
+            settings.password.clone(),
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Bitcoin RPC config is invalid; chain-status checks are off"
+                );
+                return audit;
+            }
+        };
+        info!(
+            url = %client.endpoint(),
+            initial_secs = settings.initial_secs,
+            max_secs = settings.max_secs,
+            stop_confirmations = settings.stop_confirmations,
+            "Chain-status RPC enabled; only block candidates are checked"
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = crate::chain_status::PollPolicy::production(
+            settings.initial_secs,
+            settings.max_secs,
+            settings.stop_confirmations,
+        );
+        let cancel = self.translator.cancellation_token.clone();
+        let fallback_token = self.fallback_coordinator.token();
+        let audit_for_task = audit.clone();
+        self.task_manager
+            .spawn(self.fallback_coordinator.track(async move {
+                crate::chain_status::run(
+                    rx,
+                    client,
+                    audit_for_task,
+                    policy,
+                    cancel,
+                    fallback_token,
+                )
+                .await;
+            }));
+        audit.with_chain_checks(tx)
     }
 }
 

@@ -26,7 +26,8 @@ use crate::{
         job_store::Sv1JobStore,
     },
     utils::{
-        AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId, TproxyMode,
+        AGGREGATED_CHANNEL_ID, KEEPALIVE_JOB_ID_DELIMITER, SubmitShareWithChannelId,
+        Sv1ShareMetadata, TproxyMode,
     },
 };
 use async_channel::{Receiver, Sender, unbounded};
@@ -147,15 +148,15 @@ struct Sv1ServerIo {
     downstream_to_sv1_server_sender: Sender<(DownstreamId, json_rpc::Message)>,
     downstream_to_sv1_server_receiver: Receiver<(DownstreamId, json_rpc::Message)>,
     channel_manager_receiver: Receiver<MiningOwned>,
-    // Option<String> carries non-empty sv1_worker_name metadata for SubmitSharesExtended.
-    channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
+    // Sv1ShareMetadata carries optional worker name + share_hash for SubmitSharesExtended.
+    channel_manager_sender: Sender<(MiningOwned, Sv1ShareMetadata)>,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl Sv1ServerIo {
     fn new(
         channel_manager_receiver: Receiver<MiningOwned>,
-        channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
+        channel_manager_sender: Sender<(MiningOwned, Sv1ShareMetadata)>,
     ) -> Self {
         let (downstream_to_sv1_server_sender, downstream_to_sv1_server_receiver) = unbounded();
 
@@ -433,7 +434,7 @@ impl Sv1Server {
     pub fn new(
         listener_addr: SocketAddr,
         channel_manager_receiver: Receiver<MiningOwned>,
-        channel_manager_sender: Sender<(MiningOwned, Option<String>)>,
+        channel_manager_sender: Sender<(MiningOwned, Sv1ShareMetadata)>,
         config: TranslatorConfig,
         mode: TproxyMode,
     ) -> Self {
@@ -972,7 +973,7 @@ impl Sv1Server {
             .channel_manager_sender
             .send((
                 MiningOwned::SubmitSharesExtended(submit_share_extended),
-                sv1_worker_name,
+                Sv1ShareMetadata::for_share(sv1_worker_name, message.share_hash),
             ))
             .await
             .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
@@ -1075,7 +1076,7 @@ impl Sv1Server {
                                     )
                                     .unwrap(),
                                 }),
-                                None,
+                                Sv1ShareMetadata::none(),
                             ))
                             .await
                             .map_err(|_| {
@@ -1181,7 +1182,7 @@ impl Sv1Server {
                                         channel_id: m.channel_id,
                                         reason_code,
                                     }),
-                                    None,
+                                    Sv1ShareMetadata::none(),
                                 ))
                                 .await
                                 .map_err(|_| {
@@ -1507,7 +1508,7 @@ impl Sv1Server {
             .channel_manager_sender
             .send((
                 MiningOwned::OpenExtendedMiningChannel(open_channel_msg),
-                None,
+                Sv1ShareMetadata::none(),
             ))
             .await
             .map_err(|_| TproxyError::shutdown(TproxyErrorKind::ChannelErrorSender))?;
@@ -1584,7 +1585,7 @@ impl Sv1Server {
                             channel_id,
                             reason_code,
                         }),
-                        None,
+                        Sv1ShareMetadata::none(),
                     ))
                     .await;
             }
@@ -4277,7 +4278,7 @@ mod tests {
     type TestChannels = (
         Sv1Server,
         Sender<MiningOwned>,
-        Receiver<(MiningOwned, Option<String>)>,
+        Receiver<(MiningOwned, Sv1ShareMetadata)>,
     );
 
     pub(super) fn server_with_channels(aggregated: bool) -> TestChannels {
@@ -4905,7 +4906,7 @@ mod tests {
         server: &Sv1Server,
         downstream_id: usize,
         responses: &Receiver<json_rpc::Message>,
-        forwarded: &Receiver<(MiningOwned, Option<String>)>,
+        forwarded: &Receiver<(MiningOwned, Sv1ShareMetadata)>,
         nonce: u32,
         expected_error: Option<i32>,
     ) {

@@ -45,6 +45,21 @@ monitoring_cache_refresh_secs = 15
 # channels_sv2 default of 16; set `ceil(16s / your job interval)` to reclaim ~4.5 kB per job.
 # max_past_jobs = 3
 
+# Share-hash audit. Ordinary shares stay in the process log unless share_audit_path is set.
+# Network-difficulty candidates are appended to block-candidates.jsonl by default.
+# Set block_candidate_audit_path = "" to disable that file.
+# Chain-status checks stay off until share_audit_bitcoin_rpc_url points at a bitcoind
+# on this same network (testnet4 RPC is usually 48332). Prefer a cookie file.
+# Do not commit RPC credentials.
+# share_audit_path = "./share-audit.jsonl"
+# share_audit_block_candidates_only = false
+# block_candidate_audit_path = "./block-candidates.jsonl"
+# share_audit_bitcoin_rpc_url = "http://127.0.0.1:48332"
+# share_audit_bitcoin_rpc_cookie_path = "/absolute/path/to/.cookie"
+# share_audit_chain_poll_initial_secs = 120
+# share_audit_chain_poll_max_secs = 86400
+# share_audit_chain_stop_confirmations = 6
+
 # LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
 [miner_telemetry]
 cidrs = ["192.168.1.0/24"]
