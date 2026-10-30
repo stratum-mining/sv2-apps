@@ -50,8 +50,8 @@ use stratum_apps::{
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
         types::{
-            ChannelId, DownstreamId, InboundFrame, OutboundFrame, RequestId, SharesBatchSize,
-            SharesPerMinute, TemplateId, UpstreamJobId, VardiffKey,
+            ChannelId, DownstreamId, Hashrate, InboundFrame, OutboundFrame, RequestId,
+            SharesBatchSize, SharesPerMinute, TemplateId, UpstreamJobId, VardiffKey,
         },
     },
 };
@@ -66,7 +66,7 @@ use crate::{
     jd_mode::JDMode,
     utils::{
         AtomicUpstreamState, DownstreamChannelJobId, DownstreamMessage, PendingChannelRequest,
-        SharesOrderedByDiff, UpstreamState,
+        SharesOrderedByDiff, UpstreamState, upstream_channel_update,
     },
 };
 #[cfg(feature = "monitoring")]
@@ -114,6 +114,10 @@ const JDC_LOCAL_PREFIX_BYTES: u8 = bytes_needed(JDC_MAX_CHANNELS);
 /// |<----- SOLO_FULL_EXTRANONCE_SIZE = 20 ---------->|
 /// ```
 pub const SOLO_FULL_EXTRANONCE_SIZE: u8 = 20;
+
+// The request ID of the `OpenExtendedMiningChannel` JDC sends upstream. JDC opens one upstream
+// channel, and waits for its answer in `UpstreamState::Pending`.
+const UPSTREAM_CHANNEL_REQUEST_ID: u32 = 1;
 
 // How many templates can wait for their transaction data at once. A Template Provider answers a
 // request within moments, so normally one or two wait; the cap only matters against one that
@@ -588,6 +592,9 @@ pub struct ChannelManager {
     // Pending downstream open-channel requests buffered while JDC is
     // bringing up or re-establishing the upstream channel.
     pub pending_downstream_requests: SharedLock<VecDeque<PendingChannelRequest>>,
+    // The `OpenExtendedMiningChannel` JDC last sent upstream: while the upstream state is
+    // `Pending`, the open JDC waits for an answer to.
+    upstream_open: SharedLock<Option<OpenExtendedMiningChannelOwned>>,
     // Factory used to create custom mining jobs, when available.
     pub job_factory: SharedLock<Option<JobFactory>>,
     // Mapping of `(downstream_id, channel_id)` -> vardiff controller.
@@ -595,9 +602,9 @@ pub struct ChannelManager {
     pub vardiff: SharedMap<VardiffKey, VardiffState>,
     /// Extensions that have been successfully negotiated with the upstream server.
     pub negotiated_extensions: SharedLock<Vec<u16>>,
-    /// Extensions that the JDC supports.
+    /// Extensions JDC agrees to use with its upstream when the upstream requires them.
     pub supported_extensions: Vec<u16>,
-    /// Extensions that the JDC requires.
+    /// Extensions JDC requires its upstream to support.
     pub required_extensions: Vec<u16>,
     /// Cached shares waiting for `SetCustomMiningJob.Success` before they can be
     /// validated again and propagated upstream.
@@ -742,6 +749,7 @@ impl ChannelManager {
             upstream_channel: SharedLock::new(None),
             pool_tag_string: SharedLock::new(None),
             pending_downstream_requests: SharedLock::new(VecDeque::new()),
+            upstream_open: SharedLock::new(None),
             job_factory: SharedLock::new(None),
             vardiff: SharedMap::new(),
             negotiated_extensions: SharedLock::new(vec![]),
@@ -775,6 +783,41 @@ impl ChannelManager {
 
     fn user_identity(&self) -> &str {
         self.user_identity.get().expect("identity should be set")
+    }
+
+    // Sends `open`, the `OpenExtendedMiningChannel` of JDC's single upstream channel, and keeps
+    // it for the answer (see `pending_upstream_open`).
+    async fn open_upstream_channel(
+        &self,
+        open: OpenExtendedMiningChannelOwned,
+    ) -> JDCResult<(), error::ChannelManager> {
+        self.upstream_open
+            .set(Some(open.clone()))
+            .map_err(JDCError::shutdown)?;
+        let message = MiningOwned::OpenExtendedMiningChannel(open);
+        let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
+            .map_err(JDCError::shutdown)?;
+        self.channel_manager_io
+            .upstream_sender
+            .send(sv2_frame)
+            .await
+            .map_err(|_| JDCError::fallback(JDCErrorKind::ChannelErrorSender))
+    }
+
+    // The open JDC sent upstream, if an answer with `request_id` is the one JDC waits for. JDC
+    // opens one upstream channel and waits for its answer in `UpstreamState::Pending`, so an
+    // answer for another request, or one arriving outside `Pending`, answers nothing JDC asked
+    // for.
+    #[allow(clippy::result_large_err)]
+    fn pending_upstream_open(
+        &self,
+        request_id: u32,
+    ) -> JDCResult<Option<OpenExtendedMiningChannelOwned>, error::ChannelManager> {
+        if self.upstream_state.get() != UpstreamState::Pending {
+            return Ok(None);
+        }
+        let open = self.upstream_open.get().map_err(JDCError::shutdown)?;
+        Ok(open.filter(|open| open.request_id == request_id))
     }
 
     // Bootstraps a group channel with the given parameters.
@@ -856,7 +899,8 @@ impl ChannelManager {
         Some(group_channel)
     }
 
-    /// Starts the downstream server, and accepts new connection request.
+    /// Starts the downstream server, and accepts new connection request. Each downstream negotiates
+    /// extensions against `supported_downstream_extensions` and `required_downstream_extensions`.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_downstream_server(
         self,
@@ -868,8 +912,8 @@ impl ChannelManager {
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         channel_manager_sender: Sender<(DownstreamId, MiningOwned, Option<Vec<Tlv>>)>,
-        supported_extensions: Vec<u16>,
-        required_extensions: Vec<u16>,
+        supported_downstream_extensions: Vec<u16>,
+        required_downstream_extensions: Vec<u16>,
     ) -> JDCResult<(), error::ChannelManager> {
         // todo: let start downstream accept channel manager as `Arc`, instead of clone
         let this = Arc::new(self);
@@ -949,8 +993,10 @@ impl ChannelManager {
                                 let fallback_coordinator_inner = fallback_coordinator.clone();
                                 let channel_manager_sender_inner = channel_manager_sender.clone();
                                 let task_manager_inner = task_manager_clone.clone();
-                                let supported_extensions_inner = supported_extensions.clone();
-                                let required_extensions_inner = required_extensions.clone();
+                                let supported_extensions_inner =
+                                    supported_downstream_extensions.clone();
+                                let required_extensions_inner =
+                                    required_downstream_extensions.clone();
 
                                 // Tracked from the handshake on, so a connection accepted by this
                                 // generation is never set up after fallback has completed; the
@@ -1304,7 +1350,7 @@ impl ChannelManager {
                             let identity = self.user_identity().to_string();
                             upstream_message.user_identity =
                                 identity.as_str().try_into().map_err(JDCError::shutdown)?;
-                            upstream_message.request_id = 1;
+                            upstream_message.request_id = UPSTREAM_CHANNEL_REQUEST_ID;
                             // The upstream extended channel is opened once and its
                             // `extranonce_size` is fixed. Size its rollable region to fit:
                             //   - JDC's own `local_index` (JDC_LOCAL_PREFIX_BYTES), plus
@@ -1321,19 +1367,7 @@ impl ChannelManager {
                                 std::cmp::max(reserved_downstream_rollable, downstream_min),
                             );
                             upstream_message.min_extranonce_size = upstream_min as u16;
-                            let upstream_message =
-                                MiningOwned::OpenExtendedMiningChannel(upstream_message);
-                            let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(
-                                upstream_message,
-                            ))
-                            .map_err(JDCError::shutdown)?;
-                            self.channel_manager_io
-                                .upstream_sender
-                                .send(sv2_frame)
-                                .await
-                                .map_err(|_| {
-                                    JDCError::fallback(JDCErrorKind::ChannelErrorSender)
-                                })?;
+                            self.open_upstream_channel(upstream_message).await?;
                         }
                     }
                     UpstreamState::Pending => {
@@ -1386,23 +1420,12 @@ impl ChannelManager {
                             let identity = self.user_identity().to_string();
                             let upstream_open = OpenExtendedMiningChannelOwned {
                                 user_identity: identity.as_str().try_into().unwrap(),
-                                request_id: 1,
+                                request_id: UPSTREAM_CHANNEL_REQUEST_ID,
                                 nominal_hash_rate: downstream_channel_request.nominal_hash_rate,
                                 max_target: downstream_channel_request.max_target,
                                 min_extranonce_size: upstream_min_extranonce_size,
                             };
-
-                            let message = MiningOwned::OpenExtendedMiningChannel(upstream_open);
-                            let sv2_frame =
-                                OutboundFrame::from_message(AnyMessageOwned::Mining(message))
-                                    .map_err(JDCError::shutdown)?;
-                            self.channel_manager_io
-                                .upstream_sender
-                                .send(sv2_frame)
-                                .await
-                                .map_err(|_| {
-                                    JDCError::fallback(JDCErrorKind::ChannelErrorSender)
-                                })?;
+                            self.open_upstream_channel(upstream_open).await?;
                         }
                     }
                     UpstreamState::Pending => {
@@ -1892,23 +1915,8 @@ impl ChannelManager {
         }
 
         if !messages.is_empty() {
-            let mut downstream_hashrate = 0.0;
-            let mut min_target = [0xff; 32];
-
-            self.downstream.for_each(|_, downstream| {
-                let mut update_from_channel = |hashrate: f32, target: &Target| {
-                    downstream_hashrate += hashrate;
-                    min_target = std::cmp::min(target.to_le_bytes(), min_target);
-                };
-
-                downstream.standard_channels.for_each(|_, channel| {
-                    update_from_channel(channel.get_nominal_hashrate(), channel.get_target());
-                });
-
-                downstream.extended_channels.for_each(|_, channel| {
-                    update_from_channel(channel.get_nominal_hashrate(), channel.get_target());
-                });
-            });
+            let (downstream_hashrate, min_target) =
+                upstream_channel_update(self.downstream_channels());
 
             self.upstream_channel
                 .with(|maybe_upstream_channel| {
@@ -1927,7 +1935,7 @@ impl ChannelManager {
                             MiningOwned::UpdateChannel(UpdateChannelOwned {
                                 channel_id: upstream_channel.get_channel_id(),
                                 nominal_hash_rate: downstream_hashrate,
-                                max_target: min_target.into(),
+                                max_target: min_target.to_le_bytes().into(),
                             })
                             .into(),
                         );
@@ -1947,6 +1955,20 @@ impl ChannelManager {
 
         info!("Vardiff update cycle complete");
         Ok(())
+    }
+
+    // The nominal hashrate and target of every downstream channel, standard and extended.
+    fn downstream_channels(&self) -> Vec<(Hashrate, Target)> {
+        let mut channels = Vec::new();
+        self.downstream.for_each(|_, downstream| {
+            downstream.standard_channels.for_each(|_, channel| {
+                channels.push((channel.get_nominal_hashrate(), *channel.get_target()));
+            });
+            downstream.extended_channels.for_each(|_, channel| {
+                channels.push((channel.get_nominal_hashrate(), *channel.get_target()));
+            });
+        });
+        channels
     }
 
     /// Runs `f` while holding the downstream map entry guard.

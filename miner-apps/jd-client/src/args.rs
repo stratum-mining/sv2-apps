@@ -25,6 +25,8 @@ pub struct Args {
 const LIST_KEYS: &[&str] = &[
     "supported_extensions",
     "required_extensions",
+    "supported_downstream_extensions",
+    "required_downstream_extensions",
     "miner_telemetry.cidrs",
 ];
 
@@ -79,6 +81,8 @@ mod tests {
             // Single values must come out as 1-element lists.
             ("JDC__SUPPORTED_EXTENSIONS", "2"),
             ("JDC__REQUIRED_EXTENSIONS", "2"),
+            ("JDC__SUPPORTED_DOWNSTREAM_EXTENSIONS", "2,3"),
+            ("JDC__REQUIRED_DOWNSTREAM_EXTENSIONS", "3"),
             ("JDC__MINER_TELEMETRY__CIDRS", "192.168.1.0/24"),
             (
                 "JDC__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
@@ -108,6 +112,8 @@ mod tests {
 
         assert_eq!(config.supported_extensions(), [2]);
         assert_eq!(config.required_extensions(), [2]);
+        assert_eq!(config.supported_downstream_extensions(), [2, 3]);
+        assert_eq!(config.required_downstream_extensions(), [3]);
         assert_eq!(config.miner_telemetry_cidrs(), ["192.168.1.0/24"]);
         assert!(matches!(
             config.template_provider_type(),

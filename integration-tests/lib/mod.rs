@@ -25,6 +25,7 @@ pub mod interceptor;
 pub mod message_aggregator;
 pub mod mining_device;
 pub mod mock_roles;
+pub mod mocked_jdc;
 pub mod prometheus_metrics_assertions;
 pub mod sniffer;
 pub mod sniffer_error;
@@ -226,19 +227,30 @@ pub fn start_jdc(
         template_provider_config,
         supported_extensions,
         required_extensions,
+        vec![],
+        vec![],
         enable_monitoring,
         jdc_mode,
+        "JDC",
     )
 }
 
+/// Like [`start_jdc`], with a user identity per upstream, the extensions JDC negotiates with its
+/// downstreams, and `jdc_signature` as the miner tag JDC writes in the coinbase scriptSig of its
+/// jobs. `supported_extensions` and `required_extensions` are the ones JDC negotiates with its
+/// Pool.
+#[allow(clippy::too_many_arguments)]
 pub fn start_jdc_with_user_identities(
     pool: &[(SocketAddr, SocketAddr, String)], /* (pool_address, jds_address,
                                                 * per_upstream_user_identity) */
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
+    supported_downstream_extensions: Vec<u16>,
+    required_downstream_extensions: Vec<u16>,
     enable_monitoring: bool,
     jdc_mode: Option<ConfigJDCMode>,
+    jdc_signature: &str,
 ) -> (JobDeclaratorClient, SocketAddr, Option<SocketAddr>) {
     use jd_client_sv2::config::{JobDeclaratorClientConfig, PoolConfig, ProtocolConfig, Upstream};
     let jdc_address = get_available_address();
@@ -277,7 +289,7 @@ pub fn start_jdc_with_user_identities(
         None
     };
     let monitoring_cache_refresh_secs = if enable_monitoring { Some(1) } else { None };
-    let jd_client_proxy = JobDeclaratorClientConfig::new(
+    let mut jd_client_proxy = JobDeclaratorClientConfig::new(
         jdc_address,
         protocol_config,
         10.0,
@@ -286,13 +298,17 @@ pub fn start_jdc_with_user_identities(
         3600,
         template_provider_config,
         upstreams,
-        "JDC".to_string(),
+        jdc_signature.to_string(),
         jdc_mode,
         supported_extensions,
         required_extensions,
         monitoring_address,
         monitoring_cache_refresh_secs,
         None,
+    );
+    jd_client_proxy.set_downstream_extensions(
+        supported_downstream_extensions,
+        required_downstream_extensions,
     );
     let ret = jd_client_sv2::JobDeclaratorClient::new(jd_client_proxy);
     let ret_clone = ret.clone();

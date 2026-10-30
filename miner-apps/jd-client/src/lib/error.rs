@@ -239,6 +239,8 @@ pub enum JDCErrorKind {
     ExtranonceSizeTooLarge,
     /// Extranonce size is too small
     ExtranonceSizeTooSmall,
+    /// An upstream opened a channel with a target easier than the requested `max_target`.
+    InitialTargetAboveMaxTarget,
     /// Could not create group channel
     FailedToCreateGroupChannel(GroupChannelError),
     ///Channel Errors
@@ -255,6 +257,8 @@ pub enum JDCErrorKind {
     RequiredExtensionsNotSupported(Vec<u16>),
     /// Server requires extensions that the translator doesn't support
     ServerRequiresUnsupportedExtensions(Vec<u16>),
+    /// Client does not support required extensions
+    ClientDoesNotSupportRequiredExtensions(Vec<u16>),
     /// BitcoinCoreSv2TDP cancellation token activated
     BitcoinCoreSv2TDPCancellationTokenActivated,
     /// Failed to create BitcoinCoreSv2TDP tokio runtime
@@ -385,6 +389,10 @@ impl fmt::Display for JDCErrorKind {
             ExtranonceSizeTooSmall => {
                 write!(f, "Extranonce size too small")
             }
+            InitialTargetAboveMaxTarget => write!(
+                f,
+                "upstream opened a channel with a target easier than the requested max_target"
+            ),
             FailedToCreateGroupChannel(e) => {
                 write!(f, "Failed to create group channel: {e:?}")
             }
@@ -422,6 +430,12 @@ impl fmt::Display for JDCErrorKind {
                 write!(
                     f,
                     "Server requires extensions that the translator doesn't support: {extensions:?}"
+                )
+            }
+            ClientDoesNotSupportRequiredExtensions(extensions) => {
+                write!(
+                    f,
+                    "Client does not support required extensions: {extensions:?}"
                 )
             }
             BitcoinCoreSv2TDPCancellationTokenActivated => {

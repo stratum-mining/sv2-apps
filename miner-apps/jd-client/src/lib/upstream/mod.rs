@@ -322,39 +322,19 @@ impl Upstream {
         Ok(())
     }
 
-    /// Start unified upstream loop.
+    /// Start unified upstream loop, once [`Self::setup_connection`] has succeeded.
     ///
     /// Responsibilities:
-    /// - Run `setup_connection`
     /// - Handle messages from upstream (pool) and channel manager
     /// - React to shutdown signals
     ///
     /// This function spawns an async task and returns immediately.
-    #[allow(clippy::too_many_arguments)]
     pub async fn start(
-        mut self,
-        min_version: u16,
-        max_version: u16,
+        self,
         cancellation_token: CancellationToken,
         fallback_coordinator: FallbackCoordinator,
         task_manager: Arc<TaskManager>,
     ) {
-        let setup_fallback_token = fallback_coordinator.token();
-        if let Err(e) = self.setup_connection(min_version, max_version).await {
-            error!(error = ?e, "Upstream: connection setup failed.");
-            if let LoopControl::Break = Self::handle_error_action(
-                "Upstream::setup_connection",
-                &e,
-                &cancellation_token,
-                &setup_fallback_token,
-            ) {
-                self.upstream_io.close();
-                return;
-            }
-            self.upstream_io.close();
-            return;
-        }
-
         let fallback_token = fallback_coordinator.token();
         task_manager.spawn(fallback_coordinator.track(async move {
             let mut self_clone_1 = self.clone();

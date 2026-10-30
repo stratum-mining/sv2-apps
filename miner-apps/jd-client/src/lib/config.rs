@@ -53,12 +53,21 @@ pub struct JobDeclaratorClientConfig {
     /// JDC mode: FullTemplate, CoinbaseOnly, or SoloMining
     #[serde(deserialize_with = "deserialize_jdc_mode", default)]
     pub mode: ConfigJDCMode,
-    /// Protocol extensions that the JDC supports (will accept if requested by downstream clients).
+    /// Protocol extensions JDC agrees to use with its Pool when the Pool requires them. JDC moves
+    /// to the next upstream when the Pool requires one that isn't here.
     #[serde(default)]
     supported_extensions: Vec<u16>,
-    /// Protocol extensions that the JDC requires (downstream clients must support these).
+    /// Protocol extensions JDC requires its Pool to support. JDC asks the Pool for them, and moves
+    /// to the next upstream when the Pool doesn't support them all.
     #[serde(default)]
     required_extensions: Vec<u16>,
+    /// Protocol extensions JDC grants a downstream that asks for them.
+    #[serde(default)]
+    supported_downstream_extensions: Vec<u16>,
+    /// Protocol extensions every downstream must ask for. JDC refuses a downstream that leaves one
+    /// out, and disconnects it.
+    #[serde(default)]
+    required_downstream_extensions: Vec<u16>,
     /// Optional monitoring server bind address
     #[serde(default)]
     monitoring_address: Option<SocketAddr>,
@@ -129,6 +138,10 @@ impl JobDeclaratorClientConfig {
             mode: jdc_mode.unwrap_or_default(),
             supported_extensions,
             required_extensions,
+            // Programmatic construction negotiates no extensions with downstreams; use
+            // `set_downstream_extensions` to set them, as the file-based path does via serde.
+            supported_downstream_extensions: Vec::new(),
+            required_downstream_extensions: Vec::new(),
             monitoring_address,
             monitoring_cache_refresh_secs,
             miner_telemetry: MinerTelemetryConfig::default(),
@@ -235,14 +248,30 @@ impl JobDeclaratorClientConfig {
         self.max_past_jobs = max_past_jobs;
     }
 
-    /// Returns the supported extensions.
+    /// Returns the extensions JDC agrees to use with its Pool when the Pool requires them.
     pub fn supported_extensions(&self) -> &[u16] {
         &self.supported_extensions
     }
 
-    /// Returns the required extensions.
+    /// Returns the extensions JDC requires its Pool to support.
     pub fn required_extensions(&self) -> &[u16] {
         &self.required_extensions
+    }
+
+    /// Returns the extensions JDC grants a downstream that asks for them.
+    pub fn supported_downstream_extensions(&self) -> &[u16] {
+        &self.supported_downstream_extensions
+    }
+
+    /// Returns the extensions every downstream must ask for.
+    pub fn required_downstream_extensions(&self) -> &[u16] {
+        &self.required_downstream_extensions
+    }
+
+    /// Sets the extensions JDC grants downstreams, and those every downstream must ask for.
+    pub fn set_downstream_extensions(&mut self, supported: Vec<u16>, required: Vec<u16>) {
+        self.supported_downstream_extensions = supported;
+        self.required_downstream_extensions = required;
     }
 
     /// Rollable extranonce bytes reserved for future extended downstreams (same as the config

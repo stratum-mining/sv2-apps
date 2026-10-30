@@ -229,8 +229,8 @@ impl<State> JdcRuntime<State> {
                 cancellation_token.clone(),
                 fallback_coordinator,
                 downstream_to_channel_manager_sender,
-                config.supported_extensions().to_vec(),
-                config.required_extensions().to_vec(),
+                config.supported_downstream_extensions().to_vec(),
+                config.required_downstream_extensions().to_vec(),
             )
             .await
             .map_err(|e| e.kind)?;
@@ -586,8 +586,6 @@ impl JdcRuntime<ChannelManagerReady> {
             Ok((upstream, job_declarator, user_identity)) => {
                 upstream
                     .start(
-                        self.jd_client.config.min_supported_version(),
-                        self.jd_client.config.max_supported_version(),
                         self.jd_client.cancellation_token.clone(),
                         self.fallback_coordinator.clone(),
                         self.task_manager.clone(),
@@ -748,13 +746,18 @@ impl JdcRuntime<ChannelManagerReady> {
     }
 
     // Attempts to initialize a single upstream (pool + JDS pair).
+    //
+    // The pair is usable only once both the Pool and the JDS have answered their
+    // `SetupConnection`, so a failed setup fails the attempt like a failed connection does,
+    // whatever action its error carries. Returning drops the connections opened for the pair, so
+    // JDC closes its side of each.
     #[cfg_attr(not(test), hotpath::measure)]
     async fn try_initialize_single(
         &self,
         upstream_entry: &UpstreamEntry,
     ) -> JDCResult<(Upstream, JobDeclarator), super::error::JobDeclaratorClient> {
         info!("Upstream connection in-progress at initialize single");
-        let upstream = Upstream::new(
+        let mut upstream = Upstream::new(
             upstream_entry,
             self.state.io.upstream_to_channel_manager_sender.clone(),
             self.state.io.channel_manager_to_upstream_receiver.clone(),
@@ -764,14 +767,18 @@ impl JdcRuntime<ChannelManagerReady> {
             self.jd_client.config.required_extensions().to_vec(),
         )
         .await
-        .map_err(|err| match err.action {
-            Action::Shutdown => JDCError::shutdown(err.kind),
-            _ => JDCError::fallback(err.kind),
-        })?;
+        .map_err(Self::failed_attempt)?;
+        upstream
+            .setup_connection(
+                self.jd_client.config.min_supported_version(),
+                self.jd_client.config.max_supported_version(),
+            )
+            .await
+            .map_err(Self::failed_attempt)?;
 
         info!("Upstream connection done at initialize single");
 
-        let job_declarator = JobDeclarator::new(
+        let mut job_declarator = JobDeclarator::new(
             upstream_entry,
             self.state.io.jd_to_channel_manager_sender.clone(),
             self.state.io.channel_manager_to_jd_receiver.clone(),
@@ -781,12 +788,22 @@ impl JdcRuntime<ChannelManagerReady> {
             self.task_manager.clone(),
         )
         .await
-        .map_err(|err| match err.action {
-            Action::Shutdown => JDCError::shutdown(err.kind),
-            _ => JDCError::fallback(err.kind),
-        })?;
+        .map_err(Self::failed_attempt)?;
+        job_declarator
+            .setup_connection()
+            .await
+            .map_err(Self::failed_attempt)?;
 
         Ok((upstream, job_declarator))
+    }
+
+    // The error of a failed step in an attempt at a Pool/JDS pair: one asking for a shutdown still
+    // shuts JDC down, and any other fails the attempt, so JDC retries the pair or moves on.
+    fn failed_attempt<O>(err: JDCError<O>) -> JDCError<super::error::JobDeclaratorClient> {
+        match err.action {
+            Action::Shutdown => JDCError::shutdown(err.kind),
+            _ => JDCError::fallback(err.kind),
+        }
     }
 }
 

@@ -276,19 +276,6 @@ impl PendingChannelRequest {
             } => MiningOwned::OpenStandardMiningChannel(open_channel_message),
         }
     }
-
-    pub fn hashrate(&self) -> Hashrate {
-        match self {
-            PendingChannelRequest::ExtendedChannel {
-                downstream_id: _,
-                message: m,
-            } => m.nominal_hash_rate,
-            PendingChannelRequest::StandardChannel {
-                downstream_id: _,
-                message: m,
-            } => m.nominal_hash_rate,
-        }
-    }
 }
 
 /// Creates a [`CloseChannel`] message for the given channel ID and reason.
@@ -300,6 +287,20 @@ pub(crate) fn create_close_channel_msg(channel_id: ChannelId, msg: &str) -> Clos
         channel_id,
         reason_code: Str0255Owned::try_from(msg).expect("Could not convert message."),
     }
+}
+
+/// The nominal hashrate and `max_target` JDC asks its upstream channel for, given the nominal
+/// hashrate and target of every downstream channel: their total hashrate, and the hardest of their
+/// targets. The targets are compared as numbers, not as their serialized bytes.
+pub(crate) fn upstream_channel_update(
+    channels: impl IntoIterator<Item = (Hashrate, Target)>,
+) -> (Hashrate, Target) {
+    channels.into_iter().fold(
+        (0.0, Target::from_le_bytes([0xff; 32])),
+        |(hashrate, max_target), (channel_hashrate, channel_target)| {
+            (hashrate + channel_hashrate, max_target.min(channel_target))
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -511,5 +512,22 @@ mod tests {
                 .any(|cached| cached.share_target == Target::from_le_bytes(best)),
             "the best share was evicted in favour of worse ones"
         );
+    }
+
+    // Two targets whose little-endian bytes order the other way round: the first byte of `hard` is
+    // larger, but `easy` is the larger number. The upstream channel gets the hard one.
+    #[test]
+    fn upstream_channel_update_asks_for_the_numerically_hardest_target() {
+        let mut easy = [0u8; 32];
+        easy[31] = 1;
+        let mut hard = [0u8; 32];
+        hard[0] = 0xff;
+        assert!(easy < hard);
+        let (easy, hard) = (Target::from_le_bytes(easy), Target::from_le_bytes(hard));
+        assert!(hard < easy);
+
+        let (hashrate, max_target) = upstream_channel_update([(10.0, easy), (5.0, hard)]);
+        assert_eq!(hashrate, 15.0);
+        assert_eq!(max_target, hard);
     }
 }

@@ -43,11 +43,19 @@ coinbase_reward_script = "addr(bc1qxyeh39c8n7fv0kq80qrdk7rccnvttmczj4spg5jzg2dq3
 # log_file = "./jd-client.log"
 
 # Protocol Extensions Configuration
-# Extensions that the JDC supports (will accept if requested by downstream clients)
-# Comment/uncomment to enable/disable specific extensions:
+# Comment/uncomment to enable/disable specific extensions.
+# Extensions JDC agrees to use with its Pool when the Pool requires them:
 supported_extensions = [
     0x0002,  # Worker-Specific Hashrate Tracking
 ]
+# Extensions JDC requires its Pool to support (JDC moves to the next upstream otherwise):
+# required_extensions = []
+# Extensions JDC grants downstreams that ask for them:
+supported_downstream_extensions = [
+    0x0002,  # Worker-Specific Hashrate Tracking
+]
+# Extensions every downstream must ask for (JDC disconnects a downstream that leaves one out):
+# required_downstream_extensions = []
 
 # Monitoring HTTP server address for exposing channel data (optional)
 monitoring_address = "0.0.0.0:9091"

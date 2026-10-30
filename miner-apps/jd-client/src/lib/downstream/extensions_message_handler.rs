@@ -100,7 +100,10 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                     "Downstream {}: Client does not support required extensions {:?}. Server MUST disconnect.",
                     self.downstream_id, missing_required
                 );
-                // TODO: Disconnect the client
+                return Err(JDCError::disconnect(
+                    JDCErrorKind::ClientDoesNotSupportRequiredExtensions(missing_required),
+                    self.downstream_id,
+                ));
             }
         } else {
             // Send success response with the subset of extensions we both support

@@ -31,7 +31,7 @@ use crate::{
         ChannelManager, JDC_LOCAL_PREFIX_BYTES, JDC_MAX_CHANNELS,
         downstream_message_handler::RouteMessageTo,
     },
-    error::{self, JDCError, JDCErrorKind},
+    error::{self, Action, JDCError, JDCErrorKind},
     utils::{UpstreamState, create_close_channel_msg, validate_cached_share},
 };
 
@@ -80,12 +80,18 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
     // Handles `OpenExtendedMiningChannelSuccess` messages from upstream.
     //
-    // On success, this establishes a client-side extended channel:
-    // - If initialization fails at any step, the upstream state is reverted from `Pending` to
-    //   `NoChannel`.
-    // - If initialization succeeds, we configure the extranonce factory, create a new
-    //   `ExtendedChannel` and `JobFactory`, and update the upstream state from `Pending` to
-    //   `Connected`.
+    // Only the answer to the open JDC is waiting for is acted on (see `pending_upstream_open`),
+    // and any other success is ignored and logged. That answer establishes a client-side extended
+    // channel, with the hashrate JDC asked for:
+    // - With no downstream waiting for it, the channel is closed and the upstream state goes back
+    //   from `Pending` to `NoChannel`.
+    // - A channel JDC can't use makes JDC fall back before anything is installed: an extranonce too
+    //   small for JDC's prefix and the rollable bytes it reserves, a target easier than the
+    //   `max_target` JDC asked for, a layout JDC can't build its extranonce allocator from, a full
+    //   extranonce too large for the coinbase scriptSig, or one `ExtendedChannel` refuses, such as
+    //   a target no share can meet.
+    // - Otherwise, we configure the extranonce factory, create a new `ExtendedChannel` and
+    //   `JobFactory`, and update the upstream state from `Pending` to `Connected`.
     //
     // Once the upstream state transitions to `Connected`, all pending downstream requests are
     // processed, and downstream channels are opened accordingly.
@@ -96,6 +102,18 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
+
+        // Only the answer to the open JDC is waiting for sets up the upstream channel. Any other
+        // success, such as a replay of one already handled, answers nothing JDC asked for, so it
+        // is ignored before it can change the channel JDC has or is opening.
+        let Some(requested) = self.pending_upstream_open(msg.request_id)? else {
+            warn!(
+                request_id = msg.request_id,
+                channel_id = msg.channel_id,
+                "Ignoring OpenExtendedMiningChannel.Success for a channel open JDC is not waiting for"
+            );
+            return Ok(());
+        };
 
         let reserved_downstream_rollable = self.reserved_downstream_rollable_extranonce_size;
         let min_extranonce_size =
@@ -113,11 +131,11 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             return Err(JDCError::fallback(JDCErrorKind::ExtranonceSizeTooSmall));
         }
 
-        let Some(hashrate) = self
+        let no_downstream_waiting = self
             .pending_downstream_requests
-            .with(|pending| pending.front().map(|request| request.hashrate()))
-            .map_err(JDCError::shutdown)?
-        else {
+            .with(|pending| pending.is_empty())
+            .map_err(JDCError::shutdown)?;
+        if no_downstream_waiting {
             self.upstream_state.set(UpstreamState::NoChannel);
             let close_channel =
                 create_close_channel_msg(msg.channel_id, "downstream not available");
@@ -130,7 +148,25 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 .await
                 .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
             return Ok(());
-        };
+        }
+
+        // The target the Pool assigns must not be easier than the `max_target` JDC asked for, and a
+        // Pool that can't meet it must refuse the open (sv2-spec 05,
+        // `OpenExtendedMiningChannel.Success`). A Pool that breaks this is left before any channel
+        // state is installed.
+        let initial_target = Target::from_le_bytes(*msg.target.as_array());
+        let requested_max_target = Target::from_le_bytes(requested.max_target.to_array());
+        if initial_target > requested_max_target {
+            warn!(
+                channel_id = msg.channel_id,
+                %initial_target,
+                %requested_max_target,
+                "Pool opened the upstream channel with a target easier than the requested max_target, preparing fallback"
+            );
+            return Err(JDCError::fallback(
+                JDCErrorKind::InitialTargetAboveMaxTarget,
+            ));
+        }
 
         let prefix_len = msg.extranonce_prefix.len();
         let total_len = prefix_len as u16 + msg.extranonce_size;
@@ -141,29 +177,18 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             "Calculated extranonce ranges"
         );
 
-        let extranonce_allocator = match ExtranonceAllocator::from_upstream_prefix(
+        // The Pool chose the extranonce layout, so one JDC can't allocate downstream extranonces
+        // from makes JDC fall back from the Pool.
+        let extranonce_allocator = ExtranonceAllocator::from_upstream_prefix(
             msg.extranonce_prefix.to_owned_bytes(),
             Vec::new(),
             total_len as u8,
             JDC_MAX_CHANNELS,
-        ) {
-            Ok(allocator) => allocator,
-            Err(e) => {
-                warn!("Failed to build extranonce allocator: {e:?}");
-                self.upstream_state.set(UpstreamState::NoChannel);
-                let close_channel =
-                    create_close_channel_msg(msg.channel_id, "downstream not available");
-                let close_channel = MiningOwned::CloseChannel(close_channel);
-                let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(close_channel))
-                    .map_err(JDCError::shutdown)?;
-                self.channel_manager_io
-                    .upstream_sender
-                    .send(sv2_frame)
-                    .await
-                    .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
-                return Ok(());
-            }
-        };
+        )
+        .map_err(|e| {
+            warn!("Pool granted an extranonce layout JDC can't allocate from, preparing fallback: {e:?}");
+            JDCError::fallback(e)
+        })?;
 
         let pool_tag_string = self.pool_tag_string.get().map_err(JDCError::shutdown)?;
         let job_factory =
@@ -175,7 +200,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             self.user_identity().to_string(),
             extranonce_prefix,
             Target::from_le_bytes(*msg.target.as_array()),
-            hashrate,
+            requested.nominal_hash_rate,
             true,
             msg.extranonce_size,
             self.max_past_jobs,
@@ -189,12 +214,24 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             }
         };
 
+        // Every downstream group channel builds its coinbases with the same tags as `job_factory`,
+        // so a full extranonce this factory can't fit in the coinbase scriptSig is one no group
+        // can take. The Pool chose its size, so JDC falls back from the Pool before anything is
+        // installed, rather than leave the groups to refuse it.
+        let full_extranonce_size = extended_channel.get_full_extranonce_size();
+        if !job_factory.fits_script_sig_budget(full_extranonce_size) {
+            warn!(
+                full_extranonce_size,
+                "Pool granted a full extranonce too large for the coinbase scriptSig, preparing fallback"
+            );
+            return Err(JDCError::fallback(JDCErrorKind::ExtranonceSizeTooLarge));
+        }
+
         if let Some(prevhash) = self.last_new_prev_hash.get().map_err(JDCError::shutdown)? {
             _ = extended_channel.on_chain_tip_update(prevhash.clone().into());
             debug!("Applied last_new_prev_hash to new extended channel");
         }
 
-        let full_extranonce_size = extended_channel.get_full_extranonce_size();
         self.extranonce_allocator
             .set(extranonce_allocator)
             .map_err(JDCError::shutdown)?;
@@ -212,7 +249,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)?;
         self.downstream.try_for_each(|_, downstream| {
             // the outer Result is the lock guard, the inner one is the group channel rejecting a
-            // `full_extranonce_size` that would overflow the coinbase scriptSig budget
+            // `full_extranonce_size` that would overflow the coinbase scriptSig budget, which the
+            // check above rules out
             downstream
                 .group_channel
                 .with(|group_channel| group_channel.set_full_extranonce_size(full_extranonce_size))
@@ -257,11 +295,26 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                 .with(std::mem::take)
                 .map_err(JDCError::shutdown)?;
 
+            // Each request belongs to its own downstream, so one that fails for its downstream
+            // alone, such as a downstream that disconnected while waiting, costs that downstream
+            // its request and the rest still get their channels. Any other failure stops here.
             for pending_downstream_message in pending_downstreams {
                 let downstream_id = pending_downstream_message.downstream_id();
                 let message = pending_downstream_message.message();
-                self.handle_mining_message_from_client(Some(downstream_id), message, None)
-                    .await?;
+                if let Err(e) = self
+                    .handle_mining_message_from_client(Some(downstream_id), message, None)
+                    .await
+                {
+                    let Action::Disconnect(downstream_id) = e.action else {
+                        return Err(e);
+                    };
+                    warn!(
+                        downstream_id,
+                        error_kind = ?e.kind,
+                        "Dropping a waiting channel request, disconnecting its downstream"
+                    );
+                    self.remove_downstream(downstream_id);
+                }
             }
         }
 
@@ -270,9 +323,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
     // Handles `OpenMiningChannelError` messages received from upstream.
     //
-    // Receiving this message is treated as malicious behavior, since JDC only supports
-    // extended channels. When encountered, we immediately trigger the fallback mechanism
-    // by transitioning the upstream state into a shutdown-fallback mode.
+    // A refusal of the open JDC is waiting for (see `pending_upstream_open`) leaves JDC without
+    // an upstream channel, so it falls back. Any other error is ignored and logged.
     async fn handle_open_mining_channel_error(
         &mut self,
         _server_id: Option<usize>,
@@ -280,6 +332,18 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", msg);
+
+        // Only a refusal of the open JDC is waiting for ends it. Any other error, such as a
+        // replay, answers nothing JDC asked for, so it is ignored before it can make JDC fall
+        // back from the channel it has or is opening.
+        if self.pending_upstream_open(msg.request_id)?.is_none() {
+            warn!(
+                request_id = msg.request_id,
+                "Ignoring OpenMiningChannel.Error for a channel open JDC is not waiting for"
+            );
+            return Ok(());
+        }
+
         warn!("⚠️ Cannot open extended channel with the upstream server, preparing fallback.");
 
         Err(JDCError::fallback(JDCErrorKind::OpenMiningChannelError))

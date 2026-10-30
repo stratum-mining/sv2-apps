@@ -152,6 +152,20 @@ Keep pool usernames/worker names unique for connected miners. If two connected m
 name, telemetry is not assigned to either of them and the monitoring API reports
 `duplicate_worker_name`.
 
+### Protocol Extensions
+
+JDC negotiates protocol extensions on both of its sides, with a pair of settings for each:
+
+- `supported_extensions` and `required_extensions` are for the Pool. JDC asks the Pool for the
+  required ones, and moves to the next upstream when the Pool doesn't support them all. When the
+  Pool requires extensions itself, JDC agrees to the ones in `supported_extensions` and moves on
+  otherwise.
+- `supported_downstream_extensions` and `required_downstream_extensions` are for downstreams. JDC
+  grants a downstream the supported ones it asks for, and refuses and disconnects a downstream
+  that leaves out a required one.
+
+All four are empty by default.
+
 ### Environment Variables
 
 Every configuration value can also be supplied through the environment. Variables are prefixed
@@ -169,7 +183,8 @@ JDC__LISTENING_ADDRESS=0.0.0.0:34265
 # environment's variant replaces it; set only one variant in the environment:
 JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
 JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
-# List fields (supported_extensions, required_extensions) are comma-separated.
+# List fields (supported_extensions, required_extensions and their downstream counterparts) are
+# comma-separated.
 # A lone value is read as a 1-element list:
 JDC__SUPPORTED_EXTENSIONS=2,3
 # Nested list fields work the same way (see Miner Telemetry above):
