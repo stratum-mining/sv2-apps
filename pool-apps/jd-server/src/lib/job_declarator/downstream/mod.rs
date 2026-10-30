@@ -34,7 +34,7 @@ use stratum_apps::{
         types::{DownstreamId, InboundFrame, OutboundFrame, RequestId},
     },
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 mod common_message_handler;
 
@@ -170,7 +170,11 @@ impl Downstream {
     ) {
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
-            error!(?e, "Failed to set up downstream connection");
+            warn!(
+                downstream_id = self.downstream_id,
+                error = ?e,
+                "Failed to set up downstream connection (disconnecting downstream; server unaffected)"
+            );
 
             // sleep to make sure SetupConnectionError is sent
             // before we break the TCP connection
@@ -178,7 +182,7 @@ impl Downstream {
 
             self.downstream_cancellation_token.cancel();
 
-            warn!(
+            debug!(
                 downstream_id = self.downstream_id,
                 "Downstream exiting before main loop; invoking cleanup callback"
             );
@@ -199,13 +203,13 @@ impl Downstream {
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
-                        info!("Downstream {downstream_id}: cancellation token triggered");
+                        debug!(downstream_id, "Cancellation token triggered");
                         break;
                     }
 
                     res = self_clone_1.handle_message_from_downstream() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling downstream message for {downstream_id}");
+                            error!(downstream_id, error = ?e, "Failed to handle downstream message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_message_from_downstream",
                                 &e,
@@ -216,7 +220,7 @@ impl Downstream {
                     }
                     res = self_clone_2.handle_job_declarator_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling job declarator message for {downstream_id}");
+                            error!(downstream_id, error = ?e, "Failed to handle job declarator message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_job_declarator_message",
                                 &e,
@@ -232,7 +236,7 @@ impl Downstream {
             // cleanup entry on JobDeclarator
             cleanup(downstream_id);
 
-            info!("Downstream {downstream_id}: disconnected.");
+            debug!(downstream_id, "Downstream disconnected");
         });
     }
 
@@ -306,7 +310,11 @@ impl Downstream {
         let (msg, _tlv_fields) = match receiver.recv().await {
             Ok(msg) => msg,
             Err(e) => {
-                error!("Error receiving message: {:?}", e);
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to receive message from job declarator (channel closed)"
+                );
                 return Err(error::JDSError::<error::Downstream>::disconnect(
                     e,
                     self.downstream_id,
@@ -354,7 +362,10 @@ impl Downstream {
                 let jd_message = match any_message.into_owned() {
                     AnyMessageOwned::JobDeclaration(msg) => msg,
                     _ => {
-                        error!("Expected JobDeclaration message but got different type");
+                        warn!(
+                            downstream_id = self.downstream_id,
+                            "Expected JobDeclaration message but got different type (disconnecting downstream)"
+                        );
                         return Err(error::JDSError::disconnect(
                             error::JDSErrorKind::UnexpectedMessage(
                                 header.ext_type_without_channel_msg(),
@@ -377,16 +388,18 @@ impl Downstream {
             }
             MessageType::Common | MessageType::Mining | MessageType::TemplateDistribution => {
                 warn!(
-                    ext_type = ?header.ext_type(),
-                    msg_type = ?header.msg_type(),
-                    "Received unexpected message from downstream."
+                    downstream_id = self.downstream_id,
+                    ext_type = header.ext_type(),
+                    msg_type = header.msg_type(),
+                    "Received unexpected message from downstream (ignoring)"
                 );
             }
             MessageType::Unknown => {
                 warn!(
-                    ext_type = ?header.ext_type(),
-                    msg_type = ?header.msg_type(),
-                    "Received unknown message from downstream."
+                    downstream_id = self.downstream_id,
+                    ext_type = header.ext_type(),
+                    msg_type = header.msg_type(),
+                    "Received unknown message from downstream (ignoring)"
                 );
             }
         }

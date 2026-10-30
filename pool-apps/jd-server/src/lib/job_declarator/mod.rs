@@ -190,11 +190,11 @@ impl JobDeclarator {
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
     ) -> JDSResult<(), error::JobDeclarator> {
-        info!("Starting downstream server at {listening_address}");
+        info!(%listening_address, "Starting downstream server");
         let server = TcpListener::bind(listening_address)
             .await
             .map_err(|e| {
-                error!(error = ?e, "Failed to bind downstream server at {listening_address}");
+                error!(%listening_address, error = %e, "Failed to bind downstream server");
                 e
             })
             .map_err(JDSError::shutdown)?;
@@ -205,7 +205,7 @@ impl JobDeclarator {
             loop {
                 tokio::select! {
                     _ = cancellation_token_clone.cancelled() => {
-                        info!("Job Declarator: cancellation token triggered");
+                        debug!("Job Declarator accept loop: cancellation token triggered");
                         break;
                     }
                     res = server.accept() => {
@@ -230,13 +230,13 @@ impl JobDeclarator {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {
-                                                    error!(error = ?e, "Noise handshake failed");
+                                                    warn!(%socket_address, error = ?e, "Noise handshake failed (dropping connection)");
                                                     return;
                                                 }
                                             }
                                         }
                                         _ = cancellation_token_inner.cancelled() => {
-                                            info!("Shutdown received during handshake, dropping connection");
+                                            debug!(%socket_address, "Shutdown received during handshake, dropping connection");
                                             return;
                                         }
                                     };
@@ -276,13 +276,13 @@ impl JobDeclarator {
                                 });
                             }
                             Err(e) => {
-                                error!(error = ?e, "Failed to accept new downstream connection");
+                                error!(error = %e, "Failed to accept new downstream connection");
                             }
                         }
                     }
                 }
             }
-            info!("Downstream server: Unified loop break");
+            debug!("Downstream server accept loop exited");
         });
 
         Ok(())
@@ -303,12 +303,12 @@ impl JobDeclarator {
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
-                        info!("Job Declarator: cancellation token triggered");
+                        debug!("Job Declarator: cancellation token triggered");
                         break;
                     }
                     res = self.handle_jdp_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling Job Declaration message");
+                            error!(error = ?e, "Failed to handle Job Declaration message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "JobDeclarator::handle_jdp_message",
                                 &e,
@@ -345,7 +345,7 @@ impl JobDeclarator {
 
     /// Removes a downstream from all internal maps and cleans up its tokens.
     fn cleanup_downstream(&self, downstream_id: DownstreamId) {
-        info!(downstream_id, "Cleaning up disconnected downstream");
+        debug!(downstream_id, "Cleaning up disconnected downstream");
 
         let removed_downstream =
             if let Some((_, mut downstream)) = self.downstream_clients.remove(&downstream_id) {
@@ -376,7 +376,7 @@ impl JobDeclarator {
         let (downstream_id, jd_message, tlv_fields) = match receiver.recv().await {
             Ok(msg) => msg,
             Err(e) => {
-                error!("Error receiving message: {:?}", e);
+                debug!(error = ?e, "Failed to receive message from JDP channel (channel closed)");
                 return Err(error::JDSError::shutdown(e));
             }
         };

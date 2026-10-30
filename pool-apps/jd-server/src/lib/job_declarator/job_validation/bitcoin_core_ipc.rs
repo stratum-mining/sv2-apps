@@ -55,6 +55,7 @@ use stratum_apps::{
     tp_type::BitcoinNetwork,
     utils::types::{DownstreamId, JdToken, RequestId},
 };
+use tracing::{debug, error, info, warn};
 
 /// Snapshot of a previously declared mining job, stored after a `DeclareMiningJob` is
 /// successfully validated (or while waiting for missing transactions).
@@ -182,9 +183,9 @@ impl DeclaredCustomJob {
             match bitcoin::VarInt::consensus_decode(&mut cursor) {
                 Ok(varint) => varint.0 as usize,
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to decode scriptSig size from coinbase prefix: {}",
-                        e
+                    warn!(
+                        error = %e,
+                        "Failed to decode scriptSig size from declared coinbase prefix (rejecting declared job)"
                     );
                     return Err(());
                 }
@@ -208,7 +209,10 @@ impl DeclaredCustomJob {
         // Deserialize the transaction
         bitcoin::consensus::Decodable::consensus_decode(&mut &declared_coinbase_tx[..]).map_err(
             |e| {
-                tracing::error!("Failed to deserialize declared coinbase transaction: {}", e);
+                warn!(
+                    error = %e,
+                    "Failed to deserialize declared coinbase transaction (rejecting declared job)"
+                );
             },
         )
     }
@@ -364,11 +368,9 @@ impl BitcoinCoreIPCEngine {
                             Ok(client) => client,
                             Err(e) => {
                                 if e.is_cancelled() {
-                                    tracing::debug!(
-                                        "BitcoinCoreSv2JDP bootstrap gave way to cancellation"
-                                    );
+                                    debug!("BitcoinCoreSv2JDP bootstrap gave way to cancellation");
                                 } else {
-                                    tracing::error!("Failed to create BitcoinCoreSv2JDP: {:?}", e);
+                                    error!(error = ?e, "Failed to create BitcoinCoreSv2JDP client");
                                 }
                                 // ready_tx dropped here, signaling failure to ready_rx
                                 return;
@@ -393,7 +395,7 @@ impl BitcoinCoreIPCEngine {
                         Ok(()) => break,
                         Err(_) => {
                             if let Err(e) = jdp_thread_handle.join() {
-                                tracing::warn!("BitcoinCoreSv2JDP thread join failed: {e:?}");
+                                warn!(error = ?e, "BitcoinCoreSv2JDP thread join failed");
                             }
 
                             return Err(JDSErrorKind::BitcoinCoreIPC(
@@ -403,17 +405,16 @@ impl BitcoinCoreIPCEngine {
                     }
                 }
                 _ = cancellation_token.cancelled() => {
-                    tracing::info!("BitcoinCoreIPCEngine stopped before mempool bootstrap completed");
+                    info!("BitcoinCoreIPCEngine stopped before mempool bootstrap completed");
                     if let Err(e) = jdp_thread_handle.join() {
-                        tracing::warn!("BitcoinCoreSv2JDP thread join failed during startup cancellation: {e:?}");
+                        warn!(error = ?e, "BitcoinCoreSv2JDP thread join failed during startup cancellation");
                     }
                     return Err(JDSErrorKind::BitcoinCoreIPC(
                         "Mempool bootstrap did not complete".to_string(),
                     ));
                 }
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    tracing::warn!("Waiting for initial template and prevhash from Template Provider...");
-                    tracing::warn!("Is the Bitcoin node undergoing IBD?");
+                    warn!("Waiting for initial template and previous block hash from Template Provider (check if Bitcoin node is undergoing IBD)");
                 }
             }
         }
@@ -435,7 +436,7 @@ impl BitcoinCoreIPCEngine {
                         janitor_downstream_states.for_each_mut(|downstream_id, state| {
                             let expired = state.prune_expired_allocations(now, token_timeout);
                             for (token, request_id) in expired {
-                                tracing::debug!(
+                                debug!(
                                     downstream_id,
                                     token,
                                     request_id,
@@ -473,14 +474,15 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             .with(|handle| {
                 if let Some(handle) = handle.take() {
                     if let Err(e) = handle.join() {
-                        tracing::warn!(
-                            "BitcoinCoreSv2JDP thread join failed during shutdown: {e:?}"
+                        warn!(
+                            error = ?e,
+                            "BitcoinCoreSv2JDP thread join failed during shutdown"
                         );
                     }
                 }
             })
             .unwrap_or_else(|_| {
-                tracing::warn!("BitcoinCoreSv2JDP thread handle lock poisoned during shutdown");
+                warn!("BitcoinCoreSv2JDP thread handle lock poisoned during shutdown");
             });
     }
 
@@ -531,7 +533,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
             match temp_job.get_coinbase_tx() {
                 Ok(tx) => {
-                    tracing::debug!("Declared coinbase transaction validated successfully");
+                    debug!("Declared coinbase transaction validated successfully");
                     tx
                 }
                 Err(_) => {
@@ -559,23 +561,28 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             .collect();
 
         // Parse missing transactions from ProvideMissingTransactionsSuccess
-        let missing_txs: Vec<Transaction> =
-            if let Some(ref pmts) = provide_missing_transactions_success {
-                pmts.transaction_list
+        let missing_txs: Vec<Transaction> = if let Some(ref pmts) =
+            provide_missing_transactions_success
+        {
+            pmts.transaction_list
                     .iter_bytes()
                     .filter_map(|tx_bytes| {
                         match bitcoin::consensus::Decodable::consensus_decode(&mut &tx_bytes[..]) {
                             Ok(tx) => Some(tx),
                             Err(e) => {
-                                tracing::error!("Failed to decode transaction: {}", e);
+                                warn!(
+                                    downstream_id,
+                                    error = %e,
+                                    "Failed to decode missing transaction provided by downstream (ignoring transaction)"
+                                );
                                 None
                             }
                         }
                     })
                     .collect()
-            } else {
-                Vec::new()
-            };
+        } else {
+            Vec::new()
+        };
 
         let previous_pending_validation_context =
             provide_missing_transactions_success.as_ref().and_then(|_| {
@@ -605,7 +612,11 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         };
 
         if let Err(e) = self.request_sender.send(request).await {
-            tracing::error!("Failed to send DeclareMiningJob request: {}", e);
+            error!(
+                downstream_id,
+                error = %e,
+                "Failed to send DeclareMiningJob request over IPC"
+            );
             // string here is error_code for the DeclareMiningJobError message
             return DeclareMiningJobResult::Error(ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR);
         }
@@ -614,7 +625,11 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         let response = match response_rx.await {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::error!("Failed to receive DeclareMiningJob response: {}", e);
+                error!(
+                    downstream_id,
+                    error = %e,
+                    "Failed to receive DeclareMiningJob response from IPC"
+                );
                 // string here is error_code for the DeclareMiningJobError message
                 return DeclareMiningJobResult::Error(ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR);
             }
@@ -641,7 +656,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     );
                 });
                 if updated.is_none() {
-                    tracing::error!(downstream_id, "downstream state missing after IPC response");
+                    error!(downstream_id, "Internal state missing after IPC response");
                     return DeclareMiningJobResult::Error(
                         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
                     );
@@ -705,10 +720,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                         );
                     });
                     if updated.is_none() {
-                        tracing::error!(
-                            downstream_id,
-                            "downstream state missing after IPC response"
-                        );
+                        error!(downstream_id, "Internal state missing after IPC response");
                         return DeclareMiningJobResult::Error(
                             ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
                         );
@@ -734,9 +746,13 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         };
 
         if let Err(e) = self.request_sender.send(request).await {
-            tracing::error!(downstream_id, "Failed to send PushSolution request: {}", e);
+            error!(
+                downstream_id,
+                error = %e,
+                "Failed to send PushSolution request over IPC"
+            );
         } else {
-            tracing::debug!(downstream_id, "PushSolution request sent successfully");
+            debug!(downstream_id, "PushSolution request sent successfully");
         }
     }
 
@@ -764,7 +780,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         {
             Some(declared_custom_job) => declared_custom_job,
             None => {
-                tracing::debug!(
+                debug!(
                     downstream_id,
                     allocated_token,
                     "Provided token is not associated with any DeclareMiningJob request"
@@ -777,7 +793,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
         // Job may be pending retry after missing txs and not fully validated yet.
         if !declared_custom_job.validated {
-            tracing::error!("Job not yet validated");
+            debug!(downstream_id, "Declared mining job is not yet validated");
             return SetCustomMiningJobResult::Error(
                 ERROR_CODE_SET_CUSTOM_MINING_JOB_JOB_NOT_YET_VALIDATED,
             );
@@ -799,10 +815,9 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         // Validate prev_hash
         {
             if custom_job_prev_hash != declared_prev_hash {
-                tracing::debug!(
+                debug!(
                     "prev_hash mismatch: custom={:?}, declared={:?}",
-                    custom_job_prev_hash,
-                    declared_prev_hash
+                    custom_job_prev_hash, declared_prev_hash
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
@@ -813,10 +828,9 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         // Validate nbits
         {
             if custom_job_nbits != declared_nbits {
-                tracing::debug!(
+                debug!(
                     "nbits mismatch: custom={}, declared={}",
-                    custom_job_nbits,
-                    declared_nbits
+                    custom_job_nbits, declared_nbits
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_NBITS,
@@ -827,10 +841,9 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         // Validate version
         {
             if custom_job_version != declared_version {
-                tracing::debug!(
+                debug!(
                     "version mismatch: custom={}, declared={}",
-                    custom_job_version,
-                    declared_version
+                    custom_job_version, declared_version
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_VERSION,
@@ -850,10 +863,9 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             };
 
             if declared_coinbase_tx.version.0 != set_custom_mining_job.coinbase_tx_version as i32 {
-                tracing::debug!(
+                debug!(
                     "coinbase version mismatch: custom={}, declared={}",
-                    set_custom_mining_job.coinbase_tx_version,
-                    declared_coinbase_tx.version.0
+                    set_custom_mining_job.coinbase_tx_version, declared_coinbase_tx.version.0
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_VERSION,
@@ -863,7 +875,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             let script_sig = declared_coinbase_tx.input[0].script_sig.as_bytes();
             let coinbase_prefix = set_custom_mining_job.coinbase_prefix.as_bytes();
             if !script_sig.starts_with(coinbase_prefix) {
-                tracing::debug!("coinbase prefix mismatch");
+                debug!("coinbase prefix mismatch");
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX,
                 );
@@ -872,7 +884,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             if declared_coinbase_tx.input[0].sequence.0
                 != set_custom_mining_job.coinbase_tx_input_n_sequence
             {
-                tracing::debug!(
+                debug!(
                     "coinbase input sequence mismatch: custom={}, declared={}",
                     set_custom_mining_job.coinbase_tx_input_n_sequence,
                     declared_coinbase_tx.input[0].sequence.0
@@ -885,7 +897,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             let declared_outputs_bytes =
                 bitcoin::consensus::serialize(&declared_coinbase_tx.output);
             if declared_outputs_bytes != set_custom_mining_job.coinbase_tx_outputs.as_bytes() {
-                tracing::debug!("coinbase outputs mismatch");
+                debug!("coinbase outputs mismatch");
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_OUTPUTS,
                 );
@@ -894,7 +906,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             if declared_coinbase_tx.lock_time.to_consensus_u32()
                 != set_custom_mining_job.coinbase_tx_locktime
             {
-                tracing::debug!(
+                debug!(
                     "coinbase locktime mismatch: custom={}, declared={}",
                     set_custom_mining_job.coinbase_tx_locktime,
                     declared_coinbase_tx.lock_time.to_consensus_u32()
@@ -923,10 +935,9 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 .collect();
 
             if declared_merkle_path != custom_merkle_path {
-                tracing::debug!(
+                debug!(
                     "merkle path mismatch: custom={:?}, declared={:?}",
-                    custom_merkle_path,
-                    declared_merkle_path
+                    custom_merkle_path, declared_merkle_path
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_MERKLE_PATH,
