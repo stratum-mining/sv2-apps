@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq064KOwned, U256Owned},
-    job_declaration_sv2::{AllocateMiningJobTokenSuccessOwned, DeclareMiningJobOwned},
+    job_declaration_sv2::DeclareMiningJobOwned,
     parsers_sv2::{JobDeclarationOwned, MiningOwned},
     template_distribution_sv2::{
         NewTemplateOwned, RequestTransactionDataErrorOwned, RequestTransactionDataSuccessOwned,
@@ -15,10 +15,10 @@ use stratum_apps::stratum_core::{
     parsers_sv2::Tlv,
     template_distribution_sv2::{SetNewPrevHashOwned as SetNewPrevHashTdpOwned, *},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
-    channel_manager::{ChannelManager, DeclaredJob, WaitingWork},
+    channel_manager::{ChannelManager, CustomJob, CustomJobStage, WaitingWork},
     error::{self, JDCError, JDCErrorKind},
     utils::UpstreamState,
 };
@@ -265,17 +265,11 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             return Ok(());
         };
 
-        let Some(token) = self.take_token_for(&template)? else {
-            return self
-                .wait_for_token(WaitingWork::Declaration {
-                    template,
-                    transaction_data: msg,
-                })
-                .await;
-        };
-        _ = self.allocate_tokens(1).await;
-
-        self.declare_template(template, msg, token).await
+        let token_spent = self.declare_template(template, msg).await?;
+        if token_spent {
+            _ = self.allocate_tokens(1).await;
+        }
+        Ok(())
     }
 
     async fn handle_set_new_prev_hash(
@@ -285,6 +279,23 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
+
+        // A prevhash naming the template the chain tip already activated is that chain tip again:
+        // everything it would change, the first one changed.
+        let repeated = self
+            .last_new_prev_hash
+            .with(|tip| {
+                tip.as_ref()
+                    .is_some_and(|tip| tip.template_id == msg.template_id)
+            })
+            .map_err(JDCError::shutdown)?;
+        if repeated {
+            warn!(
+                template_id = msg.template_id,
+                "Ignoring SetNewPrevHash for the template the chain tip already activated"
+            );
+            return Ok(());
+        }
 
         self.cached_shares.clear();
 
@@ -324,6 +335,21 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         self.output_sets
             .with(|output_sets| output_sets.on_chain_tip(msg.template_id))
             .map_err(JDCError::shutdown)?;
+        // An answer that still arrives for a released custom job is ignored.
+        let released = self
+            .custom_jobs
+            .with(|jobs| jobs.on_chain_tip(msg.template_id))
+            .map_err(JDCError::shutdown)?;
+        if released > 0 {
+            debug!(
+                released,
+                "Released the custom jobs the chain tip moved past"
+            );
+        }
+        // Downstream jobs of every other template are stale now, and a share on one is rejected
+        // before routing is read, so their routing entries go too.
+        self.downstream_channel_id_and_job_id_to_template_id
+            .retain(|_, template_id| *template_id == msg.template_id);
 
         self.upstream_channel
             .with(|upstream_channel| {
@@ -337,35 +363,22 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             .last_future_template
             .get()
             .map_err(JDCError::shutdown)?;
-        let future_template_id = future_template.as_ref().map(|t| t.template_id);
-        let mut declare_job = None;
-        self.last_declare_job_store.for_each(|_, declared_job| {
-            if Some(declared_job.template.template_id) == future_template_id {
-                declare_job = Some(declared_job.declare_mining_job.clone());
-            }
-        });
-
-        if self.mode.is_full_template() {
-            if let Some(Some(job)) = declare_job {
-                self.channel_manager_io
-                    .jd_sender
-                    .send(JobDeclarationOwned::DeclareMiningJob(job))
-                    .await
-                    .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
-            }
+        // The template this prevhash names is declared now, if its declaration waited for it.
+        let declaration = self
+            .custom_jobs
+            .with(|jobs| jobs.declare(&msg))
+            .map_err(JDCError::shutdown)?;
+        if let Some(declaration) = declaration {
+            self.channel_manager_io
+                .jd_sender
+                .send(JobDeclarationOwned::DeclareMiningJob(declaration))
+                .await
+                .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
         }
 
         self.last_new_prev_hash
             .set(Some(msg.clone()))
             .map_err(JDCError::shutdown)?;
-        self.last_declare_job_store.for_each_mut(|_, declared_job| {
-            if declared_job.template.future_template
-                && declared_job.template.template_id == msg.template_id
-            {
-                declared_job.prev_hash = Some(msg.clone());
-                declared_job.template.future_template = false;
-            }
-        });
 
         let mut messages: Vec<crate::channel_manager::downstream_message_handler::RouteMessageTo> =
             Vec::new();
@@ -504,15 +517,39 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl ChannelManager {
-    // Declares `template` to the JDS with `token`, from the transaction data the Template Provider
-    // sent for it, and records the declaration. A future template's declaration is held back for
-    // the prevhash that activates it, which sends it.
+    // Declares `template` to the JDS, from the transaction data the Template Provider sent for it,
+    // with the token for its upstream job, and records the declaration. A future template's
+    // declaration is held back for the prevhash that activates it, which sends it.
+    //
+    // A template has a single declaration, so one whose custom job exists already gets none. The
+    // token is taken from the queue only once the declaration is built. Without one, the template
+    // waits for a token (see `wait_for_token`), and the token that arrives declares it. Returns
+    // whether a token was spent.
     pub(super) async fn declare_template(
         &self,
         template: NewTemplateOwned,
         transaction_data: RequestTransactionDataSuccessOwned,
-        token: AllocateMiningJobTokenSuccessOwned,
-    ) -> Result<(), JDCError<error::ChannelManager>> {
+    ) -> Result<bool, JDCError<error::ChannelManager>> {
+        if self
+            .custom_jobs
+            .with(|jobs| jobs.contains(template.template_id))
+            .map_err(JDCError::shutdown)?
+        {
+            warn!(
+                template_id = template.template_id,
+                "Not declaring a template that already has a custom job"
+            );
+            return Ok(false);
+        }
+        let Some(token) = self.token_for(&template)? else {
+            self.wait_for_token(WaitingWork::Declaration {
+                template,
+                transaction_data,
+            })
+            .await?;
+            return Ok(false);
+        };
+
         let transactions_data = transaction_data.transaction_list;
         let excess_data = transaction_data.excess_data;
         let request_id = self.request_id_factory.fetch_add(1, Ordering::Relaxed);
@@ -543,7 +580,7 @@ impl ChannelManager {
             .collect();
         let wtx_ids = Seq064KOwned::new(wtxids_as_u256).map_err(JDCError::shutdown)?;
 
-        let is_activated_future_template = template.future_template
+        let awaits_activation = template.future_template
             && prevhash
                 .as_ref()
                 .map(|prev_hash| prev_hash.template_id != template.template_id)
@@ -574,7 +611,7 @@ impl ChannelManager {
             None => None,
         };
         let Some(coinbase_parts) = coinbase_parts else {
-            return Ok(());
+            return Ok(false);
         };
         // A template whose declaration can't be built would leave the downstreams mining work
         // whose shares could never reach the Pool. JDC shuts down instead, as it does when a
@@ -607,23 +644,39 @@ impl ChannelManager {
             wtxid_list: wtx_ids,
             excess_data,
         };
-        self.last_declare_job_store.insert(
-            request_id,
-            DeclaredJob {
-                declare_mining_job: Some(declare_job.clone()),
-                template,
-                prev_hash: prevhash,
-                set_custom_mining_job: None,
-                coinbase_outputs: deserialized_outputs,
-                tx_list: transactions_data
-                    .iter_bytes()
-                    .map(|tx| tx.to_vec())
-                    .collect(),
+        let transactions = transactions_data
+            .iter_bytes()
+            .map(|tx| tx.to_vec())
+            .collect();
+        // A template no prevhash has activated yet is declared by the one that does. So is one
+        // arriving while JDC has no chain tip at all, which a Template Provider following the
+        // protocol never sends: its declaration is never sent without the chain tip it is on.
+        let stage = match prevhash {
+            Some(prev_hash) if !awaits_activation => CustomJobStage::Declared {
+                prev_hash,
+                transactions: Some(transactions),
             },
-        );
-
-        if is_activated_future_template {
-            return Ok(());
+            _ => CustomJobStage::Undeclared {
+                declaration: declare_job.clone(),
+                transactions,
+            },
+        };
+        let declared = matches!(stage, CustomJobStage::Declared { .. });
+        self.mining_job_tokens
+            .with(|tokens| tokens.spend(token.request_id))
+            .map_err(JDCError::shutdown)?;
+        self.custom_jobs
+            .with(|jobs| {
+                jobs.insert(CustomJob {
+                    request_id,
+                    template,
+                    coinbase_outputs: deserialized_outputs,
+                    stage,
+                })
+            })
+            .map_err(JDCError::shutdown)?;
+        if !declared {
+            return Ok(true);
         }
 
         _ = self
@@ -632,7 +685,7 @@ impl ChannelManager {
             .send(JobDeclarationOwned::DeclareMiningJob(declare_job))
             .await;
 
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -648,12 +701,21 @@ mod tests {
             binary_sv2::B0255Owned,
             bitcoin::{Amount, ScriptBuf, Target, TxOut},
             channels_sv2::{
-                client::extended::ExtendedChannel, extranonce_manager::ExtranoncePrefix,
-                server::jobs::factory::JobFactory,
+                client::extended::ExtendedChannel,
+                extranonce_manager::ExtranoncePrefix,
+                server::{group::GroupChannel, jobs::factory::JobFactory},
             },
             codec_sv2::EncodableFrame as _,
-            job_declaration_sv2::AllocateMiningJobTokenSuccessOwned,
-            mining_sv2::SetCustomMiningJobOwned,
+            job_declaration_sv2::{
+                AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
+                DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+                ProvideMissingTransactionsOwned,
+            },
+            mining_sv2::{
+                CloseChannelOwned, ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
+                SetCustomMiningJobErrorOwned, SetCustomMiningJobOwned,
+                SetCustomMiningJobSuccessOwned,
+            },
             parsers_sv2::{Mining, TemplateDistributionOwned},
         },
         tp_type::TemplateProviderType,
@@ -665,8 +727,10 @@ mod tests {
     use crate::{
         channel_manager::{
             MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN, MiningJobTokens, OutputSets,
+            SOLO_FULL_EXTRANONCE_SIZE,
         },
         config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
+        downstream::Downstream,
         error::Action,
         jd_mode::JDMode,
     };
@@ -888,18 +952,23 @@ mod tests {
             .unwrap()
     }
 
-    // The custom jobs recorded for `template_id`.
+    // The custom job JDC keeps for `template_id`, if any.
+    fn recorded_job(manager: &ChannelManager, template_id: u64) -> Option<CustomJob> {
+        manager
+            .custom_jobs
+            .with(|jobs| jobs.0.get(&template_id).cloned())
+            .unwrap()
+    }
+
+    // The custom jobs recorded as proposed for `template_id`.
     fn recorded_custom_jobs(
         manager: &ChannelManager,
         template_id: u64,
     ) -> Vec<SetCustomMiningJobOwned> {
-        let mut custom_jobs = Vec::new();
-        manager.last_declare_job_store.for_each(|_, declared_job| {
-            if declared_job.template.template_id == template_id {
-                custom_jobs.extend(declared_job.set_custom_mining_job.clone());
-            }
-        });
-        custom_jobs
+        match recorded_job(manager, template_id).map(|job| job.stage) {
+            Some(CustomJobStage::Proposed { custom_job }) => vec![custom_job],
+            _ => vec![],
+        }
     }
 
     fn sent_to_pool(receiver: &Receiver<OutboundFrame>) -> Vec<MiningOwned> {
@@ -1005,13 +1074,9 @@ mod tests {
             .await
             .unwrap();
 
-        let mut recorded = None;
-        manager.last_declare_job_store.for_each(|_, declared_job| {
-            if declared_job.template.template_id == 2 {
-                recorded = Some(declared_job.coinbase_outputs.clone());
-            }
-        });
-        let recorded = recorded.expect("the custom job is recorded");
+        let recorded = recorded_job(&manager, 2)
+            .expect("the custom job is recorded")
+            .coinbase_outputs;
         assert_eq!(
             recorded,
             manager.coinbase_outputs_for(&template(2, false)).unwrap()
@@ -1344,14 +1409,24 @@ mod tests {
         }
     }
 
-    // The templates JDC has recorded a declaration for, in ascending order.
+    // The templates JDC keeps a declaration for that the JDS hasn't answered yet, in ascending
+    // order.
     fn declared_templates(manager: &ChannelManager) -> Vec<u64> {
-        let mut templates = Vec::new();
-        manager.last_declare_job_store.for_each(|_, declared_job| {
-            if declared_job.declare_mining_job.is_some() {
-                templates.push(declared_job.template.template_id);
-            }
-        });
+        let mut templates: Vec<u64> = manager
+            .custom_jobs
+            .with(|jobs| {
+                jobs.0
+                    .values()
+                    .filter(|job| {
+                        matches!(
+                            job.stage,
+                            CustomJobStage::Undeclared { .. } | CustomJobStage::Declared { .. }
+                        )
+                    })
+                    .map(|job| job.template.template_id)
+                    .collect()
+            })
+            .unwrap();
         templates.sort();
         templates
     }
@@ -1849,10 +1924,8 @@ mod tests {
 
         let built_with = tokens.peek_for(&jds_coinbase_outputs()).unwrap().request_id;
         assert_eq!(built_with, 4);
-        assert_eq!(
-            tokens.take_for(&jds_coinbase_outputs()).unwrap().request_id,
-            4
-        );
+        // Another job spends the same token first.
+        tokens.spend(4);
         tokens.spend(built_with);
         assert_eq!(queued_requests(&tokens), vec![5, 6]);
 
@@ -1874,16 +1947,17 @@ mod tests {
             5
         );
         assert_eq!(
-            tokens.take_for(&payout_outputs(0x33)).unwrap().request_id,
+            tokens.peek_for(&payout_outputs(0x33)).unwrap().request_id,
             4
         );
+        tokens.spend(4);
+        tokens.spend(5);
         assert_eq!(
-            tokens.take_for(&payout_outputs(0x22)).unwrap().request_id,
-            5
+            tokens.peek_for(&payout_outputs(0x22)).unwrap().request_id,
+            6
         );
-        assert_eq!(queued_requests(&tokens), vec![6]);
         tokens.spend(6);
-        assert!(tokens.take_for(&payout_outputs(0x22)).is_none());
+        assert!(tokens.peek_for(&payout_outputs(0x22)).is_none());
     }
 
     // Outputs whose sigop cost doesn't fit `CoinbaseOutputConstraints` make JDC fall back rather
@@ -2019,17 +2093,20 @@ mod tests {
     async fn custom_job_rejected_after_its_declaration_shuts_jdc_down() {
         let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
         let outputs = manager.coinbase_outputs_for(&template(2, false)).unwrap();
-        manager.last_declare_job_store.insert(
-            7,
-            DeclaredJob {
-                declare_mining_job: None,
-                template: oversized_template(2, false),
-                prev_hash: Some(prev_hash(1)),
-                set_custom_mining_job: None,
-                coinbase_outputs: outputs,
-                tx_list: Vec::new(),
-            },
-        );
+        manager
+            .custom_jobs
+            .with(|jobs| {
+                jobs.insert(CustomJob {
+                    request_id: 7,
+                    template: oversized_template(2, false),
+                    coinbase_outputs: outputs,
+                    stage: CustomJobStage::Declared {
+                        prev_hash: prev_hash(1),
+                        transactions: Some(Vec::new()),
+                    },
+                })
+            })
+            .unwrap();
 
         let error = manager
             .handle_declare_mining_job_success(
@@ -2105,13 +2182,11 @@ mod tests {
 
     // The outputs JDC recorded with its declaration of `template_id`.
     fn declared_outputs(manager: &ChannelManager, template_id: u64) -> Vec<u8> {
-        let mut outputs = None;
-        manager.last_declare_job_store.for_each(|_, declared_job| {
-            if declared_job.template.template_id == template_id {
-                outputs = Some(consensus::serialize(&declared_job.coinbase_outputs));
-            }
-        });
-        outputs.expect("the template is declared")
+        consensus::serialize(
+            &recorded_job(manager, template_id)
+                .expect("the template is declared")
+                .coinbase_outputs,
+        )
     }
 
     // A template is declared with the outputs it was handed out with, even when the JDS hands out
@@ -2436,5 +2511,717 @@ mod tests {
                 Some(constraints(12, 8)),
             ]
         );
+    }
+
+    // The request ID of the job JDC recorded for `template_id`.
+    fn recorded_request_id(manager: &ChannelManager, template_id: u64) -> u32 {
+        recorded_job(manager, template_id)
+            .expect("JDC recorded a job for the template")
+            .request_id
+    }
+
+    fn stale_chain_tip(request_id: u32) -> DeclareMiningJobErrorOwned {
+        DeclareMiningJobErrorOwned {
+            request_id,
+            error_code: ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
+                .to_string()
+                .try_into()
+                .unwrap(),
+            error_details: vec![].try_into().unwrap(),
+        }
+    }
+
+    // A declaration the JDS rejects as stale gets no other answer, so it goes with its
+    // transactions and the shares cached for its template, while JDC carries on.
+    #[tokio::test]
+    async fn stale_rejection_releases_the_declaration() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        manager.cached_shares.with_mut_or_default(2, |_| {});
+
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                stale_chain_tip(recorded_request_id(&manager, 2)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(declared_templates(&manager).is_empty());
+        assert!(!manager.cached_shares.contains_key(&2));
+    }
+
+    // A stale rejection naming work JDC never declared to the JDS leaves it alone: a declaration a
+    // prevhash hasn't activated yet was never sent, and a coinbase-only custom job is the Pool's.
+    #[tokio::test]
+    async fn stale_rejection_leaves_work_never_declared_alone() {
+        let (mut manager, _sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                stale_chain_tip(recorded_request_id(&manager, 3)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(declared_templates(&manager), vec![3]);
+
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                stale_chain_tip(recorded_request_id(&manager, 2)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+    }
+
+    fn declaration_success(request_id: u32) -> DeclareMiningJobSuccessOwned {
+        DeclareMiningJobSuccessOwned {
+            request_id,
+            new_mining_job_token: token(),
+        }
+    }
+
+    fn custom_job_success(request_id: u32, channel_id: u32) -> SetCustomMiningJobSuccessOwned {
+        SetCustomMiningJobSuccessOwned {
+            channel_id,
+            request_id,
+            job_id: 9,
+        }
+    }
+
+    fn custom_job_stale(request_id: u32, channel_id: u32) -> SetCustomMiningJobErrorOwned {
+        SetCustomMiningJobErrorOwned {
+            channel_id,
+            request_id,
+            error_code: ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP
+                .to_string()
+                .try_into()
+                .unwrap(),
+        }
+    }
+
+    // The Pool answers JDC's custom job with `message`.
+    async fn pool_success(
+        manager: &mut ChannelManager,
+        message: SetCustomMiningJobSuccessOwned,
+    ) -> Result<(), JDCError<error::ChannelManager>> {
+        use stratum_apps::stratum_core::handlers_sv2::HandleMiningMessagesFromServerOwnedAsync;
+        manager
+            .handle_set_custom_mining_job_success(None, message, None)
+            .await
+    }
+
+    // The Pool rejects JDC's custom job with `message`.
+    async fn pool_error(
+        manager: &mut ChannelManager,
+        message: SetCustomMiningJobErrorOwned,
+    ) -> Result<(), JDCError<error::ChannelManager>> {
+        use stratum_apps::stratum_core::handlers_sv2::HandleMiningMessagesFromServerOwnedAsync;
+        manager
+            .handle_set_custom_mining_job_error(None, message, None)
+            .await
+    }
+
+    // A full-template JDC whose declaration of template 2 the JDS hasn't answered yet.
+    async fn manager_with_a_declaration() -> (ChannelManager, Sent, u32) {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        let request_id = recorded_request_id(&manager, 2);
+        (manager, sent, request_id)
+    }
+
+    // A template's declaration is sent once: declaring it again finds it sent already, and sends
+    // nothing rather than the declaration again with a token the JDS has consumed.
+    #[tokio::test]
+    async fn a_declaration_is_sent_once() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        assert_eq!(declarations_sent(&sent.jds), 0);
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+        assert_eq!(declarations_sent(&sent.jds), 1);
+
+        let declaration = manager
+            .custom_jobs
+            .with(|jobs| jobs.declare(&prev_hash(3)))
+            .unwrap();
+        assert!(declaration.is_none());
+    }
+
+    // A template declared while JDC has no chain tip, which only a Template Provider breaking the
+    // protocol brings about, waits for a prevhash instead of going to the JDS without the chain
+    // tip its custom job would be built on.
+    #[tokio::test]
+    async fn a_declaration_without_a_chain_tip_is_not_sent() {
+        let (manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager.last_new_prev_hash.set(None).unwrap();
+
+        manager
+            .declare_template(template(2, false), transaction_data(2))
+            .await
+            .unwrap();
+
+        assert_eq!(declarations_sent(&sent.jds), 0);
+        let job = recorded_job(&manager, 2).expect("the template is recorded");
+        assert!(matches!(job.stage, CustomJobStage::Undeclared { .. }));
+    }
+
+    // A Template Provider repeating a template ID, which the protocol rules out, brings the
+    // template's transaction data again. The template keeps the declaration it has, and the token
+    // a second one would have spent stays queued.
+    #[tokio::test]
+    async fn a_repeated_template_keeps_its_declaration_and_its_token() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+        assert_eq!(declarations_sent(&sent.jds), 1);
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        assert_eq!(queued_tokens(&manager), 1);
+
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(2), None)
+            .await
+            .unwrap();
+
+        assert_eq!(declarations_sent(&sent.jds), 0);
+        assert_eq!(queued_tokens(&manager), 1);
+    }
+
+    // In coinbase-only mode a template has one custom job: building it again finds it built
+    // already, and neither builds another nor spends another token.
+    #[tokio::test]
+    async fn coinbase_only_template_gets_one_custom_job() {
+        let (mut manager, sent_to_pool, _sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent_to_pool), 1);
+        manager.allocate_tokens(1).await.unwrap();
+        manager
+            .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+            .await
+            .unwrap();
+        let tokens = queued_tokens(&manager);
+
+        let custom_job = manager
+            .build_coinbase_only_custom_job(&template(3, true))
+            .await
+            .unwrap();
+        assert!(custom_job.is_none());
+        assert_eq!(queued_tokens(&manager), tokens);
+    }
+
+    // A prevhash naming the template the chain tip already activated changes nothing, with a
+    // downstream whose group channel activated that template too: no declaration goes out again,
+    // the shares cached on the chain tip stay, and JDC carries on.
+    #[tokio::test]
+    async fn a_repeated_prevhash_changes_nothing() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        let group_channel = GroupChannel::new_for_job_declaration_client(
+            1,
+            SOLO_FULL_EXTRANONCE_SIZE as usize,
+            true,
+            None,
+            "test-jdc".to_string(),
+        )
+        .unwrap();
+        manager
+            .downstream
+            .insert(1, Downstream::for_test(1, group_channel));
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+        assert_eq!(declarations_sent(&sent.jds), 1);
+        manager.cached_shares.with_mut_or_default(3, |_| {});
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+
+        assert_eq!(declarations_sent(&sent.jds), 0);
+        assert!(manager.cached_shares.contains_key(&3));
+    }
+
+    // The JDS accepts a declaration once: a replayed success finds the custom job proposed
+    // already, and sends the Pool no second one.
+    #[tokio::test]
+    async fn replayed_declaration_success_proposes_once() {
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent.pool), 1);
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent.pool), 0);
+    }
+
+    // The Pool's answers concern only a custom job JDC proposed. A success or a stale rejection
+    // for a declaration the JDS hasn't accepted yet, or for an unknown request, changes nothing,
+    // and the declaration goes on as before.
+    #[tokio::test]
+    async fn pool_answers_for_jobs_it_was_not_proposed_change_nothing() {
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+
+        for request in [request_id, request_id + 100] {
+            pool_success(&mut manager, custom_job_success(request, 7))
+                .await
+                .unwrap();
+            pool_error(&mut manager, custom_job_stale(request, 7))
+                .await
+                .unwrap();
+        }
+        assert_eq!(declared_templates(&manager), vec![2]);
+
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        assert_eq!(custom_jobs_sent(&sent.pool), 1);
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+    }
+
+    fn custom_job_refused(request_id: u32, channel_id: u32) -> SetCustomMiningJobErrorOwned {
+        SetCustomMiningJobErrorOwned {
+            channel_id,
+            request_id,
+            error_code: "invalid-mining-job-token".to_string().try_into().unwrap(),
+        }
+    }
+
+    // A full-template JDC whose custom job for template 2 the Pool hasn't answered yet, on the
+    // upstream channel 7.
+    async fn manager_with_a_proposal() -> (ChannelManager, u32) {
+        let (mut manager, _sent, request_id) = manager_with_a_declaration().await;
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        (manager, request_id)
+    }
+
+    // A Pool answer whose request ID is a custom job JDC proposed, but which names another channel
+    // than the custom job went on, is one JDC can't use: a success and an error, stale or not,
+    // each make it fall back, and the custom job is left as it was.
+    #[tokio::test]
+    async fn pool_answers_on_another_channel_fall_back() {
+        let (mut manager, request_id) = manager_with_a_proposal().await;
+        let error = pool_success(&mut manager, custom_job_success(request_id, 8))
+            .await
+            .unwrap_err();
+        assert!(matches!(error.action, Action::Fallback));
+        assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+
+        for answer in [custom_job_stale, custom_job_refused] {
+            let (mut manager, request_id) = manager_with_a_proposal().await;
+            let error = pool_error(&mut manager, answer(request_id, 8))
+                .await
+                .unwrap_err();
+            assert!(matches!(error.action, Action::Fallback));
+            assert_eq!(recorded_custom_jobs(&manager, 2).len(), 1);
+        }
+    }
+
+    // A custom job the Pool acknowledges keeps the upstream job ID its shares go upstream with,
+    // and a replayed acknowledgement changes nothing.
+    #[tokio::test]
+    async fn acknowledged_custom_job_keeps_its_upstream_job_id() {
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        let request_id = recorded_request_id(&manager, 2);
+        // The upstream channel knows the chain tip the custom job is on, as it does once JDC
+        // handles a prevhash.
+        manager
+            .upstream_channel
+            .with(|channel| {
+                channel
+                    .as_mut()
+                    .unwrap()
+                    .on_chain_tip_update(prev_hash(1).into())
+                    .unwrap()
+            })
+            .unwrap();
+
+        for _ in 0..2 {
+            pool_success(&mut manager, custom_job_success(request_id, 7))
+                .await
+                .unwrap();
+        }
+
+        let upstream_job_id = manager
+            .custom_jobs
+            .with(|jobs| jobs.upstream_job_id(2))
+            .unwrap();
+        assert_eq!(upstream_job_id, Some(9));
+    }
+
+    fn missing_transactions(request_id: u32) -> ProvideMissingTransactionsOwned {
+        ProvideMissingTransactionsOwned {
+            request_id,
+            unknown_tx_position_list: vec![0].try_into().unwrap(),
+        }
+    }
+
+    fn disclosures_sent(receiver: &Receiver<JobDeclarationOwned>) -> usize {
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter(|message| {
+                matches!(
+                    message,
+                    JobDeclarationOwned::ProvideMissingTransactionsSuccess(_)
+                )
+            })
+            .count()
+    }
+
+    // A declaration's transactions are disclosed once, while the JDS hasn't answered the
+    // declaration: a repeated request gets nothing more.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_once() {
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+
+        for _ in 0..2 {
+            manager
+                .handle_provide_missing_transactions(None, missing_transactions(request_id), None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(disclosures_sent(&sent.jds), 1);
+    }
+
+    // Transactions are disclosed only for a declaration JDC sent and the JDS hasn't answered yet:
+    // not for one a prevhash hasn't activated yet, which was never sent, not once the JDS has
+    // accepted the declaration, and never for a coinbase-only custom job.
+    #[tokio::test]
+    async fn missing_transactions_are_disclosed_only_for_a_pending_declaration() {
+        let (mut manager, sent) = channel_manager_in(ConfigJDCMode::FullTemplate).await;
+        manager
+            .handle_new_template(None, template(3, true), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        let held = recorded_request_id(&manager, 3);
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(held), None)
+            .await
+            .unwrap();
+        assert_eq!(disclosures_sent(&sent.jds), 0);
+
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+        manager
+            .handle_declare_mining_job_success(None, declaration_success(request_id), None)
+            .await
+            .unwrap();
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(request_id), None)
+            .await
+            .unwrap();
+        assert_eq!(disclosures_sent(&sent.jds), 0);
+
+        let (mut manager, _sent_to_pool, sent_to_jds) = channel_manager().await;
+        manager
+            .handle_new_template(None, template(2, false), None)
+            .await
+            .unwrap();
+        let proposed = recorded_request_id(&manager, 2);
+        manager
+            .handle_provide_missing_transactions(None, missing_transactions(proposed), None)
+            .await
+            .unwrap();
+        assert_eq!(disclosures_sent(&sent_to_jds), 0);
+    }
+
+    fn recorded_templates(manager: &ChannelManager) -> Vec<u64> {
+        let mut templates: Vec<u64> = manager
+            .custom_jobs
+            .with(|jobs| jobs.0.keys().copied().collect())
+            .unwrap();
+        templates.sort();
+        templates
+    }
+
+    // A new chain tip releases every custom job but the one of the template it activates: a
+    // declaration held for a future template it doesn't activate, which will never be sent, and
+    // a declaration from the previous tip still waiting for the JDS. The activated template's
+    // declaration is sent.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_the_custom_jobs_it_leaves_behind() {
+        let (mut manager, sent, _) = manager_with_a_declaration().await;
+        for template_id in [3, 4] {
+            manager
+                .handle_new_template(None, template(template_id, true), None)
+                .await
+                .unwrap();
+            manager
+                .handle_request_tx_data_success(None, transaction_data(template_id), None)
+                .await
+                .unwrap();
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(recorded_templates(&manager), vec![2, 3, 4]);
+        let _ = declarations_sent(&sent.jds);
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(4), None)
+            .await
+            .unwrap();
+
+        assert_eq!(recorded_templates(&manager), vec![4]);
+        assert_eq!(declarations_sent(&sent.jds), 1);
+    }
+
+    // A custom job the Pool acknowledged keeps its upstream job ID only while its template is on
+    // the chain tip, and an acknowledgement that arrives after the tip moved past it is ignored.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_acknowledged_custom_jobs() {
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        manager
+            .upstream_channel
+            .with(|channel| {
+                channel
+                    .as_mut()
+                    .unwrap()
+                    .on_chain_tip_update(prev_hash(1).into())
+                    .unwrap()
+            })
+            .unwrap();
+        for template_id in [2, 3] {
+            manager
+                .handle_new_template(None, template(template_id, false), None)
+                .await
+                .unwrap();
+            manager.allocate_tokens(1).await.unwrap();
+            manager
+                .handle_allocate_mining_job_token_success(None, token_success(&manager), None)
+                .await
+                .unwrap();
+        }
+        let acknowledged = recorded_request_id(&manager, 2);
+        let late = recorded_request_id(&manager, 3);
+        pool_success(&mut manager, custom_job_success(acknowledged, 7))
+            .await
+            .unwrap();
+        manager
+            .handle_new_template(None, template(4, true), None)
+            .await
+            .unwrap();
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(4), None)
+            .await
+            .unwrap();
+        pool_success(&mut manager, custom_job_success(late, 7))
+            .await
+            .unwrap();
+
+        let upstream_job_ids = manager
+            .custom_jobs
+            .with(|jobs| (jobs.upstream_job_id(2), jobs.upstream_job_id(3)))
+            .unwrap();
+        assert_eq!(upstream_job_ids, (None, None));
+        assert_eq!(recorded_templates(&manager), vec![4]);
+    }
+
+    // The downstream `downstream_id` closes its channel `channel_id`.
+    async fn close_channel(manager: &mut ChannelManager, downstream_id: usize, channel_id: u32) {
+        use stratum_apps::stratum_core::handlers_sv2::HandleMiningMessagesFromClientOwnedAsync;
+        manager
+            .handle_close_channel(
+                Some(downstream_id),
+                CloseChannelOwned {
+                    channel_id,
+                    reason_code: "".to_string().try_into().unwrap(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    fn routed_channels(manager: &ChannelManager) -> Vec<u32> {
+        let mut channels = Vec::new();
+        manager
+            .downstream_channel_id_and_job_id_to_template_id
+            .for_each(|key, _| channels.push(key.channel_id));
+        channels.sort();
+        channels
+    }
+
+    // A channel a downstream closes takes what JDC keeps for it with it: the channel, its place in
+    // the downstream's group, its vardiff state and the routing entries of its jobs. The
+    // downstream's other channel keeps all of its own.
+    #[tokio::test]
+    async fn a_closed_channel_takes_what_jdc_keeps_for_it_with_it() {
+        use stratum_apps::stratum_core::channels_sv2::{
+            VardiffState, server::extended::ExtendedChannel as DownstreamChannel,
+        };
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        let mut group_channel = GroupChannel::new_for_job_declaration_client(
+            1,
+            SOLO_FULL_EXTRANONCE_SIZE as usize,
+            true,
+            None,
+            "test-jdc".to_string(),
+        )
+        .unwrap();
+        for channel_id in [5, 6] {
+            group_channel
+                .add_channel_id(channel_id, SOLO_FULL_EXTRANONCE_SIZE as usize)
+                .unwrap();
+        }
+        let downstream = Downstream::for_test(1, group_channel);
+        for channel_id in [5, 6] {
+            let extranonce_prefix = manager
+                .extranonce_allocator
+                .with(|allocator| allocator.allocate_extended(0))
+                .unwrap()
+                .unwrap();
+            let rollable_extranonce_size =
+                SOLO_FULL_EXTRANONCE_SIZE as usize - extranonce_prefix.len();
+            let channel = DownstreamChannel::new_for_job_declaration_client(
+                channel_id,
+                "test-user".to_string(),
+                extranonce_prefix,
+                Target::from_le_bytes([0xff; 32]),
+                1.0,
+                true,
+                rollable_extranonce_size as u16,
+                1,
+                1.0,
+                None,
+                "test-jdc".to_string(),
+                None,
+            )
+            .unwrap();
+            downstream.extended_channels.insert(channel_id, channel);
+            manager
+                .vardiff
+                .insert((1, channel_id).into(), VardiffState::new().unwrap());
+            for job_id in [1, 2] {
+                manager
+                    .downstream_channel_id_and_job_id_to_template_id
+                    .insert((1, channel_id, job_id).into(), 2);
+            }
+        }
+        manager.downstream.insert(1, downstream.clone());
+
+        close_channel(&mut manager, 1, 5).await;
+
+        assert_eq!(downstream.extended_channels.keys(), vec![6]);
+        let grouped = downstream
+            .group_channel
+            .with(|group| (group.has_channel_id(5), group.has_channel_id(6)))
+            .unwrap();
+        assert_eq!(grouped, (false, true));
+        assert!(!manager.vardiff.contains_key(&(1, 5).into()));
+        assert!(manager.vardiff.contains_key(&(1, 6).into()));
+        assert_eq!(routed_channels(&manager), vec![6, 6]);
+    }
+
+    // A new chain tip keeps the routing entries of the template it activates and releases those
+    // of every other template: the previous tip's jobs, and those of a future template it doesn't
+    // activate.
+    #[tokio::test]
+    async fn a_new_chain_tip_releases_the_routing_entries_it_leaves_behind() {
+        let (mut manager, _sent_to_pool, _sent_to_jds) = channel_manager().await;
+        for (job_id, template_id) in [(1, 2), (2, 3), (3, 4)] {
+            manager
+                .downstream_channel_id_and_job_id_to_template_id
+                .insert((1, 5, job_id).into(), template_id);
+        }
+
+        manager
+            .handle_set_new_prev_hash(None, prev_hash(3), None)
+            .await
+            .unwrap();
+
+        let mut routed = Vec::new();
+        manager
+            .downstream_channel_id_and_job_id_to_template_id
+            .for_each(|key, template_id| routed.push((key.job_id, *template_id)));
+        assert_eq!(routed, vec![(2, 3)]);
     }
 }

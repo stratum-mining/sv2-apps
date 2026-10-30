@@ -19,7 +19,7 @@ use stratum_apps::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    channel_manager::{ChannelManager, WaitingWork},
+    channel_manager::{ChannelManager, CustomJobStage, WaitingWork},
     error::{self, JDCError, JDCErrorKind},
 };
 
@@ -117,11 +117,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 template,
                 transaction_data,
             }) => {
-                let token = self
-                    .take_token_for(&template)?
-                    .ok_or_else(|| JDCError::shutdown(JDCErrorKind::MiningJobTokenNotFound))?;
-                self.declare_template(template, transaction_data, token)
-                    .await?;
+                self.declare_template(template, transaction_data).await?;
             }
             Some(WaitingWork::CustomJob { template }) => {
                 if let Some(custom_job) = self.build_coinbase_only_custom_job(&template).await? {
@@ -160,12 +156,30 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         warn!("Received: {}", msg);
 
+        // Only a declaration JDC sent and the JDS hasn't answered yet can be rejected. Any other
+        // error answers nothing JDC is waiting for: one a prevhash hasn't activated yet was never
+        // sent, and a coinbase-only custom job was never declared.
+        let Some((rejected, _)) = self
+            .custom_jobs
+            .with(|jobs| jobs.declaration_answered(msg.request_id))
+            .map_err(JDCError::shutdown)?
+        else {
+            warn!(
+                request_id = msg.request_id,
+                "Ignoring DeclareMiningJob.Error for a declaration JDC is not waiting on"
+            );
+            return Ok(());
+        };
+
         let error_code = msg.error_code.as_utf8_or_hex();
         if error_code == ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP {
             warn!(
                 "Received non-fatal DeclareMiningJobError from JDS: stale-chain-tip (request_id={})",
                 msg.request_id
             );
+            // Nothing else answers a rejected declaration, so it is gone, with its transactions,
+            // and the shares cached for its template go too.
+            self.cached_shares.remove(&rejected.template.template_id);
             return Ok(());
         }
 
@@ -181,16 +195,17 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     // giving us the green light to propagate it upstream.
     //
     // The steps are:
-    // 1. Look up the last declared job using the `request_id`.
-    // 2. Validate that a `prevhash` exists and retrieve job details.
-    // 3. Use the job factory to create a new `SetCustomMiningJob` request, embedding the token
-    //    provided by the JDS.
-    // 4. Update the channel manager state with the newly created custom job.
-    // 5. Send the `SetCustomMiningJob` message to the upstream, ensuring the job is now distributed
+    // 1. Take the declared job of `request_id`, with the chain tip it was declared on: only a
+    //    declaration JDC sent and the JDS hasn't answered yet is accepted, once. Any other success
+    //    is ignored and logged.
+    // 2. Use the job factory to create a new `SetCustomMiningJob` request on that chain tip,
+    //    embedding the token provided by the JDS.
+    // 3. Keep the job as proposed, with its custom job.
+    // 4. Send the `SetCustomMiningJob` message to the upstream, ensuring the job is now distributed
     //    across the mining network.
     //
-    // If any required data (like `prevhash` or the last declared job) is missing,
-    // this handler returns an error to prevent propagation of an incomplete job.
+    // Without an upstream channel or job factory to build the custom job with, this handler
+    // returns an error, and the job is not proposed.
     async fn handle_declare_mining_job_success(
         &mut self,
         _server_id: Option<usize>,
@@ -199,22 +214,19 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
-        let Some(last_declare_job) = self.last_declare_job_store.get_cloned(&msg.request_id) else {
-            error!(
-                "No last_declare_job found for request_id={}",
-                msg.request_id
+        let Some((mut job, prevhash)) = self
+            .custom_jobs
+            .with(|jobs| jobs.declaration_answered(msg.request_id))
+            .map_err(JDCError::shutdown)?
+        else {
+            warn!(
+                request_id = msg.request_id,
+                "Ignoring DeclareMiningJob.Success for a declaration JDC is not waiting on"
             );
-            return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
-                msg.request_id,
-            )));
+            return Ok(());
         };
 
-        let Some(prevhash) = last_declare_job.prev_hash else {
-            error!("Prevhash not found for request_id = {}", msg.request_id);
-            return Err(JDCError::log(JDCErrorKind::LastNewPrevhashNotFound));
-        };
-
-        let outputs = last_declare_job.coinbase_outputs.clone();
+        let outputs = job.coinbase_outputs.clone();
 
         let upstream_channel_info = self
             .upstream_channel
@@ -229,7 +241,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             return Err(JDCError::log(JDCErrorKind::FailedToCreateCustomJob));
         };
 
-        let template_id = last_declare_job.template.template_id;
+        let template_id = job.template.template_id;
         let Some(custom_job) = self
             .job_factory
             .with(|job_factory| {
@@ -239,7 +251,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                     msg.request_id,
                     msg.new_mining_job_token,
                     prevhash.into(),
-                    last_declare_job.template,
+                    job.template.clone(),
                     outputs,
                     full_extranonce_size,
                 );
@@ -263,16 +275,12 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
         })?;
 
-        let updated = self
-            .last_declare_job_store
-            .with_mut(&msg.request_id, |value| {
-                value.set_custom_mining_job = Some(custom_job.clone());
-            });
-        if updated.is_none() {
-            return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
-                msg.request_id,
-            )));
-        }
+        job.stage = CustomJobStage::Proposed {
+            custom_job: custom_job.clone(),
+        };
+        self.custom_jobs
+            .with(|jobs| jobs.insert(job))
+            .map_err(JDCError::shutdown)?;
 
         let channel_id = custom_job.channel_id;
 
@@ -294,7 +302,9 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     //
     // The JDS provides a list of transaction positions it could not resolve.
     // We then:
-    // - Retrieve the full transaction list for the given `request_id`.
+    // - Retrieve the full transaction list for the given `request_id`. Only a declaration JDC sent
+    //   and the JDS hasn't answered yet has its transactions disclosed, once: any other request is
+    //   ignored and logged.
     // - Identify which transactions are missing based on the provided positions.
     // - Collect and package those transactions into a `ProvideMissingTransactionsSuccess`.
     // - Send the response back to the JDS.
@@ -308,22 +318,21 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
         info!("Received: {}", msg);
 
-        let tx_store_entry = self.last_declare_job_store.get_cloned(&request_id);
+        let transactions = self
+            .custom_jobs
+            .with(|jobs| jobs.missing_transactions(request_id))
+            .map_err(JDCError::shutdown)?;
 
-        let Some(entry) = tx_store_entry else {
+        let Some(transactions) = transactions else {
             warn!(
-                "No transaction list found for request_id={}",
-                msg.request_id
+                request_id,
+                "Ignoring ProvideMissingTransactions for a declaration whose transactions JDC is not disclosing"
             );
-            return Err(JDCError::log(JDCErrorKind::LastDeclareJobNotFound(
-                msg.request_id,
-            )));
+            return Ok(());
         };
 
-        let full_tx_list: Vec<B016MOwned> = entry
-            .tx_list
-            .iter()
-            .cloned()
+        let full_tx_list: Vec<B016MOwned> = transactions
+            .into_iter()
             .map(|raw| raw.try_into().map_err(JDCError::shutdown))
             .collect::<Result<_, _>>()?;
 

@@ -121,6 +121,12 @@ room or sigops than `CoinbaseOutputConstraints` can reserve, or they're too big 
 to fit the messages that carry it. An answer to a token request JDC
 never sent, or a second answer to one already answered, is ignored instead.
 
+Answers to declarations and custom jobs follow the same split. A `DeclareMiningJob.Error` or
+`SetCustomMiningJob.Error` with any code but `stale-chain-tip`, or a Pool answer naming another
+channel than the custom job it answers, makes JDC fall back. An answer to a declaration or custom
+job JDC never sent, a second answer to one, or an answer for a job JDC released when the chain tip
+moved past its template, is ignored.
+
 ### Miner Telemetry
 
 JDC can enrich the monitoring API with telemetry from SV2 ASIC miners that connect directly to JDC.
