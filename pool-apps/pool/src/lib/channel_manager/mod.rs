@@ -719,7 +719,10 @@ impl ChannelManager {
         &self,
         coinbase_outputs: Vec<TxOut>,
     ) -> PoolResult<(), error::ChannelManager> {
-        let msg = coinbase_output_constraints_message_with_offset(coinbase_outputs);
+        let msg = coinbase_output_constraints_message_with_offset(coinbase_outputs).map_err(|e| {
+            error!(error = %e, "Configured coinbase outputs don't fit CoinbaseOutputConstraints");
+            PoolError::shutdown(PoolErrorKind::CoinbaseOutputConstraints(e))
+        })?;
 
         self.channel_manager_io
             .tp_sender

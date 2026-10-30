@@ -11,7 +11,7 @@ use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     fallback_coordinator::FallbackCoordinator,
     stratum_core::{
-        bitcoin::{TxOut, consensus::Encodable},
+        bitcoin::TxOut,
         parsers_sv2::{JobDeclarationOwned, MiningOwned, TemplateDistributionOwned, Tlv},
     },
     task_manager::TaskManager,
@@ -65,7 +65,6 @@ struct BitcoinCoreSv2Handle {
 /// are correctly initialized, passed to background executors, and cleanly torn down.
 pub(super) struct JdcRuntime<State> {
     miner_coinbase_outputs: Vec<TxOut>,
-    encoded_outputs: Vec<u8>,
     mode: JDMode,
     fallback_coordinator: FallbackCoordinator,
     task_manager: Arc<TaskManager>,
@@ -242,7 +241,6 @@ impl<State> JdcRuntime<State> {
     fn into_failed(self) -> JdcRuntime<Failed> {
         JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -303,7 +301,6 @@ impl<State> JdcRuntime<State> {
 impl JdcRuntime<Init> {
     pub(super) fn new(jd_client: JobDeclaratorClient) -> Result<Self, JDCErrorKind> {
         let miner_coinbase_outputs = vec![jd_client.config.get_txout()];
-        let mut encoded_outputs = vec![];
         let mode = JDMode::new(jd_client.config.mode);
         let upstream_addresses = jd_client
             .config
@@ -320,16 +317,8 @@ impl JdcRuntime<Init> {
             })
             .collect();
 
-        if miner_coinbase_outputs
-            .consensus_encode(&mut encoded_outputs)
-            .is_err()
-        {
-            return Err(JDCErrorKind::InvalidCoinbaseOutput);
-        }
-
         Ok(JdcRuntime {
             miner_coinbase_outputs,
-            encoded_outputs,
             mode,
             fallback_coordinator: FallbackCoordinator::new(),
             task_manager: Arc::new(TaskManager::new()),
@@ -370,7 +359,6 @@ impl JdcRuntime<Init> {
 
         JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -502,7 +490,6 @@ impl JdcRuntime<IoReady> {
 
         Ok(JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -555,7 +542,7 @@ impl JdcRuntime<TemplateProviderReady> {
             self.state.io.channel_manager_to_tp_sender.clone(),
             self.state.io.tp_to_channel_manager_receiver.clone(),
             self.state.io.downstream_to_channel_manager_receiver.clone(),
-            self.encoded_outputs.clone(),
+            self.miner_coinbase_outputs.clone(),
             self.jd_client.config.supported_extensions().to_vec(),
             self.jd_client.config.required_extensions().to_vec(),
             self.mode.clone(),
@@ -568,7 +555,6 @@ impl JdcRuntime<TemplateProviderReady> {
 
         Ok(JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -625,7 +611,6 @@ impl JdcRuntime<ChannelManagerReady> {
 
                 Ok(JdcRuntime {
                     miner_coinbase_outputs: self.miner_coinbase_outputs,
-                    encoded_outputs: self.encoded_outputs,
                     mode: self.mode,
                     fallback_coordinator: self.fallback_coordinator,
                     task_manager: self.task_manager,
@@ -651,7 +636,6 @@ impl JdcRuntime<ChannelManagerReady> {
 
         JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -821,7 +805,6 @@ impl JdcRuntime<UpstreamReady> {
 
         Ok(JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -848,7 +831,6 @@ impl JdcRuntime<SoloMiningReady> {
 
         Ok(JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
@@ -920,7 +902,6 @@ impl JdcRuntime<Running> {
 
         JdcRuntime {
             miner_coinbase_outputs: self.miner_coinbase_outputs,
-            encoded_outputs: self.encoded_outputs,
             mode: self.mode,
             fallback_coordinator: FallbackCoordinator::new(),
             task_manager: self.task_manager,

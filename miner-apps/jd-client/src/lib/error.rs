@@ -18,6 +18,7 @@ use std::{
     sync::PoisonError,
 };
 use stratum_apps::{
+    coinbase_output_constraints::CoinbaseOutputConstraintsError,
     network_helpers,
     stratum_core::{
         binary_sv2, bitcoin,
@@ -222,10 +223,18 @@ pub enum JDCErrorKind {
     FrameConversionError,
     /// Failed to create custom Job
     FailedToCreateCustomJob,
+    /// Failed to build a job declaration
+    FailedToDeclareJob,
     /// Allocate Mining job token coinbase output error
     AllocateMiningJobTokenSuccessCoinbaseOutputsError,
-    /// Channel manager has bad coinbase outputs.
-    ChannelManagerHasBadCoinbaseOutputs,
+    /// `AllocateMiningJobToken.Success` hands out no coinbase output.
+    AllocateMiningJobTokenSuccessNoCoinbaseOutputs,
+    /// `AllocateMiningJobToken.Success` hands out a coinbase output with a nonzero value.
+    AllocateMiningJobTokenSuccessCoinbaseOutputValue,
+    /// `AllocateMiningJobToken.Success` hands out coinbase outputs too big for a job's coinbase.
+    AllocateMiningJobTokenSuccessCoinbaseOutputsTooLarge,
+    /// Coinbase outputs need more room than `CoinbaseOutputConstraints` can reserve.
+    CoinbaseOutputConstraints(CoinbaseOutputConstraintsError),
     /// Extranonce size is too large
     ExtranonceSizeTooLarge,
     /// Extranonce size is too small
@@ -342,15 +351,34 @@ impl fmt::Display for JDCErrorKind {
             FailedToCreateCustomJob => {
                 write!(f, "failed to create custom job")
             }
+            FailedToDeclareJob => {
+                write!(f, "failed to build job declaration")
+            }
             AllocateMiningJobTokenSuccessCoinbaseOutputsError => {
                 write!(
                     f,
                     "AllocateMiningJobToken.Success coinbase outputs are not deserializable"
                 )
             }
-            ChannelManagerHasBadCoinbaseOutputs => {
-                write!(f, "Channel Manager coinbase outputs are not deserializable")
+            AllocateMiningJobTokenSuccessNoCoinbaseOutputs => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out no coinbase output"
+                )
             }
+            AllocateMiningJobTokenSuccessCoinbaseOutputsTooLarge => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out coinbase outputs too big for a job's coinbase"
+                )
+            }
+            AllocateMiningJobTokenSuccessCoinbaseOutputValue => {
+                write!(
+                    f,
+                    "AllocateMiningJobToken.Success hands out a coinbase output with a nonzero value"
+                )
+            }
+            CoinbaseOutputConstraints(e) => write!(f, "{e}"),
             ExtranonceSizeTooLarge => {
                 write!(f, "Extranonce size too large")
             }

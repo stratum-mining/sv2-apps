@@ -1,11 +1,8 @@
 use stratum_apps::{
+    coinbase_output_constraints::coinbase_output_constraints_message,
     stratum_core::{
         binary_sv2::{B016MOwned, Seq064KOwned},
-        bitcoin::{
-            self, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
-            absolute::LockTime, transaction::Version,
-        },
-        channels_sv2::outputs::deserialize_outputs,
+        bitcoin::{self, Amount, ScriptBuf, TxOut},
         handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync,
         job_declaration_sv2::{
             AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
@@ -39,15 +36,14 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)
     }
 
-    // Handles a successful `AllocateMiningJobToken` response from the JDS.
-    //
-    // When the JDS confirms job token allocation:
-    // - Updates the channel manager state with the newly issued token.
-    // - Checks whether the JDS has provided updated coinbase outputs.
-    //   - If outputs have changed, recalculates the corresponding size and sigops constraints.
-    //   - Sends an updated `CoinbaseOutputConstraints` message to the Template Provider to ensure
-    //     the new coinbase rules are enforced.
-    // - If outputs are unchanged, skips recomputation and continues as normal.
+    // Handles a successful `AllocateMiningJobToken` response from the JDS:
+    // - drops an answer to a token request JDC never sent or already saw answered;
+    // - checks the answer's coinbase outputs, and falls back if JDC can't use them;
+    // - records the outputs as the ones the next templates are handed out with, and queues the
+    //   token with them;
+    // - grows the room the Template Provider reserves if the outputs need more, sending it
+    //   `CoinbaseOutputConstraints` for that room;
+    // - hands the token to work waiting for one.
     async fn handle_allocate_mining_job_token_success(
         &mut self,
         _server_id: Option<usize>,
@@ -56,68 +52,57 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
     ) -> Result<(), Self::Error> {
         info!("Received: {}", msg);
 
-        let new_coinbase_outputs = msg.coinbase_outputs.to_owned_bytes();
-        let coinbase_changed = self
-            .coinbase_outputs
-            .with(|coinbase_outputs| {
-                let changed = *coinbase_outputs != new_coinbase_outputs;
-                *coinbase_outputs = new_coinbase_outputs.clone();
-                changed
-            })
+        // Only the answer to a token request JDC sent and has not seen answered is acted on,
+        // before it reaches the outputs or the token queue (see `MiningJobTokens`).
+        let requested = self
+            .mining_job_tokens
+            .with(|tokens| tokens.answered(msg.request_id))
             .map_err(JDCError::shutdown)?;
-        self.allocate_tokens
-            .with(|tokens| tokens.push_back(msg.clone()))
-            .map_err(JDCError::shutdown)?;
-
-        if coinbase_changed {
-            info!("Coinbase outputs from JDS changed, recalculating constraints");
-            let deserialized_jds_coinbase_outputs: Vec<TxOut> =
-                bitcoin::consensus::deserialize(msg.coinbase_outputs.as_bytes())
-                    .map_err(JDCError::shutdown)?;
-
-            let max_additional_size: usize = deserialized_jds_coinbase_outputs
-                .iter()
-                .map(|o| o.size())
-                .sum();
-
-            // create a dummy coinbase transaction with the empty output
-            // this is used to calculate the sigops of the coinbase output
-            let dummy_coinbase = Transaction {
-                version: Version::TWO,
-                lock_time: LockTime::ZERO,
-                input: vec![TxIn {
-                    previous_output: OutPoint::null(),
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::from(vec![vec![0; 32]]),
-                }],
-                output: deserialized_jds_coinbase_outputs,
-            };
-
-            let max_additional_sigops = dummy_coinbase.total_sigop_cost(|_| None) as u16;
-
-            debug!(
-                max_additional_size,
-                max_additional_sigops, "Computed coinbase output constraints"
+        if !requested {
+            warn!(
+                request_id = msg.request_id,
+                "Ignoring AllocateMiningJobToken.Success for a token request JDC did not send or already saw answered"
             );
+            return Ok(());
+        }
 
-            let coinbase_output_constraints_message =
-                TemplateDistributionOwned::CoinbaseOutputConstraints(
-                    CoinbaseOutputConstraintsOwned {
-                        coinbase_output_max_additional_size: max_additional_size as u32,
-                        coinbase_output_max_additional_sigops: max_additional_sigops,
-                    },
-                );
+        // Everything about the answer that can fail is checked before any of it is kept, so
+        // outputs JDC can't use leave its outputs, tokens and constraints as they were, and JDC
+        // falls back from the JDS that handed them out.
+        let (new_coinbase_outputs, constraints) =
+            usable_coinbase_outputs(msg.coinbase_outputs.as_bytes()).map_err(JDCError::fallback)?;
 
+        // The Template Provider gets constraints for the JDS's first outputs, and afterwards only
+        // when outputs need more room than it reserves (see `OutputSets`).
+        let room = self
+            .output_sets
+            .with(|output_sets| output_sets.update(new_coinbase_outputs, constraints))
+            .map_err(JDCError::shutdown)?;
+        self.mining_job_tokens
+            .with(|tokens| tokens.queue(msg.clone()))
+            .map_err(JDCError::shutdown)?;
+
+        //
+        // A template the Template Provider built before applying new constraints, but sent after
+        // JDC sent them, can't be told apart: `NewTemplate` doesn't say which constraints it was
+        // built under, so JDC hands it out with outputs it may have no room for. With the Template
+        // Provider on the same host or LAN that window is under a round trip, and in full-template
+        // mode the in-tree one closes it, answering the template's transaction-data request with
+        // `stale-template-id`.
+        if let Some(room) = room {
+            debug!(
+                max_additional_size = room.coinbase_output_max_additional_size,
+                max_additional_sigops = room.coinbase_output_max_additional_sigops,
+                "Computed coinbase output constraints"
+            );
             self.channel_manager_io
                 .tp_sender
-                .send(coinbase_output_constraints_message)
+                .send(TemplateDistributionOwned::CoinbaseOutputConstraints(room))
                 .await
                 .map_err(|_e| JDCError::shutdown(JDCErrorKind::ChannelErrorSender))?;
-
             info!("Sent updated CoinbaseOutputConstraints to TP channel");
         } else {
-            debug!("Coinbase outputs unchanged, skipping constraints update");
+            debug!("Coinbase outputs fit the room reserved, skipping constraints update");
         }
 
         // A token goes first to work that was waiting for one: a declaration in full-template
@@ -133,9 +118,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
                 transaction_data,
             }) => {
                 let token = self
-                    .allocate_tokens
-                    .with(|tokens| tokens.pop_front())
-                    .map_err(JDCError::shutdown)?
+                    .take_token_for(&template)?
                     .ok_or_else(|| JDCError::shutdown(JDCErrorKind::MiningJobTokenNotFound))?;
                 self.declare_template(template, transaction_data, token)
                     .await?;
@@ -231,14 +214,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             return Err(JDCError::log(JDCErrorKind::LastNewPrevhashNotFound));
         };
 
-        let outputs = match deserialize_outputs(last_declare_job.coinbase_output.clone()) {
-            Ok(outputs) => outputs,
-            Err(_) => {
-                return Err(JDCError::shutdown(
-                    JDCErrorKind::ChannelManagerHasBadCoinbaseOutputs,
-                ));
-            }
-        };
+        let outputs = last_declare_job.coinbase_outputs.clone();
 
         let upstream_channel_info = self
             .upstream_channel
@@ -253,6 +229,7 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             return Err(JDCError::log(JDCErrorKind::FailedToCreateCustomJob));
         };
 
+        let template_id = last_declare_job.template.template_id;
         let Some(custom_job) = self
             .job_factory
             .with(|job_factory| {
@@ -273,8 +250,18 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             return Err(JDCError::log(JDCErrorKind::FailedToCreateCustomJob));
         };
 
-        let custom_job =
-            custom_job.map_err(|_e| JDCError::log(JDCErrorKind::FailedToCreateCustomJob))?;
+        // A rejected custom job would leave the downstreams mining work whose shares could never
+        // reach the Pool. JDC shuts down instead, as it does when a coinbase-only custom job can't
+        // be built. The declaration was built from the same template and outputs, so a rejection
+        // is not expected.
+        let custom_job = custom_job.map_err(|e| {
+            error!(
+                error = ?e,
+                template_id,
+                "Failed to build the custom job of a declared template"
+            );
+            JDCError::shutdown(JDCErrorKind::FailedToCreateCustomJob)
+        })?;
 
         let updated = self
             .last_declare_job_store
@@ -374,4 +361,59 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
         Ok(())
     }
+}
+
+// The coinbase outputs a JDS token answer hands out, with the `CoinbaseOutputConstraints` that
+// reserve room for them, if JDC can use them: they deserialize, and there is at least one, the
+// first being the pool payout output JDC puts the template's reward in. Every one comes at 0
+// sats, as the JDS hands them out (sv2-spec 06, `AllocateMiningJobToken.Success`).
+fn usable_coinbase_outputs(
+    serialized: &[u8],
+) -> Result<(Vec<TxOut>, CoinbaseOutputConstraintsOwned), JDCErrorKind> {
+    let outputs: Vec<TxOut> = bitcoin::consensus::deserialize(serialized)
+        .map_err(|_| JDCErrorKind::AllocateMiningJobTokenSuccessCoinbaseOutputsError)?;
+    if outputs.is_empty() {
+        return Err(JDCErrorKind::AllocateMiningJobTokenSuccessNoCoinbaseOutputs);
+    }
+    if outputs.iter().any(|output| output.value != Amount::ZERO) {
+        return Err(JDCErrorKind::AllocateMiningJobTokenSuccessCoinbaseOutputValue);
+    }
+    if coinbase_suffix_size(&outputs) > u16::MAX as usize {
+        return Err(JDCErrorKind::AllocateMiningJobTokenSuccessCoinbaseOutputsTooLarge);
+    }
+    let constraints = coinbase_output_constraints_message(outputs.clone()).map_err(|e| {
+        warn!(error = %e, "JDS coinbase outputs don't fit CoinbaseOutputConstraints");
+        JDCErrorKind::CoinbaseOutputConstraints(e)
+    })?;
+    Ok((outputs, constraints))
+}
+
+// The input's sequence, which starts the coinbase's suffix.
+const INPUT_SEQUENCE_SIZE: usize = 4;
+// The witness commitment output's script: `OP_RETURN`, a 36-byte push, the 4-byte commitment
+// header and the 32-byte commitment.
+const WITNESS_COMMITMENT_SCRIPT_SIZE: usize = 38;
+// The coinbase input's witness: one stack item, its length and the 32-byte reserved value.
+const WITNESS_RESERVED_VALUE_SIZE: usize = 34;
+// The locktime, which ends the coinbase.
+const LOCKTIME_SIZE: usize = 4;
+
+// The size of `DeclareMiningJob.coinbase_tx_suffix` for a coinbase paying `outputs`: the input's
+// sequence, the outputs with the witness commitment a Template Provider adds (sv2-spec 07,
+// `CoinbaseOutputConstraints`), the witness reserved value and the locktime. Every job JDC builds
+// carries the outputs in a field of at most 64 KiB, and this one is the tightest.
+fn coinbase_suffix_size(outputs: &[TxOut]) -> usize {
+    let witness_commitment = TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(vec![0; WITNESS_COMMITMENT_SCRIPT_SIZE]),
+    };
+    let outputs: Vec<TxOut> = outputs
+        .iter()
+        .cloned()
+        .chain([witness_commitment])
+        .collect();
+    INPUT_SEQUENCE_SIZE
+        + bitcoin::consensus::serialize(&outputs).len()
+        + WITNESS_RESERVED_VALUE_SIZE
+        + LOCKTIME_SIZE
 }
