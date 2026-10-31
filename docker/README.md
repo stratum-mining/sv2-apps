@@ -47,7 +47,7 @@ For this to work, Bitcoin Core must be started with IPC enabled. Whatever networ
 Example: starting a **testnet4** node with IPC bindings:
 
 ```bash
-./bitcoin-31.0/bin/bitcoin -m node -testnet4 -ipcbind=unix
+./bitcoin-32.1/bin/bitcoin -m node -testnet4 -ipcbind=unix
 ```
 
 You'll also need to wait for the node to complete Initial Block Download (IBD).
@@ -76,8 +76,8 @@ In the same directory as `docker-compose.yml`, create a `docker_env` file:
 
 ```
 BITCOIN_SOCKET_PATH=/absolute/path/to/your/node.sock
-POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
-JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+POOL__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=32
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=32
 ```
 Make sure the path is correct, if there are spaces (like `Application Support`), keep the value unquoted.
 

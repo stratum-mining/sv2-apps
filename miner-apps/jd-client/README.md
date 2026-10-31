@@ -181,7 +181,7 @@ JDC__LISTENING_ADDRESS=0.0.0.0:34265
 # Tagged enums (template_provider_type) take the variant as a path segment,
 # matched case-insensitively. If the file selects a different variant, the
 # environment's variant replaces it; set only one variant in the environment:
-JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=31
+JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__VERSION=32
 JDC__TEMPLATE_PROVIDER_TYPE__BITCOINCOREIPC__NETWORK=mainnet
 # List fields (supported_extensions, required_extensions and their downstream counterparts) are
 # comma-separated.

@@ -41,7 +41,7 @@ monitoring_cache_refresh_secs = 15
 # The directory holding node.sock must be owned by the Bitcoin Core user and not writable by
 # others; run this app as that user. See bitcoin-core-sv2/README.md, section "Socket Trust".
 [template_provider_type.BitcoinCoreIpc]
-version = 31
+version = 32
 network = "signet"
 # data_dir = "/custom/bitcoin/data"  # Optional: override default data directory
 fee_threshold = 100

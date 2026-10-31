@@ -7,7 +7,7 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use stratum_core::{
     bitcoin::{
-        Block, Transaction, TxMerkleNode, Txid, Weight, Wtxid,
+        Block, Transaction, TxMerkleNode, Weight, Wtxid,
         block::{Header, Version},
         consensus::serialize,
         hashes::Hash,
@@ -16,7 +16,6 @@ use stratum_core::{
         ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
         ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-        PushSolutionOwned,
     },
 };
 use tokio::sync::oneshot;
@@ -70,7 +69,7 @@ impl BitcoinCoreSv2JDP {
             coinbase_tx.input.first().map(|input| &input.script_sig)
         );
 
-        let (initial_validation_context, ntime, txdata, mut staged_txs) = {
+        let (initial_validation_context, ntime, mut txdata, mut staged_txs) = {
             let mempool_mirror = self.mempool_mirror.borrow();
 
             let prev_hash = mempool_mirror
@@ -167,13 +166,11 @@ impl BitcoinCoreSv2JDP {
             (initial_validation_context, ntime, txdata, staged_txs)
         }; // mempool_mirror dropped here, we don't want to hold it across await points
 
-        let txid_list: Vec<Txid> = txdata.iter().map(|tx| tx.compute_txid()).collect();
-
         // `Err` carries the reason Bitcoin Core gave for rejecting the block.
         let check_block_outcome: Result<(), String> = {
             let mut all_transactions = Vec::with_capacity(1 + txdata.len());
             all_transactions.push(coinbase_tx.clone());
-            all_transactions.extend(txdata);
+            all_transactions.extend(std::mem::take(&mut txdata));
 
             let num_transactions = all_transactions.len();
 
@@ -196,6 +193,9 @@ impl BitcoinCoreSv2JDP {
             };
 
             let block_bytes: Vec<u8> = serialize(&block);
+            // The transactions go back to answer `JdResponse::Success` with, minus the coinbase.
+            txdata = block.txdata;
+            txdata.remove(0);
 
             debug!(
                 "Assembled block for checkBlock: {} bytes, {} transactions",
@@ -338,7 +338,7 @@ impl BitcoinCoreSv2JDP {
                     JdResponse::Success {
                         prev_hash: initial_validation_context.prev_hash,
                         nbits: initial_validation_context.nbits,
-                        txid_list,
+                        txdata,
                     }
                 } else {
                     // The chain tip moved while checkBlock was in flight, so the block was
@@ -368,7 +368,7 @@ impl BitcoinCoreSv2JDP {
                 // ahead of the tip is a non-final transaction: bad-txns-nonfinal. One from behind
                 // the tip is final and fails the height check instead: bad-cb-height. All three
                 // are stale-chain-tip; every other reason is the declaration's own fault. The
-                // strings are the same across the 30.x and 31.x lines this crate supports.
+                // strings are the same across the 30.x through 32.x lines this crate supports.
                 //
                 // bad-txns-nonfinal is not specific to the coinbase: Core checks finality for
                 // every transaction in the block. A mempool holds no non-final transaction, and a
@@ -401,11 +401,16 @@ impl BitcoinCoreSv2JDP {
         let _ = response_tx.send(response);
     }
 
-    /// Submits a mining solution to Bitcoin Core.
+    /// Logs and discards a solved block.
     ///
-    /// Not yet implemented — deliberately left as a stub for future work.
-    pub(crate) async fn handle_push_solution(&self, _push_solution: PushSolutionOwned) {
-        // todo
+    /// Propagating it requires the `submitBlock` IPC method, which Bitcoin Core only exposes
+    /// from v32 on.
+    pub(crate) async fn handle_push_solution(&self, block: Block) {
+        warn!(
+            block_hash = %block.block_hash(),
+            "Discarding PushSolution block: Bitcoin Core v31.x IPC has no submitBlock \
+             method; run a v32.x node to propagate solutions declared through jd-server"
+        );
     }
 }
 

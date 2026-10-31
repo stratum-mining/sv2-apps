@@ -83,6 +83,11 @@ async fn full_template_block_passes_check_block_v31x() {
     assert_full_template_block_passes_check_block(BitcoinCoreVersion::V31X).await;
 }
 
+#[tokio::test]
+async fn full_template_block_passes_check_block_v32x() {
+    assert_full_template_block_passes_check_block(BitcoinCoreVersion::V32X).await;
+}
+
 /// Runs the scenario in the module docs against a live node of the given line. Everything that
 /// mines happens before either runtime starts, so the tip never moves under the template.
 async fn assert_full_template_block_passes_check_block(version: BitcoinCoreVersion) {
@@ -229,7 +234,12 @@ async fn assert_full_template_block_passes_check_block(version: BitcoinCoreVersi
         .await;
     }
     match response {
-        JdResponse::Success { .. } => {}
+        // jd-server rebuilds a solved block from these, so they must be exactly what was
+        // declared, in declaration order and without the coinbase.
+        JdResponse::Success { txdata, .. } => assert_eq!(
+            txdata, txs,
+            "JdResponse::Success must carry the declared transactions"
+        ),
         response => panic!(
             "Bitcoin Core must accept a block built on a full template with the declared \
              coinbase, got: {response:?}"

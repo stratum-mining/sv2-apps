@@ -23,11 +23,12 @@ use stratum_apps::{
     },
     stratum_core::{
         bitcoin::{
-            self, BlockHash, CompactTarget, Transaction, TxMerkleNode, Txid, Wtxid,
-            block::Version,
+            self, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Wtxid,
+            block::{Header, Version},
             consensus::{Decodable, Encodable},
             hashes::Hash,
         },
+        channels_sv2::{VERSION_ROLLING_MASK, merkle_root::merkle_root_from_path_},
         job_declaration_sv2::{
             DeclareMiningJobOwned, ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
@@ -65,8 +66,15 @@ use stratum_apps::{
 struct DeclaredCustomJob {
     declare_mining_job: DeclareMiningJobOwned,
     validation_context: ValidationContext, // committed at the time we receive DeclareMiningJob
-    txid_list: Option<Vec<Txid>>,          // populated only on JdResponse::Success
+    merkle_path: Vec<TxMerkleNode>,        // populated only on JdResponse::Success
     validated: bool,
+}
+
+/// A downstream's most recent `DeclareMiningJob.Success` with its non-coinbase transactions,
+/// which [`BitcoinCoreIPCEngine::handle_push_solution`] rebuilds a solved block from.
+struct SolvableJob {
+    job: DeclaredCustomJob,
+    txdata: Vec<Transaction>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,14 +84,26 @@ struct AllocatedTokenEntry {
 }
 
 /// Per-downstream client state for declared custom jobs and their token entries.
+///
+/// A `PushSolution` is rebuilt from the downstream's most recent `DeclareMiningJob.Success`, the
+/// only job whose transactions are kept, since they are a block's worth of memory. It stays until
+/// a newer success replaces it, whatever happens to its `SetCustomMiningJob` or its token. An
+/// older job keeps its coinbase merkle branch, the only part of its transactions
+/// `SetCustomMiningJob` validation compares, so it is still accepted, and a solution found on it is
+/// propagated by the client alone.
 #[derive(Default)]
 struct DownstreamState {
     declared_custom_jobs: HashMap<RequestId, DeclaredCustomJob>,
     allocated_token_entries: HashMap<JdToken, AllocatedTokenEntry>,
+    most_recent_success: Option<SolvableJob>,
 }
 
 impl DownstreamState {
     /// Stores a DeclaredCustomJob and its corresponding allocated token.
+    ///
+    /// A token stays allocated until a declaration made with it succeeds, so it can be declared
+    /// with again under a new request id, and the job it pointed at before goes, since no token
+    /// reaches it any more.
     fn insert_declared_custom_job(
         &mut self,
         request_id: RequestId,
@@ -92,13 +112,16 @@ impl DownstreamState {
     ) {
         self.declared_custom_jobs
             .insert(request_id, declared_custom_job);
-        self.allocated_token_entries.insert(
+        let previous = self.allocated_token_entries.insert(
             allocated_token,
             AllocatedTokenEntry {
                 request_id,
                 inserted_at: Instant::now(),
             },
         );
+        if let Some(previous) = previous.filter(|previous| previous.request_id != request_id) {
+            self.declared_custom_jobs.remove(&previous.request_id);
+        }
     }
 
     /// Removes both the DeclaredCustomJob and its corresponding allocated token.
@@ -159,14 +182,15 @@ impl DeclaredCustomJob {
         self.validation_context.prev_hash
     }
 
-    /// Reconstructs the declared coinbase transaction by concatenating prefix, extranonce (zeros),
-    /// and suffix.
+    /// Reconstructs the declared coinbase transaction by concatenating prefix, extranonce, and
+    /// suffix. Validation call sites pass `None` to fill the extranonce with zeros; a
+    /// `PushSolution` passes the solved extranonce.
     ///
     /// The extranonce size is calculated from the scriptSig size in the coinbase_tx_prefix
     ///
     /// Error type is () because we don't need extra granularity for error_code =
     /// "invalid-coinbase-tx"
-    fn get_coinbase_tx(&self) -> Result<Transaction, ()> {
+    fn get_coinbase_tx(&self, extranonce: Option<&[u8]>) -> Result<Transaction, ()> {
         let declared_coinbase_tx_prefix: Vec<u8> =
             self.declare_mining_job.coinbase_tx_prefix.to_owned_bytes();
         let declared_coinbase_tx_suffix: Vec<u8> =
@@ -199,10 +223,24 @@ impl DeclaredCustomJob {
         // The full extranonce fills the remaining space in scriptSig
         let full_extranonce_size: usize = script_sig_size - script_sig_bytes_in_prefix;
 
-        // Concatenate prefix + full extranonce (zeros) + suffix to form the complete transaction
-        // bytes
+        let extranonce_bytes = match extranonce {
+            Some(bytes) => {
+                if bytes.len() != full_extranonce_size {
+                    tracing::error!(
+                        "PushSolution extranonce size mismatch: expected {}, got {}",
+                        full_extranonce_size,
+                        bytes.len()
+                    );
+                    return Err(());
+                }
+                bytes.to_vec()
+            }
+            None => vec![0; full_extranonce_size],
+        };
+
+        // Concatenate prefix + extranonce + suffix to form the complete transaction bytes.
         let mut declared_coinbase_tx = declared_coinbase_tx_prefix;
-        declared_coinbase_tx.extend_from_slice(&vec![0; full_extranonce_size]);
+        declared_coinbase_tx.extend_from_slice(&extranonce_bytes);
         declared_coinbase_tx.extend_from_slice(&declared_coinbase_tx_suffix);
 
         // Deserialize the transaction
@@ -213,64 +251,104 @@ impl DeclaredCustomJob {
         )
     }
 
-    /// Computes the coinbase merkle branch in the txid merkle tree.
+    /// The coinbase merkle branch of the declared job, to compare with a
+    /// `SetCustomMiningJob.merkle_path`.
     ///
-    /// Returns the sibling hashes at each level from leaf to root, needed to
-    /// reconstruct the block header's merkle root from the coinbase position (index 0).
-    ///
-    /// Requires `txid_list` to have been populated via `JdResponse::Success`.
-    /// The coinbase txid is derived from the declared coinbase prefix/suffix.
-    ///
-    /// Used to compare with a `SetCustomMiningJob.merkle_path`.
-    ///
-    /// Internally, errors may come from missing txid_list
-    /// so error_code = "declared-job-not-yet-validated"
-    /// therefore () error type is sufficient.
+    /// Errors only while the job is not validated yet, so error_code =
+    /// "declared-job-not-yet-validated" and the () error type is sufficient.
     fn get_merkle_path(&self) -> Result<Vec<TxMerkleNode>, ()> {
         if !self.validated {
             return Err(());
         }
-
-        let txid_list = self.txid_list.as_ref().ok_or(())?;
-
-        let coinbase_tx = self
-            .get_coinbase_tx()
-            .expect("coinbase tx already validated");
-        let coinbase_txid: TxMerkleNode = coinbase_tx.compute_txid().into();
-
-        let mut hashes: Vec<TxMerkleNode> = Vec::with_capacity(1 + txid_list.len());
-        hashes.push(coinbase_txid);
-        for txid in txid_list {
-            hashes.push((*txid).into());
-        }
-
-        if hashes.len() == 1 {
-            return Ok(Vec::new());
-        }
-
-        let mut branch = Vec::new();
-
-        while hashes.len() > 1 {
-            branch.push(hashes[1]);
-
-            let half = hashes.len().div_ceil(2);
-            let mut next_level = Vec::with_capacity(half);
-            for idx in 0..half {
-                let left = hashes[2 * idx];
-                let right = hashes[std::cmp::min(2 * idx + 1, hashes.len() - 1)];
-                let mut engine = TxMerkleNode::engine();
-                left.consensus_encode(&mut engine)
-                    .expect("in-memory writers don't error");
-                right
-                    .consensus_encode(&mut engine)
-                    .expect("in-memory writers don't error");
-                next_level.push(TxMerkleNode::from_engine(engine));
-            }
-            hashes = next_level;
-        }
-
-        Ok(branch)
+        Ok(self.merkle_path.clone())
     }
+}
+
+#[cfg_attr(not(test), hotpath::measure_all)]
+impl SolvableJob {
+    /// Rebuilds the block a `PushSolution` solved on this job, with the solved extranonce
+    /// spliced into the declared coinbase and the merkle root recomputed, and returns it only
+    /// if its header hash meets the target. A solution found on a different job at the same
+    /// chain tip passes every field check `PushSolution` allows and fails only here, so the
+    /// header is checked before the transactions are touched.
+    ///
+    /// Only the coinbase leaf of the merkle tree depends on the extranonce, so the root is
+    /// folded from the solved coinbase txid and the branch kept since the declaration, and the
+    /// other transactions are not hashed again.
+    fn solved_block(
+        &self,
+        downstream_id: DownstreamId,
+        push_solution: &PushSolutionOwned,
+    ) -> Option<Block> {
+        let Ok(coinbase_tx) = self
+            .job
+            .get_coinbase_tx(Some(push_solution.extranonce.as_ref()))
+        else {
+            tracing::error!(
+                downstream_id,
+                "Failed to reconstruct solved coinbase transaction"
+            );
+            return None;
+        };
+
+        let merkle_root = merkle_root_from_path_(
+            coinbase_tx.compute_txid().to_byte_array(),
+            &self.job.merkle_path,
+        );
+
+        let header = Header {
+            version: Version::from_consensus(push_solution.version as i32),
+            prev_blockhash: self.job.get_prev_hash(),
+            merkle_root: TxMerkleNode::from_byte_array(merkle_root),
+            time: push_solution.ntime,
+            bits: CompactTarget::from_consensus(push_solution.nbits),
+            nonce: push_solution.nonce,
+        };
+        header.validate_pow(header.target()).ok()?;
+
+        Some(Block {
+            header,
+            txdata: std::iter::once(coinbase_tx)
+                .chain(self.txdata.iter().cloned())
+                .collect(),
+        })
+    }
+}
+
+/// Computes the coinbase merkle branch of a block whose non-coinbase transactions are `txdata`,
+/// in order: the sibling hash at each level from the coinbase leaf (index 0) up to the root.
+///
+/// The coinbase itself is never its own sibling, so the branch does not depend on it and a
+/// placeholder stands in at index 0.
+fn coinbase_merkle_path(txdata: &[Transaction]) -> Vec<TxMerkleNode> {
+    let mut hashes: Vec<TxMerkleNode> = Vec::with_capacity(1 + txdata.len());
+    hashes.push(TxMerkleNode::all_zeros());
+    for tx in txdata {
+        hashes.push(tx.compute_txid().into());
+    }
+
+    let mut branch = Vec::new();
+
+    while hashes.len() > 1 {
+        branch.push(hashes[1]);
+
+        let half = hashes.len().div_ceil(2);
+        let mut next_level = Vec::with_capacity(half);
+        for idx in 0..half {
+            let left = hashes[2 * idx];
+            let right = hashes[std::cmp::min(2 * idx + 1, hashes.len() - 1)];
+            let mut engine = TxMerkleNode::engine();
+            left.consensus_encode(&mut engine)
+                .expect("in-memory writers don't error");
+            right
+                .consensus_encode(&mut engine)
+                .expect("in-memory writers don't error");
+            next_level.push(TxMerkleNode::from_engine(engine));
+        }
+        hashes = next_level;
+    }
+
+    branch
 }
 
 /// Engine for validating and propagating solutions for Custom Jobs using Bitcoin Core over IPC.
@@ -291,9 +369,9 @@ impl BitcoinCoreIPCEngine {
     /// Spawns a dedicated thread running BitcoinCoreSv2JDP in a LocalSet for handling
     /// the !Send Cap'n Proto client.
     ///
-    /// `version` selects the Bitcoin Core IPC schema family (v30.x or v31.x).
+    /// `version` selects the Bitcoin Core IPC schema family (v30.x, v31.x or v32.x).
     ///
-    /// Blocks until the mempool mirror is bootstrapped and ready to process requests.
+    /// Blocks until the JDP runtime has bootstrapped and is ready to process requests.
     pub async fn new(
         version: BitcoinCoreVersion,
         network: BitcoinNetwork,
@@ -381,7 +459,7 @@ impl BitcoinCoreIPCEngine {
             });
         });
 
-        // Wait for BitcoinCoreSv2JDP to complete mempool bootstrap, mirroring the
+        // Wait for BitcoinCoreSv2JDP to complete its bootstrap, mirroring the
         // pool's Template Provider startup behavior during IBD.
         // Until `new()` succeeds, this function is still the only owner of the spawned JDP
         // thread handle, so cancellation/bootstrap failure must join here rather than detach it.
@@ -397,18 +475,18 @@ impl BitcoinCoreIPCEngine {
                             }
 
                             return Err(JDSErrorKind::BitcoinCoreIPC(
-                                "Mempool bootstrap did not complete".to_string(),
+                                "JDP bootstrap did not complete".to_string(),
                             ));
                         }
                     }
                 }
                 _ = cancellation_token.cancelled() => {
-                    tracing::info!("BitcoinCoreIPCEngine stopped before mempool bootstrap completed");
+                    tracing::info!("BitcoinCoreIPCEngine stopped before JDP bootstrap completed");
                     if let Err(e) = jdp_thread_handle.join() {
                         tracing::warn!("BitcoinCoreSv2JDP thread join failed during startup cancellation: {e:?}");
                     }
                     return Err(JDSErrorKind::BitcoinCoreIPC(
-                        "Mempool bootstrap did not complete".to_string(),
+                        "JDP bootstrap did not complete".to_string(),
                     ));
                 }
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
@@ -525,11 +603,11 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     nbits: CompactTarget::from_consensus(0), /* irrelevant for coinbase tx
                                                         * validation */
                 },
-                txid_list: None,  // irrelevant for coinbase tx validation
-                validated: false, // irrelevant for coinbase tx validation
+                merkle_path: Vec::new(), // irrelevant for coinbase tx validation
+                validated: false,        // irrelevant for coinbase tx validation
             };
 
-            match temp_job.get_coinbase_tx() {
+            match temp_job.get_coinbase_tx(None) {
                 Ok(tx) => {
                     tracing::debug!("Declared coinbase transaction validated successfully");
                     tx
@@ -625,15 +703,19 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             JdResponse::Success {
                 prev_hash,
                 nbits,
-                txid_list,
+                txdata,
             } => {
                 let declared_custom_job = DeclaredCustomJob {
                     declare_mining_job: declare_mining_job_static,
                     validation_context: ValidationContext { prev_hash, nbits },
-                    txid_list: Some(txid_list),
+                    merkle_path: coinbase_merkle_path(&txdata),
                     validated: true,
                 };
                 let updated = self.downstream_states.with_mut(&downstream_id, |state| {
+                    state.most_recent_success = Some(SolvableJob {
+                        job: declared_custom_job.clone(),
+                        txdata,
+                    });
                     state.insert_declared_custom_job(
                         declare_mining_job.request_id,
                         allocated_token,
@@ -694,7 +776,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                     let declared_custom_job = DeclaredCustomJob {
                         declare_mining_job: declare_mining_job_static,
                         validation_context,
-                        txid_list: None,
+                        merkle_path: Vec::new(),
                         validated: false, // this is only set to true on JdResponse::Success
                     };
                     let updated = self.downstream_states.with_mut(&downstream_id, |state| {
@@ -725,13 +807,64 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         downstream_id: DownstreamId,
         push_solution: PushSolutionOwned,
     ) {
-        // Convert to static lifetime for channel transfer
-        let push_solution_static = push_solution;
+        let prev_hash = BlockHash::from_byte_array(push_solution.prev_hash.to_array());
+        let solved_fixed_version_bits = push_solution.version & !VERSION_ROLLING_MASK;
 
-        // Send request to BitcoinCoreSv2JDP (fire-and-forget)
-        let request = JdRequest::PushSolution {
-            push_solution: push_solution_static,
+        // The block is rebuilt from the most recent DeclareMiningJob.Success.
+        // prev_hash and nbits must match exactly; version is matched on non-rollable bits only.
+        // Every job declared at the solved chain tip passes this, so a solution found on another
+        // job fails the target check on the rebuilt block instead. That one is propagated by the
+        // client alone.
+        let block = self
+            .downstream_states
+            .with(&downstream_id, |state| {
+                let Some(solvable) = state.most_recent_success.as_ref() else {
+                    tracing::info!(
+                        downstream_id,
+                        "Not propagating PushSolution: this downstream has no validated job to \
+                         rebuild it from"
+                    );
+                    return None;
+                };
+                let job = &solvable.job;
+                if job.get_prev_hash() != prev_hash
+                    || job.get_nbits() != push_solution.nbits
+                    || job.get_version() & !VERSION_ROLLING_MASK != solved_fixed_version_bits
+                {
+                    tracing::info!(
+                        downstream_id,
+                        got_prev_hash = ?prev_hash,
+                        got_nbits = push_solution.nbits,
+                        got_fixed_version_bits = solved_fixed_version_bits,
+                        "Not propagating PushSolution: it does not match the most recent \
+                         successfully declared job"
+                    );
+                    return None;
+                }
+                let block = solvable.solved_block(downstream_id, &push_solution);
+                if block.is_none() {
+                    tracing::info!(
+                        downstream_id,
+                        "Not propagating PushSolution: the most recent successfully declared job \
+                         does not rebuild into a block meeting the target, so it was presumably \
+                         found on another one"
+                    );
+                }
+                block
+            })
+            .unwrap_or_else(|| {
+                tracing::info!(
+                    downstream_id,
+                    "Not propagating PushSolution: downstream state is gone"
+                );
+                None
+            });
+
+        let Some(block) = block else {
+            return;
         };
+
+        let request = JdRequest::PushSolution { block };
 
         if let Err(e) = self.request_sender.send(request).await {
             tracing::error!(downstream_id, "Failed to send PushSolution request: {}", e);
@@ -840,7 +973,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
         // validate coinbase tx
         {
-            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx() {
+            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx(None) {
                 Ok(tx) => tx,
                 Err(_) => {
                     return SetCustomMiningJobResult::Error(
@@ -935,5 +1068,150 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         }
 
         SetCustomMiningJobResult::Success
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::stratum_core::bitcoin::{
+        Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, Witness, absolute::LockTime,
+        transaction::Version as TxVersion,
+    };
+
+    const EXTRANONCE_LEN: usize = 8;
+    // A target one hash in 2^16 meets: a nonce mined for one merkle root misses it for another,
+    // and mining one takes a few tens of thousands of hashes.
+    const NBITS: u32 = 0x1f00_ffff;
+    const BLOCK_VERSION: u32 = 0x2000_0000;
+
+    /// A job at the shared chain tip whose coinbase pays `payout_tag`, declared with an
+    /// `EXTRANONCE_LEN`-byte extranonce hole in its scriptSig and two other transactions, so
+    /// the merkle tree has an odd leaf count and a branch of two nodes.
+    fn accepted_job(payout_tag: u8) -> SolvableJob {
+        let coinbase = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(
+                    [vec![0x03, 1, 0, 0], vec![0; EXTRANONCE_LEN]].concat(),
+                ),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[[0u8; 32]]),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x6a, 0x01, payout_tag]),
+            }],
+        };
+        let txdata: Vec<Transaction> = (1..=2)
+            .map(|n| Transaction {
+                version: TxVersion::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(Txid::from_byte_array([n; 32]), 0),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            })
+            .collect();
+        let bytes = bitcoin::consensus::serialize(&coinbase);
+        // version(4) + marker and flag(2) + input count(1) + outpoint(36) + scriptSig length(1)
+        // + height push(4)
+        let extranonce_offset = 4 + 2 + 1 + 36 + 1 + 4;
+        let job = DeclaredCustomJob {
+            declare_mining_job: DeclareMiningJobOwned {
+                request_id: 0,
+                mining_job_token: Vec::new().try_into().unwrap(),
+                version: BLOCK_VERSION,
+                coinbase_tx_prefix: bytes[..extranonce_offset].to_vec().try_into().unwrap(),
+                coinbase_tx_suffix: bytes[extranonce_offset + EXTRANONCE_LEN..]
+                    .to_vec()
+                    .try_into()
+                    .unwrap(),
+                wtxid_list: Vec::new().try_into().unwrap(),
+                excess_data: Vec::new().try_into().unwrap(),
+            },
+            validation_context: ValidationContext {
+                prev_hash: BlockHash::all_zeros(),
+                nbits: CompactTarget::from_consensus(NBITS),
+            },
+            merkle_path: coinbase_merkle_path(&txdata),
+            validated: true,
+        };
+        SolvableJob { job, txdata }
+    }
+
+    /// A `PushSolution` mined on `job`: the header fields every job at the tip shares, with a
+    /// nonce that meets the target for this job's merkle root.
+    fn solution_on(job: &DeclaredCustomJob) -> PushSolutionOwned {
+        let extranonce = [7u8; EXTRANONCE_LEN];
+        let coinbase = job.get_coinbase_tx(Some(&extranonce)).unwrap();
+        let mut header = Header {
+            version: Version::from_consensus(BLOCK_VERSION as i32),
+            prev_blockhash: job.get_prev_hash(),
+            merkle_root: TxMerkleNode::from_byte_array(merkle_root_from_path_(
+                coinbase.compute_txid().to_byte_array(),
+                &job.merkle_path,
+            )),
+            time: 1,
+            bits: CompactTarget::from_consensus(NBITS),
+            nonce: 0,
+        };
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce += 1;
+        }
+        PushSolutionOwned {
+            extranonce: extranonce.to_vec().try_into().unwrap(),
+            prev_hash: job.get_prev_hash().to_byte_array().into(),
+            nonce: header.nonce,
+            ntime: header.time,
+            nbits: NBITS,
+            version: BLOCK_VERSION,
+        }
+    }
+
+    #[test]
+    fn solved_block_tells_jobs_at_one_tip_apart() {
+        let older = accepted_job(1);
+        let newer = accepted_job(2);
+        let solution = solution_on(&older.job);
+
+        let block = older
+            .solved_block(0, &solution)
+            .expect("the job the solution was found on rebuilds into a valid block");
+        assert_eq!(
+            block.txdata[0].output[0].script_pubkey.as_bytes(),
+            [0x6a, 0x01, 1]
+        );
+        assert!(block.header.validate_pow(block.header.target()).is_ok());
+        assert_eq!(
+            block.compute_merkle_root(),
+            Some(block.header.merkle_root),
+            "the root folded from the stored branch is the root of the rebuilt block"
+        );
+
+        assert!(
+            newer.solved_block(0, &solution).is_none(),
+            "a job that passes every PushSolution field check but was not solved"
+        );
+    }
+
+    #[test]
+    fn a_job_declared_again_under_its_token_replaces_the_one_before() {
+        let mut state = DownstreamState::default();
+        let mut waiting = accepted_job(1).job;
+        waiting.validated = false;
+        state.insert_declared_custom_job(1, 7, waiting);
+        state.insert_declared_custom_job(2, 7, accepted_job(2).job);
+        assert!(!state.declared_custom_jobs.contains_key(&1));
+        assert!(state.take_declared_custom_job(7).is_some());
+        assert!(state.declared_custom_jobs.is_empty());
     }
 }
