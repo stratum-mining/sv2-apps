@@ -3211,6 +3211,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregated_update_channel_saturates_a_total_past_the_f32_range() {
+        let (channel_manager_sender, channel_manager_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            upstream_receiver,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        register_test_downstream(&server, 1, Some(1), Hashrate::MAX, false);
+        register_test_downstream(&server, 2, Some(2), Hashrate::MAX, false);
+
+        server
+            .send_update_channel_on_downstream_state_change()
+            .await
+            .unwrap();
+
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        let MiningOwned::UpdateChannel(update) = message else {
+            panic!("expected UpdateChannel");
+        };
+        assert_eq!(update.nominal_hash_rate, Hashrate::MAX);
+    }
+
+    #[tokio::test]
     async fn aggregated_channel_open_registers_vardiff_and_refreshes_hashrate() {
         let (channel_manager_sender, channel_manager_receiver) = unbounded();
         let (upstream_sender, upstream_receiver) = unbounded();

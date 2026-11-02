@@ -331,6 +331,10 @@ impl Sv1Server {
             return Ok(AggregatedSnapshot::NoOpenChannels);
         }
 
+        // Each downstream hashrate is finite, but their sum can leave the f32 range, and a
+        // non-finite hashrate cannot go out in the upstream `UpdateChannel`.
+        let total_hashrate = total_hashrate.min(Hashrate::MAX);
+
         Ok(match min_target {
             Some(min_target) => AggregatedSnapshot::Active {
                 total_hashrate,
