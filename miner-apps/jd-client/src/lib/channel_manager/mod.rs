@@ -32,6 +32,7 @@ use stratum_apps::{
             client::{error::ExtendedChannelError, extended::ExtendedChannel},
             extranonce_manager::{ExtranonceAllocator, bytes_needed},
             server::{group::GroupChannel, jobs::factory::JobFactory, standard::StandardChannel},
+            target::hash_rate_to_target,
         },
         handlers_sv2::{
             HandleExtensionsFromServerOwnedAsync, HandleJobDeclarationMessagesFromServerOwnedAsync,
@@ -962,6 +963,10 @@ impl ChannelManager {
             .set(Some(open.clone()))
             .map_err(JDCError::shutdown)?;
         let message = MiningOwned::OpenExtendedMiningChannel(open);
+        // The encoder serializes this frame in the writer task, which has no way to answer the
+        // downstream, so a value `binary_sv2` refuses to serialize costs JDC the upstream
+        // connection. Downstream opens are screened in `handle_downstream_message`, so a field
+        // added to this open later needs the same screening there.
         let sv2_frame = OutboundFrame::from_message(AnyMessageOwned::Mining(message))
             .map_err(JDCError::shutdown)?;
         self.channel_manager_io
@@ -1520,6 +1525,26 @@ impl ChannelManager {
 
         match message {
             MiningOwned::OpenExtendedMiningChannel(downstream_channel_request) => {
+                // The channel constructor refuses this request on its hashrate or max target, and
+                // forwarding it upstream would cost JDC the connection it is bootstrapping.
+                // Answer the downstream with the error code the constructor builds instead.
+                if hash_rate_to_target(
+                    downstream_channel_request.nominal_hash_rate.into(),
+                    self.shares_per_minute.into(),
+                )
+                .is_err()
+                    || Target::from_le_bytes(downstream_channel_request.max_target.to_array())
+                        == Target::ZERO
+                {
+                    self.handle_mining_message_from_client(
+                        Some(downstream_id),
+                        MiningOwned::OpenExtendedMiningChannel(downstream_channel_request),
+                        tlvs.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
                 let downstream_msg = downstream_channel_request.clone();
 
                 match self.upstream_state.get() {
@@ -1585,6 +1610,26 @@ impl ChannelManager {
                 }
             }
             MiningOwned::OpenStandardMiningChannel(downstream_channel_request) => {
+                // The channel constructor refuses this request on its hashrate or max target, and
+                // forwarding it upstream would cost JDC the connection it is bootstrapping.
+                // Answer the downstream with the error code the constructor builds instead.
+                if hash_rate_to_target(
+                    downstream_channel_request.nominal_hash_rate.into(),
+                    self.shares_per_minute.into(),
+                )
+                .is_err()
+                    || Target::from_le_bytes(downstream_channel_request.max_target.to_array())
+                        == Target::ZERO
+                {
+                    self.handle_mining_message_from_client(
+                        Some(downstream_id),
+                        MiningOwned::OpenStandardMiningChannel(downstream_channel_request),
+                        tlvs.as_deref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
                 let downstream_msg = downstream_channel_request.clone();
 
                 match self.upstream_state.get() {
