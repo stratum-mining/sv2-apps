@@ -290,17 +290,21 @@ pub(crate) fn create_close_channel_msg(channel_id: ChannelId, msg: &str) -> Clos
 }
 
 /// The nominal hashrate and `max_target` JDC asks its upstream channel for, given the nominal
-/// hashrate and target of every downstream channel: their total hashrate, and the hardest of their
-/// targets. The targets are compared as numbers, not as their serialized bytes.
+/// hashrate and target of every downstream channel: their total hashrate, saturated at
+/// `Hashrate::MAX`, and the hardest of their targets. The targets are compared as numbers, not as
+/// their serialized bytes.
 pub(crate) fn upstream_channel_update(
     channels: impl IntoIterator<Item = (Hashrate, Target)>,
 ) -> (Hashrate, Target) {
-    channels.into_iter().fold(
+    let (hashrate, max_target) = channels.into_iter().fold(
         (0.0, Target::from_le_bytes([0xff; 32])),
         |(hashrate, max_target), (channel_hashrate, channel_target)| {
             (hashrate + channel_hashrate, max_target.min(channel_target))
         },
-    )
+    );
+    // Each channel hashrate is finite, but the sum can leave the f32 range, and a non-finite
+    // hashrate cannot go out in the upstream `UpdateChannel`.
+    (hashrate.min(Hashrate::MAX), max_target)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -529,5 +533,16 @@ mod tests {
         let (hashrate, max_target) = upstream_channel_update([(10.0, easy), (5.0, hard)]);
         assert_eq!(hashrate, 15.0);
         assert_eq!(max_target, hard);
+    }
+
+    // Two hashrates near the top of the f32 range sum past it. The update JDC sends upstream must
+    // stay representable.
+    #[test]
+    fn upstream_channel_update_saturates_a_total_past_the_f32_range() {
+        let target = Target::from_le_bytes([0xff; 32]);
+        let (hashrate, _) =
+            upstream_channel_update([(Hashrate::MAX, target), (Hashrate::MAX, target)]);
+
+        assert_eq!(hashrate, Hashrate::MAX);
     }
 }
