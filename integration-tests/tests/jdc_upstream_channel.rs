@@ -1,19 +1,30 @@
+use async_channel::Receiver;
 use integration_tests_sv2::{
     interceptor::MessageDirection,
     mock_roles::{
-        channel_open_success, connect_closable_downstream, extended_channel_request, send_message,
+        channel_open_success, connect_closable_downstream, extended_channel_request,
+        next_message_type, send_message, standard_channel_request,
     },
     mocked_jdc::MockedJdc,
-    utils::ABSENCE_WINDOW,
+    types::InboundFrame,
+    utils::{ABSENCE_WINDOW, message_from_frame},
 };
 use std::time::Duration;
-use stratum_apps::stratum_core::{
-    common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-    mining_sv2::{
-        MESSAGE_TYPE_CLOSE_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_UPDATE_CHANNEL,
-        MESSAGE_TYPE_UPDATE_CHANNEL_ERROR,
+use stratum_apps::{
+    stratum_core::{
+        codec_sv2::{EncodableFrame, SerializedFrame},
+        common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        framing_sv2::SV2_FRAME_HEADER_SIZE,
+        mining_sv2::{
+            ERROR_CODE_OPEN_MINING_CHANNEL_INVALID_NOMINAL_HASHRATE,
+            ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE, MESSAGE_TYPE_CLOSE_CHANNEL,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, MESSAGE_TYPE_UPDATE_CHANNEL,
+            MESSAGE_TYPE_UPDATE_CHANNEL_ERROR, OpenMiningChannelErrorOwned,
+        },
+        parsers_sv2::{AnyMessageOwned, MiningOwned},
     },
+    utils::types::OutboundFrame,
 };
 
 // Once the upstream channel is open, a replay of the success that opened it, or an error for the
@@ -297,6 +308,180 @@ async fn jdc_answers_a_refused_update_channel_only_to_its_downstream() {
             )
             .await,
         "a refused update must not reach the Pool"
+    );
+
+    jdc.jdc.shutdown().await;
+}
+
+// A channel-open frame whose `nominal_hash_rate` is `nominal_hash_rate`. The request is framed
+// with a valid hashrate and then its four hashrate bytes are overwritten: a frame built by hand
+// is written out as it is.
+fn open_with_hash_rate(request: AnyMessageOwned, nominal_hash_rate: f32) -> OutboundFrame {
+    let user_identity_len = match &request {
+        AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(request)) => {
+            request.user_identity.as_bytes().len()
+        }
+        AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(request)) => {
+            request.user_identity.as_bytes().len()
+        }
+        _ => panic!("expected a channel open"),
+    };
+
+    let frame = OutboundFrame::from_message(request).expect("a valid channel open frames");
+    let mut bytes = vec![0; frame.encoded_length()];
+    frame
+        .encode_into(&mut bytes)
+        .expect("a valid channel open encodes");
+
+    // `request_id` and `user_identity` (a length byte plus its bytes) precede
+    // `nominal_hash_rate` on the wire.
+    let at = SV2_FRAME_HEADER_SIZE + 4 + 1 + user_identity_len;
+    bytes[at..at + 4].copy_from_slice(&nominal_hash_rate.to_le_bytes());
+
+    OutboundFrame::Raw(SerializedFrame::from_bytes(bytes.into()).expect("a whole frame"))
+}
+
+// The `OpenMiningChannel.Error` JDC answers the downstream with. Answering with anything else, or
+// not answering at all, fails the test.
+async fn next_open_mining_channel_error(
+    from_jdc: &Receiver<InboundFrame>,
+) -> OpenMiningChannelErrorOwned {
+    let mut frame = tokio::time::timeout(Duration::from_secs(10), from_jdc.recv())
+        .await
+        .expect("JDC answers an invalid first open")
+        .expect("JDC keeps the downstream connection open");
+    match message_from_frame(&mut frame).1 {
+        AnyMessageOwned::Mining(MiningOwned::OpenMiningChannelError(error)) => error,
+        other => panic!("expected OpenMiningChannel.Error, got {other:?}"),
+    }
+}
+
+// A first open the channel constructor refuses is answered by JDC itself: the downstream gets its
+// `OpenMiningChannel.Error`, the Pool hears nothing, JDC does not fall back, and the next valid
+// open still opens the upstream channel.
+async fn assert_refused_open_stays_local(jdc: &MockedJdc) {
+    assert!(
+        jdc.pool_sniffer
+            .assert_message_not_present(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "an open the channel constructor refuses must not reach the Pool"
+    );
+    assert!(
+        jdc.next_pool_sniffer
+            .assert_message_not_present(
+                MessageDirection::ToDownstream,
+                MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+                ABSENCE_WINDOW,
+            )
+            .await,
+        "an open the channel constructor refuses must not make JDC fall back"
+    );
+}
+
+// A first open that `binary_sv2` refuses to serialize must not cost JDC the upstream connection.
+#[tokio::test]
+async fn jdc_refuses_a_first_open_with_an_invalid_hash_rate_without_touching_the_pool() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let (from_jdc, to_jdc) = connect_closable_downstream(jdc.address).await;
+
+    to_jdc
+        .send(open_with_hash_rate(
+            extended_channel_request([0xff; 32]),
+            f32::NAN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_open_mining_channel_error(&from_jdc)
+            .await
+            .error_code
+            .as_utf8_or_hex(),
+        ERROR_CODE_OPEN_MINING_CHANNEL_INVALID_NOMINAL_HASHRATE
+    );
+    assert_refused_open_stays_local(&jdc).await;
+
+    // The upstream channel is still JDC's to open: the next valid request opens it.
+    send_message(&to_jdc, extended_channel_request([0xff; 32])).await;
+    let request = jdc.upstream_channel_request().await;
+    jdc.send_upstream_channel_success(channel_open_success(&request))
+        .await;
+    assert_eq!(
+        next_message_type(&from_jdc).await,
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+    );
+
+    jdc.jdc.shutdown().await;
+}
+
+// A first open the Pool would refuse must not cost JDC the upstream channel either, even though
+// the request itself serializes.
+#[tokio::test]
+async fn jdc_refuses_a_first_open_with_a_zero_max_target_without_touching_the_pool() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let (from_jdc, to_jdc) = connect_closable_downstream(jdc.address).await;
+
+    send_message(&to_jdc, extended_channel_request([0; 32])).await;
+    assert_eq!(
+        next_open_mining_channel_error(&from_jdc)
+            .await
+            .error_code
+            .as_utf8_or_hex(),
+        ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE
+    );
+    assert_refused_open_stays_local(&jdc).await;
+
+    send_message(&to_jdc, extended_channel_request([0xff; 32])).await;
+    let request = jdc.upstream_channel_request().await;
+    jdc.send_upstream_channel_success(channel_open_success(&request))
+        .await;
+    assert_eq!(
+        next_message_type(&from_jdc).await,
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+    );
+
+    jdc.jdc.shutdown().await;
+}
+
+// JDC opens an extended channel upstream for a standard first open, carrying the same
+// `nominal_hash_rate`, so an invalid value is refused here too.
+#[tokio::test]
+async fn jdc_refuses_a_standard_first_open_with_an_invalid_hash_rate_without_touching_the_pool() {
+    integration_tests_sv2::start_tracing();
+    let jdc = MockedJdc::start().await;
+    jdc.send_chain_tip().await;
+    let (from_jdc, to_jdc) = connect_closable_downstream(jdc.address).await;
+
+    to_jdc
+        .send(open_with_hash_rate(
+            standard_channel_request([0xff; 32]),
+            -1.0,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_open_mining_channel_error(&from_jdc)
+            .await
+            .error_code
+            .as_utf8_or_hex(),
+        ERROR_CODE_OPEN_MINING_CHANNEL_INVALID_NOMINAL_HASHRATE
+    );
+    assert_refused_open_stays_local(&jdc).await;
+
+    send_message(&to_jdc, extended_channel_request([0xff; 32])).await;
+    let request = jdc.upstream_channel_request().await;
+    jdc.send_upstream_channel_success(channel_open_success(&request))
+        .await;
+    assert_eq!(
+        next_message_type(&from_jdc).await,
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
     );
 
     jdc.jdc.shutdown().await;

@@ -22,7 +22,8 @@ use stratum_apps::{
         extensions_sv2::RequestExtensionsOwned,
         mining_sv2::{
             MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, OpenExtendedMiningChannelOwned,
-            OpenExtendedMiningChannelSuccessOwned, UpdateChannelOwned,
+            OpenExtendedMiningChannelSuccessOwned, OpenStandardMiningChannelOwned,
+            UpdateChannelOwned,
         },
         parsers_sv2::{
             AnyMessageOwned, CommonMessagesOwned, IsSv2Message, MiningOwned,
@@ -407,6 +408,19 @@ pub fn extended_channel_request(max_target: [u8; 32]) -> AnyMessageOwned {
             nominal_hash_rate: 1_000.0,
             max_target: max_target.into(),
             min_extranonce_size: 0,
+        },
+    ))
+}
+
+/// A downstream's request for a standard channel, with `max_target` in little-endian, as on the
+/// wire.
+pub fn standard_channel_request(max_target: [u8; 32]) -> AnyMessageOwned {
+    AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannel(
+        OpenStandardMiningChannelOwned {
+            request_id: 1,
+            user_identity: "mock-downstream".try_into().unwrap(),
+            nominal_hash_rate: 1_000.0,
+            max_target: max_target.into(),
         },
     ))
 }
