@@ -190,7 +190,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
 
     // Handles a `CloseChannel` message:
     // - Look up the downstream associated with the given `channel_id`.
-    // - If found, remove the channel from its `extended_channels` and `standard_channels`.
+    // - If found, release the channel and what JDC keeps for it (see `release_downstream_channel`).
     // - If not found, return an appropriate error.
     async fn handle_close_channel(
         &mut self,
@@ -202,19 +202,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         let downstream_id =
             client_id.expect("client_id must be present for downstream_id extraction");
         self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .group_channel
-                .with(|gc| {
-                    if gc.has_channel_id(msg.channel_id) {
-                        gc.remove_channel_id(msg.channel_id);
-                    }
-                })
-                .map_err(JDCError::shutdown)?;
-            downstream.extended_channels.remove(&msg.channel_id);
-            downstream.standard_channels.remove(&msg.channel_id);
-            Ok(())
+            self.release_downstream_channel(downstream, msg.channel_id)
         })?;
-        self.vardiff.remove(&(downstream_id, msg.channel_id).into());
         Ok(())
     }
 
@@ -995,8 +984,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 let template_id = self
                     .downstream_channel_id_and_job_id_to_template_id
                     .get_cloned(&mapping_key);
-                let upstream_job_id = template_id
-                    .and_then(|tid| self.template_id_to_upstream_job_id.get_cloned(&tid));
+                let upstream_job_id = self.upstream_job_id_for(template_id)?;
 
                 self.upstream_channel
                     .with(|maybe_upstream_channel| -> Result<(), Self::Error> {
@@ -1114,6 +1102,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         })
                         .is_none()
                     {
+                        // The channel JDC tells the downstream is closed is released here too.
+                        self.release_downstream_channel(downstream, channel_id)?;
                         return Ok(vec![(
                             downstream_id,
                             MiningOwned::CloseChannel(create_close_channel_msg(
@@ -1291,8 +1281,7 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 let template_id = self
                     .downstream_channel_id_and_job_id_to_template_id
                     .get_cloned(&mapping_key);
-                let upstream_job_id = template_id
-                    .and_then(|tid| self.template_id_to_upstream_job_id.get_cloned(&tid));
+                let upstream_job_id = self.upstream_job_id_for(template_id)?;
 
                 self.upstream_channel
                     .with(|maybe_upstream_channel| -> Result<(), Self::Error> {
@@ -1417,6 +1406,8 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                         })
                         .is_none()
                     {
+                        // The channel JDC tells the downstream is closed is released here too.
+                        self.release_downstream_channel(downstream, channel_id)?;
                         return Ok(vec![(
                             downstream_id,
                             MiningOwned::CloseChannel(create_close_channel_msg(

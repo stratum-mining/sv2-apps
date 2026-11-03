@@ -40,7 +40,7 @@ use stratum_apps::{
     },
     utils::types::{
         CanDisconnect, CanFallback, CanShutdown, DownstreamId, ExtensionType, JobId, MessageType,
-        RequestId, VardiffKey,
+        VardiffKey,
     },
 };
 use tokio::time::error::Elapsed;
@@ -203,14 +203,10 @@ pub enum JDCErrorKind {
     InvalidSocketAddress(String),
     /// Timeout error
     Timeout,
-    /// Declared job corresponding to request Id not found.
-    LastDeclareJobNotFound(RequestId),
     /// No active job with job id
     ActiveJobNotFound(JobId),
     /// Downstream not found with downstream ID
     DownstreamNotFound(DownstreamId),
-    /// No mining job token queued for work that needs one
-    MiningJobTokenNotFound,
     /// Future template not present
     FutureTemplateNotPresent,
     /// Last new prevhash not found
@@ -322,9 +318,6 @@ impl fmt::Display for JDCErrorKind {
             BitcoinEncodeError(_) => write!(f, "Error generated during encoding"),
             InvalidSocketAddress(s) => write!(f, "Invalid socket address: {s}"),
             Timeout => write!(f, "Time out error"),
-            LastDeclareJobNotFound(request_id) => {
-                write!(f, "last declare job not found for request id: {request_id}")
-            }
             ActiveJobNotFound(request_id) => {
                 write!(f, "Active Job not found for request_id: {request_id}")
             }
@@ -333,9 +326,6 @@ impl fmt::Display for JDCErrorKind {
                     f,
                     "Downstream not found with downstream_id: {downstream_id}"
                 )
-            }
-            MiningJobTokenNotFound => {
-                write!(f, "No mining job token queued for work that needs one")
             }
             FutureTemplateNotPresent => {
                 write!(f, "Future template not present")
