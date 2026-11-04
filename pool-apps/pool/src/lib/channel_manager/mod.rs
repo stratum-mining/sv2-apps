@@ -261,7 +261,7 @@ impl ChannelManager {
         }
 
         if let Err(e) = group_channel.on_set_new_prev_hash(last_set_new_prev_hash) {
-            error!(error = ?e, "Failed to set new prevhash for group channel");
+            error!(error = ?e, "Failed to set new previous block hash for group channel");
             return Ok(None);
         }
 
@@ -286,11 +286,11 @@ impl ChannelManager {
         // Bind before spawning, so that a bind failure is a startup failure the caller can
         // propagate. Everything after this point (waiting for the first template, then accepting)
         // runs in a background task, so bootstrap is never held hostage by the Template Provider.
-        info!("Starting downstream server at {listening_address}");
+        info!(%listening_address, "Starting downstream server");
         let server = TcpListener::bind(listening_address)
             .await
             .map_err(|e| {
-                error!(error = ?e, "Failed to bind downstream server at {listening_address}");
+                error!(%listening_address, error = %e, "Failed to bind downstream server");
                 e
             })
             .map_err(PoolError::shutdown)?;
@@ -306,7 +306,7 @@ impl ChannelManager {
                 ) {
                     (Ok(has_template), Ok(has_prev_hash)) => has_template && has_prev_hash,
                     _ => {
-                        error!("Channel Manager: shared state poisoned while waiting for templates");
+                        error!("Channel Manager shared state poisoned while waiting for templates (shutting down)");
                         cancellation_token_clone.cancel();
                         break false;
                     }
@@ -317,12 +317,11 @@ impl ChannelManager {
                     break true;
                 }
 
-                warn!("Waiting for initial template and prevhash from Template Provider...");
-                warn!("Is the Bitcoin node undergoing IBD?");
+                warn!("Waiting for initial template and previous block hash from Template Provider (check if Bitcoin node is undergoing IBD)");
                 select! {
                     biased;
                     _ = cancellation_token_clone.cancelled() => {
-                        info!("Channel Manager: received shutdown while waiting for templates");
+                        debug!("Channel Manager: received shutdown while waiting for templates");
                         break false;
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
@@ -337,7 +336,7 @@ impl ChannelManager {
                 select! {
                     biased;
                     _ = cancellation_token_clone.cancelled() => {
-                        info!("Channel Manager: received shutdown signal");
+                        debug!("Channel Manager accept loop: received shutdown signal");
                         break;
                     }
                     res = server.accept() => {
@@ -355,14 +354,14 @@ impl ChannelManager {
                                     let noise_stream = tokio::select! {
                                         biased;
                                         _ = cancellation_token_inner.cancelled() => {
-                                            info!("Shutdown received during handshake, dropping connection");
+                                            debug!(%socket_address, "Shutdown received during handshake, dropping connection");
                                             return;
                                         }
                                         result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {
-                                                    error!(error = ?e, "Noise handshake failed");
+                                                    warn!(%socket_address, error = ?e, "Noise handshake failed (dropping connection)");
                                                     return;
                                                 }
                                             }
@@ -377,7 +376,7 @@ impl ChannelManager {
                                     let group_channel_id = channel_id_factory.fetch_add(1, Ordering::SeqCst);
 
                                     let Ok(group_channel) = this.bootstrap_group_channel(group_channel_id) else {
-                                        error!("Failed to bootstrap group channel - disconnecting downstream {downstream_id}");
+                                        error!(downstream_id, "Failed to bootstrap group channel (disconnecting downstream)");
                                         cancellation_token_clone.cancel();
                                         return;
                                     };
@@ -385,7 +384,7 @@ impl ChannelManager {
                                     let group_channel = match group_channel {
                                         Some(group_channel) => group_channel,
                                         None => {
-                                            error!("Failed to bootstrap group channel - disconnecting downstream {downstream_id}");
+                                            error!(downstream_id, "Failed to bootstrap group channel (disconnecting downstream)");
                                             cancellation_token_clone.cancel();
                                             return;
                                         }
@@ -423,13 +422,13 @@ impl ChannelManager {
                                 }
 
                                 Err(e) => {
-                                    error!(error = ?e, "Failed to accept new downstream connection");
+                                    error!(error = %e, "Failed to accept new downstream connection");
                                 }
                             }
                     }
                 }
             }
-            info!("Downstream server: Unified loop break");
+            debug!("Downstream server accept loop exited");
         });
         Ok(())
     }
@@ -457,15 +456,15 @@ impl ChannelManager {
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
-                        info!("Channel Manager: received shutdown signal");
+                        debug!("Channel Manager message loop: received shutdown signal");
                         break;
                     }
                     res = &mut vardiff_future => {
-                        info!("Vardiff loop completed with: {res:?}");
+                        debug!(result = ?res, "Vardiff loop completed");
                     }
                     res = cm_template.handle_template_provider_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Template Receiver message");
+                            error!(error = ?e, "Failed to handle Template Receiver message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_template_provider_message",
                                 &e,
@@ -477,7 +476,7 @@ impl ChannelManager {
                     }
                     res = cm_downstreams.handle_downstream_mining_message() => {
                         if let Err(e) = res {
-                            error!(error = ?e, "Error handling Downstreams message");
+                            error!(error = ?e, "Failed to handle downstream mining message");
                             if let LoopControl::Break = cm.handle_error_action(
                                 "ChannelManager::handle_downstream_mining_message",
                                 &e,
@@ -577,7 +576,10 @@ impl ChannelManager {
                 debug!("Updated target for extended channel_id={channel_id} to {updated_target:?}",);
             }
             Err(e) => warn!(
-                "Failed to update extended channel channel_id={channel_id} during vardiff {e:?}"
+                downstream_id,
+                channel_id,
+                error = ?e,
+                "Failed to update extended channel during vardiff"
             ),
         }
     }
@@ -624,7 +626,10 @@ impl ChannelManager {
                 );
             }
             Err(e) => warn!(
-                "Failed to update standard channel channel_id={channel_id} during vardiff {e:?}"
+                downstream_id,
+                channel_id,
+                error = ?e,
+                "Failed to update standard channel during vardiff"
             ),
         }
     }
@@ -638,7 +643,7 @@ impl ChannelManager {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             ticker.tick().await;
-            info!("Starting vardiff loop for downstreams");
+            debug!("Starting vardiff loop for downstreams");
 
             if let Err(e) = self.run_vardiff().await {
                 error!(error = ?e, "Vardiff iteration failed");
@@ -698,11 +703,11 @@ impl ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward vardiff message to downstream (channel closed)");
             }
         }
 
-        info!("Vardiff update cycle complete");
+        debug!("Vardiff update cycle complete");
         Ok(())
     }
 
@@ -726,7 +731,7 @@ impl ChannelManager {
             .send(TemplateDistributionOwned::CoinbaseOutputConstraints(msg))
             .await
             .map_err(|e| {
-                error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to TP");
+                error!(error = ?e, "Failed to send CoinbaseOutputConstraints message to Template Provider");
                 PoolError::shutdown(PoolErrorKind::ChannelErrorSender)
             })?;
 

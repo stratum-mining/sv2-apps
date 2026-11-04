@@ -6,7 +6,7 @@ use stratum_apps::stratum_core::{
     handlers_sv2::HandleCommonMessagesFromServerOwnedAsync,
     parsers_sv2::Tlv,
 };
-use tracing::{error, info};
+use tracing::{debug, warn};
 
 use crate::{
     error::{self, PoolError, PoolErrorKind},
@@ -30,10 +30,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for Sv2Tp {
         msg: SetupConnectionSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!(
-            "Received `SetupConnectionSuccess` from TP: version={}, flags={:b}",
-            msg.used_version, msg.flags
-        );
+        debug!("Received: {}", msg);
         Ok(())
     }
 
@@ -43,9 +40,10 @@ impl HandleCommonMessagesFromServerOwnedAsync for Sv2Tp {
         msg: ChannelEndpointChangedOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!(
-            "Received ChannelEndpointChanged with channel id: {}",
-            msg.channel_id
+        debug!("Received: {}", msg);
+        warn!(
+            channel_id = msg.channel_id,
+            "ChannelEndpointChanged received from Template Provider (initiating shutdown)"
         );
         Err(PoolError::shutdown(PoolErrorKind::ChangeEndpoint))
     }
@@ -56,7 +54,7 @@ impl HandleCommonMessagesFromServerOwnedAsync for Sv2Tp {
         msg: ReconnectOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         Ok(())
     }
 
@@ -66,9 +64,11 @@ impl HandleCommonMessagesFromServerOwnedAsync for Sv2Tp {
         msg: SetupConnectionErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        error!(
-            "Received `SetupConnectionError` from TP with error code {}",
-            std::str::from_utf8(msg.error_code.as_ref()).unwrap_or("unknown error code")
+        debug!("Received: {}", msg);
+        let error_code = msg.error_code.as_utf8_or_hex();
+        warn!(
+            error_code = %error_code,
+            "SetupConnection rejected by Template Provider (initiating shutdown)"
         );
         Err(PoolError::shutdown(PoolErrorKind::SetupConnectionError))
     }

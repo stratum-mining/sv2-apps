@@ -112,6 +112,7 @@ impl Downstream {
     ) -> LoopControl {
         if cancellation_token.is_cancelled() {
             debug!(
+                downstream_id = self.downstream_id,
                 error_kind = ?e.kind,
                 "{context} returned an error after shutdown was requested"
             );
@@ -215,7 +216,11 @@ impl Downstream {
     ) {
         // Setup initial connection
         if let Err(e) = self.setup_connection_with_downstream().await {
-            error!(?e, "Failed to set up downstream connection");
+            warn!(
+                downstream_id = self.downstream_id,
+                error = ?e,
+                "Failed to set up downstream connection (disconnecting downstream; server unaffected)"
+            );
 
             // sleep to make sure SetupConnectionError is sent
             // before we break the TCP connection
@@ -239,12 +244,12 @@ impl Downstream {
                 tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
-                        debug!("Downstream {downstream_id}: received shutdown signal");
+                        debug!(downstream_id, "Received shutdown signal");
                         break;
                     }
                     res = self_clone_1.handle_downstream_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling downstream message for {downstream_id}");
+                            error!(downstream_id, error = ?e, "Failed to handle downstream message");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_downstream_message",
                                 &e,
@@ -256,7 +261,7 @@ impl Downstream {
                     }
                     res = self_clone_2.handle_channel_manager_message() => {
                         if let Err(e) = res {
-                            error!(?e, "Error handling channel manager message for {downstream_id}");
+                            error!(downstream_id, error = ?e, "Failed to handle channel manager message for downstream");
                             if let LoopControl::Break = self.handle_error_action(
                                 "Downstream::handle_channel_manager_message",
                                 &e,
@@ -271,7 +276,10 @@ impl Downstream {
             self.downstream_connection_token.cancel();
             self.downstream_io.close();
             on_disconnect(self.downstream_id);
-            warn!("Downstream: unified message loop exited.");
+            debug!(
+                downstream_id = self.downstream_id,
+                "Downstream message loop exited"
+            );
         });
     }
 
@@ -309,9 +317,10 @@ impl Downstream {
         let (msg, _tlv_fields) = match self.downstream_io.channel_manager_receiver.recv().await {
             Ok(msg) => msg,
             Err(e) => {
-                warn!(
-                    ?e,
-                    "Channel manager receiver closed - disconnecting downstream"
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Channel manager receiver closed (disconnecting downstream)"
                 );
                 return Err(PoolError::disconnect(
                     PoolErrorKind::ChannelRecv(e),
@@ -328,7 +337,11 @@ impl Downstream {
             .send(std_frame)
             .await
             .map_err(|e| {
-                error!(?e, "Downstream send failed");
+                debug!(
+                    downstream_id = self.downstream_id,
+                    error = ?e,
+                    "Failed to forward message to downstream (channel closed)"
+                );
                 PoolError::disconnect(PoolErrorKind::ChannelErrorSender, self.downstream_id)
             })?;
 
@@ -361,7 +374,10 @@ impl Downstream {
                 let mining_message = match any_message.into_owned() {
                     AnyMessageOwned::Mining(msg) => msg,
                     _ => {
-                        error!("Expected Mining message but got different type");
+                        warn!(
+                            downstream_id = self.downstream_id,
+                            "Expected Mining message but got different type (disconnecting downstream)"
+                        );
                         return Err(PoolError::disconnect(
                             PoolErrorKind::UnexpectedMessage(
                                 header.ext_type_without_channel_msg(),
@@ -376,7 +392,11 @@ impl Downstream {
                     .send((self.downstream_id, mining_message, tlv_fields))
                     .await
                     .map_err(|e| {
-                        error!(?e, "Failed to send mining message to channel manager.");
+                        error!(
+                            downstream_id = self.downstream_id,
+                            error = ?e,
+                            "Failed to send mining message to channel manager"
+                        );
                         PoolError::shutdown(e)
                     })?;
             }
@@ -388,16 +408,18 @@ impl Downstream {
             | MessageType::JobDeclaration
             | MessageType::TemplateDistribution => {
                 warn!(
-                    ext_type = ?header.ext_type(),
-                    msg_type = ?header.msg_type(),
-                    "Received unexpected message from downstream."
+                    downstream_id = self.downstream_id,
+                    ext_type = header.ext_type(),
+                    msg_type = header.msg_type(),
+                    "Received unexpected message from downstream (ignoring)"
                 );
             }
             MessageType::Unknown => {
                 warn!(
-                    ext_type = ?header.ext_type(),
-                    msg_type = ?header.msg_type(),
-                    "Received unknown message from downstream."
+                    downstream_id = self.downstream_id,
+                    ext_type = header.ext_type(),
+                    msg_type = header.msg_type(),
+                    "Received unknown message from downstream (ignoring)"
                 );
             }
         }

@@ -13,7 +13,7 @@ use stratum_apps::{
     },
     utils::types::OutboundFrame,
 };
-use tracing::{error, info};
+use tracing::{debug, info, warn};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleExtensionsFromClientOwnedAsync for Downstream {
@@ -34,12 +34,9 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
         msg: RequestExtensionsOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        let requested: Vec<u16> = msg.requested_extensions.clone().into_inner();
+        debug!(downstream_id = self.downstream_id, "Received: {}", msg);
 
-        info!(
-            "Downstream {}: Received RequestExtensions: request_id={}, requested={:?}",
-            self.downstream_id, msg.request_id, requested
-        );
+        let requested: Vec<u16> = msg.requested_extensions.clone().into_inner();
 
         // Get supported and required extensions from downstream data
         let (supported_extensions, required_extensions) = (
@@ -73,9 +70,13 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
 
         if should_send_error {
             // Send error response
-            error!(
-                "Downstream {}: Extension negotiation error: requested={:?}, supported={:?}, unsupported={:?}, missing_required={:?}",
-                self.downstream_id, requested, supported, unsupported, missing_required
+            warn!(
+                downstream_id = self.downstream_id,
+                ?requested,
+                ?supported,
+                ?unsupported,
+                ?missing_required,
+                "RequestExtensions negotiation failed for downstream (sending RequestExtensions.Error)"
             );
 
             let error = RequestExtensionsErrorOwned {
@@ -98,9 +99,10 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
 
             // If required extensions are missing, the server SHOULD disconnect the client
             if !missing_required.is_empty() {
-                error!(
-                    "Downstream {}: Client does not support required extensions {:?}. Server MUST disconnect.",
-                    self.downstream_id, missing_required
+                warn!(
+                    downstream_id = self.downstream_id,
+                    missing_extensions = ?missing_required,
+                    "Downstream does not support required extensions (disconnecting client)"
                 );
                 Err(PoolError::disconnect(
                     PoolErrorKind::ClientDoesNotSupportRequiredExtensions(missing_required),
@@ -110,8 +112,9 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
         } else {
             // Send success response with the subset of extensions we both support
             info!(
-                "Downstream {}: Extension negotiation success: requested={:?}, negotiated={:?}",
-                self.downstream_id, requested, supported
+                downstream_id = self.downstream_id,
+                negotiated = ?supported,
+                "Negotiated extensions with downstream successfully"
             );
 
             // Store the negotiated extensions in the shared downstream data
@@ -135,9 +138,10 @@ impl HandleExtensionsFromClientOwnedAsync for Downstream {
                     PoolError::disconnect(PoolErrorKind::ChannelErrorSender, self.downstream_id)
                 })?;
 
-            info!(
-                "Downstream {}: Stored negotiated extensions: {:?}",
-                self.downstream_id, supported
+            debug!(
+                downstream_id = self.downstream_id,
+                ?supported,
+                "Stored negotiated extensions for downstream"
             );
         }
 

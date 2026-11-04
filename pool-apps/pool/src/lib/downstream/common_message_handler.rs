@@ -15,7 +15,7 @@ use stratum_apps::{
     },
     utils::types::{OutboundFrame, SUPPORTED_PROTOCOL_VERSION},
 };
-use tracing::info;
+use tracing::{debug, warn};
 
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
@@ -36,16 +36,15 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         msg: SetupConnectionOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!(
-            "Received `SetupConnection`: min_version={}, max_version={}, flags={:b}",
-            msg.min_version, msg.max_version, msg.flags
-        );
+        debug!("Received: {}", msg);
 
         let downstream_id = client_id.expect("downstream id should be present");
 
         if msg.protocol != Protocol::MiningProtocol {
-            info!(
-                "Rejecting connection from {downstream_id}: SetupConnection asking for other protocols than mining protocol."
+            warn!(
+                downstream_id,
+                protocol = ?msg.protocol,
+                "SetupConnection rejected: unsupported protocol (check downstream configuration)"
             );
             let response = SetupConnectionErrorOwned {
                 flags: 0,
@@ -73,9 +72,12 @@ impl HandleCommonMessagesFromClientOwnedAsync for Downstream {
         if SUPPORTED_PROTOCOL_VERSION < msg.min_version
             || SUPPORTED_PROTOCOL_VERSION > msg.max_version
         {
-            info!(
-                "Rejecting connection from {downstream_id}: no supported protocol version in requested range [{}, {}] (supported: {SUPPORTED_PROTOCOL_VERSION}).",
-                msg.min_version, msg.max_version
+            warn!(
+                downstream_id,
+                min_version = msg.min_version,
+                max_version = msg.max_version,
+                supported_version = SUPPORTED_PROTOCOL_VERSION,
+                "SetupConnection rejected: protocol version mismatch (check downstream configuration)"
             );
             let response = SetupConnectionErrorOwned {
                 flags: 0,

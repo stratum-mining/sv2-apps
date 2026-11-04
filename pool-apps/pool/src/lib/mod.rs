@@ -6,7 +6,7 @@ use std::sync::{
 };
 use stratum_apps::bitcoin_core_sv2::CancellationToken;
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::debug;
 
 use crate::config::PoolConfig;
 
@@ -101,7 +101,7 @@ impl PoolSv2 {
 
 impl Drop for PoolSv2 {
     fn drop(&mut self) {
-        info!("PoolSv2 dropped");
+        debug!("PoolSv2 dropped");
         self.cancellation_token.cancel();
     }
 }

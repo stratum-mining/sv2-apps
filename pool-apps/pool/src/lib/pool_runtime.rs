@@ -18,7 +18,7 @@ use stratum_apps::{
     tp_type::TemplateProviderType,
     utils::types::{DownstreamId, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use jd_server_sv2::job_declarator::{
     JobDeclarator,
@@ -135,16 +135,18 @@ impl<State> PoolRuntime<State> {
         if let Some(bitcoin_core_sv2) = self.bitcoin_core_sv2.take() {
             bitcoin_core_sv2.cancellation_token.cancel();
 
-            info!("Waiting for BitcoinCoreSv2TDP dedicated thread to shutdown...");
+            debug!("Waiting for Bitcoin Core Template Provider thread to shut down");
             match bitcoin_core_sv2.join_handle.join() {
-                Ok(_) => info!("BitcoinCoreSv2TDP dedicated thread shutdown complete."),
-                Err(e) => error!("BitcoinCoreSv2TDP dedicated thread error: {e:?}"),
+                Ok(_) => debug!("Bitcoin Core Template Provider thread shutdown complete"),
+                Err(e) => {
+                    error!(error = ?e, "Bitcoin Core Template Provider thread panicked or errored")
+                }
             }
         }
 
-        warn!(
-            "Graceful shutdown: waiting {} seconds for tasks to finish",
-            GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+        info!(
+            timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+            "Graceful shutdown: waiting for tasks to finish"
         );
 
         match tokio::time::timeout(
@@ -158,18 +160,18 @@ impl<State> PoolRuntime<State> {
             }
             Err(_) => {
                 warn!(
-                    "Tasks did not finish within {} seconds, aborting",
-                    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+                    timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+                    "Tasks did not finish within timeout; aborting"
                 );
                 self.task_manager.abort_all().await;
-                info!("Joining aborted tasks...");
+                debug!("Joining aborted tasks");
                 self.task_manager.join_all().await;
                 warn!("Forced shutdown complete");
             }
         }
 
         self.pool.mark_stopped();
-        info!("Pool shutdown complete.");
+        info!("Pool shutdown complete");
     }
 }
 
@@ -253,7 +255,7 @@ impl PoolRuntime<IoReady> {
         let cancellation_token = self.pool.cancellation_token.clone();
 
         let jd = if let Some(jds_config) = jds_config {
-            info!("JDS config present — initializing embedded Job Declaration Server");
+            info!("Initializing embedded Job Declaration Server");
 
             let ipc_engine: Arc<dyn JobValidationEngine> =
                 match self.pool.config.template_provider_type() {
@@ -342,7 +344,7 @@ impl PoolRuntime<IoReady> {
 
             Some(jd)
         } else {
-            info!("No [jds] config — Job Declaration not available");
+            info!("No JDS configuration provided; Job Declaration disabled");
 
             None
         };
@@ -402,7 +404,7 @@ impl PoolRuntime<JdsReady> {
                 // Sv2Tp manages its own lifecycle via spawned tasks that run on the `task_manager`.
                 // It handles its own shutdown internally when the `cancellation_token` is
                 // triggered, so we don't explicitly store and shut it down.
-                info!("Sv2 Template Provider setup done");
+                info!("SV2 Template Provider setup completed");
             }
             TemplateProviderType::BitcoinCoreIpc {
                 version,
@@ -426,8 +428,8 @@ impl PoolRuntime<JdsReady> {
                     };
 
                 info!(
-                    "Using Bitcoin Core IPC socket at: {}",
-                    unix_socket_path.display()
+                    socket_path = %unix_socket_path.display(),
+                    "Using Bitcoin Core IPC socket"
                 );
 
                 // incoming and outgoing TDP channels from the perspective of BitcoinCoreSv2TDP
@@ -532,10 +534,7 @@ impl PoolRuntime<ChannelManagerReady> {
         // Start monitoring server if configured
         #[cfg(feature = "monitoring")]
         if let Some(monitoring_addr) = self.pool.config.monitoring_address() {
-            info!(
-                "Initializing monitoring server on http://{}",
-                monitoring_addr
-            );
+            info!(address = %monitoring_addr, "Initializing monitoring server");
 
             let monitoring_server = match stratum_apps::monitoring::MonitoringServer::new(
                 monitoring_addr,
@@ -568,7 +567,7 @@ impl PoolRuntime<ChannelManagerReady> {
                 let cancellation_token = cancellation_token.clone();
                 async move {
                     if let Err(e) = monitoring_server.run(shutdown_signal).await {
-                        error!("Monitoring server error: {}", e);
+                        error!(error = ?e, "Monitoring server encountered an error");
                         cancellation_token.cancel();
                     }
                 }
@@ -613,7 +612,7 @@ impl PoolRuntime<ChannelManagerReady> {
             }
         };
 
-        info!("Spawning status listener task...");
+        debug!("Spawning status listener task");
 
         Ok(PoolRuntime {
             pool: self.pool,

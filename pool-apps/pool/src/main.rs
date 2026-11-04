@@ -1,5 +1,6 @@
 use pool_sv2::PoolSv2;
 use stratum_apps::{config_helpers::logging::init_logging, utils::shutdown::ShutdownListener};
+use tracing::{error, info, warn};
 
 use crate::args::process_cli_args;
 
@@ -27,18 +28,18 @@ async fn inner_main() {
 
     let pool = PoolSv2::new(config);
     let mut shutdown_listener = ShutdownListener::new().unwrap_or_else(|e| {
-        tracing::error!("Pool could not listen for shutdown signals: {e}");
+        error!(error = %e, "Failed to listen for shutdown signals");
         std::process::exit(1);
     });
     tokio::spawn({
         let pool = pool.clone();
         async move {
             let signal = shutdown_listener.wait().await;
-            tracing::info!("{signal} received — initiating graceful shutdown...");
+            info!(signal = %signal, "Initiating graceful shutdown");
             tokio::select! {
                 _ = pool.shutdown() => {}
                 signal = shutdown_listener.wait() => {
-                    tracing::warn!("{signal} received again — abandoning graceful shutdown");
+                    warn!(signal = %signal, "Abandoning graceful shutdown; exiting immediately");
                     std::process::exit(signal.exit_code());
                 }
             }
@@ -46,7 +47,7 @@ async fn inner_main() {
     });
 
     if let Err(e) = pool.start().await {
-        tracing::error!("Pool Error'ed out: {e}");
+        error!(error = %e, "Pool encountered a fatal error");
         std::process::exit(1);
     };
 }

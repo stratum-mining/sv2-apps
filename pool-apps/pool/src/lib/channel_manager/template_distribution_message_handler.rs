@@ -12,7 +12,7 @@ use stratum_apps::stratum_core::{
     mining_sv2::SetNewPrevHashOwned as SetNewPrevHashMp, parsers_sv2::Tlv,
     template_distribution_sv2::SetNewPrevHashOwned as SetNewPrevHashTdp,
 };
-use tracing::{info, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     channel_manager::{ChannelManager, RouteMessageTo},
@@ -36,7 +36,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: NewTemplateOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         if msg.future_template {
             self.last_future_template
@@ -121,7 +121,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     standard_channel
                         .on_group_channel_job(group_channel_job.clone())
                         .map_err(|e| {
-                            tracing::error!("Error while adding group channel job to standard channel with id: {channel_id:?}");
+                            error!(channel_id, error = ?e, "Failed to add group channel job to standard channel");
                             PoolError::shutdown(e)
                         })?;
                 } else {
@@ -131,7 +131,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                             downstream_coinbase_outputs.clone(),
                         )
                         .map_err(|e| {
-                            tracing::error!("Error while adding template to standard channel");
+                            error!(channel_id, error = ?e, "Failed to add template to standard channel");
                             PoolError::shutdown(e)
                         })?;
                     let standard_job = if msg.future_template {
@@ -162,7 +162,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 channel
                     .on_group_channel_job(group_channel_job.clone())
                     .map_err(|e| {
-                        tracing::error!("Error while adding group channel job to extended channel with id: {channel_id:?}");
+                        error!(channel_id, error = ?e, "Failed to add group channel job to extended channel");
                         PoolError::shutdown(e)
                     })
             })?;
@@ -176,7 +176,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message to downstream (channel closed)");
             }
         }
 
@@ -189,7 +189,12 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataErrorOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        warn!("Received: {}", msg);
+        debug!("Received: {}", msg);
+        warn!(
+            template_id = msg.template_id,
+            error_code = %msg.error_code.as_utf8_or_hex(),
+            "RequestTransactionData rejected by Template Provider"
+        );
         Ok(())
     }
 
@@ -199,7 +204,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: RequestTransactionDataSuccessOwned,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
         Ok(())
     }
 
@@ -209,7 +214,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
         msg: SetNewPrevHashTdp,
         _tlv_fields: Option<&[Tlv]>,
     ) -> Result<(), Self::Error> {
-        info!("Received: {}", msg);
+        debug!("Received: {}", msg);
 
         self.last_new_prev_hash
             .set(Some(msg.clone()))
@@ -234,7 +239,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                     group_channel
                         .on_set_new_prev_hash(msg.clone())
                         .map_err(|e| {
-                            tracing::error!("Error while adding new prev hash to group channel");
+                            error!(error = ?e, "Failed to add new previous block hash to group channel");
                             PoolError::shutdown(e)
                         })?;
                     // Did SetupConnection have the REQUIRES_STANDARD_JOBS flag set?
@@ -269,7 +274,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 channel
                     .on_set_new_prev_hash(msg.clone())
                     .map_err(|e| {
-                        tracing::error!("Error while adding new prev hash to extended channel: {channel_id:?} {e:?}");
+                        error!(channel_id, error = ?e, "Failed to add new previous block hash to extended channel");
                         PoolError::shutdown(e)
                     })
             })?;
@@ -282,7 +287,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 channel
                     .on_set_new_prev_hash(msg.clone())
                     .map_err(|e| {
-                        tracing::error!("Error while adding new prev hash to standard channel: {channel_id:?} {e:?}");
+                        error!(channel_id, error = ?e, "Failed to add new previous block hash to standard channel");
                         PoolError::shutdown(e)
                     })?;
                 // Did SetupConnection have the REQUIRES_STANDARD_JOBS flag set?
@@ -319,7 +324,7 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
             // Since this is an unbounded channel, it cannot fail due to capacity
             // limits (which would only apply to bounded channels).
             if let Err(e) = message.forward(&self.channel_manager_io).await {
-                tracing::error!("Failed to forward message {e:?}");
+                debug!(error = ?e, "Failed to forward message to downstream (channel closed)");
             }
         }
 
