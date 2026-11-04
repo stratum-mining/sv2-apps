@@ -102,7 +102,8 @@ impl MockDownstream {
             let msg =
                 AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(setup_connection));
             let message_type = msg.message_type();
-            let frame = MessageFrame::from_message(msg, message_type, 0, false)
+            let channel_msg = msg.channel_bit();
+            let frame = MessageFrame::from_message(msg, message_type, 0, channel_msg)
                 .expect("Failed to create SetupConnection frame");
             upstream_sender
                 .send(frame.into())
@@ -127,7 +128,8 @@ impl MockDownstream {
         tokio::spawn(async move {
             while let Ok(message) = proxy_receiver.recv().await {
                 let message_type = message.message_type();
-                let frame = MessageFrame::from_message(message, message_type, 0, false)
+                let channel_msg = message.channel_bit();
+                let frame = MessageFrame::from_message(message, message_type, 0, channel_msg)
                     .expect("Failed to create frame from message");
                 if upstream_sender.send(frame.into()).await.is_err() {
                     break;
@@ -199,8 +201,9 @@ impl MockUpstream {
                                 ),
                             );
                             let success_type = success.message_type();
+                            let channel_msg = success.channel_bit();
                             let response_frame =
-                                MessageFrame::from_message(success, success_type, 0, false)
+                                MessageFrame::from_message(success, success_type, 0, channel_msg)
                                     .expect("Failed to create SetupConnectionSuccess frame");
                             downstream_sender
                                 .send(response_frame.into())
@@ -231,8 +234,9 @@ impl MockUpstream {
                                     },
                                 ));
                             let error_type = error.message_type();
+                            let channel_msg = error.channel_bit();
                             let response_frame =
-                                MessageFrame::from_message(error, error_type, 0, false)
+                                MessageFrame::from_message(error, error_type, 0, channel_msg)
                                     .expect("Failed to create SetupConnectionError frame");
                             downstream_sender
                                 .send(response_frame.into())
@@ -261,7 +265,8 @@ impl MockUpstream {
 
             while let Ok(message) = proxy_receiver.recv().await {
                 let message_type = message.message_type();
-                let frame = MessageFrame::from_message(message, message_type, 0, false)
+                let channel_msg = message.channel_bit();
+                let frame = MessageFrame::from_message(message, message_type, 0, channel_msg)
                     .expect("Failed to create frame from message");
                 if downstream_sender.send(frame.into()).await.is_err() {
                     break;
