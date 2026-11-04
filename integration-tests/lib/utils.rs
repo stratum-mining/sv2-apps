@@ -323,7 +323,7 @@ pub async fn recv_from_down_send_to_up(
                         intercept_message.replacement_message.clone(),
                         intercept_message.replacement_message.message_type(),
                         0,
-                        false,
+                        intercept_message.replacement_message.channel_bit(),
                     )
                     .expect("Failed to create the frame");
                     downstream_messages.add_message_with_tlvs(
@@ -405,7 +405,7 @@ pub async fn recv_from_up_send_to_down(
                         intercept_message.replacement_message.clone(),
                         intercept_message.replacement_message.message_type(),
                         0,
-                        false,
+                        intercept_message.replacement_message.channel_bit(),
                     )
                     .expect("Failed to create the frame");
                     upstream_messages.add_message_with_tlvs(
