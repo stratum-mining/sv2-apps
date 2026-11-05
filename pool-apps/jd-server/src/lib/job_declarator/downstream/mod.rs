@@ -47,12 +47,13 @@ mod common_message_handler;
 /// it held on one round can be gone by the next, replaced, evicted or confirmed meanwhile, and a
 /// round can end with transactions missing that the client was never asked for. Each further
 /// round costs a full lookup of the declared list, so a declaration gets a few of them and is
-/// refused when the node is still losing transactions after that. This bounds the work a client
-/// can force per declaration, by making the node lose a transaction it controls between rounds,
-/// not only how long a declaration waits on a churning mempool: an honest declaration is refused
-/// only when every round allowed lost a transaction, which rounds that take longer on a busy JDS
-/// make likelier, and five keeps that negligible.
-pub const MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS: usize = 5;
+/// refused when the node is still losing transactions after that. This bounds the work one
+/// declaration can add, whether a client forces it, by making the node lose a transaction it
+/// controls between rounds, or a churning mempool does: an honest declaration is refused only
+/// when every round allowed lost a transaction. Rounds that follow each other closely seldom
+/// lose one, which makes three in a row negligible. Rounds a busy JDS spreads apart lose more,
+/// and there the declaration is refused before it adds further lookups to the load.
+pub const MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS: usize = 3;
 
 /// The most bytes of supplied transactions one declaration keeps, over all rounds.
 ///
