@@ -8,7 +8,7 @@ use stratum_apps::{
         },
         mining_sv2::SetCustomMiningJobOwned,
     },
-    utils::types::{DownstreamId, JdToken},
+    utils::types::{DownstreamId, JdToken, RequestId},
 };
 
 pub mod bitcoin_core_ipc;
@@ -60,6 +60,18 @@ pub trait JobValidationEngine: Send + Sync {
     ///
     /// Called by [`crate::job_declarator::JobDeclarator`] when a downstream disconnects.
     fn cleanup_downstream(&self, downstream_id: DownstreamId);
+
+    /// Removes the state kept for a declaration the JDS refuses without validating it again,
+    /// so nothing the declaration brought outlives the refusal.
+    ///
+    /// Default implementation keeps nothing per declaration, so there is nothing to remove.
+    fn cleanup_declaration(
+        &self,
+        _downstream_id: DownstreamId,
+        _request_id: RequestId,
+        _allocated_token: JdToken,
+    ) {
+    }
 
     /// Performs backend-specific shutdown work.
     ///

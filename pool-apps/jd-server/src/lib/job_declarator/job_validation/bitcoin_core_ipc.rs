@@ -566,6 +566,17 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         self.downstream_states.remove(&downstream_id);
     }
 
+    fn cleanup_declaration(
+        &self,
+        downstream_id: DownstreamId,
+        request_id: RequestId,
+        allocated_token: JdToken,
+    ) {
+        self.downstream_states.with_mut(&downstream_id, |state| {
+            state.remove_declared_custom_job(request_id, allocated_token);
+        });
+    }
+
     /// Validates a `DeclareMiningJob` by forwarding it to Bitcoin Core over IPC.
     ///
     /// Steps:
@@ -1213,5 +1224,33 @@ mod tests {
         assert!(!state.declared_custom_jobs.contains_key(&1));
         assert!(state.take_declared_custom_job(7).is_some());
         assert!(state.declared_custom_jobs.is_empty());
+    }
+
+    // A declaration the JDS refuses without validating again leaves the engine neither its job
+    // nor its token entry.
+    #[test]
+    fn cleaning_up_a_declaration_leaves_no_entry() {
+        let (request_sender, _request_receiver) = async_channel::unbounded();
+        let engine = BitcoinCoreIPCEngine {
+            request_sender,
+            downstream_states: SharedMap::new(),
+            cancellation_token: CancellationToken::new(),
+            jdp_thread_handle: SharedLock::new(None),
+        };
+        let mut waiting = accepted_job(1).job;
+        waiting.validated = false;
+        engine.downstream_states.with_mut_or_default(7, |state| {
+            state.insert_declared_custom_job(1, 10, waiting);
+        });
+
+        engine.cleanup_declaration(7, 1, 10);
+
+        let left = engine.downstream_states.with(&7, |state| {
+            (
+                state.declared_custom_jobs.len(),
+                state.allocated_token_entries.len(),
+            )
+        });
+        assert_eq!(left, Some((0, 0)));
     }
 }

@@ -15,6 +15,7 @@ use crate::{
 };
 use async_channel::{Receiver, Sender, unbounded};
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -22,9 +23,11 @@ use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     network_helpers::noise_stream::NoiseTcpStream,
     stratum_core::{
+        binary_sv2::{B016MOwned, Seq064KOwned},
+        bitcoin::{Weight, Wtxid, hashes::Hash},
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
-        job_declaration_sv2::DeclareMiningJobOwned,
+        job_declaration_sv2::{DeclareMiningJobOwned, ProvideMissingTransactionsSuccessOwned},
         parsers_sv2::{AnyMessageOwned, parse_message_frame_with_tlvs},
     },
     sync::{SharedLock, SharedMap},
@@ -38,10 +41,161 @@ use tracing::{debug, error, info, warn};
 
 mod common_message_handler;
 
-/// Data associated with a pending declare mining job.
-/// - Instant is the insertion timestamp
-/// - DeclareMiningJob is the declare mining job
-pub type PendingDeclareMiningJob = (Instant, DeclareMiningJobOwned);
+/// How many times one declaration may ask the client for transactions.
+///
+/// The node is asked for every declared transaction on every validation round, so a transaction
+/// it held on one round can be gone by the next, replaced, evicted or confirmed meanwhile, and a
+/// round can end with transactions missing that the client was never asked for. Each further
+/// round costs a full lookup of the declared list, so a declaration gets a few of them and is
+/// refused when the node is still losing transactions after that. This bounds the work a client
+/// can force per declaration, by making the node lose a transaction it controls between rounds,
+/// not only how long a declaration waits on a churning mempool: an honest declaration is refused
+/// only when every round allowed lost a transaction, which rounds that take longer on a busy JDS
+/// make likelier, and five keeps that negligible.
+pub const MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS: usize = 5;
+
+/// The most bytes of supplied transactions one declaration keeps, over all rounds.
+///
+/// Everything a declaration is asked for goes in one block, and a block's serialized size never
+/// exceeds its weight, so a client that supplies what it declared stays within this.
+pub const MAX_SUPPLIED_BYTES: usize = Weight::MAX_BLOCK.to_wu() as usize;
+
+/// How many of the transactions a refusal is about its log line names.
+///
+/// A client decides how many transactions a refusal is about, up to a whole declared list, so the
+/// line carries their count and the first of them. A node that lost transactions between rounds
+/// loses a handful, which this names in full.
+const LOGGED_WTXIDS: usize = 16;
+
+/// A declaration waiting on transactions the client has been asked for.
+///
+/// The client is asked for each transaction once, and everything it has supplied is kept until
+/// the declaration is answered, so a round that ends with transactions missing can ask for the
+/// ones the client has not been asked for yet and resume with the rest. A transaction the client
+/// was already asked for and is still missing is one the client withheld, which refuses the
+/// declaration.
+pub struct PendingDeclareMiningJob {
+    /// When the declaration was received, from which the janitor expires it.
+    pub inserted_at: Instant,
+    /// The declaration itself, validated again on every round.
+    pub declare_mining_job: DeclareMiningJobOwned,
+    // Every transaction the client has been asked for, over all rounds.
+    requested: HashSet<Wtxid>,
+    // Every transaction the client has supplied, in the order they were asked for.
+    supplied: Vec<B016MOwned>,
+    rounds: usize,
+}
+
+impl PendingDeclareMiningJob {
+    /// Starts waiting on `missing_wtxids`, the transactions the first validation round found
+    /// missing, and returns their positions in the declared list for `ProvideMissingTransactions`.
+    pub fn new(
+        declare_mining_job: DeclareMiningJobOwned,
+        missing_wtxids: &[Wtxid],
+    ) -> (Self, Vec<u16>) {
+        let mut pending = Self {
+            inserted_at: Instant::now(),
+            declare_mining_job,
+            requested: HashSet::new(),
+            supplied: Vec::new(),
+            rounds: 0,
+        };
+        let positions = pending.ask(missing_wtxids);
+        (pending, positions)
+    }
+
+    /// Keeps the transactions the client supplied in answer to the last round.
+    ///
+    /// Returns `false`, keeping none of them, if they would bring what is kept past the number
+    /// of transactions the declaration lists or past [`MAX_SUPPLIED_BYTES`]: the client is only
+    /// ever asked for declared transactions, each once, and together they fit in a block, so
+    /// such an answer is invalid before anything in it is looked at. The bytes are counted as
+    /// supplied, whether or not they decode, which is what bounds the memory one declaration
+    /// can pin.
+    pub fn supply(&mut self, transactions: Vec<B016MOwned>) -> bool {
+        if self.supplied.len() + transactions.len() > self.declare_mining_job.wtxid_list.len() {
+            return false;
+        }
+        let bytes: usize = self
+            .supplied
+            .iter()
+            .chain(&transactions)
+            .map(|transaction| transaction.as_ref().len())
+            .sum();
+        if bytes > MAX_SUPPLIED_BYTES {
+            return false;
+        }
+        self.supplied.extend(transactions);
+        true
+    }
+
+    /// Everything the client has supplied so far, as one answer for the validator.
+    pub fn supplied(&self) -> ProvideMissingTransactionsSuccessOwned {
+        ProvideMissingTransactionsSuccessOwned {
+            request_id: self.declare_mining_job.request_id,
+            transaction_list: Seq064KOwned::new(self.supplied.clone())
+                .expect("never more transactions than the declared list, itself a Seq064K"),
+        }
+    }
+
+    /// Asks the client for `missing_wtxids`, the transactions the last round found missing, in
+    /// one more round: the positions in the declared list for `ProvideMissingTransactions`.
+    ///
+    /// `None` refuses the declaration: a missing transaction the client was already asked for is
+    /// one it withheld, and a declaration gets
+    /// [`MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS`] rounds. Either way the log line carries how
+    /// many transactions the refusal is about and the first [`LOGGED_WTXIDS`] of them, for
+    /// `client_id`, since request ids are only unique per client.
+    pub fn next_round(
+        &mut self,
+        client_id: DownstreamId,
+        missing_wtxids: &[Wtxid],
+    ) -> Option<Vec<u16>> {
+        let request_id = self.declare_mining_job.request_id;
+        let withheld: Vec<&Wtxid> = missing_wtxids
+            .iter()
+            .filter(|wtxid| self.requested.contains(*wtxid))
+            .collect();
+        if !withheld.is_empty() {
+            warn!(
+                client_id,
+                request_id,
+                withheld = withheld.len(),
+                first_withheld = ?&withheld[..withheld.len().min(LOGGED_WTXIDS)],
+                "Refusing DeclareMiningJob: the client did not supply transactions it was asked for"
+            );
+            return None;
+        }
+        if self.rounds >= MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS {
+            warn!(
+                client_id,
+                request_id,
+                rounds = self.rounds,
+                missing = missing_wtxids.len(),
+                first_missing = ?&missing_wtxids[..missing_wtxids.len().min(LOGGED_WTXIDS)],
+                "Refusing DeclareMiningJob: the node lost declared transactions on every round allowed"
+            );
+            return None;
+        }
+        Some(self.ask(missing_wtxids))
+    }
+
+    // Records one round asking the client for `wtxids` and returns their positions in the
+    // declared list, in declaration order. A wtxid the declaration does not list has no
+    // position, and the validator only ever reports declared ones missing.
+    fn ask(&mut self, wtxids: &[Wtxid]) -> Vec<u16> {
+        self.rounds += 1;
+        self.requested.extend(wtxids);
+        let asked: HashSet<&Wtxid> = wtxids.iter().collect();
+        self.declare_mining_job
+            .wtxid_list
+            .iter()
+            .enumerate()
+            .filter(|(_, u256)| asked.contains(&Wtxid::from_byte_array(u256.to_array())))
+            .map(|(position, _)| position as u16)
+            .collect()
+    }
+}
 
 /// Channel endpoints for a single downstream connection.
 #[derive(Clone)]
@@ -251,8 +405,8 @@ impl Downstream {
                         break;
                     }
                     _ = tokio::time::sleep(janitor_interval) => {
-                        pending_declare_mining_jobs.retain(|request_id, (inserted_at, _)| {
-                            let expired = Instant::now().duration_since(*inserted_at) > token_timeout;
+                        pending_declare_mining_jobs.retain(|request_id, pending| {
+                            let expired = Instant::now().duration_since(pending.inserted_at) > token_timeout;
                             if expired {
                                 debug!(
                                     downstream_id,
@@ -396,5 +550,107 @@ impl Downstream {
     // activates the downstream cancellation token, causing any pending tasks to be cancelled
     pub fn shutdown(&mut self) {
         self.downstream_cancellation_token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stratum_apps::stratum_core::binary_sv2::U256Owned;
+
+    fn wtxid(byte: u8) -> Wtxid {
+        Wtxid::from_byte_array([byte; 32])
+    }
+
+    fn declaration(wtxids: &[Wtxid]) -> DeclareMiningJobOwned {
+        DeclareMiningJobOwned {
+            request_id: 7,
+            mining_job_token: vec![0; 8].try_into().unwrap(),
+            version: 0,
+            coinbase_tx_prefix: Vec::<u8>::new().try_into().unwrap(),
+            coinbase_tx_suffix: Vec::<u8>::new().try_into().unwrap(),
+            wtxid_list: Seq064KOwned::new(
+                wtxids
+                    .iter()
+                    .map(|wtxid| U256Owned::from(wtxid.to_byte_array()))
+                    .collect(),
+            )
+            .unwrap(),
+            excess_data: Vec::<u8>::new().try_into().unwrap(),
+        }
+    }
+
+    fn raw_tx(byte: u8) -> B016MOwned {
+        vec![byte; 4].try_into().unwrap()
+    }
+
+    // A transaction the node loses between rounds is asked for once more, in declaration order,
+    // and the answers to every round reach the validator together.
+    #[test]
+    fn asks_once_for_each_transaction_the_node_lost() {
+        let (mut pending, positions) =
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2), wtxid(3)]), &[wtxid(3)]);
+        assert_eq!(positions, vec![2]);
+
+        assert!(pending.supply(vec![raw_tx(3)]));
+        assert_eq!(
+            pending.next_round(0, &[wtxid(2), wtxid(1)]),
+            Some(vec![0, 1])
+        );
+
+        assert!(pending.supply(vec![raw_tx(2), raw_tx(1)]));
+        assert_eq!(
+            pending.supplied().transaction_list.into_inner(),
+            vec![raw_tx(3), raw_tx(2), raw_tx(1)]
+        );
+    }
+
+    // An answer that would bring what is kept past the declared list is invalid, and nothing of
+    // it is kept.
+    #[test]
+    fn keeps_no_more_transactions_than_the_declaration_lists() {
+        let (mut pending, _) =
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)]);
+        assert!(pending.supply(vec![raw_tx(1)]));
+        assert!(!pending.supply(vec![raw_tx(2), raw_tx(2)]));
+        assert_eq!(
+            pending.supplied().transaction_list.into_inner(),
+            vec![raw_tx(1)]
+        );
+    }
+
+    // What is kept never exceeds a block's weight in bytes, over all rounds, whether or not the
+    // bytes decode.
+    #[test]
+    fn keeps_no_more_bytes_than_a_block_weighs() {
+        let (mut pending, _) =
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)]);
+        assert!(pending.supply(vec![vec![0; MAX_SUPPLIED_BYTES].try_into().unwrap()]));
+        assert!(!pending.supply(vec![raw_tx(2)]));
+        assert_eq!(pending.supplied().transaction_list.len(), 1);
+    }
+
+    // A transaction still missing after the client was asked for it was withheld, whatever else
+    // the round found missing.
+    #[test]
+    fn refuses_a_transaction_the_client_was_already_asked_for() {
+        let (mut pending, _) =
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)]);
+        assert_eq!(pending.next_round(0, &[wtxid(2), wtxid(1)]), None);
+    }
+
+    #[test]
+    fn refuses_after_the_last_round_allowed() {
+        let wtxids: Vec<Wtxid> = (1..=MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS as u8 + 1)
+            .map(wtxid)
+            .collect();
+        let (mut pending, _) = PendingDeclareMiningJob::new(declaration(&wtxids), &wtxids[..1]);
+        for lost in &wtxids[1..MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS] {
+            assert!(pending.next_round(0, &[*lost]).is_some());
+        }
+        assert_eq!(
+            pending.next_round(0, &wtxids[MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS..]),
+            None
+        );
     }
 }
