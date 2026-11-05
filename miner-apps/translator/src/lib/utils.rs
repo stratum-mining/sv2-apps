@@ -299,6 +299,36 @@ pub struct SubmitShareWithChannelId {
     pub version_rolling_mask: Option<HexU32Be>,
     /// The version field from the job, used for validation
     pub job_version: Option<u32>,
+    /// Bitcoin header hash from local SV1 validation (explorer/bitcoind display via [`Display`]).
+    pub share_hash: BlockHash,
+}
+
+/// Optional metadata carried with SV1-server → ChannelManager messages.
+///
+/// `share_hash` is set for `SubmitSharesExtended` so audit logs can correlate
+/// accept / forward / not-forwarded events (see `SHARE_HASH_AUDIT_SCHEMA.md`).
+#[derive(Debug, Clone, Default)]
+pub struct Sv1ShareMetadata {
+    pub worker_name: Option<String>,
+    pub share_hash: Option<BlockHash>,
+}
+
+impl Sv1ShareMetadata {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn for_share(worker_name: Option<String>, share_hash: BlockHash) -> Self {
+        Self {
+            worker_name,
+            share_hash: Some(share_hash),
+        }
+    }
+}
+
+/// Formats a Bitcoin share/header hash for audit logs (bitcoind / explorer hex).
+pub(crate) fn format_share_hash(hash: impl std::fmt::Display) -> String {
+    hash.to_string()
 }
 
 /// Delimiter used to separate original job ID from keepalive mutation counter.
@@ -357,6 +387,15 @@ pub(crate) fn tlv_user_identity_from_sv1_worker_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_share_hash_uses_display_hex() {
+        let hash = BlockHash::from_byte_array([0u8; 32]);
+        assert_eq!(
+            format_share_hash(hash),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
 
     #[test]
     fn derives_sv1_worker_name_from_first_dot() {
