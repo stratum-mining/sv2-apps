@@ -9,7 +9,9 @@ use std::{
 };
 use stratum_apps::{
     bitcoin_core_sv2::runtime_api::BitcoinCoreVersion,
-    stratum_core::bitcoin::{Address, Amount, Txid},
+    stratum_core::bitcoin::{
+        Address, Amount, Transaction, Txid, consensus::encode::deserialize_hex,
+    },
 };
 use tracing::warn;
 
@@ -393,6 +395,27 @@ impl BitcoinCore {
             .txid()
             .expect("Unexpected behavior: txid is None");
         Ok((address, txid))
+    }
+
+    /// Return a transaction the node's mempool holds.
+    pub fn mempool_transaction(&self, txid: Txid) -> Result<Transaction, corepc_node::Error> {
+        let hex: String = self
+            .bitcoind
+            .client
+            .call("getrawtransaction", &[json!(txid)])?;
+        Ok(deserialize_hex(&hex).expect("Bitcoin Core serializes transactions consensus-encoded"))
+    }
+
+    /// Replace a wallet transaction in the node's mempool through RBF, so the node no longer
+    /// holds the transaction `txid` names.
+    pub fn replace_mempool_transaction(&self, txid: Txid) -> Result<(), corepc_node::Error> {
+        // Well above the rate `create_mempool_transaction` pays, as a replacement has to be.
+        const FEE_RATE_SAT_VB: u64 = 50;
+        self.bitcoind.client.call::<Value>(
+            "bumpfee",
+            &[json!(txid), json!({ "fee_rate": FEE_RATE_SAT_VB })],
+        )?;
+        Ok(())
     }
 
     /// Fund the node's wallet.
