@@ -551,6 +551,225 @@ async fn jds_reject_declare_mining_job_with_invalid_mining_job_token() {
     shutdown_all!(pool);
 }
 
+// Allocated tokens let malformed declarations reach coinbase validation. Each receives a
+// controlled `invalid-coinbase-tx` or `invalid-coinbase-tx-input` response, and the connection
+// remains usable.
+#[tokio::test]
+async fn jds_rejects_malformed_declared_coinbase_without_panicking() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, _pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jds", jds_addr, false, vec![], None);
+    let send_to_jds = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+
+    // complete SetupConnection handshake
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+
+    // Allocate a real mining-job token and capture it from the success response. Each declaration
+    // consumes its token on error, so we allocate a fresh one per malformed case.
+    async fn allocate_token(
+        send_to_jds: &async_channel::Sender<AnyMessageOwned>,
+        sniffer: &Sniffer<'_>,
+        request_id: u32,
+    ) -> Vec<u8> {
+        send_to_jds
+            .send(AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(
+                    AllocateMiningJobTokenOwned {
+                        request_id,
+                        user_identifier: "malformed_coinbase".try_into().unwrap(),
+                    },
+                ),
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match sniffer.next_message_from_upstream() {
+                    Some((
+                        _,
+                        AnyMessageOwned::JobDeclaration(
+                            parsers_sv2::JobDeclarationOwned::AllocateMiningJobTokenSuccess(msg),
+                        ),
+                    )) if msg.request_id == request_id => {
+                        break msg.mining_job_token.as_ref().to_vec();
+                    }
+                    Some(_) => continue,
+                    None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for AllocateMiningJobTokenSuccess")
+    }
+
+    // Sends a `DeclareMiningJob` with the given coinbase parts and asserts the JDS responds with
+    // `expected_error_code` for `request_id`.
+    async fn assert_invalid_coinbase(
+        send_to_jds: &async_channel::Sender<AnyMessageOwned>,
+        sniffer: &Sniffer<'_>,
+        request_id: u32,
+        expected_error_code: &str,
+        coinbase_tx_prefix: Vec<u8>,
+        coinbase_tx_suffix: Vec<u8>,
+    ) {
+        let token = allocate_token(send_to_jds, sniffer, request_id).await;
+
+        send_to_jds
+            .send(AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::DeclareMiningJob(DeclareMiningJobOwned {
+                    request_id,
+                    mining_job_token: token.try_into().unwrap(),
+                    version: 0x20000000,
+                    coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
+                    coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
+                    wtxid_list: Seq064KOwned::new(Vec::new()).unwrap(),
+                    excess_data: Vec::<u8>::new().try_into().unwrap(),
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match sniffer.next_message_from_upstream() {
+                    Some((
+                        _,
+                        AnyMessageOwned::JobDeclaration(
+                            parsers_sv2::JobDeclarationOwned::DeclareMiningJobError(msg),
+                        ),
+                    )) if msg.request_id == request_id => break msg,
+                    Some(_) => continue,
+                    None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for DeclareMiningJobError");
+
+        assert_eq!(
+            error.error_code.as_utf8_or_hex(),
+            expected_error_code,
+            "unexpected DeclareMiningJobError code for request {request_id}"
+        );
+    }
+
+    // The fixed header is 43 bytes long.
+    assert_invalid_coinbase(
+        &send_to_jds,
+        &sniffer,
+        1,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+        vec![0u8; 10],
+        vec![],
+    )
+    .await;
+
+    // A structurally valid header with a scriptSig length of 0xffff exceeds the consensus bound.
+    let mut oversized_prefix = Vec::new();
+    oversized_prefix.extend([0x02, 0x00, 0x00, 0x00]); // version
+    oversized_prefix.extend([0x00, 0x01]); // segwit marker + flag
+    oversized_prefix.push(0x01); // input count
+    oversized_prefix.extend([0u8; 32]); // prev txid
+    oversized_prefix.extend([0xff, 0xff, 0xff, 0xff]); // prev vout index
+    let header = oversized_prefix.clone();
+    oversized_prefix.extend([0xfd, 0xff, 0xff]); // VarInt(0xffff) = 65535
+    assert_invalid_coinbase(
+        &send_to_jds,
+        &sniffer,
+        2,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+        oversized_prefix,
+        vec![],
+    )
+    .await;
+
+    let mut huge = header.clone();
+    huge.extend([0xff; 9]); // VarInt(u64::MAX)
+    assert_invalid_coinbase(
+        &send_to_jds,
+        &sniffer,
+        3,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+        huge,
+        vec![],
+    )
+    .await;
+
+    let mut truncated = header.clone();
+    truncated.extend([0xfd, 0x10]);
+    assert_invalid_coinbase(
+        &send_to_jds,
+        &sniffer,
+        4,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+        truncated,
+        vec![],
+    )
+    .await;
+
+    let mut inconsistent = header.clone();
+    inconsistent.extend([2, 1, 2, 3]);
+    assert_invalid_coinbase(
+        &send_to_jds,
+        &sniffer,
+        5,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+        inconsistent,
+        vec![],
+    )
+    .await;
+
+    let mut multiple_inputs = header;
+    multiple_inputs[6] = 2;
+    multiple_inputs.extend([2, 1, 2]); // first scriptSig
+    let mut suffix = vec![0xff; 4]; // first sequence
+    suffix.extend([0; 32]); // second outpoint txid
+    suffix.extend([0xff; 4]); // second outpoint index
+    suffix.extend([2, 1, 2]); // second scriptSig
+    suffix.extend([0xff; 4]); // second sequence
+    suffix.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // one empty output
+    suffix.extend([1, 1, 0, 1, 1, 0]); // witness for each input
+    suffix.extend([0; 4]); // locktime
+    let bytes = [multiple_inputs.as_slice(), suffix.as_slice()].concat();
+    let tx: stratum_apps::stratum_core::bitcoin::Transaction =
+        stratum_apps::stratum_core::bitcoin::consensus::deserialize(&bytes).unwrap();
+    assert_eq!(tx.input.len(), 2);
+    assert_invalid_coinbase(
+        &send_to_jds,
+        &sniffer,
+        6,
+        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+        multiple_inputs,
+        suffix,
+    )
+    .await;
+
+    // The JDS must still be alive and able to serve a fresh token allocation after all malformed
+    // declarations.
+    let _ = allocate_token(&send_to_jds, &sniffer, 7).await;
+
+    shutdown_all!(pool);
+}
+
 // This test verifies that a single JDP connection can allocate tokens under different
 // identities without being disconnected.
 #[tokio::test]
