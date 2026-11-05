@@ -710,8 +710,8 @@ mod tests {
             codec_sv2::EncodableFrame as _,
             job_declaration_sv2::{
                 AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
-                DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-                ProvideMissingTransactionsOwned,
+                DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS,
+                ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactionsOwned,
             },
             mining_sv2::{
                 CloseChannelOwned, ERROR_CODE_SET_CUSTOM_MINING_JOB_STALE_CHAIN_TIP,
@@ -2518,15 +2518,16 @@ mod tests {
             .request_id
     }
 
-    fn stale_chain_tip(request_id: u32) -> DeclareMiningJobErrorOwned {
+    fn declaration_refused(request_id: u32, error_code: &str) -> DeclareMiningJobErrorOwned {
         DeclareMiningJobErrorOwned {
             request_id,
-            error_code: ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
-                .to_string()
-                .try_into()
-                .unwrap(),
+            error_code: error_code.to_string().try_into().unwrap(),
             error_details: vec![].try_into().unwrap(),
         }
+    }
+
+    fn stale_chain_tip(request_id: u32) -> DeclareMiningJobErrorOwned {
+        declaration_refused(request_id, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP)
     }
 
     // A declaration the JDS rejects as stale gets no other answer, so it goes with its
@@ -2826,6 +2827,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(custom_jobs_sent(&sent.pool), 0);
+    }
+
+    // A declaration the JDS refuses with `missing-txs` goes like a stale one, with the shares
+    // cached for its template, while JDC carries on: its next template is declared as usual.
+    #[tokio::test]
+    async fn missing_txs_rejection_releases_the_declaration() {
+        let (mut manager, sent, request_id) = manager_with_a_declaration().await;
+        manager.cached_shares.with_mut_or_default(2, |_| {});
+        assert_eq!(declarations_sent(&sent.jds), 1);
+
+        manager
+            .handle_declare_mining_job_error(
+                None,
+                declaration_refused(request_id, ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(declared_templates(&manager).is_empty());
+        assert!(!manager.cached_shares.contains_key(&2));
+
+        let token = token_success(&manager);
+        manager
+            .handle_allocate_mining_job_token_success(None, token, None)
+            .await
+            .unwrap();
+        manager
+            .handle_new_template(None, template(3, false), None)
+            .await
+            .unwrap();
+        manager
+            .handle_request_tx_data_success(None, transaction_data(3), None)
+            .await
+            .unwrap();
+        assert_eq!(declarations_sent(&sent.jds), 1);
+    }
+
+    // A declaration refused with any other code, known or not, makes JDC fall back at once.
+    #[tokio::test]
+    async fn other_declaration_rejections_fall_back() {
+        for error_code in ["invalid-mining-job-token", "missing-txs-foo", ""] {
+            let (mut manager, _sent, request_id) = manager_with_a_declaration().await;
+
+            let error = manager
+                .handle_declare_mining_job_error(
+                    None,
+                    declaration_refused(request_id, error_code),
+                    None,
+                )
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error.action, Action::Fallback));
+        }
     }
 
     // The Pool's answers concern only a custom job JDC proposed. A success or a stale rejection
