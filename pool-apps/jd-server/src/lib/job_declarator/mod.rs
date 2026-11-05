@@ -21,6 +21,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
@@ -63,8 +64,10 @@ pub mod token_management;
 /// Shared JDP payload exchanged between Job Declarator and downstreams.
 type JobDeclarationMessage = (JobDeclarationOwned, Option<Vec<Tlv>>);
 
-/// Shared JDP payload sent from downstreams to Job Declarator, tagged with downstream id.
-type DownstreamJobDeclarationMessage = (DownstreamId, JobDeclarationOwned, Option<Vec<Tlv>>);
+/// Shared JDP payload sent from downstreams to Job Declarator, tagged with downstream id and
+/// with when the downstream received it.
+type DownstreamJobDeclarationMessage =
+    (DownstreamId, JobDeclarationOwned, Option<Vec<Tlv>>, Instant);
 
 /// The response produced by [`JobDeclarator::handle_set_custom_mining_job`].
 ///
@@ -115,6 +118,10 @@ pub struct JobDeclarator {
     coinbase_reward_script: CoinbaseRewardScript,
     downstream_clients: SharedMap<DownstreamId, Downstream>,
     downstream_id_factory: Arc<AtomicUsize>,
+    // When the downstream received the JDP message being handled. Messages wait in the fan-in
+    // channel until the ones ahead of them are handled, so this is earlier than when handling
+    // starts.
+    message_received_at: Instant,
 }
 
 /// Constructor of `JobDeclarator` with a pluggable [`JobValidationEngine`] backend.
@@ -144,6 +151,7 @@ impl JobDeclarator {
             coinbase_reward_script,
             downstream_clients: SharedMap::new(),
             downstream_id_factory: Arc::new(AtomicUsize::new(0)),
+            message_received_at: Instant::now(),
         })
     }
 }
@@ -377,13 +385,14 @@ impl JobDeclarator {
     /// Receives and dispatches a single JDP message from the fan-in channel.
     async fn handle_jdp_message(&mut self) -> JDSResult<(), error::JobDeclarator> {
         let receiver = self.job_declarator_io.job_declarator_receiver.clone();
-        let (downstream_id, jd_message, tlv_fields) = match receiver.recv().await {
+        let (downstream_id, jd_message, tlv_fields, received_at) = match receiver.recv().await {
             Ok(msg) => msg,
             Err(e) => {
                 error!("Error receiving message: {:?}", e);
                 return Err(error::JDSError::shutdown(e));
             }
         };
+        self.message_received_at = received_at;
 
         self.handle_job_declaration_message_from_client(
             Some(downstream_id),
