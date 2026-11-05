@@ -2,7 +2,7 @@
 
 use stratum_apps::{
     stratum_core::{
-        bitcoin::Wtxid,
+        bitcoin::{BlockHash, Wtxid},
         job_declaration_sv2::{
             DeclareMiningJobOwned, ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
         },
@@ -71,6 +71,15 @@ pub trait JobValidationEngine: Send + Sync {
         _request_id: RequestId,
         _allocated_token: JdToken,
     ) {
+    }
+
+    /// The chain tip the backend validated its latest declaration against, from any downstream,
+    /// once it has validated one. The JDS refuses the declarations a client left waiting since
+    /// another tip.
+    ///
+    /// Default implementation knows no tip, so nothing waiting is ever refused for it.
+    fn latest_prev_hash(&self) -> Option<BlockHash> {
+        None
     }
 
     /// Performs backend-specific shutdown work.

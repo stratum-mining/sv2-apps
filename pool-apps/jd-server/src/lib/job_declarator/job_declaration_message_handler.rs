@@ -2,19 +2,23 @@ use crate::{
     error,
     error::JDSError,
     job_declarator::{
-        JobDeclarator, downstream::PendingDeclareMiningJob, job_validation::DeclareMiningJobResult,
+        JobDeclarationMessage, JobDeclarator,
+        downstream::{PendingDeclareMiningJob, take_pending_at_other_tips},
+        job_validation::DeclareMiningJobResult,
     },
 };
+use async_channel::Sender;
 use stratum_apps::{
     stratum_core::{
-        bitcoin::{Amount, TxOut, consensus},
+        bitcoin::{Amount, BlockHash, TxOut, consensus},
         handlers_sv2::HandleJobDeclarationMessagesFromClientOwnedAsync,
         job_declaration_sv2::{
             AllocateMiningJobTokenOwned, AllocateMiningJobTokenSuccessOwned,
             DeclareMiningJobErrorOwned, DeclareMiningJobOwned, DeclareMiningJobSuccessOwned,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             ERROR_CODE_DECLARE_MINING_JOB_INVALID_MINING_JOB_TOKEN,
-            ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS, ProvideMissingTransactionsOwned,
+            ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactionsOwned,
             ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
         },
         parsers_sv2::{JobDeclarationOwned, Tlv},
@@ -182,11 +186,14 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         }
 
         // validate job
-        let response = match self
+        let result = self
             .job_validator
             .handle_declare_mining_job(client_id, msg.clone(), None)
-            .await
-        {
+            .await;
+        // Read once, so what this answer is tagged with and what the waiting declarations are
+        // compared against below are the same tip.
+        let latest_prev_hash = self.job_validator.latest_prev_hash();
+        let response = match result {
             // if job is valid, activate token and return DeclareMiningJobSuccess
             DeclareMiningJobResult::Success => {
                 match self.token_manager.activate(token, client_id) {
@@ -239,7 +246,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
             // ProvideMissingTransactions
             DeclareMiningJobResult::MissingTransactions(missing_wtxids) => {
                 let (pending, unknown_tx_position_list) =
-                    PendingDeclareMiningJob::new(msg.clone(), &missing_wtxids);
+                    PendingDeclareMiningJob::new(msg.clone(), &missing_wtxids, latest_prev_hash);
 
                 // Disconnect: downstream may have disconnected between dispatch and handling.
                 self.downstream_clients
@@ -265,6 +272,8 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
             }
         };
 
+        self.refuse_pending_declarations_at_other_tips(client_id, latest_prev_hash, &client_sender)
+            .await?;
         client_sender
             .send((response, None))
             .await
@@ -316,13 +325,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
             }
         };
 
-        let pending_declare_mining_job_token: JdToken = u64::from_le_bytes(
-            pending
-                .declare_mining_job
-                .mining_job_token
-                .try_as_array::<8>()
-                .expect("already validated"),
-        );
+        let pending_declare_mining_job_token: JdToken = pending.token();
 
         // The validator gets everything the client has supplied for this declaration, this
         // answer included, since a round only asks for what the node did not hold on the round
@@ -352,15 +355,16 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         }
         let supplied = pending.supplied();
 
-        let response = match self
+        let result = self
             .job_validator
             .handle_declare_mining_job(
                 client_id,
                 pending.declare_mining_job.clone(),
                 Some(supplied),
             )
-            .await
-        {
+            .await;
+        let latest_prev_hash = self.job_validator.latest_prev_hash();
+        let response = match result {
             // if job is valid, activate token and return DeclareMiningJobSuccess
             DeclareMiningJobResult::Success => {
                 match self
@@ -460,6 +464,8 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
             }
         };
 
+        self.refuse_pending_declarations_at_other_tips(client_id, latest_prev_hash, &client_sender)
+            .await?;
         client_sender
             .send((response, None))
             .await
@@ -489,6 +495,56 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
 }
 
 impl JobDeclarator {
+    /// Refuses, with `stale-chain-tip`, the declarations `client_id` left waiting on it since a
+    /// chain tip other than `latest_prev_hash`, the one the validator saw last, and releases
+    /// their tokens. A client that moved on to the new tip has dropped them and never answers
+    /// for them, so nothing else would end them before they expire. This runs when the
+    /// client's next declaration or answer is validated, so a client that sends nothing more
+    /// keeps them until they expire.
+    ///
+    /// A declaration is tagged with the tip the JDS validated it at, since `DeclareMiningJob`
+    /// carries none of its own. One first validated while the JDS's node lagged behind the
+    /// client's is therefore refused here as well, though its answer could still have been
+    /// accepted; `stale-chain-tip` is not fatal to SRI's JDC.
+    async fn refuse_pending_declarations_at_other_tips(
+        &self,
+        client_id: usize,
+        latest_prev_hash: Option<BlockHash>,
+        client_sender: &Sender<JobDeclarationMessage>,
+    ) -> Result<(), JDSError<error::JobDeclarator>> {
+        let Some(latest_prev_hash) = latest_prev_hash else {
+            return Ok(());
+        };
+        let stale = self
+            .downstream_clients
+            .with(&client_id, |downstream| {
+                take_pending_at_other_tips(
+                    &downstream.pending_declare_mining_jobs,
+                    &downstream.pending_checked_at,
+                    latest_prev_hash,
+                )
+            })
+            .unwrap_or_default();
+        for (request_id, token) in stale {
+            warn!(
+                client_id,
+                request_id,
+                "Refusing DeclareMiningJob: the chain tip moved while it waited on the client"
+            );
+            let refusal = self.refuse_declaration(
+                client_id,
+                request_id,
+                token,
+                ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
+            );
+            client_sender
+                .send((refusal, None))
+                .await
+                .map_err(|e| error::JDSError::disconnect(e, client_id))?;
+        }
+        Ok(())
+    }
+
     /// Refuses a declaration the JDS does not validate again, with `error_code`: its token is
     /// released and the validator drops what it kept for it, so nothing the declaration brought
     /// outlives the answer. Returns the `DeclareMiningJob.Error` to send.
