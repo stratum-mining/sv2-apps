@@ -2,13 +2,13 @@
 
 use stratum_apps::{
     stratum_core::{
-        bitcoin::Wtxid,
+        bitcoin::{BlockHash, Wtxid},
         job_declaration_sv2::{
             DeclareMiningJobOwned, ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
         },
         mining_sv2::SetCustomMiningJobOwned,
     },
-    utils::types::{DownstreamId, JdToken},
+    utils::types::{DownstreamId, JdToken, RequestId},
 };
 
 pub mod bitcoin_core_ipc;
@@ -60,6 +60,27 @@ pub trait JobValidationEngine: Send + Sync {
     ///
     /// Called by [`crate::job_declarator::JobDeclarator`] when a downstream disconnects.
     fn cleanup_downstream(&self, downstream_id: DownstreamId);
+
+    /// Removes the state kept for a declaration the JDS refuses without validating it again,
+    /// so nothing the declaration brought outlives the refusal.
+    ///
+    /// Default implementation keeps nothing per declaration, so there is nothing to remove.
+    fn cleanup_declaration(
+        &self,
+        _downstream_id: DownstreamId,
+        _request_id: RequestId,
+        _allocated_token: JdToken,
+    ) {
+    }
+
+    /// The chain tip the backend validated its latest declaration against, from any downstream,
+    /// once it has validated one. The JDS refuses the declarations a client left waiting since
+    /// another tip.
+    ///
+    /// Default implementation knows no tip, so nothing waiting is ever refused for it.
+    fn latest_prev_hash(&self) -> Option<BlockHash> {
+        None
+    }
 
     /// Performs backend-specific shutdown work.
     ///

@@ -358,6 +358,8 @@ fn coinbase_merkle_path(txdata: &[Transaction]) -> Vec<TxMerkleNode> {
 pub struct BitcoinCoreIPCEngine {
     request_sender: async_channel::Sender<JdRequest>,
     downstream_states: SharedMap<DownstreamId, DownstreamState>,
+    // The chain tip the latest declaration, from any downstream, was validated at.
+    latest_prev_hash: SharedLock<Option<BlockHash>>,
     cancellation_token: CancellationToken,
     jdp_thread_handle: SharedLock<Option<JoinHandle<()>>>,
 }
@@ -529,6 +531,7 @@ impl BitcoinCoreIPCEngine {
         Ok(Self {
             request_sender,
             downstream_states,
+            latest_prev_hash: SharedLock::new(None),
             cancellation_token,
             jdp_thread_handle: SharedLock::new(Some(jdp_thread_handle)),
         })
@@ -564,6 +567,21 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
     fn cleanup_downstream(&self, downstream_id: DownstreamId) {
         self.downstream_states.remove(&downstream_id);
+    }
+
+    fn cleanup_declaration(
+        &self,
+        downstream_id: DownstreamId,
+        request_id: RequestId,
+        allocated_token: JdToken,
+    ) {
+        self.downstream_states.with_mut(&downstream_id, |state| {
+            state.remove_declared_custom_job(request_id, allocated_token);
+        });
+    }
+
+    fn latest_prev_hash(&self) -> Option<BlockHash> {
+        self.latest_prev_hash.get().unwrap_or(None)
     }
 
     /// Validates a `DeclareMiningJob` by forwarding it to Bitcoin Core over IPC.
@@ -697,6 +715,20 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 return DeclareMiningJobResult::Error(ERROR_CODE_DECLARE_MINING_JOB_INTERNAL_ERROR);
             }
         };
+
+        // The tip this declaration was validated at is the latest the backend has seen.
+        let prev_hash = match &response {
+            JdResponse::Success { prev_hash, .. } => *prev_hash,
+            JdResponse::Error {
+                validation_context, ..
+            }
+            | JdResponse::MissingTransactions {
+                validation_context, ..
+            } => validation_context.prev_hash,
+        };
+        if self.latest_prev_hash.set(Some(prev_hash)).is_err() {
+            tracing::warn!("latest chain tip lock poisoned");
+        }
 
         // Convert JdResponse to DeclareMiningJobResult
         match response {
@@ -1213,5 +1245,34 @@ mod tests {
         assert!(!state.declared_custom_jobs.contains_key(&1));
         assert!(state.take_declared_custom_job(7).is_some());
         assert!(state.declared_custom_jobs.is_empty());
+    }
+
+    // A declaration the JDS refuses without validating again leaves the engine neither its job
+    // nor its token entry.
+    #[test]
+    fn cleaning_up_a_declaration_leaves_no_entry() {
+        let (request_sender, _request_receiver) = async_channel::unbounded();
+        let engine = BitcoinCoreIPCEngine {
+            request_sender,
+            downstream_states: SharedMap::new(),
+            latest_prev_hash: SharedLock::new(None),
+            cancellation_token: CancellationToken::new(),
+            jdp_thread_handle: SharedLock::new(None),
+        };
+        let mut waiting = accepted_job(1).job;
+        waiting.validated = false;
+        engine.downstream_states.with_mut_or_default(7, |state| {
+            state.insert_declared_custom_job(1, 10, waiting);
+        });
+
+        engine.cleanup_declaration(7, 1, 10);
+
+        let left = engine.downstream_states.with(&7, |state| {
+            (
+                state.declared_custom_jobs.len(),
+                state.allocated_token_entries.len(),
+            )
+        });
+        assert_eq!(left, Some((0, 0)));
     }
 }

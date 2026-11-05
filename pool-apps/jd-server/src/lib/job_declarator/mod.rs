@@ -514,17 +514,23 @@ mod tests {
     use super::*;
     use job_validation::DeclareMiningJobResult;
     use std::sync::atomic::AtomicUsize;
-    use stratum_apps::stratum_core::job_declaration_sv2::{
-        DeclareMiningJobOwned, ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
+    use stratum_apps::{
+        stratum_core::job_declaration_sv2::{
+            DeclareMiningJobOwned, ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS,
+            ProvideMissingTransactionsSuccessOwned, PushSolutionOwned,
+        },
+        utils::types::RequestId,
     };
 
     /// Counts calls to `handle_set_custom_mining_job` so tests can tell "correctly rejected
     /// by the identity check" apart from "coincidentally failed for an unrelated reason" —
     /// e.g. a token that's never found returns the same error code via a different, earlier
-    /// branch, without the identity comparison ever running.
+    /// branch, without the identity comparison ever running. Counts `cleanup_declaration` calls
+    /// too, so a test can tell a refusal reached the validator.
     #[derive(Default)]
     struct CountingEngine {
         handle_set_custom_mining_job_calls: AtomicUsize,
+        cleanup_declaration_calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -557,6 +563,16 @@ mod tests {
         }
 
         fn cleanup_downstream(&self, _downstream_id: DownstreamId) {}
+
+        fn cleanup_declaration(
+            &self,
+            _downstream_id: DownstreamId,
+            _request_id: RequestId,
+            _allocated_token: JdToken,
+        ) {
+            self.cleanup_declaration_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     fn dummy_set_custom_mining_job(
@@ -663,5 +679,29 @@ mod tests {
             1,
             "a matching identity must reach the validator exactly once"
         );
+    }
+
+    // A refusal the JDS makes without validating again releases the token and the validator's
+    // state for the declaration, and answers with the given code.
+    #[tokio::test]
+    async fn refusing_a_declaration_releases_its_token_and_validator_state() {
+        let engine = Arc::new(CountingEngine::default());
+        let jd = new_test_job_declarator(engine.clone()).await;
+        let token = jd.token_manager.allocate(0, "farm_01".to_string());
+
+        let refusal = jd.refuse_declaration(0, 7, token, ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS);
+
+        assert!(!jd.token_manager.is_allocated(token, 0));
+        assert_eq!(engine.cleanup_declaration_calls.load(Ordering::SeqCst), 1);
+        match refusal {
+            JobDeclarationOwned::DeclareMiningJobError(err) => {
+                assert_eq!(err.request_id, 7);
+                assert_eq!(
+                    err.error_code.as_utf8_or_hex(),
+                    ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS
+                );
+            }
+            other => panic!("expected DeclareMiningJobError, got {other:?}"),
+        }
     }
 }
