@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "integration_tests_sv2"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-channel 1.9.0",
  "clap",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "jd_server_sv2"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-channel 1.9.0",
  "async-trait",
@@ -3527,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "pool_sv2"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-channel 1.9.0",
  "clap",
