@@ -24,7 +24,7 @@ use stratum_apps::{
     network_helpers::noise_stream::NoiseTcpStream,
     stratum_core::{
         binary_sv2::{B016MOwned, Seq064KOwned},
-        bitcoin::{Weight, Wtxid, hashes::Hash},
+        bitcoin::{BlockHash, Weight, Wtxid, hashes::Hash},
         common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION,
         handlers_sv2::HandleCommonMessagesFromClientOwnedAsync,
         job_declaration_sv2::{DeclareMiningJobOwned, ProvideMissingTransactionsSuccessOwned},
@@ -34,7 +34,7 @@ use stratum_apps::{
     task_manager::TaskManager,
     utils::{
         protocol_message_type::{MessageType, protocol_message_type},
-        types::{DownstreamId, InboundFrame, OutboundFrame, RequestId},
+        types::{DownstreamId, InboundFrame, JdToken, OutboundFrame, RequestId},
     },
 };
 use tracing::{debug, error, info, warn};
@@ -79,6 +79,9 @@ pub struct PendingDeclareMiningJob {
     pub inserted_at: Instant,
     /// The declaration itself, validated again on every round.
     pub declare_mining_job: DeclareMiningJobOwned,
+    /// The chain tip the JDS validated it at, when the validator tells. It is refused when the
+    /// client's next declaration or answer is validated at another tip.
+    pub prev_hash: Option<BlockHash>,
     // Every transaction the client has been asked for, over all rounds.
     requested: HashSet<Wtxid>,
     // Every transaction the client has supplied, in the order they were asked for.
@@ -92,16 +95,28 @@ impl PendingDeclareMiningJob {
     pub fn new(
         declare_mining_job: DeclareMiningJobOwned,
         missing_wtxids: &[Wtxid],
+        prev_hash: Option<BlockHash>,
     ) -> (Self, Vec<u16>) {
         let mut pending = Self {
             inserted_at: Instant::now(),
             declare_mining_job,
+            prev_hash,
             requested: HashSet::new(),
             supplied: Vec::new(),
             rounds: 0,
         };
         let positions = pending.ask(missing_wtxids);
         (pending, positions)
+    }
+
+    /// The token the declaration was made with.
+    pub fn token(&self) -> JdToken {
+        u64::from_le_bytes(
+            self.declare_mining_job
+                .mining_job_token
+                .try_as_array::<8>()
+                .expect("checked when the declaration was received"),
+        )
     }
 
     /// Keeps the transactions the client supplied in answer to the last round.
@@ -197,6 +212,38 @@ impl PendingDeclareMiningJob {
     }
 }
 
+/// Takes out of `pending` the declarations validated at a chain tip other than
+/// `latest_prev_hash`, returning each one's request id and token. A declaration whose tip is
+/// not known stays.
+///
+/// `checked_at` is the tip `pending` was last gone through for. What stays after that is at
+/// that tip, and so is everything added until the tip moves, so `pending` is only gone through
+/// again once `latest_prev_hash` differs from it: a client that leaves many declarations waiting
+/// costs their number once per tip change, not once per declaration.
+pub fn take_pending_at_other_tips(
+    pending: &SharedMap<RequestId, PendingDeclareMiningJob>,
+    checked_at: &SharedLock<Option<BlockHash>>,
+    latest_prev_hash: BlockHash,
+) -> Vec<(RequestId, JdToken)> {
+    let already_checked = checked_at
+        .with(|checked_at| checked_at.replace(latest_prev_hash) == Some(latest_prev_hash))
+        .unwrap_or(false);
+    if already_checked {
+        return Vec::new();
+    }
+    let mut taken = Vec::new();
+    pending.retain(|request_id, pending| {
+        let at_other_tip = pending
+            .prev_hash
+            .is_some_and(|prev_hash| prev_hash != latest_prev_hash);
+        if at_other_tip {
+            taken.push((*request_id, pending.token()));
+        }
+        !at_other_tip
+    });
+    taken
+}
+
 /// Channel endpoints for a single downstream connection.
 #[derive(Clone)]
 pub struct DownstreamIo {
@@ -213,6 +260,9 @@ pub struct Downstream {
     pub negotiated_extensions: SharedLock<Vec<u16>>,
     /// Jobs waiting for missing transactions (keyed by `request_id`).
     pub pending_declare_mining_jobs: SharedMap<RequestId, PendingDeclareMiningJob>,
+    /// The chain tip `pending_declare_mining_jobs` was last gone through for, looking for
+    /// declarations left waiting since another one.
+    pub pending_checked_at: SharedLock<Option<BlockHash>>,
     pub downstream_io: DownstreamIo,
     pub downstream_id: DownstreamId,
     /// Extensions that JDS supports
@@ -291,6 +341,7 @@ impl Downstream {
 
         let negotiated_extensions = SharedLock::new(Vec::new());
         let pending_declare_mining_jobs = SharedMap::new();
+        let pending_checked_at = SharedLock::new(None);
 
         let downstream_io = DownstreamIo {
             to_job_declarator_sender,
@@ -302,6 +353,7 @@ impl Downstream {
         Self {
             negotiated_extensions,
             pending_declare_mining_jobs,
+            pending_checked_at,
             downstream_io,
             downstream_id,
             supported_extensions,
@@ -563,9 +615,13 @@ mod tests {
     }
 
     fn declaration(wtxids: &[Wtxid]) -> DeclareMiningJobOwned {
+        declaration_with_token(0, wtxids)
+    }
+
+    fn declaration_with_token(token: JdToken, wtxids: &[Wtxid]) -> DeclareMiningJobOwned {
         DeclareMiningJobOwned {
             request_id: 7,
-            mining_job_token: vec![0; 8].try_into().unwrap(),
+            mining_job_token: token.to_le_bytes().to_vec().try_into().unwrap(),
             version: 0,
             coinbase_tx_prefix: Vec::<u8>::new().try_into().unwrap(),
             coinbase_tx_suffix: Vec::<u8>::new().try_into().unwrap(),
@@ -588,8 +644,11 @@ mod tests {
     // and the answers to every round reach the validator together.
     #[test]
     fn asks_once_for_each_transaction_the_node_lost() {
-        let (mut pending, positions) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2), wtxid(3)]), &[wtxid(3)]);
+        let (mut pending, positions) = PendingDeclareMiningJob::new(
+            declaration(&[wtxid(1), wtxid(2), wtxid(3)]),
+            &[wtxid(3)],
+            None,
+        );
         assert_eq!(positions, vec![2]);
 
         assert!(pending.supply(vec![raw_tx(3)]));
@@ -610,7 +669,7 @@ mod tests {
     #[test]
     fn keeps_no_more_transactions_than_the_declaration_lists() {
         let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)]);
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)], None);
         assert!(pending.supply(vec![raw_tx(1)]));
         assert!(!pending.supply(vec![raw_tx(2), raw_tx(2)]));
         assert_eq!(
@@ -624,7 +683,7 @@ mod tests {
     #[test]
     fn keeps_no_more_bytes_than_a_block_weighs() {
         let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)]);
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)], None);
         assert!(pending.supply(vec![vec![0; MAX_SUPPLIED_BYTES].try_into().unwrap()]));
         assert!(!pending.supply(vec![raw_tx(2)]));
         assert_eq!(pending.supplied().transaction_list.len(), 1);
@@ -635,7 +694,7 @@ mod tests {
     #[test]
     fn refuses_a_transaction_the_client_was_already_asked_for() {
         let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)]);
+            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)], None);
         assert_eq!(pending.next_round(0, &[wtxid(2), wtxid(1)]), None);
     }
 
@@ -644,13 +703,69 @@ mod tests {
         let wtxids: Vec<Wtxid> = (1..=MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS as u8 + 1)
             .map(wtxid)
             .collect();
-        let (mut pending, _) = PendingDeclareMiningJob::new(declaration(&wtxids), &wtxids[..1]);
+        let (mut pending, _) =
+            PendingDeclareMiningJob::new(declaration(&wtxids), &wtxids[..1], None);
         for lost in &wtxids[1..MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS] {
             assert!(pending.next_round(0, &[*lost]).is_some());
         }
         assert_eq!(
             pending.next_round(0, &wtxids[MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS..]),
             None
+        );
+    }
+
+    // Only the declarations validated at another tip are taken out; one at the latest tip and
+    // one whose tip is not known stay.
+    #[test]
+    fn takes_only_the_declarations_waiting_at_another_tip() {
+        let previous_tip = BlockHash::from_byte_array([1; 32]);
+        let latest_tip = BlockHash::from_byte_array([2; 32]);
+        let pending = SharedMap::new();
+        let checked_at = SharedLock::new(None);
+        let waiting = |token, prev_hash| {
+            PendingDeclareMiningJob::new(
+                declaration_with_token(token, &[wtxid(1)]),
+                &[wtxid(1)],
+                prev_hash,
+            )
+            .0
+        };
+        pending.insert(1, waiting(10, Some(previous_tip)));
+        pending.insert(2, waiting(20, Some(latest_tip)));
+        pending.insert(3, waiting(30, None));
+
+        assert_eq!(
+            take_pending_at_other_tips(&pending, &checked_at, latest_tip),
+            vec![(1, 10)]
+        );
+        let mut kept = pending.keys();
+        kept.sort();
+        assert_eq!(kept, vec![2, 3]);
+    }
+
+    // While the tip stays where it was last checked, the waiting declarations are not gone
+    // through again: an entry planted at another tip, which the JDS never adds itself, is only
+    // found once the tip moves.
+    #[test]
+    fn goes_through_the_waiting_declarations_only_when_the_tip_moves() {
+        let previous_tip = BlockHash::from_byte_array([1; 32]);
+        let latest_tip = BlockHash::from_byte_array([2; 32]);
+        let next_tip = BlockHash::from_byte_array([3; 32]);
+        let pending = SharedMap::new();
+        let checked_at = SharedLock::new(None);
+        assert!(take_pending_at_other_tips(&pending, &checked_at, latest_tip).is_empty());
+
+        let (planted, _) = PendingDeclareMiningJob::new(
+            declaration_with_token(10, &[wtxid(1)]),
+            &[wtxid(1)],
+            Some(previous_tip),
+        );
+        pending.insert(1, planted);
+
+        assert!(take_pending_at_other_tips(&pending, &checked_at, latest_tip).is_empty());
+        assert_eq!(
+            take_pending_at_other_tips(&pending, &checked_at, next_tip),
+            vec![(1, 10)]
         );
     }
 }
