@@ -3,6 +3,7 @@ use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, JobDeclarationOwn
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
     mock_roles::{MockDownstream, WithSetup},
+    sniffer::Sniffer,
     start_jdc_with_user_identities,
     template_provider::DifficultyLevel,
     *,
@@ -1171,6 +1172,377 @@ async fn jds_wont_exit_upon_receiving_unexpected_txids_in_provide_missing_transa
 
     assert!(tokio::net::TcpListener::bind(jds_addr).await.is_err());
     shutdown_all!(translator, jdc, pool);
+}
+
+// A transaction the JDS's node holds when a declaration is first validated can be gone from its
+// mempool, replaced here through RBF, by the time the client's answer is validated. The JDS asks
+// for it in one more round instead of refusing the declaration, and accepts the declaration once
+// it is supplied.
+#[tokio::test]
+async fn jds_asks_again_for_a_transaction_its_node_lost_between_rounds() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let core = tp.bitcoin_core();
+    // One mature coinbase per transaction below, so each spends a confirmed coin of its own and
+    // either can be replaced on its own.
+    core.fund_wallet().unwrap();
+    core.generate_blocks(1);
+    let (_, held_txid) = core.create_mempool_transaction().unwrap();
+    let (_, unknown_txid) = core.create_mempool_transaction().unwrap();
+    let held_tx = core.mempool_transaction(held_txid).unwrap();
+    let unknown_tx = core.mempool_transaction(unknown_txid).unwrap();
+    // Replaced before the declaration, so the node never holds it: the first round asks for it.
+    core.replace_mempool_transaction(unknown_txid).unwrap();
+
+    let (pool, _pool_addr, jds_addr, _) = start_pool_with_jds(core, vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jdc", jds_addr, false, vec![], None);
+    let send_to_jds = connect_mock_jdc(&sniffer, sniffer_addr).await;
+
+    declare(
+        core,
+        &sniffer,
+        &send_to_jds,
+        2,
+        &[held_tx.clone(), unknown_tx.clone()],
+    )
+    .await;
+    assert_eq!(next_unknown_tx_positions(&sniffer).await, (2, vec![1]));
+
+    // The node loses the transaction it held while the client answers.
+    core.replace_mempool_transaction(held_txid).unwrap();
+    supply(&sniffer, &send_to_jds, 2, &[unknown_tx]).await;
+    assert_eq!(next_unknown_tx_positions(&sniffer).await, (2, vec![0]));
+
+    supply(&sniffer, &send_to_jds, 2, &[held_tx]).await;
+    assert_eq!(next_declare_mining_job_success(&sniffer).await, 2);
+
+    shutdown_all!(pool);
+}
+
+// A client that moved on to a new chain tip has dropped the declarations it made at the previous
+// one and never answers for them. Here that is a second-round request, with the first round's
+// transactions already supplied. The JDS refuses the waiting declaration with stale-chain-tip
+// once it validates a declaration at the new tip.
+#[tokio::test]
+async fn jds_refuses_a_declaration_left_waiting_across_a_chain_tip() {
+    start_tracing();
+    let (tp, _tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let core = tp.bitcoin_core();
+    core.fund_wallet().unwrap();
+    core.generate_blocks(1);
+    let (_, held_txid) = core.create_mempool_transaction().unwrap();
+    let (_, unknown_txid) = core.create_mempool_transaction().unwrap();
+    let held_tx = core.mempool_transaction(held_txid).unwrap();
+    let unknown_tx = core.mempool_transaction(unknown_txid).unwrap();
+    core.replace_mempool_transaction(unknown_txid).unwrap();
+
+    let (pool, _pool_addr, jds_addr, _) = start_pool_with_jds(core, vec![], vec![], false).await;
+    let (sniffer, sniffer_addr) = start_sniffer("mock-jdc", jds_addr, false, vec![], None);
+    let send_to_jds = connect_mock_jdc(&sniffer, sniffer_addr).await;
+
+    declare(
+        core,
+        &sniffer,
+        &send_to_jds,
+        2,
+        &[held_tx, unknown_tx.clone()],
+    )
+    .await;
+    assert_eq!(next_unknown_tx_positions(&sniffer).await, (2, vec![1]));
+    core.replace_mempool_transaction(held_txid).unwrap();
+    supply(&sniffer, &send_to_jds, 2, &[unknown_tx]).await;
+    assert_eq!(next_unknown_tx_positions(&sniffer).await, (2, vec![0]));
+
+    // The chain tip moves while the client is asked again, and the client never answers. The JDS
+    // hears of the new tip from its node a moment later, so the declarations made at it until
+    // then are answered stale-chain-tip themselves.
+    core.generate_blocks(1);
+    let (_, fresh_txid) = core.create_mempool_transaction().unwrap();
+    let fresh_tx = core.mempool_transaction(fresh_txid).unwrap();
+    let mut refused_with = None;
+    let mut accepted = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    for request_id in 3.. {
+        declare(
+            core,
+            &sniffer,
+            &send_to_jds,
+            request_id,
+            &[fresh_tx.clone()],
+        )
+        .await;
+        loop {
+            match next_jds_answer(&sniffer).await {
+                JobDeclarationOwned::DeclareMiningJobSuccess(msg)
+                    if msg.request_id == request_id =>
+                {
+                    accepted = true;
+                    break;
+                }
+                JobDeclarationOwned::DeclareMiningJobError(msg) if msg.request_id == 2 => {
+                    refused_with = Some(msg.error_code.as_utf8_or_hex().to_string());
+                }
+                JobDeclarationOwned::DeclareMiningJobError(msg) if msg.request_id == request_id => {
+                    assert_eq!(
+                        msg.error_code.as_utf8_or_hex(),
+                        ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
+                    );
+                    break;
+                }
+                msg => panic!("unexpected answer from the JDS: {msg:?}"),
+            }
+        }
+        if accepted || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(
+        accepted,
+        "the JDS never accepted a declaration at the new tip"
+    );
+    assert_eq!(
+        refused_with.as_deref(),
+        Some(ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP)
+    );
+
+    shutdown_all!(pool);
+}
+
+// The next message the JDS sends, waited for up to a minute.
+async fn next_jds_answer(sniffer: &Sniffer<'_>) -> JobDeclarationOwned {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some((_, AnyMessageOwned::JobDeclaration(msg))) =
+            sniffer.next_message_from_upstream()
+        {
+            return msg;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "timed out waiting for the JDS's next answer"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+// A client of the JDS behind `sniffer`, past its SetupConnection handshake.
+async fn connect_mock_jdc(
+    sniffer: &Sniffer<'_>,
+    sniffer_addr: std::net::SocketAddr,
+) -> async_channel::Sender<AnyMessageOwned> {
+    let send_to_jds = MockDownstream::new(
+        sniffer_addr,
+        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0b0001),
+    )
+    .start()
+    .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+        )
+        .await;
+    send_to_jds
+}
+
+// Allocates a token under `request_id` and declares `declared` with it under the same request
+// id, returning once the JDS has received the declaration. The coinbase is one Bitcoin Core's
+// checkBlock accepts at `core`'s next height: the BIP34 height push, the outputs the token hands
+// out, and the witness commitment the declared transactions need since they carry witnesses.
+async fn declare(
+    core: &integration_tests_sv2::template_provider::BitcoinCore,
+    sniffer: &Sniffer<'_>,
+    send_to_jds: &async_channel::Sender<AnyMessageOwned>,
+    request_id: u32,
+    declared: &[stratum_apps::stratum_core::bitcoin::Transaction],
+) {
+    use stratum_apps::stratum_core::bitcoin::{
+        Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+        block::{Header, Version as BlockVersion},
+        consensus::{deserialize, serialize},
+        hashes::Hash,
+        script::Builder,
+        transaction::Version as TxVersion,
+    };
+
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                request_id,
+                user_identifier: "farm_01".try_into().unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
+        )
+        .await;
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS,
+        )
+        .await;
+    let token = match sniffer.next_message_from_upstream() {
+        Some((
+            _,
+            AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::AllocateMiningJobTokenSuccess(msg),
+            ),
+        )) => msg,
+        msg => panic!("Expected AllocateMiningJobTokenSuccess message, found: {msg:?}"),
+    };
+
+    // The commitment leaves the coinbase itself out, so it is computed before the coinbase is
+    // complete.
+    let next_height = core.get_blockchain_info().unwrap().blocks + 1;
+    let mut coinbase_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: stratum_apps::stratum_core::bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: Builder::new().push_int(next_height).into_script(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: deserialize(token.coinbase_outputs.as_ref()).unwrap(),
+    };
+    let block = Block {
+        header: Header {
+            version: BlockVersion::TWO,
+            prev_blockhash: Hash::all_zeros(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: 0,
+            bits: CompactTarget::from_consensus(0),
+            nonce: 0,
+        },
+        txdata: std::iter::once(coinbase_tx.clone())
+            .chain(declared.iter().cloned())
+            .collect(),
+    };
+    let commitment = Block::compute_witness_commitment(&block.witness_root().unwrap(), &[0u8; 32]);
+    let mut commitment_script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    commitment_script.extend_from_slice(commitment.as_ref());
+    coinbase_tx.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(commitment_script),
+    });
+    // The JDS reads the scriptSig length at byte 43 of the prefix and fills what the prefix
+    // leaves of the scriptSig with the extranonce: none, here.
+    let serialized_coinbase = serialize(&coinbase_tx);
+    let prefix_len = 43 + 1 + coinbase_tx.input[0].script_sig.len();
+    let (coinbase_tx_prefix, coinbase_tx_suffix) = serialized_coinbase.split_at(prefix_len);
+
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::DeclareMiningJob(DeclareMiningJobOwned {
+                request_id,
+                mining_job_token: token.mining_job_token.clone(),
+                version: 0x2000_0000,
+                coinbase_tx_prefix: coinbase_tx_prefix.to_vec().try_into().unwrap(),
+                coinbase_tx_suffix: coinbase_tx_suffix.to_vec().try_into().unwrap(),
+                wtxid_list: Seq064KOwned::new(
+                    declared
+                        .iter()
+                        .map(|tx| U256Owned::from(tx.compute_wtxid().to_byte_array()))
+                        .collect(),
+                )
+                .unwrap(),
+                excess_data: Vec::<u8>::new().try_into().unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_DECLARE_MINING_JOB,
+        )
+        .await;
+}
+
+// Answers the JDS's last `ProvideMissingTransactions` for `request_id` with `transactions`,
+// returning once the JDS has received the answer.
+async fn supply(
+    sniffer: &Sniffer<'_>,
+    send_to_jds: &async_channel::Sender<AnyMessageOwned>,
+    request_id: u32,
+    transactions: &[stratum_apps::stratum_core::bitcoin::Transaction],
+) {
+    use stratum_apps::stratum_core::bitcoin::consensus::serialize;
+
+    send_to_jds
+        .send(AnyMessageOwned::JobDeclaration(
+            parsers_sv2::JobDeclarationOwned::ProvideMissingTransactionsSuccess(
+                ProvideMissingTransactionsSuccessOwned {
+                    request_id,
+                    transaction_list: Seq064KOwned::new(
+                        transactions
+                            .iter()
+                            .map(|tx| serialize(tx).try_into().unwrap())
+                            .collect(),
+                    )
+                    .unwrap(),
+                },
+            ),
+        ))
+        .await
+        .unwrap();
+    sniffer
+        .wait_for_message_type_and_clean_queue(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+        )
+        .await;
+}
+
+// The request id and positions of the next `ProvideMissingTransactions` the JDS sends.
+async fn next_unknown_tx_positions(sniffer: &Sniffer<'_>) -> (u32, Vec<u16>) {
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
+        )
+        .await;
+    match sniffer.next_message_from_upstream() {
+        Some((
+            _,
+            AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::ProvideMissingTransactions(msg),
+            ),
+        )) => (msg.request_id, msg.unknown_tx_position_list.into_inner()),
+        msg => panic!("Expected ProvideMissingTransactions message, found: {msg:?}"),
+    }
+}
+
+// The request id of the next `DeclareMiningJob.Success` the JDS sends.
+async fn next_declare_mining_job_success(sniffer: &Sniffer<'_>) -> u32 {
+    sniffer
+        .wait_for_message_type(
+            MessageDirection::ToDownstream,
+            MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS,
+        )
+        .await;
+    match sniffer.next_message_from_upstream() {
+        Some((
+            _,
+            AnyMessageOwned::JobDeclaration(
+                parsers_sv2::JobDeclarationOwned::DeclareMiningJobSuccess(msg),
+            ),
+        )) => msg.request_id,
+        msg => panic!("Expected DeclareMiningJobSuccess message, found: {msg:?}"),
+    }
 }
 
 // This test launches a JDC and leverages a MockDownstream to test the correct functionalities of
