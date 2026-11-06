@@ -134,6 +134,9 @@ if its node keeps losing some between one request and the next. The template was
 declared it, so JDC drops that declaration, keeps its Pool and JDS, and declares its next template
 as usual. Shares found on the refused template don't reach the Pool.
 
+JDC still leaves a JDS that keeps refusing: ten declarations in a row refused with
+`stale-chain-tip` or `missing-txs`, with none accepted in between, make it fall back.
+
 ### Miner Telemetry
 
 JDC can enrich the monitoring API with telemetry from SV2 ASIC miners that connect directly to JDC.
