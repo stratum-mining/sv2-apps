@@ -131,6 +131,13 @@ const MAX_REQUESTED_TEMPLATES: usize = 16;
 // coming. Past it, the oldest is dropped: its downstreams have already moved on to the newer ones.
 const MAX_WAITING_FOR_TOKEN: usize = 4;
 
+// How many declarations in a row the JDS can refuse with `stale-chain-tip` or `missing-txs`,
+// accepting none in between, before JDC falls back. Neither refusal says anything against the JDS
+// on its own: a chain tip or a mempool that moved refuses the declarations JDC has waiting on the
+// JDS together. A JDS that accepts none of ten declarations in a row is one JDC gets no work
+// through, whatever the reason.
+const MAX_CONSECUTIVE_DECLARATION_REFUSALS: u32 = 10;
+
 // The custom job of one template, from its declaration in full-template mode to the Pool's
 // acknowledgement. Its `DeclareMiningJob` and its `SetCustomMiningJob` carry the same request ID.
 #[derive(Clone, Debug)]
@@ -748,6 +755,9 @@ pub struct ChannelManager {
     waiting_for_token: SharedLock<WaitingForToken>,
     // The custom job of each template JDC sends upstream (see `CustomJob`).
     custom_jobs: SharedLock<CustomJobs>,
+    // How many declarations the JDS has refused with `stale-chain-tip` or `missing-txs` since it
+    // last accepted one (see `MAX_CONSECUTIVE_DECLARATION_REFUSALS`).
+    declaration_refusals: Arc<AtomicU32>,
     // Maps a downstream ID + channel ID + job ID to the corresponding template ID.
     pub downstream_channel_id_and_job_id_to_template_id:
         SharedMap<DownstreamChannelJobId, TemplateId>,
@@ -912,6 +922,7 @@ impl ChannelManager {
             requested_templates: SharedLock::new(VecDeque::new()),
             waiting_for_token: SharedLock::new(WaitingForToken::default()),
             custom_jobs: SharedLock::new(CustomJobs::default()),
+            declaration_refusals: Arc::new(AtomicU32::new(0)),
             downstream_channel_id_and_job_id_to_template_id: SharedMap::new(),
             output_sets: SharedLock::new(OutputSets::new(coinbase_outputs)),
             upstream_channel: SharedLock::new(None),
