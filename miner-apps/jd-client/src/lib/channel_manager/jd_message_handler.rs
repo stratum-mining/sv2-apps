@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use stratum_apps::{
     coinbase_output_constraints::coinbase_output_constraints_message,
     stratum_core::{
@@ -6,8 +8,9 @@ use stratum_apps::{
         handlers_sv2::HandleJobDeclarationMessagesFromServerOwnedAsync,
         job_declaration_sv2::{
             AllocateMiningJobTokenSuccessOwned, DeclareMiningJobErrorOwned,
-            DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
-            ProvideMissingTransactionsOwned, ProvideMissingTransactionsSuccessOwned,
+            DeclareMiningJobSuccessOwned, ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS,
+            ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP, ProvideMissingTransactionsOwned,
+            ProvideMissingTransactionsSuccessOwned,
         },
         parsers_sv2::{
             AnyMessageOwned, JobDeclarationOwned, MiningOwned, TemplateDistributionOwned, Tlv,
@@ -19,7 +22,9 @@ use stratum_apps::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    channel_manager::{ChannelManager, CustomJobStage, WaitingWork},
+    channel_manager::{
+        ChannelManager, CustomJobStage, MAX_CONSECUTIVE_DECLARATION_REFUSALS, WaitingWork,
+    },
     error::{self, JDCError, JDCErrorKind},
 };
 
@@ -139,15 +144,20 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
 
     // Handles a `DeclareMiningJobError` response from the JDS.
     //
-    // Receiving this error is treated as a malicious or invalid upstream behavior,
-    // since it indicates the JDS has rejected a declared mining job request.
+    // Only the answer to a declaration JDC sent and the JDS hasn't answered yet is acted on; any
+    // other is ignored and logged. The declaration is gone either way, and the error code
+    // decides what else happens:
+    // - `stale-chain-tip`: the chain tip moved past the declaration. The shares cached for its
+    //   template go with it, and JDC carries on.
+    // - `missing-txs`: the JDS's node kept losing declared transactions while the JDS validated the
+    //   declaration, as when RBF replaces them in its mempool. JDC carries on the same way. The JDS
+    //   answers this code as well when a client does not supply a transaction it was asked for,
+    //   which JDC always does.
+    // - any other code: JDC falls back, rather than keep relying on a JDS that refuses its jobs.
     //
-    // Upon receiving it:
-    // - Triggers the fallback mechanism by signaling a shutdown through the status channel, causing
-    //   the Job Declarator Client to enter `JobDeclaratorShutdownFallback`.
-    //
-    // This ensures that the system does not continue relying on a potentially
-    // untrustworthy or misbehaving JDS, and instead fails over to a safer state.
+    // JDC carries on only so far: the `MAX_CONSECUTIVE_DECLARATION_REFUSALS`th declaration in a
+    // row refused with either of the first two codes, with none accepted in between, makes it
+    // fall back as well.
     async fn handle_declare_mining_job_error(
         &mut self,
         _server_id: Option<usize>,
@@ -172,9 +182,13 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
         };
 
         let error_code = msg.error_code.as_utf8_or_hex();
-        if error_code == ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP {
+        if (error_code == ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP
+            || error_code == ERROR_CODE_DECLARE_MINING_JOB_MISSING_TXS)
+            && self.declaration_refusals.fetch_add(1, Ordering::Relaxed) + 1
+                < MAX_CONSECUTIVE_DECLARATION_REFUSALS
+        {
             warn!(
-                "Received non-fatal DeclareMiningJobError from JDS: stale-chain-tip (request_id={})",
+                "Received non-fatal DeclareMiningJobError from JDS: {error_code} (request_id={})",
                 msg.request_id
             );
             // Nothing else answers a rejected declaration, so it is gone, with its transactions,
@@ -225,6 +239,8 @@ impl HandleJobDeclarationMessagesFromServerOwnedAsync for ChannelManager {
             );
             return Ok(());
         };
+        // An accepted declaration ends a run of refused ones.
+        self.declaration_refusals.store(0, Ordering::Relaxed);
 
         let outputs = job.coinbase_outputs.clone();
 

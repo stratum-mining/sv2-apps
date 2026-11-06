@@ -47,12 +47,13 @@ mod common_message_handler;
 /// it held on one round can be gone by the next, replaced, evicted or confirmed meanwhile, and a
 /// round can end with transactions missing that the client was never asked for. Each further
 /// round costs a full lookup of the declared list, so a declaration gets a few of them and is
-/// refused when the node is still losing transactions after that. This bounds the work a client
-/// can force per declaration, by making the node lose a transaction it controls between rounds,
-/// not only how long a declaration waits on a churning mempool: an honest declaration is refused
-/// only when every round allowed lost a transaction, which rounds that take longer on a busy JDS
-/// make likelier, and five keeps that negligible.
-pub const MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS: usize = 5;
+/// refused when the node is still losing transactions after that. This bounds the work one
+/// declaration can add, whether a client forces it, by making the node lose a transaction it
+/// controls between rounds, or a churning mempool does: an honest declaration is refused only
+/// when every round allowed lost a transaction. Rounds that follow each other closely seldom
+/// lose one, which makes three in a row negligible. Rounds a busy JDS spreads apart lose more,
+/// and there the declaration is refused before it adds further lookups to the load.
+pub const MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS: usize = 3;
 
 /// The most bytes of supplied transactions one declaration keeps, over all rounds.
 ///
@@ -75,7 +76,8 @@ const LOGGED_WTXIDS: usize = 16;
 /// was already asked for and is still missing is one the client withheld, which refuses the
 /// declaration.
 pub struct PendingDeclareMiningJob {
-    /// When the declaration was received, from which the janitor expires it.
+    /// When the declaration was received, from which the janitor expires it and its answer's
+    /// log line counts how long it waited.
     pub inserted_at: Instant,
     /// The declaration itself, validated again on every round.
     pub declare_mining_job: DeclareMiningJobOwned,
@@ -91,14 +93,16 @@ pub struct PendingDeclareMiningJob {
 
 impl PendingDeclareMiningJob {
     /// Starts waiting on `missing_wtxids`, the transactions the first validation round found
-    /// missing, and returns their positions in the declared list for `ProvideMissingTransactions`.
+    /// missing of a declaration received at `received_at`, and returns their positions in the
+    /// declared list for `ProvideMissingTransactions`.
     pub fn new(
         declare_mining_job: DeclareMiningJobOwned,
         missing_wtxids: &[Wtxid],
         prev_hash: Option<BlockHash>,
+        received_at: Instant,
     ) -> (Self, Vec<u16>) {
         let mut pending = Self {
-            inserted_at: Instant::now(),
+            inserted_at: received_at,
             declare_mining_job,
             prev_hash,
             requested: HashSet::new(),
@@ -117,6 +121,11 @@ impl PendingDeclareMiningJob {
                 .try_as_array::<8>()
                 .expect("checked when the declaration was received"),
         )
+    }
+
+    /// How many times the client has been asked for transactions so far.
+    pub fn rounds(&self) -> usize {
+        self.rounds
     }
 
     /// Keeps the transactions the client supplied in answer to the last round.
@@ -213,8 +222,8 @@ impl PendingDeclareMiningJob {
 }
 
 /// Takes out of `pending` the declarations validated at a chain tip other than
-/// `latest_prev_hash`, returning each one's request id and token. A declaration whose tip is
-/// not known stays.
+/// `latest_prev_hash`, returning each one's request id and token, with how many rounds it took
+/// and when it was received. A declaration whose tip is not known stays.
 ///
 /// `checked_at` is the tip `pending` was last gone through for. What stays after that is at
 /// that tip, and so is everything added until the tip moves, so `pending` is only gone through
@@ -224,7 +233,7 @@ pub fn take_pending_at_other_tips(
     pending: &SharedMap<RequestId, PendingDeclareMiningJob>,
     checked_at: &SharedLock<Option<BlockHash>>,
     latest_prev_hash: BlockHash,
-) -> Vec<(RequestId, JdToken)> {
+) -> Vec<(RequestId, JdToken, usize, Instant)> {
     let already_checked = checked_at
         .with(|checked_at| checked_at.replace(latest_prev_hash) == Some(latest_prev_hash))
         .unwrap_or(false);
@@ -237,7 +246,12 @@ pub fn take_pending_at_other_tips(
             .prev_hash
             .is_some_and(|prev_hash| prev_hash != latest_prev_hash);
         if at_other_tip {
-            taken.push((*request_id, pending.token()));
+            taken.push((
+                *request_id,
+                pending.token(),
+                pending.rounds,
+                pending.inserted_at,
+            ));
         }
         !at_other_tip
     });
@@ -573,7 +587,7 @@ impl Downstream {
 
                 self.downstream_io
                     .to_job_declarator_sender
-                    .send((self.downstream_id, jd_message, tlv_fields))
+                    .send((self.downstream_id, jd_message, tlv_fields, Instant::now()))
                     .await
                     .map_err(error::JDSError::shutdown)?;
             }
@@ -648,6 +662,7 @@ mod tests {
             declaration(&[wtxid(1), wtxid(2), wtxid(3)]),
             &[wtxid(3)],
             None,
+            Instant::now(),
         );
         assert_eq!(positions, vec![2]);
 
@@ -668,8 +683,12 @@ mod tests {
     // it is kept.
     #[test]
     fn keeps_no_more_transactions_than_the_declaration_lists() {
-        let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)], None);
+        let (mut pending, _) = PendingDeclareMiningJob::new(
+            declaration(&[wtxid(1), wtxid(2)]),
+            &[wtxid(1)],
+            None,
+            Instant::now(),
+        );
         assert!(pending.supply(vec![raw_tx(1)]));
         assert!(!pending.supply(vec![raw_tx(2), raw_tx(2)]));
         assert_eq!(
@@ -682,8 +701,12 @@ mod tests {
     // bytes decode.
     #[test]
     fn keeps_no_more_bytes_than_a_block_weighs() {
-        let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)], None);
+        let (mut pending, _) = PendingDeclareMiningJob::new(
+            declaration(&[wtxid(1), wtxid(2)]),
+            &[wtxid(1)],
+            None,
+            Instant::now(),
+        );
         assert!(pending.supply(vec![vec![0; MAX_SUPPLIED_BYTES].try_into().unwrap()]));
         assert!(!pending.supply(vec![raw_tx(2)]));
         assert_eq!(pending.supplied().transaction_list.len(), 1);
@@ -693,8 +716,12 @@ mod tests {
     // the round found missing.
     #[test]
     fn refuses_a_transaction_the_client_was_already_asked_for() {
-        let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&[wtxid(1), wtxid(2)]), &[wtxid(1)], None);
+        let (mut pending, _) = PendingDeclareMiningJob::new(
+            declaration(&[wtxid(1), wtxid(2)]),
+            &[wtxid(1)],
+            None,
+            Instant::now(),
+        );
         assert_eq!(pending.next_round(0, &[wtxid(2), wtxid(1)]), None);
     }
 
@@ -704,7 +731,7 @@ mod tests {
             .map(wtxid)
             .collect();
         let (mut pending, _) =
-            PendingDeclareMiningJob::new(declaration(&wtxids), &wtxids[..1], None);
+            PendingDeclareMiningJob::new(declaration(&wtxids), &wtxids[..1], None, Instant::now());
         for lost in &wtxids[1..MAX_PROVIDE_MISSING_TRANSACTIONS_ROUNDS] {
             assert!(pending.next_round(0, &[*lost]).is_some());
         }
@@ -722,11 +749,13 @@ mod tests {
         let latest_tip = BlockHash::from_byte_array([2; 32]);
         let pending = SharedMap::new();
         let checked_at = SharedLock::new(None);
+        let received_at = Instant::now();
         let waiting = |token, prev_hash| {
             PendingDeclareMiningJob::new(
                 declaration_with_token(token, &[wtxid(1)]),
                 &[wtxid(1)],
                 prev_hash,
+                received_at,
             )
             .0
         };
@@ -736,7 +765,7 @@ mod tests {
 
         assert_eq!(
             take_pending_at_other_tips(&pending, &checked_at, latest_tip),
-            vec![(1, 10)]
+            vec![(1, 10, 1, received_at)]
         );
         let mut kept = pending.keys();
         kept.sort();
@@ -755,17 +784,19 @@ mod tests {
         let checked_at = SharedLock::new(None);
         assert!(take_pending_at_other_tips(&pending, &checked_at, latest_tip).is_empty());
 
+        let received_at = Instant::now();
         let (planted, _) = PendingDeclareMiningJob::new(
             declaration_with_token(10, &[wtxid(1)]),
             &[wtxid(1)],
             Some(previous_tip),
+            received_at,
         );
         pending.insert(1, planted);
 
         assert!(take_pending_at_other_tips(&pending, &checked_at, latest_tip).is_empty());
         assert_eq!(
             take_pending_at_other_tips(&pending, &checked_at, next_tip),
-            vec![(1, 10)]
+            vec![(1, 10, 1, received_at)]
         );
     }
 }

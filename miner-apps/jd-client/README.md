@@ -121,11 +121,21 @@ room or sigops than `CoinbaseOutputConstraints` can reserve, or they're too big 
 to fit the messages that carry it. An answer to a token request JDC
 never sent, or a second answer to one already answered, is ignored instead.
 
-Answers to declarations and custom jobs follow the same split. A `DeclareMiningJob.Error` or
-`SetCustomMiningJob.Error` with any code but `stale-chain-tip`, or a Pool answer naming another
-channel than the custom job it answers, makes JDC fall back. An answer to a declaration or custom
-job JDC never sent, a second answer to one, or an answer for a job JDC released when the chain tip
-moved past its template, is ignored.
+Answers to declarations and custom jobs follow the same split. A `SetCustomMiningJob.Error` with any
+code but `stale-chain-tip`, a `DeclareMiningJob.Error` with any code but `stale-chain-tip` or
+`missing-txs`, or a Pool answer naming another channel than the custom job it answers, makes JDC
+fall back. An answer to a declaration or custom job JDC never sent, a second answer to one, or an
+answer for a job JDC released when the chain tip moved past its template, is ignored.
+
+A `DeclareMiningJob.Error` with `missing-txs` is most often the work of RBF: while the JDS validates
+a declaration, a transaction of the template is replaced in the mempool of the JDS's node, which
+then no longer holds it. The JDS asks JDC for the transactions it lacks, and refuses the declaration
+if its node keeps losing some between one request and the next. The template was valid when JDC
+declared it, so JDC drops that declaration, keeps its Pool and JDS, and declares its next template
+as usual. Shares found on the refused template don't reach the Pool.
+
+JDC still leaves a JDS that keeps refusing: ten declarations in a row refused with
+`stale-chain-tip` or `missing-txs`, with none accepted in between, make it fall back.
 
 ### Miner Telemetry
 

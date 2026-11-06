@@ -8,6 +8,7 @@ use crate::{
     },
 };
 use async_channel::Sender;
+use std::time::Instant;
 use stratum_apps::{
     stratum_core::{
         bitcoin::{Amount, BlockHash, TxOut, consensus},
@@ -150,15 +151,15 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
                     error_details: Vec::new().try_into().map_err(error::JDSError::shutdown)?,
                 };
 
-                client_sender
-                    .send((
+                return self
+                    .respond_to_declaration(
+                        client_id,
+                        &client_sender,
                         JobDeclarationOwned::DeclareMiningJobError(error_message),
-                        None,
-                    ))
-                    .await
-                    .map_err(|e| error::JDSError::disconnect(e, client_id))?;
-
-                return Ok(());
+                        0,
+                        self.message_received_at,
+                    )
+                    .await;
             }
         };
 
@@ -174,15 +175,15 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
                     .expect("error code must be valid B0_255"),
                 error_details: Vec::new().try_into().map_err(error::JDSError::shutdown)?,
             };
-            client_sender
-                .send((
+            return self
+                .respond_to_declaration(
+                    client_id,
+                    &client_sender,
                     JobDeclarationOwned::DeclareMiningJobError(error_message),
-                    None,
-                ))
-                .await
-                .map_err(|e| error::JDSError::disconnect(e, client_id))?;
-
-            return Ok(());
+                    0,
+                    self.message_received_at,
+                )
+                .await;
         }
 
         // validate job
@@ -245,8 +246,12 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
             // if missing transactions, add to pending declare mining jobs and return
             // ProvideMissingTransactions
             DeclareMiningJobResult::MissingTransactions(missing_wtxids) => {
-                let (pending, unknown_tx_position_list) =
-                    PendingDeclareMiningJob::new(msg.clone(), &missing_wtxids, latest_prev_hash);
+                let (pending, unknown_tx_position_list) = PendingDeclareMiningJob::new(
+                    msg.clone(),
+                    &missing_wtxids,
+                    latest_prev_hash,
+                    self.message_received_at,
+                );
 
                 // Disconnect: downstream may have disconnected between dispatch and handling.
                 self.downstream_clients
@@ -274,12 +279,14 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
 
         self.refuse_pending_declarations_at_other_tips(client_id, latest_prev_hash, &client_sender)
             .await?;
-        client_sender
-            .send((response, None))
-            .await
-            .map_err(|e| error::JDSError::disconnect(e, client_id))?;
-
-        Ok(())
+        self.respond_to_declaration(
+            client_id,
+            &client_sender,
+            response,
+            0,
+            self.message_received_at,
+        )
+        .await
     }
 
     async fn handle_provide_missing_transactions_success(
@@ -326,6 +333,7 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
         };
 
         let pending_declare_mining_job_token: JdToken = pending.token();
+        let (rounds, received_at) = (pending.rounds(), pending.inserted_at);
 
         // The validator gets everything the client has supplied for this declaration, this
         // answer included, since a round only asks for what the node did not hold on the round
@@ -346,12 +354,9 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
                 pending_declare_mining_job_token,
                 ERROR_CODE_DECLARE_MINING_JOB_INVALID_JOB,
             );
-            client_sender
-                .send((refusal, None))
-                .await
-                .map_err(|e| error::JDSError::disconnect(e, client_id))?;
-
-            return Ok(());
+            return self
+                .respond_to_declaration(client_id, &client_sender, refusal, rounds, received_at)
+                .await;
         }
         let supplied = pending.supplied();
 
@@ -466,12 +471,8 @@ impl HandleJobDeclarationMessagesFromClientOwnedAsync for JobDeclarator {
 
         self.refuse_pending_declarations_at_other_tips(client_id, latest_prev_hash, &client_sender)
             .await?;
-        client_sender
-            .send((response, None))
+        self.respond_to_declaration(client_id, &client_sender, response, rounds, received_at)
             .await
-            .map_err(|e| error::JDSError::disconnect(e, client_id))?;
-
-        Ok(())
     }
 
     async fn handle_push_solution(
@@ -525,7 +526,7 @@ impl JobDeclarator {
                 )
             })
             .unwrap_or_default();
-        for (request_id, token) in stale {
+        for (request_id, token, rounds, received_at) in stale {
             warn!(
                 client_id,
                 request_id,
@@ -537,10 +538,50 @@ impl JobDeclarator {
                 token,
                 ERROR_CODE_DECLARE_MINING_JOB_STALE_CHAIN_TIP,
             );
-            client_sender
-                .send((refusal, None))
-                .await
-                .map_err(|e| error::JDSError::disconnect(e, client_id))?;
+            self.respond_to_declaration(client_id, client_sender, refusal, rounds, received_at)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Sends the client `message`, the response to a declaration received at `received_at`.
+    ///
+    /// A `DeclareMiningJob.Success` or `DeclareMiningJob.Error` answers the declaration, and is
+    /// logged in one line once sent: the client, the request, the outcome (`accepted`, or the
+    /// error code it is refused with), how many `ProvideMissingTransactions` rounds it took, and
+    /// how long it waited from the downstream receiving it to this answer. For a declaration that
+    /// took rounds, that includes the time the client took to supply transactions. A
+    /// `ProvideMissingTransactions` leaves the declaration waiting and logs nothing.
+    async fn respond_to_declaration(
+        &self,
+        client_id: usize,
+        client_sender: &Sender<JobDeclarationMessage>,
+        message: JobDeclarationOwned,
+        rounds: usize,
+        received_at: Instant,
+    ) -> Result<(), JDSError<error::JobDeclarator>> {
+        let answer = match &message {
+            JobDeclarationOwned::DeclareMiningJobSuccess(success) => {
+                Some((success.request_id, "accepted".to_string()))
+            }
+            JobDeclarationOwned::DeclareMiningJobError(error) => {
+                Some((error.request_id, error.error_code.as_utf8_or_hex()))
+            }
+            _ => None,
+        };
+        client_sender
+            .send((message, None))
+            .await
+            .map_err(|e| error::JDSError::disconnect(e, client_id))?;
+        if let Some((request_id, outcome)) = answer {
+            info!(
+                client_id,
+                request_id,
+                outcome = %outcome,
+                rounds,
+                waited_ms = received_at.elapsed().as_millis(),
+                "Answered DeclareMiningJob"
+            );
         }
         Ok(())
     }
