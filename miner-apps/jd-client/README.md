@@ -71,7 +71,7 @@ The configuration file contains the following information:
 
 1. The downstream socket information, which includes the listening IP address (`downstream_address`) and port (`downstream_port`).
 2. The maximum and minimum protocol versions (`max_supported_version` and `min_supported_version`) with size as (`min_extranonce2_size`)
-3. The authentication keys used for the downstream connections (`authority_public_key`, `authority_secret_key`)
+3. The keys JDC presents to downstreams in the Noise handshake, see [Server keys](#server-keys).
 4. The `template_provider_type` section, which determines how the pool obtains block templates. There are two options:
    - `[template_provider_type.Sv2Tp]` - Connects to an SV2 Template Provider, with the following parameters:
      - `address` - The Template Provider's network address
@@ -182,6 +182,57 @@ JDC negotiates protocol extensions on both of its sides, with a pair of settings
 
 All four are empty by default.
 
+### Server keys
+
+A downstream verifies the JDC by the authority public key it pins (`authority_pubkey` in its
+upstream config). The JDC proves it holds that identity with a certificate over its static key,
+issued where the authority secret key is kept: the JDC host never sees that key. It gets the
+certificate in one of two ways:
+
+- `static_private_key` and `certificate` in its configuration, loaded once at startup.
+- `active_static_key` pointing at a TOML file holding the same fields. The file is read before
+  every handshake, so replacing it (or the symlink it is) rotates the static key without a restart
+  and without disturbing open connections.
+
+An optional `authority_public_key` makes the JDC check the certificate against it at startup and
+before every handshake, so a wrong file fails with a reason. For the file, an
+`authority_public_key` inside the file is checked as well.
+
+Precedence. Each of these fields can come from the TOML file or from the environment
+(`JDC__STATIC_PRIVATE_KEY`, `JDC__CERTIFICATE`, `JDC__ACTIVE_STATIC_KEY`,
+`JDC__AUTHORITY_PUBLIC_KEY`), and the environment overrides the TOML field by field, as for
+every other setting. On the merged result:
+
+1. `static_private_key` and `certificate` set: they are used, and `active_static_key` is ignored.
+2. Otherwise `active_static_key` set: the file is used.
+3. Neither: the JDC refuses to start.
+
+So an inline pair in the TOML still wins over `JDC__ACTIVE_STATIC_KEY` from the environment:
+the environment overrides fields, not the choice between inline and file. To use the file, leave the
+inline pair unset in both places. Half an inline pair, and `authority_secret_key` or
+`cert_validity_sec` anywhere, are refused with a reason.
+
+The example configs ship a throwaway static key with a certificate from the development authority
+`9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72`, whose secret key is public, so they start out of the
+box and prove nothing to anyone else. Issue your own on the machine that holds your authority
+secret key with the `sv2-certificate` binary from `stratum-apps`:
+
+```bash
+# once: an authority keypair; publish the public key, keep the secret key off every server
+cargo run -p stratum-apps --features cli --bin sv2-certificate -- keygen
+# per rotation: a fresh static key and a certificate over it, as the file `active_static_key`
+# points at and/or as `JDC__*` environment variables. The authority secret key is read from
+# SV2_AUTHORITY_SECRET_KEY; typed at a silent prompt it stays out of the shell history and of
+# `ps` output
+read -rs SV2_AUTHORITY_SECRET_KEY && export SV2_AUTHORITY_SECRET_KEY
+cargo run -p stratum-apps --features cli --bin sv2-certificate -- issue --valid-for 93600 \
+    --toml key_2.toml --env key_2.env --env-prefix JDC
+cargo run -p stratum-apps --features cli --bin sv2-certificate -- inspect <CERTIFICATE>
+```
+
+Make a certificate valid from before the moment it goes live and until after the next rotation,
+so a late rotation never breaks handshakes.
+
 ### Environment Variables
 
 Every configuration value can also be supplied through the environment. Variables are prefixed
@@ -194,6 +245,10 @@ source, JDC exits with an error.
 
 ```bash
 JDC__LISTENING_ADDRESS=0.0.0.0:34265
+# Server keys (see above); `sv2-certificate issue --env <file> --env-prefix JDC` writes these three:
+JDC__STATIC_PRIVATE_KEY=...
+JDC__CERTIFICATE=...
+JDC__AUTHORITY_PUBLIC_KEY=...
 # Tagged enums (template_provider_type) take the variant as a path segment,
 # matched case-insensitively. If the file selects a different variant, the
 # environment's variant replaces it; set only one variant in the environment:

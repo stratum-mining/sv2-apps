@@ -24,9 +24,15 @@ BITCOIN_SOCKET_PATH=/absolute/path/to/your/node.sock
 # Pool (pool_sv2)
 # -----------------------------------------------------------------------------
 POOL__LISTEN_ADDRESS=0.0.0.0:3333
+# A throwaway static key and a certificate for it from the development authority, whose secret
+# key is public: for trying the stack only. In production replace these three with the output of
+# `sv2-certificate issue --valid-for <seconds> --env <file> --env-prefix POOL`, run where the
+# authority secret key is kept (see pool-apps/pool/README.md, "Server keys"). To use a key file
+# re-read per handshake instead, drop these two and set POOL__ACTIVE_STATIC_KEY=<file>: while they
+# are set, they are used and the file is ignored.
+POOL__STATIC_PRIVATE_KEY=2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8
+POOL__CERTIFICATE=11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew
 POOL__AUTHORITY_PUBLIC_KEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
-POOL__AUTHORITY_SECRET_KEY=mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n
-POOL__CERT_VALIDITY_SEC=3600
 POOL__COINBASE_REWARD_SCRIPT=addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)
 POOL__SERVER_ID=1
 POOL__POOL_SIGNATURE=Stratum V2 SRI Pool
@@ -52,9 +58,12 @@ POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
 JDC__LISTENING_ADDRESS=0.0.0.0:34265
 JDC__MAX_SUPPORTED_VERSION=2
 JDC__MIN_SUPPORTED_VERSION=2
+# The same throwaway key and certificate, and the same rules, as for the Pool above; in production use the output of
+# `sv2-certificate issue --valid-for <seconds> --env <file> --env-prefix JDC` instead (see
+# miner-apps/jd-client/README.md, "Server keys").
+JDC__STATIC_PRIVATE_KEY=2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8
+JDC__CERTIFICATE=11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew
 JDC__AUTHORITY_PUBLIC_KEY=9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72
-JDC__AUTHORITY_SECRET_KEY=mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n
-JDC__CERT_VALIDITY_SEC=3600
 JDC__SHARES_PER_MINUTE=6.0
 JDC__SHARE_BATCH_SIZE=10
 JDC__MODE=FULLTEMPLATE
