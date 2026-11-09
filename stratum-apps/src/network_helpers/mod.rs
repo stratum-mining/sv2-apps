@@ -4,7 +4,8 @@
 //! for Stratum V2 applications. It includes support for:
 //!
 //! - Noise-encrypted connections ([`crate::network_helpers::noise_connection`],
-//!   [`crate::network_helpers::noise_stream`])
+//!   [`crate::network_helpers::noise_stream`]), with the server's static key and certificate
+//!   coming from [`crate::network_helpers::ResponderCredentials`]
 //! - SV1 protocol connections (`sv1_connection`) - when `sv1` feature is enabled
 //! - Hostname resolution ([`crate::network_helpers::resolve_hostname`])
 //!
@@ -13,11 +14,13 @@
 pub mod noise_connection;
 pub mod noise_stream;
 pub mod resolve_hostname;
+pub mod responder_credentials;
 
 #[cfg(feature = "sv1")]
 pub mod sv1_connection;
 
 pub use resolve_hostname::{ResolveError, resolve_host, resolve_host_port};
+pub use responder_credentials::ResponderCredentials;
 
 use async_channel::{RecvError, SendError};
 use std::{fmt, time::Duration};
@@ -49,6 +52,9 @@ pub enum Error {
     HandshakeTimeout,
     /// Invalid key provided to construct an Initiator or Responder
     InvalidKey,
+    /// The server's static key and certificate are misconfigured, unreadable, or do not match
+    /// the authority they are checked against. See [`ResponderCredentials`].
+    InvalidResponderCredentials(String),
     /// DNS resolution failed for a hostname
     DnsResolutionFailed(String),
 }
@@ -71,6 +77,10 @@ impl fmt::Display for Error {
             Error::HandshakeTimeout => write!(f, "Handshake timeout"),
 
             Error::InvalidKey => write!(f, "Invalid key provided for handshake"),
+
+            Error::InvalidResponderCredentials(msg) => {
+                write!(f, "Invalid responder credentials: {msg}")
+            }
 
             Error::DnsResolutionFailed(msg) => write!(f, "DNS resolution failed: {msg}"),
         }

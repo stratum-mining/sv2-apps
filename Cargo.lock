@@ -4499,6 +4499,7 @@ dependencies = [
  "stratum-core",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tower",
  "tracing",
  "tracing-subscriber",

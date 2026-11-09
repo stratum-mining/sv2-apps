@@ -167,18 +167,16 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
-    use std::time::Duration;
+    use crate::network_helpers::ResponderCredentials;
     use stratum_core::{
-        codec_sv2::MessageFrame,
-        noise_sv2::{Initiator, Responder},
-        parsers_sv2::AnyMessageOwned,
+        codec_sv2::MessageFrame, noise_sv2::Initiator, parsers_sv2::AnyMessageOwned,
     };
     use tokio::net::TcpListener;
 
-    // same test authority keypair used by the integration tests
-    const PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
-    const PRV_KEY: &str = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n";
+    // A throwaway static key and a certificate over it from the development authority, valid
+    // until the year 2106. The initiator below pins nothing, so any valid certificate does.
+    const STATIC_KEY: &str = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8";
+    const CERTIFICATE: &str = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew";
 
     #[tokio::test]
     async fn cancellation_shuts_down_connection() {
@@ -187,11 +185,14 @@ mod tests {
 
         let responder_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let pub_key = PUB_KEY.parse::<Secp256k1PublicKey>().unwrap().into_bytes();
-            let prv_key = PRV_KEY.parse::<Secp256k1SecretKey>().unwrap().into_bytes();
-            let responder =
-                Responder::from_authority_kp(&pub_key, &prv_key, Duration::from_secs(10_000))
-                    .unwrap();
+            let responder = ResponderCredentials::PreIssued {
+                static_private_key: STATIC_KEY.parse().unwrap(),
+                certificate: CERTIFICATE.parse().unwrap(),
+                authority_public_key: None,
+            }
+            .responder()
+            .await
+            .unwrap();
             Connection::accept::<MessageFrame<AnyMessageOwned>>(
                 stream,
                 responder,
