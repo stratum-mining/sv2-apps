@@ -11,9 +11,14 @@ max_supported_version = 2
 min_supported_version = 2
 
 # Auth keys for open encrypted connection downstream
+# Development credentials: a throwaway static key and a certificate from the development
+# authority, whose secret key is public. For trying the examples only; they prove nothing to
+# anyone else. For a real deployment, including key rotation through
+# `active_static_key = "/etc/sv2/active_static_key.toml"`, see "Server keys" in the README.
+static_private_key = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8"
+certificate = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew"
+# Optional: the certificate is checked against it at startup and before every handshake.
 authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
-cert_validity_sec = 3600
 
 # How many shares we expect to receive in a minute (determines difficulty targets)
 shares_per_minute = 6.0

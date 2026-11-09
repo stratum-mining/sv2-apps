@@ -8,6 +8,8 @@ services:
       - docker_env
     volumes:
       - "${BITCOIN_SOCKET_PATH?}:/root/.bitcoin/node.sock"
+      # Key directory for POOL__ACTIVE_STATIC_KEY, read-only (see docker_env.example).
+      # - "/absolute/path/to/your/sv2-keys:/etc/sv2:ro"
     ports:
       - "3333:3333"
       - "3334:3334"
@@ -26,6 +28,8 @@ services:
       - docker_env
     volumes:
       - "${BITCOIN_SOCKET_PATH?}:/root/.bitcoin/node.sock"
+      # Key directory for JDC__ACTIVE_STATIC_KEY, read-only (see docker_env.example).
+      # - "/absolute/path/to/your/sv2-keys:/etc/sv2:ro"
     ports:
       - "34265:34265"
       - "9091:9091"  # Monitoring HTTP API & Prometheus metrics
