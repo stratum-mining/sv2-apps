@@ -24,16 +24,10 @@ pub use responder_credentials::ResponderCredentials;
 
 use async_channel::{RecvError, SendError};
 use std::{fmt, time::Duration};
-use stratum_core::{
-    codec_sv2::Error as CodecError,
-    noise_sv2::{Initiator, Responder},
-};
+use stratum_core::{codec_sv2::Error as CodecError, noise_sv2::Initiator};
 use tokio::net::TcpStream;
 
-use crate::{
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
-    network_helpers::noise_stream::NoiseTcpStream,
-};
+use crate::{key_utils::Secp256k1PublicKey, network_helpers::noise_stream::NoiseTcpStream};
 
 /// Networking errors that can occur in SV2 connections
 #[derive(Debug)]
@@ -144,20 +138,13 @@ pub async fn connect_with_noise(
 /// The handshake timeout is opinionated and fixed at `NOISE_HANDSHAKE_TIMEOUT`. If you need a
 /// custom timeout, use [`noise_stream::NoiseTcpStream::new`] directly.
 ///
-/// `cert_validity` controls how long the generated Noise certificate is valid,
-/// which is independent of the handshake timeout.
+/// The static key and certificate the server presents come from `credentials`, resolved for
+/// this one handshake (see [`ResponderCredentials::responder`]).
 pub async fn accept_noise_connection(
     stream: TcpStream,
-    pub_key: Secp256k1PublicKey,
-    prv_key: Secp256k1SecretKey,
-    cert_validity: u64,
+    credentials: &ResponderCredentials,
 ) -> Result<NoiseTcpStream, Error> {
-    let responder = Responder::from_authority_kp(
-        &pub_key.into_bytes(),
-        &prv_key.into_bytes(),
-        Duration::from_secs(cert_validity),
-    )
-    .map_err(|_| Error::InvalidKey)?;
+    let responder = credentials.responder().await?;
     let stream =
         noise_stream::NoiseTcpStream::accept(stream, responder, NOISE_HANDSHAKE_TIMEOUT).await?;
     Ok(stream)

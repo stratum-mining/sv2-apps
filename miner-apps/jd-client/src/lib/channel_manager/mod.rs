@@ -23,8 +23,7 @@ use stratum_apps::{
     channel_utils::ReceiverCleanup,
     coinbase_output_constraints::coinbase_output_constraints_message,
     fallback_coordinator::FallbackCoordinator,
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
-    network_helpers::accept_noise_connection,
+    network_helpers::{ResponderCredentials, accept_noise_connection},
     stratum_core::{
         bitcoin::{Amount, Target, TxOut, consensus},
         channels_sv2::{
@@ -1087,9 +1086,7 @@ impl ChannelManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn start_downstream_server(
         self,
-        authority_public_key: Secp256k1PublicKey,
-        authority_secret_key: Secp256k1SecretKey,
-        cert_validity_sec: u64,
+        credentials: ResponderCredentials,
         listening_address: SocketAddr,
         task_manager: Arc<TaskManager>,
         cancellation_token: CancellationToken,
@@ -1107,6 +1104,7 @@ impl ChannelManager {
         // propagate. Everything after this point (waiting for the first template, then accepting)
         // runs in a background task, so bootstrap is never held hostage by the Template Provider.
         info!("Starting downstream server at {listening_address}");
+        credentials.check().await.map_err(JDCError::shutdown)?;
         let server = TcpListener::bind(listening_address).await.map_err(|e| {
             error!(error = ?e, "Failed to bind downstream server at {listening_address}");
             JDCError::shutdown(e)
@@ -1180,6 +1178,7 @@ impl ChannelManager {
                                     supported_downstream_extensions.clone();
                                 let required_extensions_inner =
                                     required_downstream_extensions.clone();
+                                let credentials_inner = credentials.clone();
 
                                 // Tracked from the handshake on, so a connection accepted by this
                                 // generation is never set up after fallback has completed; the
@@ -1195,7 +1194,7 @@ impl ChannelManager {
                                             info!("Fallback received during handshake, dropping connection");
                                             return;
                                         }
-                                        result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
+                                        result = accept_noise_connection(stream, &credentials_inner) => {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {

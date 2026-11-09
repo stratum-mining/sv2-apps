@@ -5,7 +5,7 @@
 //!
 //! This module handles:
 //! - Initializing [`PoolConfig`]
-//! - Managing [`TemplateProviderType`], [`AuthorityConfig`], [`CoinbaseRewardScript`], and
+//! - Managing [`TemplateProviderType`], [`ResponderCredentials`], [`CoinbaseRewardScript`], and
 //!   [`ConnectionConfig`]
 //! - Validating and converting coinbase outputs
 use std::{
@@ -16,7 +16,7 @@ use std::{
 pub use jd_server_sv2::config::{JDSConfig, JDSPartialConfig};
 use stratum_apps::{
     config_helpers::{CoinbaseRewardScript, opt_path_from_toml},
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
+    network_helpers::ResponderCredentials,
     stratum_core::bitcoin::{Amount, TxOut},
     tp_type::TemplateProviderType,
     utils::types::{SharesBatchSize, SharesPerMinute},
@@ -24,14 +24,15 @@ use stratum_apps::{
 
 use crate::error::PoolErrorKind;
 
-/// Configuration for the Pool, including connection, authority, and coinbase settings.
+/// Configuration for the Pool, including connection, Noise credentials, and coinbase settings.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct PoolConfig {
     listen_address: SocketAddr,
     template_provider_type: TemplateProviderType,
-    authority_public_key: Secp256k1PublicKey,
-    authority_secret_key: Secp256k1SecretKey,
-    cert_validity_sec: u64,
+    /// Static key and certificate presented to downstreams in the Noise handshake; see
+    /// [`ResponderCredentials`] for the fields that select it.
+    #[serde(flatten)]
+    credentials: ResponderCredentials,
     coinbase_reward_script: CoinbaseRewardScript,
     pool_signature: String,
     shares_per_minute: SharesPerMinute,
@@ -72,7 +73,7 @@ impl PoolConfig {
     pub fn new(
         pool_connection: ConnectionConfig,
         template_provider_type: TemplateProviderType,
-        authority_config: AuthorityConfig,
+        credentials: ResponderCredentials,
         coinbase_reward_script: CoinbaseRewardScript,
         shares_per_minute: SharesPerMinute,
         share_batch_size: SharesBatchSize,
@@ -86,9 +87,7 @@ impl PoolConfig {
         Self {
             listen_address: pool_connection.listen_address,
             template_provider_type,
-            authority_public_key: authority_config.public_key,
-            authority_secret_key: authority_config.secret_key,
-            cert_validity_sec: pool_connection.cert_validity_sec,
+            credentials,
             coinbase_reward_script,
             pool_signature: pool_connection.signature,
             shares_per_minute,
@@ -114,19 +113,9 @@ impl PoolConfig {
         &self.listen_address
     }
 
-    /// Returns the authority public key.
-    pub fn authority_public_key(&self) -> &Secp256k1PublicKey {
-        &self.authority_public_key
-    }
-
-    /// Returns the authority secret key.
-    pub fn authority_secret_key(&self) -> &Secp256k1SecretKey {
-        &self.authority_secret_key
-    }
-
-    /// Returns the certificate validity in seconds.
-    pub fn cert_validity_sec(&self) -> u64 {
-        self.cert_validity_sec
+    /// Static key and certificate presented to downstreams in the Noise handshake.
+    pub fn responder_credentials(&self) -> &ResponderCredentials {
+        &self.credentials
     }
 
     /// Returns the Pool signature.
@@ -220,9 +209,7 @@ impl PoolConfig {
 
         let jds_config = JDSConfig::from_partial(
             jds_partial,
-            self.authority_public_key,
-            self.authority_secret_key,
-            self.cert_validity_sec,
+            self.credentials.clone(),
             self.coinbase_reward_script.clone(),
         );
 
@@ -230,33 +217,16 @@ impl PoolConfig {
     }
 }
 
-/// Pool's authority public and secret keys.
-pub struct AuthorityConfig {
-    pub public_key: Secp256k1PublicKey,
-    pub secret_key: Secp256k1SecretKey,
-}
-
-impl AuthorityConfig {
-    pub fn new(public_key: Secp256k1PublicKey, secret_key: Secp256k1SecretKey) -> Self {
-        Self {
-            public_key,
-            secret_key,
-        }
-    }
-}
-
 /// Connection settings for the Pool listener.
 pub struct ConnectionConfig {
     listen_address: SocketAddr,
-    cert_validity_sec: u64,
     signature: String,
 }
 
 impl ConnectionConfig {
-    pub fn new(listen_address: SocketAddr, cert_validity_sec: u64, signature: String) -> Self {
+    pub fn new(listen_address: SocketAddr, signature: String) -> Self {
         Self {
             listen_address,
-            cert_validity_sec,
             signature,
         }
     }
@@ -278,9 +248,9 @@ mod tests {
             format!(
                 r#"
 listen_address = "0.0.0.0:34254"
+static_private_key = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8"
+certificate = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew"
 authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
-cert_validity_sec = 3600
 coinbase_reward_script = "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)"
 pool_signature = "test"
 shares_per_minute = 6.0
