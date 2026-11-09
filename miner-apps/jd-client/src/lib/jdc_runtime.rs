@@ -221,9 +221,7 @@ impl<State> JdcRuntime<State> {
 
         channel_manager
             .start_downstream_server(
-                *config.authority_public_key(),
-                *config.authority_secret_key(),
-                config.cert_validity_sec(),
+                config.responder_credentials().clone(),
                 *config.listening_address(),
                 task_manager,
                 cancellation_token.clone(),
