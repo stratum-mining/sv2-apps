@@ -6,7 +6,8 @@ use std::{
 };
 use stratum_apps::{
     config_helpers::{CoinbaseRewardScript, opt_path_from_toml},
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
+    key_utils::Secp256k1PublicKey,
+    network_helpers::ResponderCredentials,
     stratum_core::bitcoin::{Amount, TxOut},
     tp_type::TemplateProviderType,
     utils::types::{SharesBatchSize, SharesPerMinute},
@@ -21,12 +22,10 @@ pub struct JobDeclaratorClientConfig {
     max_supported_version: u16,
     // The minimum supported SV2 protocol version.
     min_supported_version: u16,
-    // The public key used by this JDC for noise encryption.
-    authority_public_key: Secp256k1PublicKey,
-    /// The secret key used by this JDC for noise encryption.
-    authority_secret_key: Secp256k1SecretKey,
-    /// The validity period (in seconds) for the certificate used in noise.
-    cert_validity_sec: u64,
+    /// Static key and certificate presented to downstreams in the Noise handshake; see
+    /// [`ResponderCredentials`] for the fields that select it.
+    #[serde(flatten)]
+    credentials: ResponderCredentials,
     /// The template provider type that this JDC will use.
     template_provider_type: TemplateProviderType,
     /// A list of upstream Job Declarator Servers (JDS) that this JDC can connect to.
@@ -106,8 +105,7 @@ impl JobDeclaratorClientConfig {
         protocol_config: ProtocolConfig,
         shares_per_minute: SharesPerMinute,
         shares_batch_size: SharesBatchSize,
-        pool_config: PoolConfig,
-        cert_validity_sec: u64,
+        credentials: ResponderCredentials,
         template_provider_type: TemplateProviderType,
         upstreams: Vec<Upstream>,
         jdc_signature: String,
@@ -125,9 +123,7 @@ impl JobDeclaratorClientConfig {
             max_past_jobs: None,
             max_supported_version: protocol_config.max_supported_version,
             min_supported_version: protocol_config.min_supported_version,
-            authority_public_key: pool_config.authority_public_key,
-            authority_secret_key: pool_config.authority_secret_key,
-            cert_validity_sec,
+            credentials,
             template_provider_type,
             upstreams,
             coinbase_reward_script: protocol_config.coinbase_reward_script,
@@ -178,19 +174,9 @@ impl JobDeclaratorClientConfig {
         &self.upstreams
     }
 
-    /// Returns the authority public key.
-    pub fn authority_public_key(&self) -> &Secp256k1PublicKey {
-        &self.authority_public_key
-    }
-
-    /// Returns the authority secret key.
-    pub fn authority_secret_key(&self) -> &Secp256k1SecretKey {
-        &self.authority_secret_key
-    }
-
-    /// Returns the certificate validity in seconds.
-    pub fn cert_validity_sec(&self) -> u64 {
-        self.cert_validity_sec
+    /// Static key and certificate presented to downstreams in the Noise handshake.
+    pub fn responder_credentials(&self) -> &ResponderCredentials {
+        &self.credentials
     }
 
     /// Returns the template provider type.
@@ -311,25 +297,6 @@ where
 {
     let s: String = String::deserialize(deserializer)?;
     ConfigJDCMode::from_str(&s).map_err(serde::de::Error::custom)
-}
-
-/// Represents pool specific encryption keys.
-pub struct PoolConfig {
-    authority_public_key: Secp256k1PublicKey,
-    authority_secret_key: Secp256k1SecretKey,
-}
-
-impl PoolConfig {
-    /// Creates a new instance of [`PoolConfig`].
-    pub fn new(
-        authority_public_key: Secp256k1PublicKey,
-        authority_secret_key: Secp256k1SecretKey,
-    ) -> Self {
-        Self {
-            authority_public_key,
-            authority_secret_key,
-        }
-    }
 }
 
 /// Represent protocol versioning the JDC supports.
