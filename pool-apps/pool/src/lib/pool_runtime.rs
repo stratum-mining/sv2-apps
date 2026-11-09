@@ -320,9 +320,7 @@ impl PoolRuntime<IoReady> {
             match jd
                 .clone()
                 .start_downstream_server(
-                    *jds_config.authority_public_key(),
-                    *jds_config.authority_secret_key(),
-                    jds_config.cert_validity_sec(),
+                    jds_config.responder_credentials().clone(),
                     *jds_config.listen_address(),
                     self.task_manager.clone(),
                     cancellation_token.clone(),
@@ -597,9 +595,7 @@ impl PoolRuntime<ChannelManagerReady> {
             .channel_manager
             .clone()
             .start_downstream_server(
-                *self.pool.config.authority_public_key(),
-                *self.pool.config.authority_secret_key(),
-                self.pool.config.cert_validity_sec(),
+                self.pool.config.responder_credentials().clone(),
                 *self.pool.config.listen_address(),
                 self.task_manager.clone(),
                 cancellation_token.clone(),

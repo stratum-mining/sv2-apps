@@ -26,8 +26,7 @@ use std::{
 use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     config_helpers::CoinbaseRewardScript,
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
-    network_helpers::accept_noise_connection,
+    network_helpers::{ResponderCredentials, accept_noise_connection},
     stratum_core::{
         handlers_sv2::HandleJobDeclarationMessagesFromClientOwnedAsync,
         mining_sv2::{
@@ -189,9 +188,7 @@ impl JobDeclarator {
     #[allow(clippy::too_many_arguments)]
     pub async fn start_downstream_server(
         self,
-        authority_public_key: Secp256k1PublicKey,
-        authority_secret_key: Secp256k1SecretKey,
-        cert_validity_sec: u64,
+        credentials: ResponderCredentials,
         listening_address: SocketAddr,
         task_manager: Arc<TaskManager>,
         cancellation_token: CancellationToken,
@@ -199,6 +196,9 @@ impl JobDeclarator {
         required_extensions: Vec<u16>,
     ) -> JDSResult<(), error::JobDeclarator> {
         info!("Starting downstream server at {listening_address}");
+        credentials.check().await.map_err(|e| {
+            JDSError::shutdown(crate::error::JDSErrorKind::InvalidConfig(e.to_string()))
+        })?;
         let server = TcpListener::bind(listening_address)
             .await
             .map_err(|e| {
@@ -226,15 +226,11 @@ impl JobDeclarator {
                                 let task_manager_inner = task_manager_clone.clone();
                                 let supported_extensions_inner = supported_extensions.clone();
                                 let required_extensions_inner = required_extensions.clone();
+                                let credentials_inner = credentials.clone();
 
                                 task_manager_clone.spawn(async move {
                                     let noise_stream = tokio::select! {
-                                        result = accept_noise_connection(
-                                            stream,
-                                            authority_public_key,
-                                            authority_secret_key,
-                                            cert_validity_sec,
-                                        ) => {
+                                        result = accept_noise_connection(stream, &credentials_inner) => {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {

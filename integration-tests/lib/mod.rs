@@ -11,9 +11,8 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
 };
 use stratum_apps::{
-    bitcoin_core_sv2::runtime_api::BitcoinCoreVersion,
-    config_helpers::CoinbaseRewardScript,
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
+    bitcoin_core_sv2::runtime_api::BitcoinCoreVersion, config_helpers::CoinbaseRewardScript,
+    key_utils::Secp256k1PublicKey, network_helpers::ResponderCredentials,
     tp_type::TemplateProviderType,
 };
 use tracing::Level;
@@ -119,6 +118,17 @@ pub fn start_sniffer(
     (sniffer, listening_address)
 }
 
+/// What servers under test present in the Noise handshake: a throwaway static key and the
+/// certificate the shared test authority issued for it, valid until the year 2106. The clients
+/// under test pin that authority's public key; no test holds its secret key.
+pub fn test_responder_credentials() -> ResponderCredentials {
+    ResponderCredentials::PreIssued {
+        static_private_key: "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8".parse().unwrap(),
+        certificate: "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew".parse().unwrap(),
+        authority_public_key: Some("9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".parse().unwrap()),
+    }
+}
+
 pub async fn start_pool(
     template_provider_config: TemplateProviderType,
     supported_extensions: Vec<u16>,
@@ -127,25 +137,11 @@ pub async fn start_pool(
 ) -> (PoolSv2, SocketAddr, Option<SocketAddr>) {
     use pool_sv2::config::PoolConfig;
     let listening_address = get_available_address();
-    let authority_public_key = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .expect("failed");
-    let authority_secret_key = Secp256k1SecretKey::try_from(
-        "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-    )
-    .expect("failed");
-    let cert_validity_sec = 3600;
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(POOL_COINBASE_REWARD_DESCRIPTOR).unwrap();
     let pool_signature = "Stratum V2 SRI Pool".to_string();
-    let connection_config = pool_sv2::config::ConnectionConfig::new(
-        listening_address,
-        cert_validity_sec,
-        pool_signature,
-    );
-    let authority_config =
-        pool_sv2::config::AuthorityConfig::new(authority_public_key, authority_secret_key);
+    let connection_config =
+        pool_sv2::config::ConnectionConfig::new(listening_address, pool_signature);
     let share_batch_size = 1;
     let monitoring_address = if enable_monitoring {
         Some(get_available_address())
@@ -156,7 +152,7 @@ pub async fn start_pool(
     let config = PoolConfig::new(
         connection_config,
         template_provider_config,
-        authority_config,
+        test_responder_credentials(),
         coinbase_reward_script,
         SHARES_PER_MINUTE,
         share_batch_size,
@@ -252,16 +248,8 @@ pub fn start_jdc_with_user_identities(
     jdc_mode: Option<ConfigJDCMode>,
     jdc_signature: &str,
 ) -> (JobDeclaratorClient, SocketAddr, Option<SocketAddr>) {
-    use jd_client_sv2::config::{JobDeclaratorClientConfig, PoolConfig, ProtocolConfig, Upstream};
+    use jd_client_sv2::config::{JobDeclaratorClientConfig, ProtocolConfig, Upstream};
     let jdc_address = get_available_address();
-    let authority_public_key = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .unwrap();
-    let authority_secret_key = Secp256k1SecretKey::try_from(
-        "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-    )
-    .unwrap();
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(JDC_COINBASE_REWARD_DESCRIPTOR).unwrap();
     let authority_pubkey = Secp256k1PublicKey::try_from(
@@ -281,7 +269,6 @@ pub fn start_jdc_with_user_identities(
             )
         })
         .collect();
-    let pool_config = PoolConfig::new(authority_public_key, authority_secret_key);
     let protocol_config = ProtocolConfig::new(2, 2, coinbase_reward_script);
     let monitoring_address = if enable_monitoring {
         Some(get_available_address())
@@ -294,8 +281,7 @@ pub fn start_jdc_with_user_identities(
         protocol_config,
         10.0,
         1,
-        pool_config,
-        3600,
+        test_responder_credentials(),
         template_provider_config,
         upstreams,
         jdc_signature.to_string(),
@@ -322,20 +308,11 @@ pub async fn start_pool_with_jds(
     required_extensions: Vec<u16>,
     enable_monitoring: bool,
 ) -> (PoolSv2, SocketAddr, SocketAddr, Option<SocketAddr>) {
-    use pool_sv2::config::{AuthorityConfig, ConnectionConfig, JDSPartialConfig, PoolConfig};
+    use pool_sv2::config::{ConnectionConfig, JDSPartialConfig, PoolConfig};
 
     let pool_address = get_available_address();
     let jds_address = get_available_address();
 
-    let authority_public_key = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .expect("failed");
-    let authority_secret_key = Secp256k1SecretKey::try_from(
-        "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-    )
-    .expect("failed");
-    let cert_validity_sec = 3600;
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(POOL_COINBASE_REWARD_DESCRIPTOR).unwrap();
 
@@ -346,8 +323,7 @@ pub async fn start_pool_with_jds(
     );
 
     let pool_signature = "Stratum V2 SRI Pool".to_string();
-    let connection_config = ConnectionConfig::new(pool_address, cert_validity_sec, pool_signature);
-    let authority_config = AuthorityConfig::new(authority_public_key, authority_secret_key);
+    let connection_config = ConnectionConfig::new(pool_address, pool_signature);
     let share_batch_size = 1;
     let monitoring_address = if enable_monitoring {
         Some(get_available_address())
@@ -358,7 +334,7 @@ pub async fn start_pool_with_jds(
     let config = PoolConfig::new(
         connection_config,
         template_provider_config,
-        authority_config,
+        test_responder_credentials(),
         coinbase_reward_script.clone(),
         SHARES_PER_MINUTE,
         share_batch_size,
