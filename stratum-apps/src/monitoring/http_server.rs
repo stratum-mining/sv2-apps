@@ -1099,6 +1099,7 @@ mod tests {
 
         Router::new()
             .route(routes::ROOT, get(handle_root))
+            .merge(SwaggerUi::new(routes::SWAGGER_UI).url(routes::OPENAPI_SPEC, ApiDoc::openapi()))
             .nest(routes::API_V1_PREFIX, api_v1)
             .route(routes::METRICS, get(handle_prometheus_metrics))
             .with_state(state)
@@ -1217,6 +1218,39 @@ mod tests {
         let resp: RootResponse = serde_json::from_str(&body).unwrap();
         assert_eq!(resp.service, ApiDoc::openapi().info.title);
         assert!(resp.endpoints.contains_key(routes::HEALTH));
+    }
+
+    #[tokio::test]
+    async fn swagger_ui_serves_its_page_and_embedded_assets() {
+        for asset in ["/", "/swagger-ui-bundle.js", "/swagger-ui.css"] {
+            let uri = format!("{}{asset}", routes::SWAGGER_UI);
+            let app = build_test_app(None, None, None);
+            let response = app.oneshot(make_request(&uri)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert!(!get_body(response).await.is_empty(), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn swagger_ui_is_configured_with_the_openapi_spec_route() {
+        let uri = format!("{}/swagger-initializer.js", routes::SWAGGER_UI);
+        let app = build_test_app(None, None, None);
+        let response = app.oneshot(make_request(&uri)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(get_body(response).await.contains(routes::OPENAPI_SPEC));
+    }
+
+    #[tokio::test]
+    async fn openapi_spec_endpoint_serves_the_generated_schema() {
+        let app = build_test_app(None, None, None);
+        let response = app
+            .oneshot(make_request(routes::OPENAPI_SPEC))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let served: serde_json::Value = serde_json::from_str(&get_body(response).await).unwrap();
+        assert_eq!(served, serde_json::to_value(ApiDoc::openapi()).unwrap());
     }
 
     #[tokio::test]
