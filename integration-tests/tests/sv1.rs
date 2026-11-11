@@ -1,6 +1,6 @@
 use integration_tests_sv2::{template_provider::DifficultyLevel, *};
 use interceptor::MessageDirection;
-use stratum_apps::stratum_core::sv1_api::{self, server_to_client};
+use stratum_apps::stratum_core::sv1_api;
 use sv1_sniffer::SV1MessageFilter;
 
 #[tokio::test]
@@ -62,11 +62,11 @@ async fn test_sniffer_sv1_wait_and_assert() {
                 SV1MessageFilter::WithMessageName("mining.subscribe"),
                 MessageDirection::ToUpstream,
                 |msg| {
-                    // The message should be a StandardRequest with the mining.subscribe method
+                    // The message should be a request with the mining.subscribe method
                     match msg {
-                        sv1_api::Message::StandardRequest(req) => {
-                            assert_eq!(req.method, "mining.subscribe");
-                            extracted_id = Some(req.id);
+                        sv1_api::Message::Request(req) => {
+                            assert_eq!(req.method.as_str(), "mining.subscribe");
+                            extracted_id = req.id.clone();
                             // mining.subscribe typically has a user agent parameter
                             // params is a serde_json::Value, check if it's an array with elements
                             if let Some(params_array) = req.params.as_array() {
@@ -76,7 +76,7 @@ async fn test_sniffer_sv1_wait_and_assert() {
                                 );
                             }
                         }
-                        _ => panic!("Expected StandardRequest for mining.subscribe"),
+                        _ => panic!("Expected a request for mining.subscribe"),
                     }
                 },
             )
@@ -87,22 +87,24 @@ async fn test_sniffer_sv1_wait_and_assert() {
     // Now wait for the response to that specific message ID
     sniffer_sv1
         .wait_and_assert(
-            SV1MessageFilter::WithMessageId(subscribe_id),
+            SV1MessageFilter::WithMessageId(subscribe_id.clone()),
             MessageDirection::ToDownstream,
             |msg| {
                 match msg {
-                    sv1_api::Message::OkResponse(res) => {
-                        assert_eq!(res.id, subscribe_id);
+                    sv1_api::Message::Response(res) => {
+                        assert_eq!(res.id.as_ref(), Some(&subscribe_id));
                         // Verify the response has the expected subscription data
-                        assert!(
-                            !res.result.is_null(),
-                            "subscribe response should contain subscription details"
-                        );
+                        match &res.result {
+                            Ok(result) => assert!(
+                                !result.is_null(),
+                                "subscribe response should contain subscription details"
+                            ),
+                            Err(error) => {
+                                panic!("Expected success response but got error: {error:?}")
+                            }
+                        }
                     }
-                    sv1_api::Message::ErrorResponse(err) => {
-                        panic!("Expected success response but got error: {:?}", err.error);
-                    }
-                    _ => panic!("Expected OkResponse or ErrorResponse for subscribe"),
+                    _ => panic!("Expected a response for subscribe"),
                 }
             },
         )
@@ -116,11 +118,14 @@ async fn test_sniffer_sv1_wait_and_assert() {
             MessageDirection::ToDownstream,
             |msg| {
                 match msg {
-                    sv1_api::Message::Notification(notif) => {
-                        assert_eq!(notif.method, "mining.notify");
+                    sv1_api::Message::Request(notif) => {
+                        assert_eq!(notif.method.as_str(), "mining.notify");
                         // Parse the notification into a properly typed Notify struct
-                        let notify = server_to_client::Notify::try_from(notif.clone())
-                            .expect("Failed to parse mining.notify");
+                        let Ok(sv1_api::ServerNotification::Notify(notify)) =
+                            sv1_api::ServerNotification::try_from(notif.clone())
+                        else {
+                            panic!("Failed to parse mining.notify");
+                        };
 
                         // Verify job parameters are present
                         assert!(!notify.job_id.is_empty(), "job_id should not be empty");
