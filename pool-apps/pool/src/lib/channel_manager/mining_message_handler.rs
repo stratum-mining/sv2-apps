@@ -25,7 +25,7 @@ use stratum_apps::stratum_core::{
     extensions_sv2::{
         EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, TLV_FIELD_TYPE_USER_IDENTITY, UserIdentity,
     },
-    handlers_sv2::{HandleMiningMessagesFromClientOwnedAsync, SupportedChannelTypes},
+    handlers_sv2::HandleMiningMessagesFromClientOwnedAsync,
     mining_sv2::*,
     parsers_sv2::{Tlv, TlvField},
     template_distribution_sv2::SubmitSolutionOwned,
@@ -60,10 +60,6 @@ fn extranonce_allocation_error_code(
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
     type Error = PoolError<error::ChannelManager>;
-
-    fn get_channel_type_for_client(&self, _client_id: Option<usize>) -> SupportedChannelTypes {
-        SupportedChannelTypes::GroupAndExtended
-    }
 
     fn is_work_selection_enabled_for_client(&self, _client_id: Option<usize>) -> bool {
         true
