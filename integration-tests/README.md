@@ -59,7 +59,7 @@ cargo run -p integration_tests_sv2 --release --bin mining_device -- \
  - To write your own integration tests using this library, you can install the library as follows:
 
 ```sh
-$ cargo add sv2-integration-tests --git
+$ cargo add integration_tests_sv2 --git https://github.com/stratum-mining/sv2-apps
 ```
 
 Then, create your own test by using the library as shown below:
@@ -134,6 +134,50 @@ async fn success_pool_template_provider_connection() {
     assert_tp_message!(sniffer.next_message_from_upstream(), SetNewPrevHash);
 }
 ```
+
+### Mocking a peer
+
+`MockUpstream` accepts every connection a client opens and answers each message through a handler
+shared by all of them. Returning an empty vector leaves the message unanswered, and a handler can
+return more than one frame:
+
+```rust
+use integration_tests_sv2::{
+    mock_roles::{MockUpstream, WithSetup, channel_open_success, setup_connection_success},
+    utils::get_available_address,
+};
+use stratum_apps::{
+    stratum_core::{
+        mining_sv2::OpenExtendedMiningChannelSuccessOwned,
+        parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, MiningOwned},
+    },
+    utils::types::OutboundFrame,
+};
+
+let address = get_available_address();
+let mock = MockUpstream::new(address, WithSetup::no()).with_handler(|message| match message {
+    AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(_)) => {
+        vec![setup_connection_success()]
+    }
+    AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(request)) => vec![
+        OutboundFrame::from_message(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccessOwned {
+                extranonce_size: 6,
+                ..channel_open_success(&request)
+            }),
+        ))
+        .expect("the success can be framed"),
+    ],
+    _ => vec![],
+});
+
+let _to_downstream = mock.start().await;
+```
+
+With `WithSetup::yes_with_defaults(...)` the mock answers `SetupConnection` itself, and the handler
+only sees the messages that follow it. `start` returns a handle whose `send` writes to every open
+connection. `next_connection` waits for the next connection and returns a `MockConnection` with
+`send`, `close` and `closed`; `stop_accepting` stops accepting new connections.
 
 ## License
 MIT OR Apache-2.0

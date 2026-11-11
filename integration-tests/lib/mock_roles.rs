@@ -3,13 +3,14 @@ use crate::{
     sniffer::Sniffer,
     start_sniffer,
     types::InboundFrame,
-    utils::{
-        CONNECT_RETRY_INTERVAL, create_downstream, create_upstream, message_from_frame,
-        wait_for_client,
-    },
+    utils::{CONNECT_RETRY_INTERVAL, create_downstream, create_upstream, message_from_frame},
 };
 use async_channel::{Receiver, Sender};
-use std::{convert::TryInto, net::SocketAddr, time::Duration};
+use std::{
+    convert::TryInto,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Seq064KOwned,
@@ -33,7 +34,11 @@ use stratum_apps::{
     },
     utils::types::OutboundFrame,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{Notify, watch},
+};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub enum WithSetup {
@@ -139,10 +144,89 @@ impl MockDownstream {
     }
 }
 
+/// Decides how a [`MockUpstream`] answers one message from a downstream. Returning an empty
+/// vector leaves the message unanswered.
+type MessageHandler = dyn Fn(AnyMessageOwned) -> Vec<OutboundFrame> + Send + Sync;
+
+type Connections = Arc<Mutex<Vec<(u64, Sender<OutboundFrame>)>>>;
+
+/// A running [`MockUpstream`].
+pub struct MockUpstreamHandle {
+    to_downstream: Sender<AnyMessageOwned>,
+    next_connection: Receiver<MockConnection>,
+    stop_accepting: CancellationToken,
+}
+
+impl MockUpstreamHandle {
+    /// Sends `message` to every connection the mock has open. Messages sent before the first
+    /// connection are delivered once it is set up.
+    pub async fn send(
+        &self,
+        message: AnyMessageOwned,
+    ) -> Result<(), async_channel::SendError<AnyMessageOwned>> {
+        self.to_downstream.send(message).await
+    }
+
+    /// Waits for the next connection the mock accepts to finish setting up.
+    pub async fn next_connection(&self) -> MockConnection {
+        self.next_connection
+            .recv()
+            .await
+            .expect("the mock upstream accepts a connection")
+    }
+
+    /// Stops accepting new connections. Connections already open stay open.
+    pub fn stop_accepting(&self) {
+        self.stop_accepting.cancel();
+    }
+}
+
+/// One connection accepted by a [`MockUpstream`].
+pub struct MockConnection {
+    id: u64,
+    sender: Sender<OutboundFrame>,
+    receiver: Receiver<InboundFrame>,
+    closed: watch::Receiver<bool>,
+}
+
+impl MockConnection {
+    /// The connection's ID, starting at 0 for the first connection the mock accepts.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Sends `message` on this connection alone.
+    pub async fn send(
+        &self,
+        message: AnyMessageOwned,
+    ) -> Result<(), async_channel::SendError<OutboundFrame>> {
+        self.sender
+            .send(OutboundFrame::from_message(message).expect("the message can be framed"))
+            .await
+    }
+
+    /// Closes the connection.
+    pub fn close(&self) {
+        self.sender.close();
+        self.receiver.close();
+    }
+
+    /// Waits until the connection is closed, by either side.
+    pub async fn closed(&self) {
+        let mut closed = self.closed.clone();
+        while !*closed.borrow() {
+            if closed.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// A mock upstream server.
 pub struct MockUpstream {
     listening_address: SocketAddr,
     setup: WithSetup,
-    disconnect_after_setup: Option<Duration>,
+    handler: Option<Arc<MessageHandler>>,
 }
 
 impl MockUpstream {
@@ -150,127 +234,207 @@ impl MockUpstream {
         Self {
             listening_address,
             setup,
-            disconnect_after_setup: None,
+            handler: None,
         }
     }
 
-    pub fn disconnect_after_setup_connection_success(mut self, delay: Duration) -> Self {
-        self.disconnect_after_setup = Some(delay);
+    /// Answers every message from every connection through `handler`, so a test decides what the
+    /// client gets back, malformed frames included. The handler is shared by all the connections
+    /// the mock accepts, and returning an empty vector leaves a message unanswered. When the mock
+    /// answers `SetupConnection` itself, the handler only sees the messages that follow it.
+    pub fn with_handler<H>(mut self, handler: H) -> Self
+    where
+        H: Fn(AnyMessageOwned) -> Vec<OutboundFrame> + Send + Sync + 'static,
+    {
+        self.handler = Some(Arc::new(handler));
         self
     }
 
-    pub async fn start(self) -> Sender<AnyMessageOwned> {
-        let listening_address = self.listening_address;
+    /// Starts accepting connections to the mock's address.
+    pub async fn start(self) -> MockUpstreamHandle {
+        let Self {
+            listening_address,
+            setup,
+            handler,
+        } = self;
 
-        let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessageOwned>();
+        let listener = TcpListener::bind(listening_address)
+            .await
+            .expect("the mock upstream's address is available");
+        let (to_downstream, downstream_messages) = async_channel::unbounded::<AnyMessageOwned>();
+        let (connection_sender, next_connection) = async_channel::unbounded::<MockConnection>();
+        let stop_accepting = CancellationToken::new();
+        let connections: Connections = Arc::new(Mutex::new(Vec::new()));
+        let connection_ready = Arc::new(Notify::new());
+        let setup = match setup {
+            WithSetup::Yes(setup) => Some((setup.protocol, setup.flags)),
+            WithSetup::No => None,
+        };
 
-        tokio::spawn(async move {
-            let (downstream_receiver, downstream_sender) =
-                create_downstream(wait_for_client(listening_address).await)
-                    .await
-                    .expect("Failed to connect to downstream");
-
-            if let WithSetup::Yes(expected_setup) = self.setup {
-                let expected_protocol = expected_setup.protocol;
-                let flags = expected_setup.flags;
-
-                let mut frame = downstream_receiver
-                    .recv()
-                    .await
-                    .expect("Failed to receive first message from downstream");
-                let (msg_type, msg) = message_from_frame(&mut frame);
-                info!(
-                    "MockUpstream: received message from downstream: {} {}",
-                    msg_type, msg
-                );
-
-                if msg_type == MESSAGE_TYPE_SETUP_CONNECTION {
-                    if let AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(
-                        setup_msg,
-                    )) = &msg
-                    {
-                        if setup_msg.protocol == expected_protocol {
-                            let success = AnyMessageOwned::Common(
-                                CommonMessagesOwned::SetupConnectionSuccess(
-                                    SetupConnectionSuccessOwned {
-                                        used_version: 2,
-                                        flags,
-                                    },
-                                ),
-                            );
-                            let success_type = success.message_type();
-                            let response_frame =
-                                MessageFrame::from_message(success, success_type, 0, false)
-                                    .expect("Failed to create SetupConnectionSuccess frame");
-                            downstream_sender
-                                .send(response_frame.into())
-                                .await
-                                .expect("Failed to send SetupConnectionSuccess");
-                            info!(
-                                "MockUpstream: sent SetupConnectionSuccess with flags {}",
-                                flags
-                            );
-
-                            if let Some(delay) = self.disconnect_after_setup {
-                                tokio::time::sleep(delay).await;
-                                downstream_sender.close();
-                                downstream_receiver.close();
-                                return;
-                            }
-                        } else {
-                            let error =
-                                AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(
-                                    SetupConnectionErrorOwned {
-                                        flags: 0,
-                                        error_code:
-                                            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
-                                                .to_string()
-                                                .into_bytes()
-                                                .try_into()
-                                                .unwrap(),
-                                    },
-                                ));
-                            let error_type = error.message_type();
-                            let response_frame =
-                                MessageFrame::from_message(error, error_type, 0, false)
-                                    .expect("Failed to create SetupConnectionError frame");
-                            downstream_sender
-                                .send(response_frame.into())
-                                .await
-                                .expect("Failed to send SetupConnectionError");
-                            info!(
-                                "MockUpstream: sent SetupConnectionError for wrong protocol {:?}, expected {:?}",
-                                setup_msg.protocol, expected_protocol
-                            );
-                        }
-                    }
-                } else {
-                    panic!("MockUpstream: first message must be SetupConnection, got {msg_type}");
+        tokio::spawn({
+            let connections = Arc::clone(&connections);
+            let connection_ready = Arc::clone(&connection_ready);
+            let stop_accepting = stop_accepting.clone();
+            async move {
+                let mut connection_id = 0;
+                loop {
+                    let stream = tokio::select! {
+                        _ = stop_accepting.cancelled() => break,
+                        accepted = listener.accept() => accepted.expect("the client connects").0,
+                    };
+                    tokio::spawn(run_connection(
+                        stream,
+                        connection_id,
+                        ConnectionContext {
+                            setup,
+                            connections: Arc::clone(&connections),
+                            connection_ready: Arc::clone(&connection_ready),
+                            handler: handler.clone(),
+                            connection_sender: connection_sender.clone(),
+                        },
+                    ));
+                    connection_id += 1;
                 }
             }
+        });
 
-            tokio::spawn(async move {
-                while let Ok(mut frame) = downstream_receiver.recv().await {
-                    let (msg_type, msg) = message_from_frame(&mut frame);
-                    info!(
-                        "MockUpstream: received message from downstream: {} {}",
-                        msg_type, msg
-                    );
-                }
-            });
-
-            while let Ok(message) = proxy_receiver.recv().await {
-                let message_type = message.message_type();
-                let frame = MessageFrame::from_message(message, message_type, 0, false)
-                    .expect("Failed to create frame from message");
-                if downstream_sender.send(frame.into()).await.is_err() {
+        tokio::spawn(async move {
+            while let Ok(message) = downstream_messages.recv().await {
+                loop {
+                    let senders = connections
+                        .lock()
+                        .expect("the mock upstream's connections are not poisoned")
+                        .clone();
+                    if senders.is_empty() {
+                        connection_ready.notified().await;
+                        continue;
+                    }
+                    for (_, sender) in senders {
+                        let frame = OutboundFrame::from_message(message.clone())
+                            .expect("the message can be framed");
+                        _ = sender.send(frame).await;
+                    }
                     break;
                 }
             }
         });
 
-        proxy_sender
+        MockUpstreamHandle {
+            to_downstream,
+            next_connection,
+            stop_accepting,
+        }
     }
+}
+
+struct ConnectionContext {
+    setup: Option<(Protocol, u32)>,
+    connections: Connections,
+    connection_ready: Arc<Notify>,
+    handler: Option<Arc<MessageHandler>>,
+    connection_sender: Sender<MockConnection>,
+}
+
+async fn run_connection(stream: TcpStream, connection_id: u64, context: ConnectionContext) {
+    let ConnectionContext {
+        setup,
+        connections,
+        connection_ready,
+        handler,
+        connection_sender,
+    } = context;
+    let (receiver, sender) = create_downstream(stream)
+        .await
+        .expect("the noise handshake completes");
+    let (closed_sender, closed) = watch::channel(false);
+
+    if let Some((expected_protocol, flags)) = setup {
+        let mut frame = receiver
+            .recv()
+            .await
+            .expect("the client sends a SetupConnection");
+        let (msg_type, msg) = message_from_frame(&mut frame);
+        info!("MockUpstream: received message from downstream: {msg_type} {msg}");
+        let AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(setup_msg)) = &msg else {
+            panic!("MockUpstream: first message must be SetupConnection, got {msg_type}");
+        };
+
+        if setup_msg.protocol == expected_protocol {
+            let success = AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionSuccess(
+                SetupConnectionSuccessOwned {
+                    used_version: 2,
+                    flags,
+                },
+            ));
+            let success_type = success.message_type();
+            let response_frame = MessageFrame::from_message(success, success_type, 0, false)
+                .expect("Failed to create SetupConnectionSuccess frame");
+
+            sender
+                .send(response_frame.into())
+                .await
+                .expect("Failed to send SetupConnectionSuccess");
+            info!("MockUpstream: sent SetupConnectionSuccess with flags {flags}");
+        } else {
+            let error = AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(
+                SetupConnectionErrorOwned {
+                    flags: 0,
+                    error_code: ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL
+                        .to_string()
+                        .into_bytes()
+                        .try_into()
+                        .unwrap(),
+                },
+            ));
+
+            let error_type = error.message_type();
+            let response_frame = MessageFrame::from_message(error, error_type, 0, false)
+                .expect("Failed to create SetupConnectionError frame");
+
+            sender
+                .send(response_frame.into())
+                .await
+                .expect("Failed to send SetupConnectionError");
+
+            info!(
+                "MockUpstream: sent SetupConnectionError for a wrong protocol {:?}, expected {:?}",
+                setup_msg.protocol, expected_protocol
+            );
+        }
+    }
+
+    connections
+        .lock()
+        .expect("the mock upstream's connections are not poisoned")
+        .push((connection_id, sender.clone()));
+    connection_ready.notify_one();
+
+    _ = connection_sender
+        .send(MockConnection {
+            id: connection_id,
+            sender: sender.clone(),
+            receiver: receiver.clone(),
+            closed,
+        })
+        .await;
+
+    'connection: while let Ok(mut frame) = receiver.recv().await {
+        let (msg_type, msg) = message_from_frame(&mut frame);
+        info!("MockUpstream: received message from downstream: {msg_type} {msg}");
+        if let Some(handler) = &handler {
+            for reply in handler(msg) {
+                if sender.send(reply).await.is_err() {
+                    break 'connection;
+                }
+            }
+        }
+    }
+
+    connections
+        .lock()
+        .expect("the mock upstream's connections are not poisoned")
+        .retain(|(id, _)| *id != connection_id);
+    _ = closed_sender.send(true);
 }
 
 /// Accepts every connection a client opens to `address` and answers its `SetupConnection` with
@@ -357,7 +521,7 @@ pub fn template(template_id: u64, future_template: bool) -> NewTemplateOwned {
 }
 
 /// Sends `template` from the mock Template Provider behind `tp`.
-pub async fn send_template(tp: &Sender<AnyMessageOwned>, template: NewTemplateOwned) {
+pub async fn send_template(tp: &MockUpstreamHandle, template: NewTemplateOwned) {
     tp.send(AnyMessageOwned::TemplateDistribution(
         TemplateDistributionOwned::NewTemplate(template),
     ))
@@ -367,7 +531,7 @@ pub async fn send_template(tp: &Sender<AnyMessageOwned>, template: NewTemplateOw
 
 /// Sends, from the mock Template Provider behind `tp`, future template `template_id` and the
 /// prevhash activating it.
-pub async fn send_chain_tip(tp: &Sender<AnyMessageOwned>, template_id: u64) {
+pub async fn send_chain_tip(tp: &MockUpstreamHandle, template_id: u64) {
     send_template(tp, template(template_id, true)).await;
     tp.send(AnyMessageOwned::TemplateDistribution(
         TemplateDistributionOwned::SetNewPrevHash(SetNewPrevHashOwned {
@@ -569,8 +733,12 @@ pub async fn next_message_type(receiver: &Receiver<InboundFrame>) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{interceptor::MessageDirection, start_sniffer};
-    use std::net::TcpListener;
+    use crate::{interceptor::MessageDirection, start_sniffer, utils::get_available_address};
+    use std::{
+        net::TcpListener,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
     use stratum_apps::stratum_core::{
         common_messages_sv2::{
             MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
@@ -578,6 +746,130 @@ mod tests {
         },
         mining_sv2::MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
     };
+
+    #[tokio::test]
+    async fn mock_upstream_answers_every_connection_through_one_handler() {
+        let address = get_available_address();
+        let handled = Arc::new(AtomicUsize::new(0));
+        let handler_count = Arc::clone(&handled);
+
+        let mock_upstream = MockUpstream::new(
+            address,
+            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        )
+        .with_handler(move |message| {
+            handler_count.fetch_add(1, Ordering::SeqCst);
+            match message {
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(request)) => {
+                    vec![
+                        OutboundFrame::from_message(AnyMessageOwned::Mining(
+                            MiningOwned::OpenExtendedMiningChannelSuccess(channel_open_success(
+                                &request,
+                            )),
+                        ))
+                        .expect("OpenExtendedMiningChannel.Success can be framed"),
+                    ]
+                }
+                _ => vec![],
+            }
+        })
+        .start()
+        .await;
+
+        for expected_id in 0..2 {
+            let (receiver, sender) = connect_closable_downstream(address).await;
+            let connection = mock_upstream.next_connection().await;
+            assert_eq!(connection.id(), expected_id);
+
+            send_message(&sender, extended_channel_request([0xff_u8; 32])).await;
+            assert_eq!(
+                next_message_type(&receiver).await,
+                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+            );
+        }
+
+        assert_eq!(
+            handled.load(Ordering::SeqCst),
+            2,
+            "one handler serves every connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_upstream_answers_setup_connection_through_its_handler() {
+        let address = get_available_address();
+        let _to_downstream = MockUpstream::new(address, WithSetup::no())
+            .with_handler(|message| match message {
+                AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(_)) => {
+                    vec![setup_connection_success()]
+                }
+                _ => vec![],
+            })
+            .start()
+            .await;
+
+        let (_receiver, _sender) = connect_closable_downstream(address).await;
+    }
+
+    #[tokio::test]
+    async fn mock_upstream_reports_closed_connections() {
+        let address = get_available_address();
+        let mock_upstream = MockUpstream::new(
+            address,
+            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        )
+        .start()
+        .await;
+
+        let (_receiver, sender) = connect_closable_downstream(address).await;
+        let connection = mock_upstream.next_connection().await;
+        assert_eq!(connection.id(), 0);
+        sender.close();
+
+        tokio::time::timeout(Duration::from_secs(5), connection.closed())
+            .await
+            .expect("the mock reports the closed connection");
+    }
+
+    #[tokio::test]
+    async fn mock_upstream_sends_on_one_connection() {
+        let address = get_available_address();
+        let mock_upstream = MockUpstream::new(
+            address,
+            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        )
+        .start()
+        .await;
+
+        let (first_receiver, _first_sender) = connect_closable_downstream(address).await;
+        let first_connection = mock_upstream.next_connection().await;
+        let (second_receiver, _second_sender) = connect_closable_downstream(address).await;
+        let _second_connection = mock_upstream.next_connection().await;
+
+        first_connection
+            .send(AnyMessageOwned::Common(
+                CommonMessagesOwned::SetupConnectionSuccess(SetupConnectionSuccessOwned {
+                    used_version: 2,
+                    flags: 0,
+                }),
+            ))
+            .await
+            .expect("the connection is open");
+
+        assert_eq!(
+            next_message_type(&first_receiver).await,
+            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                next_message_type(&second_receiver)
+            )
+            .await
+            .is_err(),
+            "a message sent on one connection must not reach another"
+        );
+    }
 
     #[tokio::test]
     async fn test_implicit_setup_connection() {

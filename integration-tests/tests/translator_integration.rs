@@ -2576,11 +2576,10 @@ async fn multiple_tproxy_sessions() {
 async fn test_translator_fallback_during_abrupt_disconnection() {
     start_tracing();
     let primary_addr = get_available_address();
-    let _primary_upstream = MockUpstream::new(
+    let primary_upstream = MockUpstream::new(
         primary_addr,
         WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
     )
-    .disconnect_after_setup_connection_success(Duration::from_secs(1))
     .start()
     .await;
 
@@ -2599,6 +2598,11 @@ async fn test_translator_fallback_during_abrupt_disconnection() {
         false,
     )
     .await;
+
+    let primary_connection = primary_upstream.next_connection().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    primary_upstream.stop_accepting();
+    primary_connection.close();
 
     pool_translator_sniffer_2
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)

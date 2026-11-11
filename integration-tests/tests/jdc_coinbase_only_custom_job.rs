@@ -2,7 +2,7 @@ use async_channel::Sender;
 use integration_tests_sv2::{
     POOL_COINBASE_REWARD_ADDRESS,
     interceptor::MessageDirection,
-    mock_roles::{MockDownstream, MockUpstream, WithSetup},
+    mock_roles::{MockDownstream, MockUpstream, MockUpstreamHandle, WithSetup},
     sniffer::Sniffer,
     utils::get_available_address,
 };
@@ -275,9 +275,9 @@ fn assert_pays_template_reward(
 struct MockedJdc {
     jdc: JobDeclaratorClient,
     address: SocketAddr,
-    tp: Sender<AnyMessageOwned>,
-    pool: Sender<AnyMessageOwned>,
-    jds: Sender<AnyMessageOwned>,
+    tp: MockUpstreamHandle,
+    pool: MockUpstreamHandle,
+    jds: MockUpstreamHandle,
     tp_sniffer: Sniffer<'static>,
     pool_sniffer: Sniffer<'static>,
     jds_sniffer: Sniffer<'static>,

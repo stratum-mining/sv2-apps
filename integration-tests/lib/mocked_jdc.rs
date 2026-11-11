@@ -1,11 +1,10 @@
 use crate::{
     interceptor::MessageDirection,
-    mock_roles::{MockUpstream, SniffedDownstream, WithSetup, send_chain_tip},
+    mock_roles::{MockUpstream, MockUpstreamHandle, SniffedDownstream, WithSetup, send_chain_tip},
     sniffer::Sniffer,
     start_jdc_with_user_identities, start_sniffer, sv2_tp_config,
     utils::get_available_address,
 };
-use async_channel::Sender;
 use jd_client_sv2::JobDeclaratorClient;
 use std::{net::SocketAddr, time::Duration};
 use stratum_apps::stratum_core::{
@@ -23,8 +22,8 @@ use stratum_apps::stratum_core::{
 pub struct MockedJdc {
     pub jdc: JobDeclaratorClient,
     pub address: SocketAddr,
-    tp: Sender<AnyMessageOwned>,
-    pool: Sender<AnyMessageOwned>,
+    tp: MockUpstreamHandle,
+    pool: MockUpstreamHandle,
     pub pool_sniffer: Sniffer<'static>,
     pub next_pool_sniffer: Sniffer<'static>,
 }
