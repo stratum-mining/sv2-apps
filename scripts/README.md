@@ -64,6 +64,15 @@ restore-cargo-toml
 
 ### 📊 Testing & Coverage Scripts
 
+#### Script regression tests
+Run offline with Python 3, Bash, and jq installed. Cargo publishing and crates.io
+requests are stubbed out:
+```bash
+python3 -B -m unittest discover -s scripts/tests -v
+```
+
+These tests also run in CI and `clippy-fmt-and-test.sh`.
+
 #### `coverage.sh`
 **Generate test coverage reports**
 - Uses cargo-tarpaulin for coverage analysis

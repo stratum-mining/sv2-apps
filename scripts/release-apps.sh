@@ -11,7 +11,7 @@ CRATE_DIR="$1"
 
 echo "Publishing crate in directory: $CRATE_DIR"
 
-cd "$CRATE_DIR"
+cd "$CRATE_DIR" || exit 1
 
 CARGO_COMMAND="cargo publish"
 

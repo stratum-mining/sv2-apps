@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Test repository scripts
+        run: python3 -B -m unittest discover -s scripts/tests -v
       - name: Install capnp dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y capnproto libcapnp-dev
