@@ -14,9 +14,7 @@ use stratum_apps::{
         bitcoin::{BlockHash, Target},
         channels_sv2::client::MAX_SEEN_SHARES,
         sv1_api::{
-            json_rpc,
-            methods::Client2Server,
-            server_to_client,
+            ClientRequest, Notify, SetExtranonce, json_rpc,
             utils::{Extranonce, HexU32Be},
         },
     },
@@ -35,10 +33,10 @@ use tracing::{debug, error, info, warn};
 /// messages; protocol-level server-to-client message types remain in `sv1_api`.
 #[derive(Clone, Debug)]
 pub(super) enum Sv1ServerEvent {
-    Notify(Arc<server_to_client::Notify>),
+    Notify(Arc<Notify>),
     SetDifficulty(Sv1Difficulty),
     SetExtranonce {
-        message: server_to_client::SetExtranonce,
+        message: SetExtranonce,
         /// Decided by the server in the same task that builds and records subscribe responses.
         /// Otherwise the prefix is already included in the upcoming subscribe response.
         notify_miner: bool,
@@ -214,10 +212,10 @@ pub struct DownstreamData {
     pub sv1_username: String,
     pub sv1_worker_name: String,
     pub(super) cached_set_difficulty: Option<Sv1Difficulty>,
-    pub cached_notify: Option<Arc<server_to_client::Notify>>,
+    pub cached_notify: Option<Arc<Notify>>,
     /// Prefix notification paired with the next deliverable job. Capability is checked only
     /// when that job is sent, allowing the miner to announce support during setup.
-    pub(super) cached_set_extranonce: Option<server_to_client::SetExtranonce>,
+    pub(super) cached_set_extranonce: Option<SetExtranonce>,
     pub(super) session_state: Sv1SessionState,
     /// Per-job downstream state retained for late-share validation under the current chain tip.
     pub(super) job_validation_contexts: Sv1JobStore<Sv1JobValidationContext>,
@@ -232,7 +230,7 @@ pub struct DownstreamData {
     pub(super) advertised_target: Option<Target>,
     pub stable_hashrate: bool,
     // Queue of Sv1 handshake messages received while waiting for SV2 channel to open
-    pub queued_sv1_handshake_messages: Vec<Client2Server>,
+    pub queued_sv1_handshake_messages: Vec<ClientRequest>,
     // Stores pending shares to be sent to the sv1_server
     pub pending_share: Option<SubmitShareWithChannelId>,
     // Exact target of the miner's upstream channel. The miner is never advertised a harder
@@ -291,7 +289,7 @@ impl DownstreamData {
         }
     }
 
-    fn record_job_validation_context(&mut self, notify: &server_to_client::Notify) {
+    fn record_job_validation_context(&mut self, notify: &Notify) {
         if notify.clean_jobs {
             self.accepted_share_hashes.clear();
         }
@@ -581,8 +579,8 @@ impl Downstream {
                         // construction. Reapplying this event could overwrite a newer prefix
                         // already included in that response.
                         if notify_miner {
-                            data.extranonce1 = message.extra_nonce1.clone();
-                            data.extranonce2_len = message.extra_nonce2_size;
+                            data.extranonce1 = message.extranonce1.clone();
+                            data.extranonce2_len = message.extranonce2_size;
                             data.cached_set_extranonce = Some(message);
                         }
                         // A cached job predates this transition and has not reached the miner.
@@ -653,10 +651,7 @@ impl Downstream {
     /// Sends pending difficulty, then the required extranonce immediately before its job.
     /// A miner that has not announced prefix-update support is disconnected without advertising
     /// work it would hash with the wrong extranonce. No capability timeout is introduced.
-    async fn send_job(
-        &self,
-        notify: Arc<server_to_client::Notify>,
-    ) -> TproxyResult<(), error::Downstream> {
+    async fn send_job(&self, notify: Arc<Notify>) -> TproxyResult<(), error::Downstream> {
         let messages = self
             .downstream_data
             .with(|data| {
@@ -705,22 +700,22 @@ impl Downstream {
 mod tests {
     use super::*;
     use async_channel::unbounded;
-    use stratum_apps::stratum_core::{bitcoin::hashes::Hash, sv1_api::json_rpc::Message};
+    use stratum_apps::stratum_core::{
+        bitcoin::hashes::Hash,
+        sv1_api::{ServerNotification, json_rpc::Message},
+    };
 
     // JSON fixtures exercise the same typed events as production, without parsing internal messages
     // on the per-miner job delivery path.
     impl From<json_rpc::Message> for Sv1ServerEvent {
         fn from(message: json_rpc::Message) -> Self {
-            let json_rpc::Message::Notification(notification) = &message else {
+            let json_rpc::Message::Request(request) = message else {
                 panic!("expected a notification fixture");
             };
-            match notification.method.as_str() {
-                "mining.notify" => Self::Notify(Arc::new(
-                    server_to_client::Notify::try_from(notification.clone()).unwrap(),
-                )),
-                "mining.set_extranonce" => Self::SetExtranonce {
-                    message: server_to_client::SetExtranonce::try_from(notification.clone())
-                        .unwrap(),
+            match ServerNotification::try_from(request).unwrap() {
+                ServerNotification::Notify(notify) => Self::Notify(Arc::new(notify)),
+                ServerNotification::SetExtranonce(message) => Self::SetExtranonce {
+                    message,
                     notify_miner: true,
                 },
                 _ => panic!("unexpected notification fixture"),
@@ -786,6 +781,16 @@ mod tests {
             "params": [1.0]
         }))
         .unwrap()
+    }
+
+    fn notify_from(message: Message) -> Notify {
+        let Message::Request(request) = message else {
+            panic!("expected mining.notify");
+        };
+        match ServerNotification::try_from(request).unwrap() {
+            ServerNotification::Notify(notify) => notify,
+            other => panic!("expected mining.notify, got {other:?}"),
+        }
     }
 
     fn assert_message_eq(actual: &Message, expected: &Message) {
@@ -963,10 +968,7 @@ mod tests {
             &queued_difficulty.message,
         );
         let forwarded_notify = downstream_sv1_receiver.recv().await.unwrap();
-        let Message::Notification(notification) = &forwarded_notify else {
-            panic!("expected mining.notify");
-        };
-        let forwarded_notify = server_to_client::Notify::try_from(notification.clone()).unwrap();
+        let forwarded_notify = notify_from(forwarded_notify);
         assert_eq!(forwarded_notify.job_id, "next");
         assert!(!forwarded_notify.clean_jobs);
     }
@@ -1013,10 +1015,7 @@ mod tests {
         }
         downstream_sv1_receiver.recv().await.unwrap();
         let forwarded_notify = downstream_sv1_receiver.recv().await.unwrap();
-        let Message::Notification(notification) = forwarded_notify else {
-            panic!("expected mining.notify");
-        };
-        let forwarded_notify = server_to_client::Notify::try_from(notification).unwrap();
+        let forwarded_notify = notify_from(forwarded_notify);
         assert!(!forwarded_notify.clean_jobs);
 
         downstream
@@ -1106,12 +1105,10 @@ mod tests {
             .await
             .unwrap();
         sv1_server_message_sender
-            .send(Sv1ServerEvent::from(Message::from(
-                server_to_client::SetExtranonce {
-                    extra_nonce1: new_extranonce.clone(),
-                    extra_nonce2_size: 4,
-                },
-            )))
+            .send(Sv1ServerEvent::from(Message::from(SetExtranonce {
+                extranonce1: new_extranonce.clone(),
+                extranonce2_size: 4,
+            })))
             .await
             .unwrap();
 
@@ -1185,12 +1182,10 @@ mod tests {
             })
             .unwrap();
         sv1_server_message_sender
-            .send(Sv1ServerEvent::from(Message::from(
-                server_to_client::SetExtranonce {
-                    extra_nonce1: new_extranonce.clone(),
-                    extra_nonce2_size: 6,
-                },
-            )))
+            .send(Sv1ServerEvent::from(Message::from(SetExtranonce {
+                extranonce1: new_extranonce.clone(),
+                extranonce2_size: 6,
+            })))
             .await
             .unwrap();
 
@@ -1205,8 +1200,8 @@ mod tests {
         assert_message_eq(&downstream_sv1_receiver.recv().await.unwrap(), &old_notify);
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
-            Message::Notification(notification)
-                if notification.method == "mining.set_extranonce"
+            Message::Request(notification)
+                if notification.method == json_rpc::Method::SetExtranonce
         ));
         assert_message_eq(&downstream_sv1_receiver.recv().await.unwrap(), &new_notify);
         downstream
@@ -1267,14 +1262,14 @@ mod tests {
         let first_extranonce: Extranonce = vec![1, 2, 3, 4].try_into().unwrap();
         let second_extranonce: Extranonce = vec![5, 6, 7, 8].try_into().unwrap();
         for message in [
-            Message::from(server_to_client::SetExtranonce {
-                extra_nonce1: first_extranonce.clone(),
-                extra_nonce2_size: 4,
+            Message::from(SetExtranonce {
+                extranonce1: first_extranonce.clone(),
+                extranonce2_size: 4,
             }),
             notify_with_clean_jobs("first", false),
-            Message::from(server_to_client::SetExtranonce {
-                extra_nonce1: second_extranonce.clone(),
-                extra_nonce2_size: 4,
+            Message::from(SetExtranonce {
+                extranonce1: second_extranonce.clone(),
+                extranonce2_size: 4,
             }),
             notify_with_clean_jobs("second", false),
         ] {
@@ -1349,9 +1344,9 @@ mod tests {
             .unwrap();
         sv1_server_message_sender
             .send(Sv1ServerEvent::SetExtranonce {
-                message: server_to_client::SetExtranonce {
-                    extra_nonce1: vec![9; 4].try_into().unwrap(),
-                    extra_nonce2_size: 4,
+                message: SetExtranonce {
+                    extranonce1: vec![9; 4].try_into().unwrap(),
+                    extranonce2_size: 4,
                 },
                 notify_miner: false,
             })

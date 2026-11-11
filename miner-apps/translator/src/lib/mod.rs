@@ -19,8 +19,6 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-pub use stratum_apps::stratum_core::sv1_api::server_to_client;
-
 use config::TranslatorConfig;
 
 use crate::utils::TproxyMode;

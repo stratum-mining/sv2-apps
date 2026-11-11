@@ -26,7 +26,7 @@ use stratum_apps::{
         noise_sv2,
         parsers_sv2::{self, ParserError, TlvError},
         stratum_translation,
-        sv1_api::{self, server_to_client::SetDifficulty},
+        sv1_api::{self, SetDifficulty},
     },
     utils::types::{
         CanDisconnect, CanFallback, CanShutdown, ChannelId, DownstreamId, ExtensionType,
