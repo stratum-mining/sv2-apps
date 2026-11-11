@@ -1260,9 +1260,12 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 SV1MessageFilter::WithMessageName("mining.notify"),
                 MessageDirection::ToDownstream,
                 |msg| match msg {
-                    sv1_api::Message::Notification(notif) => {
-                        let notify = sv1_api::server_to_client::Notify::try_from(notif.clone())
-                            .expect("Failed to parse mining.notify");
+                    sv1_api::Message::Request(notif) => {
+                        let Ok(sv1_api::ServerNotification::Notify(notify)) =
+                            sv1_api::ServerNotification::try_from(notif.clone())
+                        else {
+                            panic!("Failed to parse mining.notify");
+                        };
                         prevhash_before_chain_tip_update = Some(notify.prev_hash.clone());
                     }
                     _ => panic!("Expected Notification for mining.notify"),
@@ -1344,9 +1347,12 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 SV1MessageFilter::WithMessageName("mining.notify"),
                 MessageDirection::ToDownstream,
                 |msg| match msg {
-                    sv1_api::Message::Notification(notif) => {
-                        let notify = sv1_api::server_to_client::Notify::try_from(notif.clone())
-                            .expect("Failed to parse mining.notify");
+                    sv1_api::Message::Request(notif) => {
+                        let Ok(sv1_api::ServerNotification::Notify(notify)) =
+                            sv1_api::ServerNotification::try_from(notif.clone())
+                        else {
+                            panic!("Failed to parse mining.notify");
+                        };
                         let prevhash_after_chain_tip_update = notify.prev_hash.clone();
 
                         // assert that the prevhash changed after the chain tip update

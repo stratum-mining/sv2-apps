@@ -3,7 +3,7 @@ use async_channel::{Receiver, Sender};
 use std::{collections::VecDeque, net::SocketAddr, sync::Arc};
 use stratum_apps::{
     network_helpers::sv1_connection::ConnectionSV1,
-    stratum_core::sv1_api::{self, server_to_client},
+    stratum_core::sv1_api::{self, Id, ServerNotification},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -172,18 +172,17 @@ impl SnifferSV1 {
         };
 
         // Poll on exactly the predicate this function fetches with, rather than waiting on
-        // `wait_for_message`'s looser matcher and then re-querying. That matcher also accepts an
-        // `OkResponse` whose serialized form merely *contains* the filter string, so it can report
-        // a match that the strict predicates below cannot find — a window the previous 1s poll
-        // interval happened to step over rather than avoid.
+        // `wait_for_message`'s looser matcher and then re-querying. That matcher also accepts a
+        // success response whose serialized form merely *contains* the filter string, so it can
+        // report a match that the strict predicates below cannot find — a window the
+        // previous 1s poll interval happened to step over rather than avoid.
         let now = std::time::Instant::now();
         let message = loop {
             let found = match &filter {
                 SV1MessageFilter::WithMessageName(method_name) => {
                     aggregator
                         .get_last_matching(|msg| match msg {
-                            sv1_api::Message::StandardRequest(req) => req.method == *method_name,
-                            sv1_api::Message::Notification(notif) => notif.method == *method_name,
+                            sv1_api::Message::Request(req) => req.method.as_str() == *method_name,
                             _ => false,
                         })
                         .await
@@ -191,10 +190,8 @@ impl SnifferSV1 {
                 SV1MessageFilter::WithMessageId(method_id) => {
                     aggregator
                         .get_last_matching(|msg| match msg {
-                            sv1_api::Message::StandardRequest(req) => req.id == *method_id,
-                            sv1_api::Message::OkResponse(req) => req.id == *method_id,
-                            sv1_api::Message::ErrorResponse(req) => req.id == *method_id,
-                            _ => false,
+                            sv1_api::Message::Request(req) => req.id.as_ref() == Some(method_id),
+                            sv1_api::Message::Response(res) => res.id.as_ref() == Some(method_id),
                         })
                         .await
                 }
@@ -252,7 +249,7 @@ impl SnifferSV1 {
 #[derive(Debug)]
 pub enum SV1MessageFilter {
     WithMessageName(&'static str),
-    WithMessageId(u64),
+    WithMessageId(Id),
 }
 
 /// Represents a SV1 message manager.
@@ -287,28 +284,18 @@ impl MessagesAggregatorSV1 {
         };
 
         messages.iter().any(|msg| match msg {
-            sv1_api::Message::StandardRequest(req) => req.method == *target,
-            sv1_api::Message::Notification(notif) => notif.method == *target,
-            sv1_api::Message::OkResponse(res) => {
-                let id_match = res.id.to_string() == *target;
-
-                if id_match {
-                    true
-                } else if let Ok(serialized) = corepc_node::serde_json::to_string(&res) {
-                    expected_msg.iter().all(|m| serialized.contains(m))
-                } else {
-                    false
+            sv1_api::Message::Request(req) => req.method.as_str() == *target,
+            sv1_api::Message::Response(res) => {
+                let id_match = res.id.as_ref().is_some_and(|id| id.to_string() == *target);
+                match &res.result {
+                    Ok(_) => {
+                        id_match
+                            || corepc_node::serde_json::to_string(&res).is_ok_and(|serialized| {
+                                expected_msg.iter().all(|m| serialized.contains(m))
+                            })
+                    }
+                    Err(error) => id_match || error.message.contains(*target),
                 }
-            }
-            sv1_api::Message::ErrorResponse(res) => {
-                let id_match = res.id.to_string() == *target;
-                let error_msg_match = res
-                    .error
-                    .as_ref()
-                    .map(|e| e.message.contains(*target))
-                    .unwrap_or(false);
-
-                id_match || error_msg_match
             }
         })
     }
@@ -318,11 +305,11 @@ impl MessagesAggregatorSV1 {
     async fn has_keepalive_notify(&self) -> bool {
         let messages = self.messages.lock().await;
         messages.iter().any(|msg| {
-            if let sv1_api::Message::Notification(notif) = msg {
-                if notif.method == "mining.notify" {
-                    if let Ok(notify) = server_to_client::Notify::try_from(notif.clone()) {
-                        return notify.job_id.contains('#');
-                    }
+            if let sv1_api::Message::Request(notif) = msg {
+                if let Ok(ServerNotification::Notify(notify)) =
+                    ServerNotification::try_from(notif.clone())
+                {
+                    return notify.job_id.contains('#');
                 }
             }
             false
