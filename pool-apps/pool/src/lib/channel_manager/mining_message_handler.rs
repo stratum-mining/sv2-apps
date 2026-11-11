@@ -11,7 +11,6 @@ use stratum_apps::stratum_core::{
 };
 
 use stratum_apps::stratum_core::{
-    binary_sv2::Str0255,
     bitcoin::Target,
     channels_sv2::{
         Vardiff, VardiffState,
@@ -68,14 +67,6 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
 
     fn is_work_selection_enabled_for_client(&self, _client_id: Option<usize>) -> bool {
         true
-    }
-
-    fn is_client_authorized(
-        &self,
-        _client_id: Option<usize>,
-        _user_identity: &Str0255,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
     }
 
     fn get_negotiated_extensions_with_client(
