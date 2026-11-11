@@ -16,7 +16,7 @@ use stratum_apps::{
         binary_sv2::Seq064KOwned,
         codec_sv2::{MessageFrame, SerializedFrame},
         common_messages_sv2::{
-            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
+            ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL,
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
             SetupConnectionOwned, SetupConnectionSuccessOwned,
         },
@@ -435,43 +435,6 @@ async fn run_connection(stream: TcpStream, connection_id: u64, context: Connecti
         .expect("the mock upstream's connections are not poisoned")
         .retain(|(id, _)| *id != connection_id);
     _ = closed_sender.send(true);
-}
-
-/// Accepts every connection a client opens to `address` and answers its `SetupConnection` with
-/// `reply`, so a test decides what the client gets back, malformed frames included. Each
-/// connection is reported on the returned receiver once the client has closed it.
-pub async fn answer_setup_connections(
-    address: SocketAddr,
-    reply: fn() -> OutboundFrame,
-) -> Receiver<()> {
-    let listener = TcpListener::bind(address)
-        .await
-        .expect("the mock role's address is available");
-    let (closed_sender, closed_receiver) = async_channel::unbounded();
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = listener.accept().await.expect("the client connects");
-            let closed_sender = closed_sender.clone();
-            tokio::spawn(async move {
-                let (receiver, sender) = create_downstream(stream)
-                    .await
-                    .expect("the noise handshake completes");
-                let setup_connection = receiver
-                    .recv()
-                    .await
-                    .expect("the client sends SetupConnection");
-                assert_eq!(
-                    setup_connection.header().msg_type(),
-                    MESSAGE_TYPE_SETUP_CONNECTION
-                );
-                sender.send(reply()).await.expect("the reply is sent");
-                // The stream ends once the client closes the connection.
-                while receiver.recv().await.is_ok() {}
-                _ = closed_sender.send(()).await;
-            });
-        }
-    });
-    closed_receiver
 }
 
 /// A `SetupConnection.Success` accepting version 2 with no flags.

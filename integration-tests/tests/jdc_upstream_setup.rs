@@ -1,16 +1,29 @@
 use integration_tests_sv2::{
     interceptor::MessageDirection,
     mock_roles::{
-        MockUpstream, WithSetup, answer_setup_connections, setup_connection_success,
-        truncated_setup_connection_success,
+        MockUpstream, WithSetup, setup_connection_success, truncated_setup_connection_success,
     },
     start_jdc, start_sniffer, start_tracing, sv2_tp_config,
     utils::get_available_address,
 };
 use std::time::Duration;
-use stratum_apps::stratum_core::common_messages_sv2::{
-    MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol,
+use stratum_apps::{
+    stratum_core::{
+        common_messages_sv2::{MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol},
+        parsers_sv2::{AnyMessageOwned, CommonMessagesOwned},
+    },
+    utils::types::OutboundFrame,
 };
+
+/// Answers the first `SetupConnection` of every connection with `reply`.
+fn answer_setup(
+    reply: fn() -> OutboundFrame,
+) -> impl Fn(AnyMessageOwned) -> Vec<OutboundFrame> + Send + Sync + 'static {
+    move |message| match message {
+        AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(_)) => vec![reply()],
+        _ => vec![],
+    }
+}
 
 // A Pool whose `SetupConnection.Success` can't be parsed fails its Pool/JDS pair: JDC moves on to
 // the next configured pair instead of starting without a Pool.
@@ -27,7 +40,10 @@ async fn jdc_moves_to_the_next_pair_when_the_pool_setup_answer_is_malformed() {
     .await;
 
     let malformed_pool_addr = get_available_address();
-    answer_setup_connections(malformed_pool_addr, truncated_setup_connection_success).await;
+    MockUpstream::new(malformed_pool_addr, WithSetup::no())
+        .with_handler(answer_setup(truncated_setup_connection_success))
+        .start()
+        .await;
     let first_jds_addr = get_available_address();
     MockUpstream::new(
         first_jds_addr,
@@ -91,10 +107,15 @@ async fn jdc_moves_to_the_next_pair_when_the_jds_setup_answer_is_malformed() {
     .await;
 
     let first_pool_addr = get_available_address();
-    let first_pool_closed =
-        answer_setup_connections(first_pool_addr, setup_connection_success).await;
+    let first_pool = MockUpstream::new(first_pool_addr, WithSetup::no())
+        .with_handler(answer_setup(setup_connection_success))
+        .start()
+        .await;
     let malformed_jds_addr = get_available_address();
-    answer_setup_connections(malformed_jds_addr, truncated_setup_connection_success).await;
+    MockUpstream::new(malformed_jds_addr, WithSetup::no())
+        .with_handler(answer_setup(truncated_setup_connection_success))
+        .start()
+        .await;
 
     let next_pool_addr = get_available_address();
     MockUpstream::new(
@@ -124,6 +145,10 @@ async fn jdc_moves_to_the_next_pair_when_the_jds_setup_answer_is_malformed() {
         false,
         None,
     );
+    let first_pool_connection =
+        tokio::time::timeout(Duration::from_secs(10), first_pool.next_connection())
+            .await
+            .expect("JDC connects to the first pair's Pool");
 
     next_pool_sniffer
         .wait_for_message_type(
@@ -131,10 +156,9 @@ async fn jdc_moves_to_the_next_pair_when_the_jds_setup_answer_is_malformed() {
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
         )
         .await;
-    tokio::time::timeout(Duration::from_secs(10), first_pool_closed.recv())
+    tokio::time::timeout(Duration::from_secs(10), first_pool_connection.closed())
         .await
-        .expect("JDC closes its connection to the first pair's Pool")
-        .expect("the first pair's Pool was connected");
+        .expect("JDC closes its connection to the first pair's Pool");
 
     jdc.shutdown().await;
 }
