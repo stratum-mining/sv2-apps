@@ -17,8 +17,7 @@ use stratum_apps::{
         },
         extensions_sv2::{MAX_USER_IDENTITY_LENGTH, UserIdentity},
         sv1_api::{
-            client_to_server::{self, Submit},
-            server_to_client::Notify,
+            Notify, Submit,
             utils::{HexU32Be, VERSION_ROLLING_MASK},
         },
     },
@@ -61,7 +60,7 @@ pub enum Sv1ShareValidationOutcome {
 /// * `Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget)` otherwise
 /// * `Err(TproxyErrorKind)` if the supplied data cannot form a valid header
 pub fn validate_sv1_share(
-    share: &client_to_server::Submit,
+    share: &Submit,
     target: Target,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<HexU32Be>,
@@ -69,7 +68,7 @@ pub fn validate_sv1_share(
 ) -> Result<Sv1ShareValidationOutcome, TproxyErrorKind> {
     let mut full_extranonce = vec![];
     full_extranonce.extend_from_slice(extranonce1.as_slice());
-    full_extranonce.extend_from_slice(share.extra_nonce2.0.as_ref());
+    full_extranonce.extend_from_slice(share.extranonce2.0.as_ref());
 
     let share_version = share
         .version_bits
@@ -91,8 +90,8 @@ pub fn validate_sv1_share(
     // - job coinbase_tx_suffix
     // - job merkle_path
     let merkle_root: [u8; 32] = merkle_root_from_path(
-        job.coin_base1.as_ref(),
-        job.coin_base2.as_ref(),
+        job.coinbase1.as_ref(),
+        job.coinbase2.as_ref(),
         full_extranonce.as_ref(),
         job.merkle_branch.as_ref(),
     )
@@ -103,8 +102,8 @@ pub fn validate_sv1_share(
         version: Version::from_consensus(version as i32),
         prev_blockhash: u256_to_block_hash(prev_hash),
         merkle_root: TxMerkleNode::from_byte_array(merkle_root),
-        time: share.time.0,
-        bits: CompactTarget::from_consensus(job.bits.0),
+        time: share.ntime.0,
+        bits: CompactTarget::from_consensus(job.nbits.0),
         nonce: share.nonce.0,
     };
 
