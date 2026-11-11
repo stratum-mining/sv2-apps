@@ -105,7 +105,7 @@ impl ConnectionSV1 {
         let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_LINE_LENGTH));
         while let Some(result) = lines.next().await {
             match result {
-                Ok(line) => match serde_json::from_str::<json_rpc::Message>(&line) {
+                Ok(line) => match json_rpc::Message::decode(&line) {
                     Ok(msg) => {
                         if sender.send(msg).await.is_err() {
                             warn!("Receiver dropped, stopping reader");
@@ -113,7 +113,7 @@ impl ConnectionSV1 {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to deserialize message: {e:?}");
+                        error!("Failed to decode message: {e}");
                     }
                 },
                 Err(e) => {
@@ -187,36 +187,35 @@ mod tests {
             ConnectionSV1::new(upstream_stream, CancellationToken::new()).await;
         let downstream_connection =
             ConnectionSV1::new(downstream_stream, CancellationToken::new()).await;
-        let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
-            id: 1,
-            method: "test".to_string(),
+        let message = json_rpc::Message::Request(json_rpc::Request {
+            id: Some(json_rpc::Id::from(1u64)),
+            method: json_rpc::Method::from("test"),
             params: serde_json::Value::Null,
         });
         assert!(downstream_connection.send(message).await);
         let received_on_upstream = upstream_connection.receive().await.unwrap();
         match received_on_upstream {
-            json_rpc::Message::StandardRequest(received) => {
-                assert_eq!(received.id, 1);
-                assert_eq!(received.method, "test".to_string());
+            json_rpc::Message::Request(received) => {
+                assert_eq!(received.id, Some(json_rpc::Id::from(1u64)));
+                assert_eq!(received.method.as_str(), "test");
                 assert_eq!(received.params, serde_json::Value::Null);
             }
             _ => {
                 panic!("Unexpected message type");
             }
         }
-        let upstream_response = json_rpc::Message::OkResponse(json_rpc::Response {
-            id: 1,
-            result: serde_json::Value::String("response".to_string()),
-            error: None,
-        });
+        let upstream_response = json_rpc::Message::Response(json_rpc::Response::success(
+            json_rpc::Id::from(1u64),
+            "response",
+        ));
         assert!(upstream_connection.send(upstream_response).await);
         let received_upstream = downstream_connection.receive().await.unwrap();
         match received_upstream {
-            json_rpc::Message::OkResponse(received) => {
-                assert_eq!(received.id, 1);
+            json_rpc::Message::Response(received) => {
+                assert_eq!(received.id, Some(json_rpc::Id::from(1u64)));
                 assert_eq!(
                     received.result,
-                    serde_json::Value::String("response".to_string())
+                    Ok(serde_json::Value::String("response".to_string()))
                 );
             }
             _ => {
