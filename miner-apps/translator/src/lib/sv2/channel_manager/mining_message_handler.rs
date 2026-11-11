@@ -16,7 +16,7 @@ use stratum_apps::{
                 ExtranonceAllocator, ExtranoncePrefix, MAX_EXTRANONCE_LEN, bytes_needed,
             },
         },
-        handlers_sv2::{HandleMiningMessagesFromServerOwnedAsync, SupportedChannelTypes},
+        handlers_sv2::HandleMiningMessagesFromServerOwnedAsync,
         mining_sv2::{
             CloseChannelOwned, MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
             MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS,
@@ -35,10 +35,6 @@ use tracing::{error, info, warn};
 #[cfg_attr(not(test), hotpath::measure_all)]
 impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     type Error = TproxyError<error::ChannelManager>;
-
-    fn get_channel_type_for_server(&self, _server_id: Option<usize>) -> SupportedChannelTypes {
-        SupportedChannelTypes::GroupAndExtended
-    }
 
     fn is_work_selection_enabled_for_server(&self, _server_id: Option<usize>) -> bool {
         false
