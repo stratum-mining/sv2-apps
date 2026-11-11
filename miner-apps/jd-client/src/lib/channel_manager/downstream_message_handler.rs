@@ -13,7 +13,6 @@ use stratum_apps::stratum_core::{
 
 use stratum_apps::{
     stratum_core::{
-        binary_sv2::Str0255,
         bitcoin::{Target, hashes::sha256d},
         channels_sv2::{
             Vardiff, VardiffState, client,
@@ -179,13 +178,6 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
     }
     fn is_work_selection_enabled_for_client(&self, _client_id: Option<usize>) -> bool {
         false
-    }
-    fn is_client_authorized(
-        &self,
-        _client_id: Option<usize>,
-        _user_identity: &Str0255,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
     }
 
     // Handles a `CloseChannel` message:
