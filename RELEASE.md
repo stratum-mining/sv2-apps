@@ -28,11 +28,12 @@ Usually the release process is as follows:
 
 1. **Update Dependencies:** Ensure all SRI dependencies are updated to the latest stable versions from the main repository.
 2. **Run Tests:** Execute `./scripts/clippy-fmt-and-test.sh` to ensure the workspace passes tests, linting, and formatting.
-3. **Create Release Branch:** Create a new release branch from the `main` branch.
-4. **Update Versions:** Update version numbers in relevant `Cargo.toml` files.
-5. **Create Tag:** Create a new tag for the release branch.
-6. **Publish Release:** Use `./scripts/publish.sh` to publish applications to crates.io (if applicable).
-7. **Create GitHub Release:** Create a GitHub release with changelog and release notes.
+3. **Smoke Tests:** Smoke-test the miner apps against the hosted `pool_sv2` deployment, following `AGENTS_SMOKE_TESTS.md`.
+4. **Create Release Branch:** Create a new release branch from the `main` branch.
+5. **Update Versions:** Update version numbers in relevant `Cargo.toml` files.
+6. **Create Tag:** Create a new tag for the release branch.
+7. **Publish Release:** Use `./scripts/publish.sh` to publish applications to crates.io (if applicable).
+8. **Create GitHub Release:** Create a GitHub release with changelog and release notes.
 
 ## Versioning
 
