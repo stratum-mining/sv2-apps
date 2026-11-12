@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use crate::network_helpers::Error;
+use crate::{key_utils::Secp256k1PublicKey, network_helpers::Error};
 use stratum_core::{
     codec_sv2::{
         Decoded, Decrypted, EncodableFrame, Handshake, HandshakeMessage, NoiseDecoder,
@@ -27,7 +27,7 @@ use tokio::net::{
 
 use stratum_core::{codec_sv2::SerializedFrame, noise_sv2::ELLSWIFT_ENCODING_SIZE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// A Noise-secured duplex stream over TCP that wraps a `TcpStream`
 /// and provides secure read/write capabilities using the Noise protocol.
@@ -67,7 +67,9 @@ pub struct NoiseTcpWriteHalf {
 impl NoiseTcpStream {
     /// Connects as the Noise initiator over the given TCP stream, performing the handshake.
     ///
-    /// On success, returns a stream with encrypted communication channels.
+    /// On success, returns a stream with encrypted communication channels. When the initiator was
+    /// built with an authority key, the certificate it verified is logged at `info`; without one
+    /// no certificate exists and none is logged.
     ///
     /// `timeout` applies to each individual handshake read. Prefer [`super::connect_with_noise`]
     /// for typical use, which applies a sensible default timeout automatically.
@@ -93,12 +95,22 @@ impl NoiseTcpStream {
             .try_into()
             .map_err(|_| Error::HandshakeRemoteInvalidMessage)?;
 
+        let transport = handshake.step_2(payload)?;
+        if let Some(certificate) = transport.certificate() {
+            let message = certificate.signature_noise_message;
+            info!(
+                "Noise handshake verified certificate version {}, valid from {} until {} \
+                 (unix time), server static pubkey {}, authority pubkey {}",
+                message.version,
+                message.valid_from,
+                message.not_valid_after,
+                Secp256k1PublicKey(certificate.server_static_pubkey),
+                Secp256k1PublicKey(certificate.authority_pubkey)
+            );
+        }
+
         Ok(Self::from_transport(
-            reader,
-            writer,
-            decoder,
-            encoder,
-            handshake.step_2(payload)?,
+            reader, writer, decoder, encoder, transport,
         ))
     }
 

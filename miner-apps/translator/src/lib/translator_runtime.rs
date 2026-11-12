@@ -444,8 +444,8 @@ impl TranslatorRuntime<Sv1ServerReady> {
                     }
 
                     warn!(
-                        "Attempt {}/{} failed for {}:{}: {:?}",
-                        attempt, MAX_UPSTREAM_RETRIES, upstream.host, upstream.port, e
+                        "Attempt {}/{} failed for {}:{}: {}",
+                        attempt, MAX_UPSTREAM_RETRIES, upstream.host, upstream.port, e.kind
                     );
                 }
             }

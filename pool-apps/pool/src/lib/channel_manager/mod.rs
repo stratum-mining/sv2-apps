@@ -17,8 +17,7 @@ use stratum_apps::{
     channel_utils::ReceiverCleanup,
     coinbase_output_constraints::coinbase_output_constraints_message_with_offset,
     config_helpers::CoinbaseRewardScript,
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
-    network_helpers::accept_noise_connection,
+    network_helpers::{ResponderCredentials, accept_noise_connection},
     stratum_core::{
         bitcoin::{Amount, TxOut},
         channels_sv2::{
@@ -272,9 +271,7 @@ impl ChannelManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn start_downstream_server(
         self,
-        authority_public_key: Secp256k1PublicKey,
-        authority_secret_key: Secp256k1SecretKey,
-        cert_validity_sec: u64,
+        credentials: ResponderCredentials,
         listening_address: SocketAddr,
         task_manager: Arc<TaskManager>,
         cancellation_token: CancellationToken,
@@ -287,6 +284,9 @@ impl ChannelManager {
         // propagate. Everything after this point (waiting for the first template, then accepting)
         // runs in a background task, so bootstrap is never held hostage by the Template Provider.
         info!("Starting downstream server at {listening_address}");
+        credentials.check().await.map_err(|e| {
+            PoolError::shutdown(crate::error::PoolErrorKind::Configuration(e.to_string()))
+        })?;
         let server = TcpListener::bind(listening_address)
             .await
             .map_err(|e| {
@@ -349,6 +349,7 @@ impl ChannelManager {
                                 let cancellation_token_inner = cancellation_token_clone.clone();
                                 let channel_manager_sender_inner = channel_manager_sender.clone();
                                 let task_manager_inner = task_manager_clone.clone();
+                                let credentials_inner = credentials.clone();
 
                                 task_manager_clone.spawn(async move {
                                     let cancellation_token_clone = cancellation_token_inner.clone();
@@ -358,7 +359,7 @@ impl ChannelManager {
                                             info!("Shutdown received during handshake, dropping connection");
                                             return;
                                         }
-                                        result = accept_noise_connection(stream, authority_public_key, authority_secret_key, cert_validity_sec) => {
+                                        result = accept_noise_connection(stream, &credentials_inner) => {
                                             match result {
                                                 Ok(r) => r,
                                                 Err(e) => {

@@ -23,6 +23,7 @@ bitcoin-core-sv2 = { package = "bitcoin_core_sv2", version = "0.7.0", path = "..
 # External dependencies needed by the modules
 # Network helpers dependencies
 async-channel = { version = "1.8.0" }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 tokio = { version = "1.44.1", features = ["full"] }
 futures = { version = "0.3.28" }
 tokio-util = { version = "0.7.10", default-features = false, features = ["codec", "rt"], optional = true }
@@ -56,6 +57,10 @@ utoipa-swagger-ui = { version = "10.0.2", features = ["axum", "vendored"], optio
 shellexpand = "3.1.1"
 dashmap = "6.1.0"
 
+# `sv2-certificate` binary
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
+
 [features]
 default = ["network", "fallback-coordinator", "config", "std"]
 
@@ -67,6 +72,7 @@ payout = ["config", "core"]
 monitoring = ["serde_json", "axum", "prometheus", "utoipa", "utoipa-swagger-ui"]
 asic-rs-telemetry = ["monitoring", "dep:asic-rs"]
 std = ["bs58/std", "secp256k1/rand-std", "rand/std", "rand/std_rng"]
+cli = ["dep:clap", "dep:chrono", "std", "core"]
 core = ["stratum-core"]
 
 # Protocol features passed through to stratum-core
@@ -91,6 +97,11 @@ hyper = "1.1.0"
 name = "generate-openapi"
 path = "src/bin/generate-openapi.rs"
 required-features = ["monitoring"]
+
+[[bin]]
+name = "sv2-certificate"
+path = "src/bin/sv2-certificate.rs"
+required-features = ["cli"]
 
 [package.metadata.docs.rs]
 features = ["pool", "jd_client", "jd_server", "translator", "sv1", "monitoring", "asic-rs-telemetry"]

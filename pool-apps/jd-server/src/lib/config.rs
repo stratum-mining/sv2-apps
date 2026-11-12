@@ -9,15 +9,12 @@
 //! - Validating and converting coinbase outputs
 
 use std::net::SocketAddr;
-use stratum_apps::{
-    config_helpers::CoinbaseRewardScript,
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
-};
+use stratum_apps::{config_helpers::CoinbaseRewardScript, network_helpers::ResponderCredentials};
 
 /// Partial configuration deserialized from the `[jds]` TOML section, when embedded in Pool.
 ///
-/// Contains only JDS-specific fields. Shared fields (authority keys, cert validity,
-/// coinbase script) are inherited from the parent Pool config.
+/// Contains only JDS-specific fields. Shared fields (Noise credentials, coinbase script) are
+/// inherited from the parent Pool config.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct JDSPartialConfig {
     listen_address: SocketAddr,
@@ -34,9 +31,7 @@ pub struct JDSPartialConfig {
 #[derive(Clone, Debug)]
 pub struct JDSConfig {
     listen_address: SocketAddr,
-    authority_public_key: Secp256k1PublicKey,
-    authority_secret_key: Secp256k1SecretKey,
-    cert_validity_sec: u64,
+    credentials: ResponderCredentials,
     coinbase_reward_script: CoinbaseRewardScript,
     supported_extensions: Vec<u16>,
     required_extensions: Vec<u16>,
@@ -62,18 +57,14 @@ impl JDSConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         listen_address: SocketAddr,
-        authority_public_key: Secp256k1PublicKey,
-        authority_secret_key: Secp256k1SecretKey,
-        cert_validity_sec: u64,
+        credentials: ResponderCredentials,
         coinbase_reward_script: CoinbaseRewardScript,
         supported_extensions: Vec<u16>,
         required_extensions: Vec<u16>,
     ) -> Self {
         Self {
             listen_address,
-            authority_public_key,
-            authority_secret_key,
-            cert_validity_sec,
+            credentials,
             coinbase_reward_script,
             supported_extensions,
             required_extensions,
@@ -87,16 +78,12 @@ impl JDSConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn from_partial(
         partial: JDSPartialConfig,
-        authority_public_key: Secp256k1PublicKey,
-        authority_secret_key: Secp256k1SecretKey,
-        cert_validity_sec: u64,
+        credentials: ResponderCredentials,
         coinbase_reward_script: CoinbaseRewardScript,
     ) -> Self {
         Self {
             listen_address: partial.listen_address,
-            authority_public_key,
-            authority_secret_key,
-            cert_validity_sec,
+            credentials,
             coinbase_reward_script,
             supported_extensions: partial.supported_extensions,
             required_extensions: partial.required_extensions,
@@ -108,19 +95,9 @@ impl JDSConfig {
         &self.listen_address
     }
 
-    /// Authority public key used for the Noise handshake with downstreams.
-    pub fn authority_public_key(&self) -> &Secp256k1PublicKey {
-        &self.authority_public_key
-    }
-
-    /// Authority secret key used for the Noise handshake with downstreams.
-    pub fn authority_secret_key(&self) -> &Secp256k1SecretKey {
-        &self.authority_secret_key
-    }
-
-    /// Validity period (seconds) for the Noise certificate.
-    pub fn cert_validity_sec(&self) -> u64 {
-        self.cert_validity_sec
+    /// Static key and certificate presented to downstreams in the Noise handshake.
+    pub fn responder_credentials(&self) -> &ResponderCredentials {
+        &self.credentials
     }
 
     /// Script included in `AllocateMiningJobTokenSuccess.coinbase_outputs`.

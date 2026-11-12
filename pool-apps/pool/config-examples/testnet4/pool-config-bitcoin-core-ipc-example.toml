@@ -1,7 +1,22 @@
 # SRI Pool config
+# A throwaway static key and the certificate the development authority
+# 9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72 issued for it, valid until the year 2106.
+# That authority's secret key is public, so anyone can mint certificates for it: these are for
+# trying the examples and for tests, and prove nothing to anyone else. For a real deployment keep
+# your authority secret key on another machine, issue a certificate there with
+# `sv2-certificate issue` (see "Server keys" in the README), and give this server only its static
+# key and that certificate, either inline as below or through a file read before every handshake,
+# so replacing it (or the symlink it is) rotates the key without a restart:
+#
+# active_static_key = "/etc/sv2/active_static_key.toml"
+#
+# To use the file, leave static_private_key and certificate unset, both here and in the environment:
+# when that pair is set, it is used and the file is ignored. The full precedence is under
+# "Server keys" in the README.
+static_private_key = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8"
+certificate = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew"
+# Optional: the certificate is checked against it at startup and before every handshake.
 authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
-cert_validity_sec = 3600
 listen_address = "0.0.0.0:43333"
 
 # Coinbase outputs are specified as descriptors. A full list of descriptors is available at
@@ -51,7 +66,7 @@ min_interval = 5
 # Optional: Embedded Job Declaration Server (JDS)
 # When enabled, Pool runs a JDS subserver that listens for JDP connections from JDC.
 # Requires template_provider_type = BitcoinCoreIpc (JDS backend is selected by Pool startup).
-# Shared fields (authority keys, cert_validity, coinbase_reward_script) are inherited
+# Shared fields (server keys, coinbase_reward_script) are inherited
 # from the Pool config above.
 # [jds]
 # listen_address = "0.0.0.0:34254"
