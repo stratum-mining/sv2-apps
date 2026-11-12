@@ -6,7 +6,7 @@ use core::{convert::TryFrom, fmt::Display, str::FromStr};
 use secp256k1::{Keypair, Secp256k1};
 use serde::{Deserialize, Serialize};
 use stratum_core::noise_sv2::{
-    CERTIFICATE_VERSION, SIGNATURE_NOISE_MESSAGE_SIZE, SignatureNoiseMessage,
+    CERTIFICATE_VERSION, CertificateError, SIGNATURE_NOISE_MESSAGE_SIZE, SignatureNoiseMessage,
 };
 
 /// A Noise certificate issued in advance for a server's static key: the 74-byte
@@ -33,7 +33,8 @@ pub enum Error {
     Version(u16),
     /// The signature does not verify for the given static and authority keys.
     Signature,
-    /// The clock reading `now` falls outside the validity window.
+    /// The clock reading `now` falls outside the validity window, on either side, or the window
+    /// ends before it starts: the timestamps say which.
     Window {
         valid_from: u32,
         not_valid_after: u32,
@@ -154,24 +155,28 @@ impl Certificate {
     }
 
     /// Checks that this certificate was issued for `static_public_key` by the holder of
-    /// `authority_public_key`, and that `now` (unix time) falls inside its validity window, with
-    /// the same clock tolerance Sv2 Noise initiators apply.
+    /// `authority_public_key`, and that `now` (unix time) falls inside its validity window: the
+    /// checks Sv2 Noise initiators apply, in their order and with their clock tolerance.
     pub fn verify(
         &self,
         static_public_key: &Secp256k1PublicKey,
         authority_public_key: &Secp256k1PublicKey,
         now: u32,
     ) -> Result<(), Error> {
-        // The window is reported first, so a failure below can only be the signature.
-        self.check_validity(now)?;
-        if self
-            .message()
+        let message = self.message();
+        message
             .verify_with_now(&static_public_key.0, &authority_public_key.0, now)
-        {
-            Ok(())
-        } else {
-            Err(Error::Signature)
-        }
+            .map_err(|reason| match reason {
+                CertificateError::UnsupportedVersion => Error::Version(message.version),
+                CertificateError::InvalidSignature => Error::Signature,
+                CertificateError::EmptyValidityWindow
+                | CertificateError::NotYetValid { .. }
+                | CertificateError::Expired { .. } => Error::Window {
+                    valid_from: message.valid_from,
+                    not_valid_after: message.not_valid_after,
+                    now,
+                },
+            })
     }
 
     /// The checks that need no authority key: the version is the supported one and `now` (unix
@@ -273,6 +278,20 @@ mod test {
         assert!(matches!(
             certificate.verify(&static_public, &static_public, 1_500),
             Err(Error::Signature)
+        ));
+        // The signature is checked before the window, as the initiator does.
+        assert!(matches!(
+            certificate.verify(&other, &authority_public, 2_011),
+            Err(Error::Signature)
+        ));
+        // A window that ends before it starts is a window problem too.
+        assert!(matches!(
+            Certificate::sign(&static_public, &authority_secret, 2_000, 1_000).verify(
+                &static_public,
+                &authority_public,
+                1_500
+            ),
+            Err(Error::Window { now: 1_500, .. })
         ));
         // A truncated string is reported as a length problem, not a checksum one.
         let mut short = certificate.0.to_vec();
