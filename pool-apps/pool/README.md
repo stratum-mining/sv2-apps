@@ -49,15 +49,14 @@ There are three example configuration files demonstrating different template pro
 
 The configuration file contains the following information:
 
-1. The SRI Pool information which includes the SRI Pool authority public key
-   (`authority_public_key`), the SRI Pool authority secret key (`authority_secret_key`).
+1. The keys the Pool presents to downstreams in the Noise handshake, see [Server keys](#server-keys).
 2. The address which it will use to listen to new connection from downstream roles (`listen_address`)
 3. The coinbase reward script specified as a descriptor (`coinbase_reward_script`)
 4. A string that serves as signature on the coinbase tx (`pool_signature`).
 5. The `template_provider_type` section, which determines how the pool obtains block templates. There are two options:
    - `[template_provider_type.Sv2Tp]` - Connects to an SV2 Template Provider, with the following parameters:
      - `address` - The Template Provider's network address
-     - `public_key` - (Optional) The TP's authority public key for connection verification
+     - `public_key` - The TP's authority public key, which its certificate must verify against
    - `[template_provider_type.BitcoinCoreIpc]` - Connects directly to Bitcoin Core via IPC, with the following parameters:
      - `version` - Required Bitcoin Core IPC schema major version (`30` or `31`, any other value fails startup)
      - `network` - Bitcoin network (mainnet, testnet4, signet, regtest) for determining socket path
@@ -65,13 +64,64 @@ The configuration file contains the following information:
      - `fee_threshold` - Minimum fee threshold to trigger new templates
      - `min_interval` - Minimum interval between template updates in seconds
 
-For connections with a Sv2 Template Provider, you may want to verify that your TP connection is authentic. You can get the `public_key` from the logs of your TP, for example:
+`public_key` is the authority key your TP prints at startup, for example:
 
 ```
 # 2024-02-13T14:59:24Z Template Provider authority key: EguTM8URcZDQVeEBsM4B5vg9weqEUnufA8pm85fG4bZd
 ```
 
 Make sure the machine running the Pool application has its clock synced with an NTP server. Certificate validation is time-sensitive, and even a small drift of a few seconds can trigger an `InvalidCertificate` error.
+
+### Server keys
+
+A downstream verifies the Pool by the authority public key it pins (`authority_pubkey` in its
+upstream config). The Pool proves it holds that identity with a certificate over its static key,
+issued where the authority secret key is kept: the Pool host never sees that key. It gets the
+certificate in one of two ways:
+
+- `static_private_key` and `certificate` in its configuration, loaded once at startup.
+- `active_static_key` pointing at a TOML file holding the same fields. The file is read before
+  every handshake, so replacing it (or the symlink it is) rotates the static key without a restart
+  and without disturbing open connections.
+
+An optional `authority_public_key` makes the Pool check the certificate against it at startup and
+before every handshake, so a wrong file fails with a reason. For the file, an
+`authority_public_key` inside the file is checked as well.
+
+Precedence. Each of these fields can come from the TOML file or from the environment
+(`POOL__STATIC_PRIVATE_KEY`, `POOL__CERTIFICATE`, `POOL__ACTIVE_STATIC_KEY`,
+`POOL__AUTHORITY_PUBLIC_KEY`), and the environment overrides the TOML field by field, as for
+every other setting. On the merged result:
+
+1. `static_private_key` and `certificate` set: they are used, and `active_static_key` is ignored.
+2. Otherwise `active_static_key` set: the file is used.
+3. Neither: the Pool refuses to start.
+
+So an inline pair in the TOML still wins over `POOL__ACTIVE_STATIC_KEY` from the environment:
+the environment overrides fields, not the choice between inline and file. To use the file, leave the
+inline pair unset in both places. Half an inline pair, and `authority_secret_key` or
+`cert_validity_sec` anywhere, are refused with a reason.
+
+The example configs ship a throwaway static key with a certificate from the development authority
+`9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72`, whose secret key is public, so they start out of the
+box and prove nothing to anyone else. Issue your own on the machine that holds your authority
+secret key with the `sv2-certificate` binary from `stratum-apps`:
+
+```bash
+# once: an authority keypair; publish the public key, keep the secret key off every server
+cargo run -p stratum-apps --features cli --bin sv2-certificate -- keygen
+# per rotation: a fresh static key and a certificate over it, as the file `active_static_key`
+# points at and/or as `POOL__*` environment variables. The authority secret key is read from
+# SV2_AUTHORITY_SECRET_KEY; typed at a silent prompt it stays out of the shell history and of
+# `ps` output
+read -rs SV2_AUTHORITY_SECRET_KEY && export SV2_AUTHORITY_SECRET_KEY
+cargo run -p stratum-apps --features cli --bin sv2-certificate -- issue --valid-for 93600 \
+    --toml key_2.toml --env key_2.env --env-prefix POOL
+cargo run -p stratum-apps --features cli --bin sv2-certificate -- inspect <CERTIFICATE>
+```
+
+Make a certificate valid from before the moment it goes live and until after the next rotation,
+so a late rotation never breaks handshakes.
 
 ### Environment Variables
 
@@ -85,6 +135,10 @@ neither source, the pool exits with an error.
 
 ```bash
 POOL__LISTEN_ADDRESS=0.0.0.0:3333
+# Server keys (see above); `sv2-certificate issue --env <file> --env-prefix POOL` writes these three:
+POOL__STATIC_PRIVATE_KEY=...
+POOL__CERTIFICATE=...
+POOL__AUTHORITY_PUBLIC_KEY=...
 # Nested fields join each level with `__`:
 POOL__JDS__LISTEN_ADDRESS=0.0.0.0:3334
 # Tagged enums (template_provider_type) take the variant as a path segment,

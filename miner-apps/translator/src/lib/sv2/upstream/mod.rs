@@ -315,7 +315,7 @@ impl Upstream {
                         info!("Shutdown received during handshake, dropping connection");
                         Err(TproxyError::shutdown(TproxyErrorKind::CouldNotInitiateSystem))
                     }
-                    result = connect_with_noise(socket, Some(upstream.authority_pubkey)) => {
+                    result = connect_with_noise(socket, upstream.authority_pubkey) => {
                         match result {
                             Ok(stream) => {
                                 let (reader, writer) = stream.into_split();

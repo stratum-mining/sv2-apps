@@ -4,7 +4,8 @@
 //! for Stratum V2 applications. It includes support for:
 //!
 //! - Noise-encrypted connections ([`crate::network_helpers::noise_connection`],
-//!   [`crate::network_helpers::noise_stream`])
+//!   [`crate::network_helpers::noise_stream`]), with the server's static key and certificate
+//!   coming from [`crate::network_helpers::ResponderCredentials`]
 //! - SV1 protocol connections (`sv1_connection`) - when `sv1` feature is enabled
 //! - Hostname resolution ([`crate::network_helpers::resolve_hostname`])
 //!
@@ -13,24 +14,20 @@
 pub mod noise_connection;
 pub mod noise_stream;
 pub mod resolve_hostname;
+pub mod responder_credentials;
 
 #[cfg(feature = "sv1")]
 pub mod sv1_connection;
 
 pub use resolve_hostname::{ResolveError, resolve_host, resolve_host_port};
+pub use responder_credentials::ResponderCredentials;
 
 use async_channel::{RecvError, SendError};
 use std::{fmt, time::Duration};
-use stratum_core::{
-    codec_sv2::Error as CodecError,
-    noise_sv2::{Initiator, Responder},
-};
+use stratum_core::{codec_sv2::Error as CodecError, noise_sv2::Initiator};
 use tokio::net::TcpStream;
 
-use crate::{
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
-    network_helpers::noise_stream::NoiseTcpStream,
-};
+use crate::{key_utils::Secp256k1PublicKey, network_helpers::noise_stream::NoiseTcpStream};
 
 /// Networking errors that can occur in SV2 connections
 #[derive(Debug)]
@@ -49,6 +46,9 @@ pub enum Error {
     HandshakeTimeout,
     /// Invalid key provided to construct an Initiator or Responder
     InvalidKey,
+    /// The server's static key and certificate are misconfigured, unreadable, or do not match
+    /// the authority they are checked against. See [`ResponderCredentials`].
+    InvalidResponderCredentials(String),
     /// DNS resolution failed for a hostname
     DnsResolutionFailed(String),
 }
@@ -71,6 +71,10 @@ impl fmt::Display for Error {
             Error::HandshakeTimeout => write!(f, "Handshake timeout"),
 
             Error::InvalidKey => write!(f, "Invalid key provided for handshake"),
+
+            Error::InvalidResponderCredentials(msg) => {
+                write!(f, "Invalid responder credentials: {msg}")
+            }
 
             Error::DnsResolutionFailed(msg) => write!(f, "DNS resolution failed: {msg}"),
         }
@@ -114,16 +118,13 @@ pub const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The handshake timeout is opinionated and fixed at `NOISE_HANDSHAKE_TIMEOUT`. If you need a
 /// custom timeout, use [`noise_stream::NoiseTcpStream::new`] directly.
 ///
-/// Pass `Some(key)` to verify the server's authority public key, or `None` to skip
-/// verification (encrypted but unauthenticated — use only on trusted networks).
+/// The server's certificate must verify against `authority_pub_key`, or the handshake fails.
 pub async fn connect_with_noise(
     stream: TcpStream,
-    authority_pub_key: Option<Secp256k1PublicKey>,
+    authority_pub_key: Secp256k1PublicKey,
 ) -> Result<NoiseTcpStream, Error> {
-    let initiator = match authority_pub_key {
-        Some(key) => Initiator::from_raw_k(key.into_bytes()).map_err(|_| Error::InvalidKey)?,
-        None => Initiator::without_pk().map_err(|_| Error::InvalidKey)?,
-    };
+    let initiator =
+        Initiator::from_raw_k(authority_pub_key.into_bytes()).map_err(|_| Error::InvalidKey)?;
     let stream =
         noise_stream::NoiseTcpStream::connect(stream, initiator, NOISE_HANDSHAKE_TIMEOUT).await?;
     Ok(stream)
@@ -134,20 +135,13 @@ pub async fn connect_with_noise(
 /// The handshake timeout is opinionated and fixed at `NOISE_HANDSHAKE_TIMEOUT`. If you need a
 /// custom timeout, use [`noise_stream::NoiseTcpStream::new`] directly.
 ///
-/// `cert_validity` controls how long the generated Noise certificate is valid,
-/// which is independent of the handshake timeout.
+/// The static key and certificate the server presents come from `credentials`, resolved for
+/// this one handshake (see [`ResponderCredentials::responder`]).
 pub async fn accept_noise_connection(
     stream: TcpStream,
-    pub_key: Secp256k1PublicKey,
-    prv_key: Secp256k1SecretKey,
-    cert_validity: u64,
+    credentials: &ResponderCredentials,
 ) -> Result<NoiseTcpStream, Error> {
-    let responder = Responder::from_authority_kp(
-        &pub_key.into_bytes(),
-        &prv_key.into_bytes(),
-        Duration::from_secs(cert_validity),
-    )
-    .map_err(|_| Error::InvalidKey)?;
+    let responder = credentials.responder().await?;
     let stream =
         noise_stream::NoiseTcpStream::accept(stream, responder, NOISE_HANDSHAKE_TIMEOUT).await?;
     Ok(stream)
