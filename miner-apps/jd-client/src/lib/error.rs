@@ -279,8 +279,6 @@ pub enum JDCErrorKind {
     CustomJobError,
     /// Could not initiate subsystem
     CouldNotInitiateSystem,
-    /// Invalid key
-    InvalidKey,
     /// Upstream not found
     UpstreamNotFound,
     /// Cannot determine Bitcoin data directory
@@ -452,7 +450,6 @@ impl fmt::Display for JDCErrorKind {
             CloseChannel => write!(f, "channel closed by upstream"),
             CustomJobError => write!(f, "Custom job not acknowledged"),
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
-            InvalidKey => write!(f, "Invalid key used during noise handshake"),
             UpstreamNotFound => write!(f, "Upstream not found"),
             InvalidBitcoinDataDir => write!(
                 f,

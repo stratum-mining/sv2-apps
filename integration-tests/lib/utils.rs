@@ -263,7 +263,13 @@ pub async fn create_downstream(
 pub async fn create_upstream(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
-    let initiator = Initiator::without_pk().expect("This fn call can not fail");
+    // Every server the harness connects to presents a certificate from the test authority.
+    let initiator = Initiator::new(
+        crate::TEST_AUTHORITY_PUBLIC_KEY
+            .parse::<stratum_apps::key_utils::Secp256k1PublicKey>()
+            .expect("valid key")
+            .0,
+    );
     Connection::connect::<OutboundFrame>(stream, initiator, CancellationToken::new())
         .await
         .ok()

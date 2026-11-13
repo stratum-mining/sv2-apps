@@ -81,7 +81,8 @@ pub fn resolve_ipc_socket_path(
 pub enum TemplateProviderType {
     Sv2Tp {
         address: String,
-        public_key: Option<Secp256k1PublicKey>,
+        /// The TP's authority public key, which its certificate must verify against.
+        public_key: Secp256k1PublicKey,
     },
     #[cfg(feature = "bitcoin-core-sv2")]
     BitcoinCoreIpc {

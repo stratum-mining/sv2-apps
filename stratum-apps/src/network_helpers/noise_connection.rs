@@ -174,7 +174,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     // A throwaway static key and a certificate over it from the development authority, valid
-    // until the year 2106. The initiator below pins nothing, so any valid certificate does.
+    // until the year 2106. The initiator below pins that authority.
+    const AUTHORITY_PUBLIC: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
     const STATIC_KEY: &str = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8";
     const CERTIFICATE: &str = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew";
 
@@ -203,7 +204,12 @@ mod tests {
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
-        let initiator = Initiator::without_pk().unwrap();
+        let initiator = Initiator::new(
+            AUTHORITY_PUBLIC
+                .parse::<crate::key_utils::Secp256k1PublicKey>()
+                .unwrap()
+                .0,
+        );
         let cancellation_token = CancellationToken::new();
         let (receiver, sender) = Connection::connect::<MessageFrame<AnyMessageOwned>>(
             stream,

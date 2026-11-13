@@ -1,7 +1,4 @@
-use crate::{
-    mining_device::Secp256k1PublicKey as MiningDeviceSecp256k1PublicKey, sniffer::*,
-    sv1_minerd::MinerdProcess, template_provider::*,
-};
+use crate::{sniffer::*, sv1_minerd::MinerdProcess, template_provider::*};
 use interceptor::InterceptAction;
 use jd_client_sv2::{JobDeclaratorClient, config::ConfigJDCMode};
 use once_cell::sync::OnceCell;
@@ -53,11 +50,12 @@ const JDC_COINBASE_REWARD_DESCRIPTOR: &str = "addr(tb1qpusf5256yxv50qt0pm0tue8k9
 
 static LOGGER: OnceCell<()> = OnceCell::new();
 
-/// Helper to create Sv2Tp config for Pool/JDC with default public key.
+/// Helper to create Sv2Tp config for Pool/JDC, pinning the test authority that
+/// [`TemplateProvider::start`] installs on sv2-tp.
 pub fn sv2_tp_config(address: SocketAddr) -> TemplateProviderType {
     TemplateProviderType::Sv2Tp {
         address: address.to_string(),
-        public_key: None,
+        public_key: TEST_AUTHORITY_PUBLIC_KEY.parse().unwrap(),
     }
 }
 
@@ -118,14 +116,21 @@ pub fn start_sniffer(
     (sniffer, listening_address)
 }
 
+/// The development authority every server in the harness presents a certificate from: the roles
+/// under test through [`test_responder_credentials`], sv2-tp through the key file
+/// [`TemplateProvider::start`] installs. Every client pins this key.
+pub const TEST_AUTHORITY_PUBLIC_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
+/// Its secret key, which is public: it issues throwaway certificates only.
+pub const TEST_AUTHORITY_SECRET_KEY: &str = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n";
+
 /// What servers under test present in the Noise handshake: a throwaway static key and the
 /// certificate the shared test authority issued for it, valid until the year 2106. The clients
-/// under test pin that authority's public key; no test holds its secret key.
+/// under test pin that authority's public key.
 pub fn test_responder_credentials() -> ResponderCredentials {
     ResponderCredentials::PreIssued {
         static_private_key: "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8".parse().unwrap(),
         certificate: "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew".parse().unwrap(),
-        authority_public_key: Some("9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".parse().unwrap()),
+        authority_public_key: Some(TEST_AUTHORITY_PUBLIC_KEY.parse().unwrap()),
     }
 }
 
@@ -252,10 +257,8 @@ pub fn start_jdc_with_user_identities(
     let jdc_address = get_available_address();
     let coinbase_reward_script =
         CoinbaseRewardScript::from_descriptor(JDC_COINBASE_REWARD_DESCRIPTOR).unwrap();
-    let authority_pubkey = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .unwrap();
+    let authority_pubkey =
+        Secp256k1PublicKey::try_from(TEST_AUTHORITY_PUBLIC_KEY.to_string()).unwrap();
     let upstreams = pool
         .iter()
         .map(|(pool_addr, jds_addr, per_upstream_id)| {
@@ -387,10 +390,9 @@ pub async fn start_sv2_translator_with_user_identities(
     enable_monitoring: bool,
 ) -> (TranslatorSv2, SocketAddr, Option<SocketAddr>) {
     let job_keepalive_interval_secs = job_keepalive_interval_secs.unwrap_or(60);
-    let upstream_authority_pubkey = Secp256k1PublicKey::try_from(
-        "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-    )
-    .expect("failed to parse test authority pubkey");
+    let upstream_authority_pubkey =
+        Secp256k1PublicKey::try_from(TEST_AUTHORITY_PUBLIC_KEY.to_string())
+            .expect("failed to parse test authority pubkey");
 
     let upstreams = upstreams
         .iter()
@@ -465,10 +467,9 @@ pub async fn start_sv2_translator_with_user_identity(
         .map(|upstream| {
             let upstream_address = upstream.ip().to_string();
             let upstream_port = upstream.port();
-            let upstream_authority_pubkey = Secp256k1PublicKey::try_from(
-                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-            )
-            .expect("failed");
+            let upstream_authority_pubkey =
+                Secp256k1PublicKey::try_from(TEST_AUTHORITY_PUBLIC_KEY.to_string())
+                    .expect("failed");
 
             translator_sv2::config::Upstream::new(
                 upstream_address,
@@ -540,7 +541,6 @@ pub async fn start_minerd(
 
 pub fn start_mining_device_sv2(
     upstream: SocketAddr,
-    pub_key: Option<MiningDeviceSecp256k1PublicKey>,
     device_id: Option<String>,
     user_id: Option<String>,
     handicap: u32,
@@ -553,7 +553,7 @@ pub fn start_mining_device_sv2(
     tokio::spawn(async move {
         crate::mining_device::connect(
             upstream.to_string(),
-            pub_key,
+            TEST_AUTHORITY_PUBLIC_KEY.parse().unwrap(),
             device_id,
             user_id,
             handicap,
