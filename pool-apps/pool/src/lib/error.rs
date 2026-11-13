@@ -200,8 +200,6 @@ pub enum PoolErrorKind {
     Configuration(String),
     /// Job not found
     JobNotFound,
-    /// Invalid Key
-    InvalidKey,
     ///Error when parsing the PayoutMode for Solo Mining Mode
     PayoutModeError(String),
     /// JDS error (from embedded Job Declaration Server)
@@ -294,7 +292,6 @@ impl std::fmt::Display for PoolErrorKind {
             CouldNotInitiateSystem => write!(f, "Could not initiate subsystem"),
             Configuration(e) => write!(f, "Configuration error: {e}"),
             JobNotFound => write!(f, "Job not found"),
-            InvalidKey => write!(f, "Invalid key used during noise handshake"),
             PayoutModeError(e) => write!(f, "Unable to parse the PayoutMode: {e}"),
             Jds(e) => write!(f, "JDS error: {e:?}"),
             Timeout => write!(f, "Time out error"),

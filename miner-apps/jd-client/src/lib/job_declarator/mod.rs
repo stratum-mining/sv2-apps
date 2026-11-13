@@ -165,7 +165,7 @@ impl JobDeclarator {
                 info!("Shutdown received during handshake, dropping connection");
                 return Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem));
             }
-            result = connect_with_noise(stream, Some(upstream_entry.authority_pubkey)) => {
+            result = connect_with_noise(stream, upstream_entry.authority_pubkey) => {
                 result.map_err(JDCError::fallback)?.into_split()
             }
         };

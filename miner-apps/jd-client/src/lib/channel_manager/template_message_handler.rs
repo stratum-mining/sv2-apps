@@ -777,7 +777,7 @@ mod tests {
             },
             TemplateProviderType::Sv2Tp {
                 address: "127.0.0.1:0".to_string(),
-                public_key: None,
+                public_key: "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".parse().unwrap(),
             },
             vec![],
             "test-jdc".to_string(),

@@ -269,7 +269,13 @@ pub async fn handshake_as_client(
     stream: tokio::net::TcpStream,
     cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
-    let initiator = Initiator::without_pk().expect("This fn call can not fail");
+    // Every server the harness connects to presents a certificate from the test authority.
+    let initiator = Initiator::new(
+        crate::TEST_AUTHORITY_PUBLIC_KEY
+            .parse::<stratum_apps::key_utils::Secp256k1PublicKey>()
+            .expect("valid key")
+            .0,
+    );
     Connection::connect::<OutboundFrame>(stream, initiator, cancellation_token)
         .await
         .ok()
