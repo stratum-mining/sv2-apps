@@ -361,7 +361,7 @@ mod tests {
     // Connects once, pinning the test authority, and reports whether the handshake succeeded.
     async fn connect_once(addr: std::net::SocketAddr) -> bool {
         let stream = TcpStream::connect(addr).await.unwrap();
-        connect_with_noise(stream, Some(AUTHORITY_PUBLIC.parse().unwrap()))
+        connect_with_noise(stream, AUTHORITY_PUBLIC.parse().unwrap())
             .await
             .is_ok()
     }

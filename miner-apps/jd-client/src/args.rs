@@ -92,6 +92,10 @@ mod tests {
                 "127.0.0.1:8442",
             ),
             (
+                "JDC__TEMPLATE_PROVIDER_TYPE__SV2TP__PUBLIC_KEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
+            ),
+            (
                 "JDC__UPSTREAM_01__AUTHORITY_PUBKEY",
                 "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
             ),
@@ -159,6 +163,10 @@ mod tests {
             (
                 "JDC_PREISSUED__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
                 "127.0.0.1:8442",
+            ),
+            (
+                "JDC_PREISSUED__TEMPLATE_PROVIDER_TYPE__SV2TP__PUBLIC_KEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
             ),
             (
                 "JDC_PREISSUED__UPSTREAM_01__AUTHORITY_PUBKEY",

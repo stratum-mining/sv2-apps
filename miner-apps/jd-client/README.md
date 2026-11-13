@@ -75,7 +75,7 @@ The configuration file contains the following information:
 4. The `template_provider_type` section, which determines how the pool obtains block templates. There are two options:
    - `[template_provider_type.Sv2Tp]` - Connects to an SV2 Template Provider, with the following parameters:
      - `address` - The Template Provider's network address
-     - `public_key` - (Optional) The TP's authority public key for connection verification
+     - `public_key` - The TP's authority public key, which its certificate must verify against
    - `[template_provider_type.BitcoinCoreIpc]` - Connects directly to Bitcoin Core via IPC, with the following parameters:
      - `version` - Required Bitcoin Core IPC schema major version (`30` or `31`, any other value fails startup)
      - `network` - Bitcoin network (mainnet, testnet4, signet, regtest) for determining socket path
@@ -83,7 +83,7 @@ The configuration file contains the following information:
      - `fee_threshold` - Minimum fee threshold to trigger new templates
      - `min_interval` - Minimum interval between template updates in seconds
 
-For connections with a Sv2 Template Provider, you may want to verify that your TP connection is authentic. You can get the `public_key` from the logs of your TP, for example:
+`public_key` is the authority key your TP prints at startup, for example:
 
 ```
 # 2024-02-13T14:59:24Z Template Provider authority key: EguTM8URcZDQVeEBsM4B5vg9weqEUnufA8pm85fG4bZd

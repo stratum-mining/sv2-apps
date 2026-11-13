@@ -9,9 +9,9 @@ struct Args {
     #[arg(
         short,
         long,
-        help = "Pool pub key, when left empty the pool certificate is not checked"
+        help = "Pool authority public key the pool certificate must verify against"
     )]
-    pubkey_pool: Option<Secp256k1PublicKey>,
+    pubkey_pool: Secp256k1PublicKey,
     #[arg(
         short,
         long,

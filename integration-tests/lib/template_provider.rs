@@ -564,7 +564,7 @@ impl BitcoinCore {
         }
     }
 
-    fn network_dir(&self) -> PathBuf {
+    pub(crate) fn network_dir(&self) -> PathBuf {
         let network_dir = if self.is_signet { "signet" } else { "regtest" };
         self.data_dir.join(network_dir)
     }
@@ -723,6 +723,19 @@ impl TemplateProvider {
         } else {
             "-regtest"
         };
+
+        // sv2-tp signs its certificate with the authority key it finds in its data directory,
+        // so install the test authority there before it starts; every client in the harness pins
+        // that authority (see `crate::TEST_AUTHORITY_PUBLIC_KEY`). The file is Bitcoin Core's
+        // `CKey` serialization: one "compressed" flag byte, then the 32 key bytes.
+        let net_dir = bitcoin_core.network_dir();
+        create_dir_all(&net_dir).expect("Failed to create the sv2-tp network data directory");
+        let authority: stratum_apps::key_utils::Secp256k1SecretKey =
+            crate::TEST_AUTHORITY_SECRET_KEY.parse().expect("valid key");
+        let mut key_file = vec![1u8];
+        key_file.extend_from_slice(&authority.0.secret_bytes());
+        std::fs::write(net_dir.join("sv2_authority_key"), key_file)
+            .expect("Failed to install the sv2-tp authority key");
 
         let sv2_tp_process = Command::new(&sv2_tp_bin)
             .arg(network)

@@ -93,6 +93,10 @@ mod tests {
                 "POOL__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
                 "127.0.0.1:8442",
             ),
+            (
+                "POOL__TEMPLATE_PROVIDER_TYPE__SV2TP__PUBLIC_KEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
+            ),
         ];
         for (key, value) in vars {
             unsafe { std::env::set_var(key, value) };
@@ -143,6 +147,10 @@ mod tests {
             (
                 "POOL_PREISSUED__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
                 "127.0.0.1:8442",
+            ),
+            (
+                "POOL_PREISSUED__TEMPLATE_PROVIDER_TYPE__SV2TP__PUBLIC_KEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
             ),
         ];
         let inline = [

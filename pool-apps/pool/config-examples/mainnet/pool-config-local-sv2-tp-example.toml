@@ -56,3 +56,6 @@ monitoring_cache_refresh_secs = 15
 [template_provider_type.Sv2Tp]
 # address accepts "ip:port" or "hostname:port" (e.g. "tp.example.com:8442")
 address = "127.0.0.1:8442"
+# The authority public key your TP prints at startup ("Template Provider authority key: ...");
+# the value below is the development authority used by the examples and will not match your TP.
+public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"

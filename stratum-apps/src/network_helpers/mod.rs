@@ -118,16 +118,13 @@ pub const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The handshake timeout is opinionated and fixed at `NOISE_HANDSHAKE_TIMEOUT`. If you need a
 /// custom timeout, use [`noise_stream::NoiseTcpStream::new`] directly.
 ///
-/// Pass `Some(key)` to verify the server's authority public key, or `None` to skip
-/// verification (encrypted but unauthenticated — use only on trusted networks).
+/// The server's certificate must verify against `authority_pub_key`, or the handshake fails.
 pub async fn connect_with_noise(
     stream: TcpStream,
-    authority_pub_key: Option<Secp256k1PublicKey>,
+    authority_pub_key: Secp256k1PublicKey,
 ) -> Result<NoiseTcpStream, Error> {
-    let initiator = match authority_pub_key {
-        Some(key) => Initiator::from_raw_k(key.into_bytes()).map_err(|_| Error::InvalidKey)?,
-        None => Initiator::without_pk().map_err(|_| Error::InvalidKey)?,
-    };
+    let initiator =
+        Initiator::from_raw_k(authority_pub_key.into_bytes()).map_err(|_| Error::InvalidKey)?;
     let stream =
         noise_stream::NoiseTcpStream::connect(stream, initiator, NOISE_HANDSHAKE_TIMEOUT).await?;
     Ok(stream)

@@ -259,6 +259,7 @@ share_batch_size = 10
 
 [template_provider_type.Sv2Tp]
 address = "127.0.0.1:8442"
+public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
 "#
             ),
         )

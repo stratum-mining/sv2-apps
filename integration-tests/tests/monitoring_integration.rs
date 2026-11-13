@@ -45,7 +45,6 @@ async fn pool_monitoring_with_sv2_mining_device() {
     start_mining_device_sv2(
         sniffer_addr,
         None,
-        None,
         Some("test-miner".to_string()),
         1,
         None,
@@ -392,7 +391,6 @@ async fn pool_api_endpoints_with_miner() {
     // Explicit user_id so the per-channel Prometheus user_identity label is meaningful.
     start_mining_device_sv2(
         sniffer_addr,
-        None,
         None,
         Some("test-miner".to_string()),
         1,

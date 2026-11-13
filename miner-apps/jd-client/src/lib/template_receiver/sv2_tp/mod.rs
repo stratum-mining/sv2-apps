@@ -136,7 +136,7 @@ impl Sv2Tp {
     /// Retries up to 3 times before returning [`JDCError::Shutdown`].
     pub async fn new(
         tp_address: String,
-        public_key: Option<Secp256k1PublicKey>,
+        public_key: Secp256k1PublicKey,
         channel_manager_receiver: Receiver<TemplateDistributionOwned>,
         channel_manager_sender: Sender<TemplateDistributionOwned>,
         cancellation_token: CancellationToken,

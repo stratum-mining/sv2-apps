@@ -51,6 +51,7 @@ To run it directly through Cargo:
 ```bash
 cargo run -p integration_tests_sv2 --release --bin mining_device -- \
   --address-pool 127.0.0.1:3333 \
+  --pubkey-pool 9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72 \
   --id-device test
 ```
 

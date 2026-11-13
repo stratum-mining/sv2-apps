@@ -99,7 +99,7 @@ pub fn total_logical_cpus() -> u32 {
 
 pub async fn connect(
     address: String,
-    pub_key: Option<Secp256k1PublicKey>,
+    pub_key: Secp256k1PublicKey,
     device_id: Option<String>,
     user_id: Option<String>,
     handicap: u32,
@@ -134,7 +134,7 @@ pub async fn connect(
     };
     info!("Pool tcp connection established at {}", address);
     let address = socket.peer_addr().unwrap();
-    let initiator = Initiator::new(pub_key.map(|e| e.0));
+    let initiator = Initiator::new(pub_key.0);
     let (receiver, sender) = Connection::connect(socket, initiator, CancellationToken::new())
         .await
         .unwrap();
