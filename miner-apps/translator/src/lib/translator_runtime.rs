@@ -16,9 +16,10 @@ use stratum_apps::{
     stratum_core::parsers_sv2::MiningOwned,
     sync::SharedLock,
     task_manager::TaskManager,
+    upstream_selector::{Attempt, UpstreamSelector, attempts},
     utils::types::{GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, InboundFrame, OutboundFrame},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     TranslatorSv2,
@@ -39,9 +40,6 @@ struct Io {
     sv1_server_to_channel_manager_receiver: Receiver<(MiningOwned, Option<String>)>,
 }
 
-/// Connection attempts made to an upstream before moving on.
-const MAX_UPSTREAM_RETRIES: usize = 3;
-
 /// The core coordinator of the Translator runtime, parameterized by its current bootstrap `State`.
 ///
 /// It manages the lifecycle of essential sub-services and channels, ensuring resources
@@ -51,7 +49,7 @@ pub(super) struct TranslatorRuntime<State> {
     fallback_coordinator: FallbackCoordinator,
     task_manager: Arc<TaskManager>,
     translator: TranslatorSv2,
-    upstream_addresses: Vec<UpstreamEntry>,
+    upstreams: UpstreamSelector<UpstreamEntry>,
     protocol_reconnect: SharedLock<ProtocolReconnect>,
     listen_addr: SocketAddr,
     state: State,
@@ -111,7 +109,7 @@ impl<State> TranslatorRuntime<State> {
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Failed,
@@ -186,25 +184,20 @@ impl TranslatorRuntime<Init> {
 
         let listen_addr = SocketAddr::new(downstream_addr_ip, translator.config.downstream_port);
 
-        let upstream_addresses = translator
-            .config
-            .upstreams
-            .iter()
-            .map(|u| UpstreamEntry {
+        let upstreams =
+            UpstreamSelector::new(translator.config.upstreams.iter().map(|u| UpstreamEntry {
                 host: u.address.clone(),
                 port: u.port,
                 authority_pubkey: u.authority_pubkey,
-                tried_or_flagged: false,
                 user_identity: u.user_identity.clone(),
-            })
-            .collect();
+            }));
 
         Ok(TranslatorRuntime {
             tproxy_mode,
             fallback_coordinator: FallbackCoordinator::new(),
             task_manager: Arc::new(TaskManager::new()),
             translator,
-            upstream_addresses,
+            upstreams,
             protocol_reconnect: SharedLock::new(ProtocolReconnect::default()),
             listen_addr,
             state: Init,
@@ -239,7 +232,7 @@ impl TranslatorRuntime<Init> {
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: IoReady {
@@ -281,7 +274,7 @@ impl TranslatorRuntime<IoReady> {
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: ChannelManagerReady {
@@ -307,7 +300,7 @@ impl TranslatorRuntime<ChannelManagerReady> {
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Sv1ServerReady {
@@ -321,7 +314,7 @@ impl TranslatorRuntime<ChannelManagerReady> {
 
 impl TranslatorRuntime<Sv1ServerReady> {
     pub(super) async fn try_upstream(
-        mut self,
+        self,
     ) -> Result<TranslatorRuntime<UpstreamReady>, BootstrapError> {
         if let Err(kind) = self.initialize_upstream().await {
             return Err(BootstrapError::from((kind, self)));
@@ -334,23 +327,32 @@ impl TranslatorRuntime<Sv1ServerReady> {
     ///
     /// The endpoint keeps the authority key and user identity of the upstream that requested it,
     /// so it can only be another server of the same pool. It is tried on its own and does not join
-    /// the configured list.
+    /// the configured list; once connected it stands in for that upstream, at its rank. Leaving the
+    /// upstream to follow its request is not a failure of it.
     pub(super) async fn try_reconnect(
         self,
         request: ReconnectRequest,
     ) -> Result<TranslatorRuntime<UpstreamReady>, BootstrapError> {
         let upstream = request.into_upstream();
-        info!("Reconnecting to {}:{}", upstream.host, upstream.port);
-        match self.connect_with_retries(&upstream).await {
-            Ok(true) => Ok(self.into_upstream_ready()),
-            Ok(false) => {
-                warn!(
-                    "Could not reconnect to {}:{}; trying the configured upstreams",
-                    upstream.host, upstream.port
-                );
+        info!("Reconnecting to {upstream}");
+        let requester_rank = self.upstreams.leave();
+        let outcome = self
+            .unless_shutdown(attempts(&upstream, &mut |upstream| {
+                self.connect_once(upstream)
+            }))
+            .await;
+        match outcome {
+            Ok(Attempt::Connected(())) => {
+                if let Some(rank) = requester_rank {
+                    self.upstreams.connected(rank);
+                }
+                Ok(self.into_upstream_ready())
+            }
+            Ok(Attempt::Failed) => {
+                warn!("Could not reconnect to {upstream}; trying the configured upstreams");
                 self.try_upstream().await
             }
-            Err(kind) => Err(BootstrapError::from((kind, self))),
+            Ok(Attempt::Abort(kind)) | Err(kind) => Err(BootstrapError::from((kind, self))),
         }
     }
 
@@ -360,7 +362,7 @@ impl TranslatorRuntime<Sv1ServerReady> {
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: UpstreamReady {
@@ -370,91 +372,73 @@ impl TranslatorRuntime<Sv1ServerReady> {
         }
     }
 
-    /// Initializes the upstream connection list, handling retries, fallbacks, and flagging.
+    /// Connects to the first upstream that answers, in priority order.
     ///
-    /// Upstreams are tried sequentially, each receiving a fixed number of retries before we
-    /// advance to the next entry. This ensures we exhaust every healthy upstream before shutting
-    /// the translator down.
-    ///
-    /// The `tried_or_flagged` flag in the `UpstreamEntry` acts as the upstream's state machine:
-    ///  `false` means "never tried", while `true` means "already connected or marked as
-    /// malicious". Once an upstream is flagged we skip it on future loops
-    /// to avoid hammering known-bad endpoints during failover.
-    async fn initialize_upstream(&mut self) -> Result<(), TproxyErrorKind> {
-        let upstream_len = self.upstream_addresses.len();
-
-        for i in 0..upstream_len {
-            if self.upstream_addresses[i].tried_or_flagged {
-                debug!(
-                    "Upstream previously marked as malicious, skipping initial attempt warnings."
-                );
-                continue;
-            }
-
-            info!(
-                "Trying upstream {} of {}: {}:{}",
-                i + 1,
-                upstream_len,
-                self.upstream_addresses[i].host,
-                self.upstream_addresses[i].port
-            );
-
-            let upstream = self.upstream_addresses[i].clone();
-            let connected = self.connect_with_retries(&upstream).await?;
-            self.upstream_addresses[i].tried_or_flagged = true;
-            if connected {
-                return Ok(());
-            }
+    /// While none does, the SV1 server stays down, so miners cannot connect, and the upstreams are
+    /// walked again whenever one of them may be tried again. Only a shutdown, or an error that
+    /// calls for one, ends this without a connection.
+    async fn initialize_upstream(&self) -> Result<(), TproxyErrorKind> {
+        if self.upstreams.is_empty() {
+            error!("No upstream is configured");
+            return Err(TproxyErrorKind::CouldNotInitiateSystem);
         }
-
-        tracing::error!(
-            "All upstreams failed after {} retries each",
-            MAX_UPSTREAM_RETRIES
-        );
-        Err(TproxyErrorKind::CouldNotInitiateSystem)
+        let connect = async {
+            loop {
+                match self
+                    .upstreams
+                    .walk(|upstream| self.connect_once(upstream))
+                    .await
+                {
+                    Attempt::Connected(()) => return Ok(()),
+                    Attempt::Failed => {
+                        warn!("No upstream is reachable; SV1 miners cannot connect until one is");
+                        self.upstreams.next_ready().await;
+                    }
+                    Attempt::Abort(kind) => return Err(kind),
+                }
+            }
+        };
+        self.unless_shutdown(connect).await?
     }
 
-    /// Tries `upstream` up to [`MAX_UPSTREAM_RETRIES`] times and, once connected, configures the
-    /// channel manager and SV1 server for it.
-    ///
-    /// Returns `false` if every attempt failed.
-    async fn connect_with_retries(
+    /// Runs `connect` unless the translator shuts down first, which aborts it.
+    async fn unless_shutdown<T>(
         &self,
-        upstream: &UpstreamEntry,
-    ) -> Result<bool, TproxyErrorKind> {
-        for attempt in 1..=MAX_UPSTREAM_RETRIES {
-            info!("Connection attempt {}/{}...", attempt, MAX_UPSTREAM_RETRIES);
-            tokio::time::sleep(Duration::from_secs(1)).await;
-
-            match self.try_initialize_upstream_single(upstream).await {
-                Ok(()) => {
-                    let user_identity = upstream.user_identity.to_string();
-                    let payout_mode = self.payout_mode(&user_identity)?;
-
-                    self.state
-                        .channel_manager
-                        .set_expected_payout_distribution(payout_mode);
-                    self.state.sv1_server.set_user_identity(user_identity);
-                    return Ok(true);
-                }
-                Err(e) => {
-                    if e.action.is_shutdown() {
-                        error!("Fatal shutdown signal during upstream setup: {:?}", e.kind);
-                        return Err(e.kind);
-                    }
-
-                    warn!(
-                        "Attempt {}/{} failed for {}:{}: {:?}",
-                        attempt, MAX_UPSTREAM_RETRIES, upstream.host, upstream.port, e
-                    );
-                }
+        connect: impl Future<Output = T>,
+    ) -> Result<T, TproxyErrorKind> {
+        tokio::select! {
+            biased;
+            _ = self.translator.cancellation_token.cancelled() => {
+                info!("Shutdown requested while connecting to an upstream");
+                Err(TproxyErrorKind::CouldNotInitiateSystem)
             }
+            outcome = connect => Ok(outcome),
         }
-        warn!(
-            "Max retries reached for {}:{}, moving to next upstream",
-            upstream.host, upstream.port
-        );
-        Ok(false)
+    }
+
+    /// Makes one attempt at `upstream` and, once connected, configures the channel manager and
+    /// SV1 server for it.
+    async fn connect_once(&self, upstream: UpstreamEntry) -> Attempt<(), TproxyErrorKind> {
+        if let Err(e) = self.try_initialize_upstream_single(&upstream).await {
+            if e.action.is_shutdown() {
+                error!("Fatal shutdown signal during upstream setup: {:?}", e.kind);
+                return Attempt::Abort(e.kind);
+            }
+            warn!("Could not connect to {upstream}: {e:?}");
+            return Attempt::Failed;
+        }
+
+        let payout_mode = match self.payout_mode(&upstream.user_identity) {
+            Ok(payout_mode) => payout_mode,
+            Err(kind) => return Attempt::Abort(kind),
+        };
+        self.state
+            .channel_manager
+            .set_expected_payout_distribution(payout_mode);
+        self.state
+            .sv1_server
+            .set_user_identity(upstream.user_identity);
+        Attempt::Connected(())
     }
 
     // Attempts to initialize a single upstream.
@@ -524,16 +508,53 @@ impl TranslatorRuntime<UpstreamReady> {
             }
         }
 
+        self.start_upstream_probe();
+
         Ok(TranslatorRuntime {
             tproxy_mode: self.tproxy_mode,
             fallback_coordinator: self.fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Running,
         })
+    }
+
+    // Probes the upstreams ranked above the active one and switches to the first that answers
+    // through this generation's fallback.
+    fn start_upstream_probe(&self) {
+        let cancellation_token = self.translator.cancellation_token.clone();
+        let task_manager = self.task_manager.clone();
+        let required_extensions = self.translator.config.required_extensions.clone();
+
+        self.upstreams.start_probe(
+            &self.task_manager,
+            self.translator.cancellation_token.clone(),
+            &self.fallback_coordinator,
+            move |upstream, fallback_coordinator| {
+                let cancellation_token = cancellation_token.clone();
+                let task_manager = task_manager.clone();
+                let required_extensions = required_extensions.clone();
+                async move {
+                    // Channels connected to nothing: a probed upstream is never started.
+                    Upstream::new(
+                        &upstream,
+                        unbounded().0,
+                        unbounded().1,
+                        cancellation_token,
+                        fallback_coordinator,
+                        task_manager,
+                        required_extensions,
+                        SharedLock::new(ProtocolReconnect::default()),
+                    )
+                    .await?
+                    .setup_connection()
+                    .await
+                }
+            },
+        );
     }
 
     #[cfg(feature = "monitoring")]
@@ -624,7 +645,10 @@ impl TranslatorRuntime<Running> {
                     .with(|protocol_reconnect| protocol_reconnect.take(Instant::now()))
                 {
                     Ok(Some(request)) => RuntimeEvent::Reconnect(request),
-                    _ => RuntimeEvent::Fallback,
+                    _ => {
+                        self.upstreams.disconnected();
+                        RuntimeEvent::Fallback
+                    }
                 }
             }
         }
@@ -647,7 +671,7 @@ impl TranslatorRuntime<Running> {
             fallback_coordinator: fresh_fallback_coordinator,
             task_manager: self.task_manager,
             translator: self.translator,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             protocol_reconnect: self.protocol_reconnect,
             listen_addr: self.listen_addr,
             state: Init,
