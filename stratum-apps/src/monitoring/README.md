@@ -49,7 +49,8 @@ let server = MonitoringServer::new(
 )?;
 
 // For Translator, add SV1 monitoring
-let server = server.with_sv1_monitoring(Arc::new(sv1_server.clone()))?;
+// `true` also emits `sv1_client_hashrate`, one Prometheus series per connected miner
+let server = server.with_sv1_monitoring(Arc::new(sv1_server.clone()), false)?;
 
 // Create a shutdown signal (any Future that completes when shutdown is needed)
 let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
@@ -93,3 +94,9 @@ tokio::spawn(async move {
 **Sv1 (Translator Proxy only):**
 - `sv1_clients_total` - Sv1 client count
 - `sv1_hashrate_total` - Sv1 total hashrate
+- `sv1_client_hashrate{user_identity}` - Per-miner hashrate. **Opt-in**, via
+  `monitoring_sv1_per_client_metrics = true`, because the series count scales with
+  connected miners. Labelled by SV1 username rather than a connection id, so a
+  reconnecting miner continues the same series; hashrates of connections sharing a
+  username are summed. Series for departed miners are removed on the next refresh.
+  `/api/v1/sv1/clients` serves per-client state regardless of this setting.

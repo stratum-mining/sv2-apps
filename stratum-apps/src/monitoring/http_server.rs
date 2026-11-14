@@ -198,9 +198,15 @@ impl MonitoringServer {
     /// Add Sv1 clients monitoring (optional, for Translator Proxy only)
     ///
     /// This must be called before `run()` if you want SV1 monitoring.
+    ///
+    /// `per_client_metrics` additionally registers `sv1_client_hashrate`, one
+    /// series per connected miner. It is off in production by default because
+    /// the series count scales with miner count; the JSON API always serves
+    /// per-client state regardless.
     pub fn with_sv1_monitoring(
         mut self,
         sv1_monitoring: Arc<dyn Sv1ClientsMonitoring + Send + Sync + 'static>,
+        per_client_metrics: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Determine what sources the cache already has
         let snapshot = self.state.cache.get_snapshot();
@@ -209,6 +215,11 @@ impl MonitoringServer {
 
         // Create metrics with SV1 monitoring enabled
         let metrics = PrometheusMetrics::new(has_server, has_sv2_clients, true)?;
+        let metrics = if per_client_metrics {
+            metrics.with_sv1_per_client()?
+        } else {
+            metrics
+        };
 
         // Add Sv1 clients source and attach new metrics to the cache
         let cache = Arc::new(
