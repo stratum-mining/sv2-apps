@@ -28,6 +28,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub struct FallbackCoordinator {
     signal: CancellationToken,
     tasks: TaskTracker,
+    // The trackers of the coordinators this one is a child of, which wait for its futures too.
+    ancestors: Vec<TaskTracker>,
 }
 
 impl FallbackCoordinator {
@@ -40,6 +42,19 @@ impl FallbackCoordinator {
         self.signal.clone()
     }
 
+    /// A coordinator for work nested in this one's generation: fallback on this coordinator
+    /// signals the child too and waits for the futures the child tracks, while fallback on the
+    /// child leaves this one alone and waits for the child's futures only.
+    pub fn child(&self) -> Self {
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push(self.tasks.clone());
+        Self {
+            signal: self.signal.child_token(),
+            tasks: TaskTracker::new(),
+            ancestors,
+        }
+    }
+
     /// Wrap a fallback-relevant future so that fallback waits for it until it is dropped.
     ///
     /// Tracking starts here, not when the future is first polled, so a tracked future handed to a
@@ -47,7 +62,12 @@ impl FallbackCoordinator {
     /// inside a future that is itself tracked: a future tracked after the wait has observed the
     /// tracker empty belongs to no generation and is not waited for.
     pub fn track<F: Future>(&self, fut: F) -> impl Future<Output = F::Output> + use<F> {
-        self.tasks.track_future(fut)
+        let ancestors: Vec<_> = self.ancestors.iter().map(TaskTracker::token).collect();
+        let fut = self.tasks.track_future(fut);
+        async move {
+            let _ancestors = ancestors;
+            fut.await
+        }
     }
 
     /// Trigger fallback and wait until every tracked future has been dropped.
@@ -108,6 +128,28 @@ mod tests {
         assert!(wait.as_mut().now_or_never().is_none());
 
         drop(never_polled);
+        assert!(wait.as_mut().now_or_never().is_some());
+    }
+
+    #[tokio::test]
+    async fn fallback_reaches_a_child_and_waits_for_it_but_not_the_other_way_round() {
+        let parent = FallbackCoordinator::new();
+        let parent_work = parent.track(std::future::pending::<()>());
+        let child = parent.child();
+        child.trigger_fallback_and_wait().await;
+        assert!(!parent.token().is_cancelled());
+        drop(parent_work);
+
+        let child = parent.child();
+        let child_work = child.track(std::future::pending::<()>());
+        let mut wait = pin!(parent.trigger_fallback_and_wait());
+        assert!(
+            wait.as_mut().now_or_never().is_none(),
+            "fallback completed while the child's work was still pending"
+        );
+        assert!(child.token().is_cancelled());
+
+        drop(child_work);
         assert!(wait.as_mut().now_or_never().is_some());
     }
 
