@@ -21,6 +21,10 @@ pub struct PrometheusMetrics {
     pub sv2_client_channels: Option<GaugeVec>,
     pub sv2_client_hashrate_total: Option<Gauge>,
     pub sv2_client_channel_hashrate: Option<GaugeVec>,
+    /// Cumulative validated share work per client channel, in difficulty-1 units.
+    /// `nominal_hashrate` is the value the miner declared; `rate()` over this is what it
+    /// actually produced.
+    pub sv2_client_channel_share_work_total: Option<GaugeVec>,
     pub sv2_client_shares_accepted_total: Option<GaugeVec>,
     pub sv2_client_shares_rejected_total: Option<GaugeVec>,
     pub sv2_client_blocks_found_total: Option<Gauge>,
@@ -113,6 +117,7 @@ impl PrometheusMetrics {
             sv2_client_channels,
             sv2_client_hashrate_total,
             sv2_client_channel_hashrate,
+            sv2_client_channel_share_work_total,
             sv2_client_shares_accepted_total,
             sv2_client_shares_rejected_total,
             sv2_client_blocks_found_total,
@@ -141,6 +146,15 @@ impl PrometheusMetrics {
                 &["client_id", "channel_id", "user_identity"],
             )?;
             registry.register(Box::new(channel_hashrate.clone()))?;
+
+            let channel_share_work = GaugeVec::new(
+                Opts::new(
+                    "sv2_client_channel_share_work_total",
+                    "Cumulative validated share work per client channel, in difficulty-1 units (rate() * 2^32 = H/s)",
+                ),
+                &["client_id", "channel_id", "user_identity"],
+            )?;
+            registry.register(Box::new(channel_share_work.clone()))?;
 
             let shares_accepted = GaugeVec::new(
                 Opts::new(
@@ -171,12 +185,13 @@ impl PrometheusMetrics {
                 Some(channels),
                 Some(hashrate),
                 Some(channel_hashrate),
+                Some(channel_share_work),
                 Some(shares_accepted),
                 Some(shares_rejected),
                 Some(blocks_found),
             )
         } else {
-            (None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None)
         };
 
         // SV1 metrics
@@ -205,6 +220,7 @@ impl PrometheusMetrics {
             sv2_client_channels,
             sv2_client_hashrate_total,
             sv2_client_channel_hashrate,
+            sv2_client_channel_share_work_total,
             sv2_client_shares_accepted_total,
             sv2_client_shares_rejected_total,
             sv2_client_blocks_found_total,
@@ -251,6 +267,7 @@ mod tests {
         assert!(m.sv2_client_channel_hashrate.is_some());
         assert!(m.sv2_client_shares_accepted_total.is_some());
         assert!(m.sv2_client_shares_rejected_total.is_some());
+        assert!(m.sv2_client_channel_share_work_total.is_some());
         // server and sv1 should be None
         assert!(m.sv2_server_channels.is_none());
         assert!(m.sv1_clients_total.is_none());

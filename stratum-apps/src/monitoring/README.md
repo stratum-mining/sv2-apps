@@ -86,6 +86,13 @@ tokio::spawn(async move {
 - `sv2_client_channels{channel_type}` - Client channels by type (extended/standard)
 - `sv2_client_hashrate_total` - Total client hashrate
 - `sv2_client_channel_hashrate{client_id, channel_id, user_identity}` - Per-channel hashrate
+  as *declared* by the miner (`nominal_hashrate`), not measured
+- `sv2_client_channel_share_work_total{client_id, channel_id, user_identity}` - Cumulative
+  validated share work per channel, as the sum of each accepted share's difficulty
+  (difficulty-1 units). Monotonic while the channel lives, so `rate()` over it gives
+  *measured* work per second, and `rate() * 2^32` is the measured hashrate in H/s: the
+  counterpart to the declared value above. Use it where you need what a miner actually
+  produced rather than what it announced.
 - `sv2_client_shares_accepted_total{client_id, channel_id, user_identity}` - Per-channel shares
 - `sv2_client_shares_rejected_total{client_id, channel_id, user_identity, error_code}` - Per-channel rejected shares by error code
 - `sv2_client_blocks_found_total` - Total blocks found across all current client channels
