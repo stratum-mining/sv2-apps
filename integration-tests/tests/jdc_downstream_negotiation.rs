@@ -48,6 +48,7 @@ async fn jdc_grants_downstreams_extensions_without_the_ones_it_requires_from_its
         false,
         Some(ConfigJDCMode::SoloMining),
         "JDC",
+        None,
     );
     tp.send(
         0,
@@ -149,6 +150,7 @@ async fn jdc_disconnects_only_the_downstream_without_a_required_extension() {
         false,
         Some(ConfigJDCMode::SoloMining),
         "JDC",
+        None,
     );
     tp.send(
         0,

@@ -4,7 +4,7 @@
 //! Client's (JDC) initialization, bootstrap stages, background service loops, and graceful teardown
 //! or fallback.
 
-use std::{sync::Arc, thread::JoinHandle, time::Duration};
+use std::{sync::Arc, thread::JoinHandle};
 
 use async_channel::{Receiver, Sender, unbounded};
 use stratum_apps::{
@@ -16,6 +16,7 @@ use stratum_apps::{
     },
     task_manager::TaskManager,
     tp_type::{TemplateProviderType, resolve_ipc_socket_path},
+    upstream_selector::{Attempt, UpstreamSelector},
     utils::types::{DownstreamId, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, InboundFrame, OutboundFrame},
 };
 use tracing::{error, info, warn};
@@ -70,7 +71,7 @@ pub(super) struct JdcRuntime<State> {
     task_manager: Arc<TaskManager>,
     bitcoin_core_sv2: Option<BitcoinCoreSv2Handle>,
     jd_client: JobDeclaratorClient,
-    upstream_addresses: Vec<UpstreamEntry>,
+    upstreams: UpstreamSelector<UpstreamEntry>,
     state: State,
 }
 
@@ -133,7 +134,7 @@ impl<State> JdcRuntime<State> {
         channel_manager: &ChannelManager,
         monitoring_addr: SocketAddr,
     ) -> Result<(), String> {
-        let refresh_interval = Duration::from_secs(
+        let refresh_interval = std::time::Duration::from_secs(
             self.jd_client
                 .config
                 .monitoring_cache_refresh_secs()
@@ -233,7 +234,52 @@ impl<State> JdcRuntime<State> {
             .await
             .map_err(|e| e.kind)?;
 
+        if config.mode != ConfigJDCMode::SoloMining {
+            self.start_upstream_probe();
+        }
+
         Ok(())
+    }
+
+    fn pair_connector(&self) -> PairConnector {
+        let config = &self.jd_client.config;
+        PairConnector {
+            cancellation_token: self.jd_client.cancellation_token.clone(),
+            task_manager: self.task_manager.clone(),
+            required_extensions: config.required_extensions().to_vec(),
+            min_version: config.min_supported_version(),
+            max_version: config.max_supported_version(),
+            mode: self.mode.clone(),
+        }
+    }
+
+    // Probes the upstreams ranked above the active one, or all of them while mining solo, and
+    // switches to the first that answers through this generation's fallback.
+    fn start_upstream_probe(&self) {
+        // The JDS answering `SetupConnection` activates the mode it is given, so a probe gets a
+        // mode of its own rather than one shared with the running generation.
+        let connector = PairConnector {
+            mode: JDMode::new(self.jd_client.config.mode),
+            ..self.pair_connector()
+        };
+        self.upstreams.start_probe(
+            &self.task_manager,
+            self.jd_client.cancellation_token.clone(),
+            &self.fallback_coordinator,
+            move |upstream_entry, fallback_coordinator| {
+                let connector = connector.clone();
+                async move {
+                    connector
+                        .connect(
+                            &upstream_entry,
+                            PairChannels::unused(),
+                            fallback_coordinator,
+                        )
+                        .await
+                        .map(|_| ())
+                }
+            },
+        );
     }
 
     fn into_failed(self) -> JdcRuntime<Failed> {
@@ -244,7 +290,7 @@ impl<State> JdcRuntime<State> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: Failed,
         }
     }
@@ -300,20 +346,16 @@ impl JdcRuntime<Init> {
     pub(super) fn new(jd_client: JobDeclaratorClient) -> Result<Self, JDCErrorKind> {
         let miner_coinbase_outputs = vec![jd_client.config.get_txout()];
         let mode = JDMode::new(jd_client.config.mode);
-        let upstream_addresses = jd_client
-            .config
-            .upstreams()
-            .iter()
-            .map(|u| UpstreamEntry {
+        let upstreams =
+            UpstreamSelector::new(jd_client.config.upstreams().iter().map(|u| UpstreamEntry {
                 pool_host: u.pool_address.clone(),
                 pool_port: u.pool_port,
                 jds_host: u.jds_address.clone(),
                 jds_port: u.jds_port,
                 authority_pubkey: u.authority_pubkey,
-                tried_or_flagged: false,
                 user_identity: u.user_identity.clone(),
-            })
-            .collect();
+            }))
+            .with_initial_backoff(jd_client.initial_upstream_backoff);
 
         Ok(JdcRuntime {
             miner_coinbase_outputs,
@@ -322,7 +364,7 @@ impl JdcRuntime<Init> {
             task_manager: Arc::new(TaskManager::new()),
             bitcoin_core_sv2: None,
             jd_client,
-            upstream_addresses,
+            upstreams,
             state: Init,
         })
     }
@@ -362,7 +404,7 @@ impl JdcRuntime<Init> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: IoReady {
                 io: Io {
                     channel_manager_to_upstream_sender,
@@ -493,7 +535,7 @@ impl JdcRuntime<IoReady> {
             task_manager: self.task_manager,
             bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: TemplateProviderReady { io: self.state.io },
         })
     }
@@ -558,7 +600,7 @@ impl JdcRuntime<TemplateProviderReady> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: ChannelManagerReady {
                 io: self.state.io,
                 channel_manager,
@@ -569,9 +611,9 @@ impl JdcRuntime<TemplateProviderReady> {
 
 impl JdcRuntime<ChannelManagerReady> {
     async fn try_upstream(
-        mut self,
+        self,
     ) -> Result<JdcRuntime<UpstreamReady>, (JDCErrorKind, JdcRuntime<ChannelManagerReady>)> {
-        if self.upstream_addresses.is_empty() {
+        if self.upstreams.is_empty() {
             return Err((
                 JDCErrorKind::NoUpstreamConfig(self.jd_client.config.mode),
                 self,
@@ -612,7 +654,7 @@ impl JdcRuntime<ChannelManagerReady> {
                     task_manager: self.task_manager,
                     bitcoin_core_sv2: self.bitcoin_core_sv2,
                     jd_client: self.jd_client,
-                    upstream_addresses: self.upstream_addresses,
+                    upstreams: self.upstreams,
                     state: UpstreamReady {
                         io: self.state.io,
                         channel_manager: self.state.channel_manager,
@@ -637,7 +679,7 @@ impl JdcRuntime<ChannelManagerReady> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: SoloMiningReady {
                 io: self.state.io,
                 channel_manager: self.state.channel_manager,
@@ -645,143 +687,122 @@ impl JdcRuntime<ChannelManagerReady> {
         }
     }
 
-    /// Initializes an upstream pool + JD connection pair.
-    async fn initialize_jd(&mut self) -> Result<(Upstream, JobDeclarator, String), JDCErrorKind> {
-        const MAX_RETRIES: usize = 3;
-        let upstream_len = self.upstream_addresses.len();
-
-        for i in 0..upstream_len {
-            let upstream_entry = self.upstream_addresses[i].clone();
-            info!(
-                "Trying upstream {} of {}: pool={}:{}, jds={}:{}",
-                i + 1,
-                upstream_len,
-                upstream_entry.pool_host,
-                upstream_entry.pool_port,
-                upstream_entry.jds_host,
-                upstream_entry.jds_port,
-            );
-
-            tokio::select! {
-                biased;
-                _ = self.jd_client.cancellation_token.cancelled() => {
-                    info!("Shutdown requested while waiting to initialize upstream, aborting retries");
-                    return Err(JDCErrorKind::CouldNotInitiateSystem);
-                }
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-            }
-
-            if upstream_entry.tried_or_flagged {
-                info!(
-                    "Upstream previously marked as malicious, skipping initial attempt warnings."
-                );
-                continue;
-            }
-
-            for attempt in 1..=MAX_RETRIES {
-                if self.jd_client.cancellation_token.is_cancelled() {
-                    info!(
-                        "Shutdown requested before upstream connection attempt, aborting retries"
-                    );
-                    return Err(JDCErrorKind::CouldNotInitiateSystem);
-                }
-
-                info!("Connection attempt {}/{}...", attempt, MAX_RETRIES);
-
-                match self.try_initialize_single(&upstream_entry).await {
-                    Ok((upstream, jd)) => {
-                        self.upstream_addresses[i].tried_or_flagged = true;
-                        return Ok((upstream, jd, upstream_entry.user_identity.clone()));
+    /// Connects to the first upstream pool + JD pair that answers, in priority order. The
+    /// connections of each attempt are tied to that attempt's coordinator, which ends them if the
+    /// attempt fails.
+    async fn initialize_jd(&self) -> Result<(Upstream, JobDeclarator, String), JDCErrorKind> {
+        let connector = self.pair_connector();
+        let connect = |upstream_entry: UpstreamEntry, attempt: FallbackCoordinator| {
+            let connector = connector.clone();
+            let channels = PairChannels::of(&self.state.io);
+            async move {
+                match connector.connect(&upstream_entry, channels, attempt).await {
+                    Ok((upstream, job_declarator)) => {
+                        Attempt::Connected((upstream, job_declarator, upstream_entry.user_identity))
                     }
+                    Err(e) if e.action.is_shutdown() => Attempt::Abort(e.kind),
                     Err(e) => {
-                        tracing::error!("Upstream and JDS connection terminated");
-
-                        tokio::select! {
-                            biased;
-                            _ = self.jd_client.cancellation_token.cancelled() => {
-                                info!("Shutdown requested after upstream initialization failure, aborting retries");
-                                return Err(JDCErrorKind::CouldNotInitiateSystem);
-                            }
-                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                        }
-
-                        // Stop retrying and fail immediately if a shutdown signal is encountered,
-                        // as retries are only intended for fallback scenarios.
-                        if e.action.is_shutdown() {
-                            info!(
-                                "Encountered a shutdown error during upstream initialization, aborting retries"
-                            );
-                            return Err(e.kind);
-                        }
-
-                        warn!(
-                            "Attempt {}/{} failed for pool={}:{}, jds={}:{}: {:?}",
-                            attempt,
-                            MAX_RETRIES,
-                            upstream_entry.pool_host,
-                            upstream_entry.pool_port,
-                            upstream_entry.jds_host,
-                            upstream_entry.jds_port,
-                            e
-                        );
-                        if attempt == MAX_RETRIES {
-                            warn!(
-                                "Max retries reached for pool={}:{}, jds={}:{}, moving to next upstream",
-                                upstream_entry.pool_host,
-                                upstream_entry.pool_port,
-                                upstream_entry.jds_host,
-                                upstream_entry.jds_port,
-                            );
-                        }
+                        warn!("Could not connect to {upstream_entry}: {e:?}");
+                        Attempt::Failed
                     }
                 }
             }
-            self.upstream_addresses[i].tried_or_flagged = true;
-        }
+        };
+        let walk = self.upstreams.walk(&self.fallback_coordinator, connect);
 
-        tracing::error!("All upstreams failed after {} retries each", MAX_RETRIES);
-        Err(JDCErrorKind::CouldNotInitiateSystem)
+        tokio::select! {
+            biased;
+            _ = self.jd_client.cancellation_token.cancelled() => {
+                info!("Shutdown requested while connecting to an upstream");
+                Err(JDCErrorKind::CouldNotInitiateSystem)
+            }
+            outcome = walk => match outcome {
+                Attempt::Connected(connected) => Ok(connected),
+                Attempt::Failed => Err(JDCErrorKind::CouldNotInitiateSystem),
+                Attempt::Abort(kind) => Err(kind),
+            },
+        }
+    }
+}
+
+// What connecting to a Pool/JDS pair takes besides the pair itself and the channels and
+// coordinator its connections are tied to. The probe task holds a copy, as it connects outside
+// any runtime state.
+#[derive(Clone)]
+struct PairConnector {
+    cancellation_token: CancellationToken,
+    task_manager: Arc<TaskManager>,
+    required_extensions: Vec<u16>,
+    min_version: u16,
+    max_version: u16,
+    mode: JDMode,
+}
+
+// The channels a pair's connections exchange traffic with once they are started.
+struct PairChannels {
+    upstream_to_channel_manager: Sender<InboundFrame>,
+    channel_manager_to_upstream: Receiver<OutboundFrame>,
+    jd_to_channel_manager: Sender<JobDeclarationOwned>,
+    channel_manager_to_jd: Receiver<JobDeclarationOwned>,
+}
+
+impl PairChannels {
+    fn of(io: &Io) -> Self {
+        Self {
+            upstream_to_channel_manager: io.upstream_to_channel_manager_sender.clone(),
+            channel_manager_to_upstream: io.channel_manager_to_upstream_receiver.clone(),
+            jd_to_channel_manager: io.jd_to_channel_manager_sender.clone(),
+            channel_manager_to_jd: io.channel_manager_to_jd_receiver.clone(),
+        }
     }
 
-    // Attempts to initialize a single upstream (pool + JDS pair).
+    // Channels connected to nothing, for a pair that is probed and never started.
+    fn unused() -> Self {
+        Self {
+            upstream_to_channel_manager: unbounded().0,
+            channel_manager_to_upstream: unbounded().1,
+            jd_to_channel_manager: unbounded().0,
+            channel_manager_to_jd: unbounded().1,
+        }
+    }
+}
+
+impl PairConnector {
+    // Connects to a Pool/JDS pair and sets up both connections.
     //
     // The pair is usable only once both the Pool and the JDS have answered their
     // `SetupConnection`, so a failed setup fails the attempt like a failed connection does,
-    // whatever action its error carries. Returning drops the connections opened for the pair, so
-    // JDC closes its side of each.
+    // whatever action its error carries. The connections are tied to `fallback_coordinator`, whose
+    // fallback closes JDC's side of each.
     #[cfg_attr(not(test), hotpath::measure)]
-    async fn try_initialize_single(
+    async fn connect(
         &self,
         upstream_entry: &UpstreamEntry,
+        channels: PairChannels,
+        fallback_coordinator: FallbackCoordinator,
     ) -> JDCResult<(Upstream, JobDeclarator), super::error::JobDeclaratorClient> {
-        info!("Upstream connection in-progress at initialize single");
         let mut upstream = Upstream::new(
             upstream_entry,
-            self.state.io.upstream_to_channel_manager_sender.clone(),
-            self.state.io.channel_manager_to_upstream_receiver.clone(),
-            self.jd_client.cancellation_token.clone(),
-            self.fallback_coordinator.clone(),
+            channels.upstream_to_channel_manager,
+            channels.channel_manager_to_upstream,
+            self.cancellation_token.clone(),
+            fallback_coordinator.clone(),
             self.task_manager.clone(),
-            self.jd_client.config.required_extensions().to_vec(),
+            self.required_extensions.clone(),
         )
         .await
         .map_err(Self::failed_attempt)?;
         upstream
-            .setup_connection(
-                self.jd_client.config.min_supported_version(),
-                self.jd_client.config.max_supported_version(),
-            )
+            .setup_connection(self.min_version, self.max_version)
             .await
             .map_err(Self::failed_attempt)?;
 
-        info!("Upstream connection done at initialize single");
-
         let mut job_declarator = JobDeclarator::new(
             upstream_entry,
-            self.state.io.jd_to_channel_manager_sender.clone(),
-            self.state.io.channel_manager_to_jd_receiver.clone(),
-            self.jd_client.cancellation_token.clone(),
-            self.fallback_coordinator.clone(),
+            channels.jd_to_channel_manager,
+            channels.channel_manager_to_jd,
+            self.cancellation_token.clone(),
+            fallback_coordinator,
             self.mode.clone(),
             self.task_manager.clone(),
         )
@@ -825,7 +846,7 @@ impl JdcRuntime<UpstreamReady> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: Running { io: self.state.io },
         })
     }
@@ -851,7 +872,7 @@ impl JdcRuntime<SoloMiningReady> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: Running { io: self.state.io },
         })
     }
@@ -874,7 +895,11 @@ impl JdcRuntime<Running> {
                 RuntimeEvent::Shutdown
             }
             _ = fallback_token.cancelled() => {
-                warn!("Upstream/Job Declarator connection dropped — attempting reconnection...");
+                if self.upstreams.disconnected() {
+                    warn!("Upstream/Job Declarator connection dropped — attempting reconnection...");
+                } else {
+                    info!("Fallback triggered, walking the upstreams");
+                }
                 RuntimeEvent::Fallback
             }
         }
@@ -922,7 +947,7 @@ impl JdcRuntime<Running> {
             task_manager: self.task_manager,
             bitcoin_core_sv2: self.bitcoin_core_sv2,
             jd_client: self.jd_client,
-            upstream_addresses: self.upstream_addresses,
+            upstreams: self.upstreams,
             state: TemplateProviderReady { io: new_io },
         }
     }
