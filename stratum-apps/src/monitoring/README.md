@@ -88,7 +88,9 @@ tokio::spawn(async move {
 - `sv2_client_channel_hashrate{client_id, channel_id, user_identity}` - Per-channel hashrate
 - `sv2_client_shares_accepted_total{client_id, channel_id, user_identity}` - Per-channel shares
 - `sv2_client_shares_rejected_total{client_id, channel_id, user_identity, error_code}` - Per-channel rejected shares by error code
-- `sv2_client_blocks_found_total` - Total blocks found across all current client channels
+- `sv2_client_blocks_found_total` - Total blocks found across client channels. The pool counts
+  every block for its process lifetime, so the total survives the finding channel closing; the
+  default `Sv2ClientsMonitoring` implementation, which the JDC uses, sums current channels only
 
 **Sv1 (Translator Proxy only):**
 - `sv1_clients_total` - Sv1 client count
