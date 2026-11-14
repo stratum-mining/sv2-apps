@@ -15,6 +15,7 @@ use stratum_apps::{
         bitcoin::{Amount, TxOut, consensus::serialize},
         mining_sv2::*,
     },
+    upstream_selector::ATTEMPTS_PER_UPSTREAM,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -2538,8 +2539,10 @@ async fn translator_ignores_a_reconnect_requested_too_soon_after_the_last_one() 
     shutdown_all!(translator);
 }
 
-// If the endpoint requested by Reconnect cannot be reached, the translator moves on to the
-// configured upstreams.
+// If the endpoint requested by Reconnect cannot be reached, the translator goes through the
+// configured upstreams from the top again. Leaving an upstream to follow its request is not a
+// failure of it, so the translator connects to the one that sent the request again, not to the
+// one ranked below it.
 #[tokio::test]
 async fn translator_uses_the_configured_upstreams_when_the_requested_one_fails() {
     start_tracing();
@@ -2583,9 +2586,15 @@ async fn translator_uses_the_configured_upstreams_when_the_requested_one_fails()
         )
         .await;
 
-    fallback_upstream
-        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
+    current_upstream
+        .wait_for_message_type(1, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
+    assert!(
+        fallback_upstream
+            .assert_message_not_present(0, MESSAGE_TYPE_SETUP_CONNECTION, Duration::from_secs(3))
+            .await,
+        "the translator does not connect to the lower-ranked upstream"
+    );
     shutdown_all!(translator);
 }
 
@@ -2605,6 +2614,7 @@ async fn tproxy_sends_per_upstream_user_identity() {
         vec![],
         None,
         false,
+        None,
     )
     .await;
 
@@ -2678,6 +2688,7 @@ async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
         vec![],
         None,
         false,
+        None,
     )
     .await;
 
@@ -2685,10 +2696,8 @@ async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
 
     // The primary mock answers nothing by itself: the test sends back SetupConnectionError by hand
     // each time tproxy's SetupConnection arrives. tproxy tries an upstream
-    // `MAX_UPSTREAM_RETRIES` times (private to `translator_sv2::translator_runtime`) before it
-    // falls over to mock_fallback.
-    const TPROXY_ATTEMPTS_PER_UPSTREAM: usize = 3;
-    for attempt in 0..TPROXY_ATTEMPTS_PER_UPSTREAM {
+    // `ATTEMPTS_PER_UPSTREAM` times before it falls over to mock_fallback.
+    for attempt in 0..ATTEMPTS_PER_UPSTREAM {
         mock_primary
             .wait_for_message_type(attempt, MESSAGE_TYPE_SETUP_CONNECTION)
             .await;
@@ -2731,4 +2740,158 @@ async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
     );
 
     shutdown_all!(translator);
+}
+
+// Long enough for tProxy to spend its attempts on an upstream that is down.
+const ATTEMPTS_ON_A_DOWN_UPSTREAM: Duration = Duration::from_secs(5);
+
+// How long tProxy backs off after an upstream's first failure in the tests that have it come back
+// to an upstream, in place of the 10 seconds of a deployment.
+const INITIAL_UPSTREAM_BACKOFF: Duration = Duration::from_secs(1);
+
+// An upstream that answers `SetupConnection` and nothing after it.
+async fn upstream_answering_setup(address: std::net::SocketAddr) -> MockServer {
+    MockServer::new(
+        address,
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
+    )
+    .await
+}
+
+// Waits until tProxy's SV1 port accepts connections when `open` holds, or refuses them when not.
+async fn wait_for_sv1_port(tproxy_addr: std::net::SocketAddr, open: bool, what: &str) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while TcpStream::connect(tproxy_addr).await.is_ok() != open {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
+}
+
+// An upstream stays eligible whatever happened with it before. With it as the only configured
+// upstream, tProxy keeps running with its SV1 port closed while the upstream is down, serves
+// miners once it answers, closes the port again when it drops and serves miners again when it is
+// back.
+#[tokio::test]
+async fn translator_reconnects_to_an_upstream_it_was_connected_to_before() {
+    start_tracing();
+
+    let upstream_addr = get_available_address();
+    let (translator, tproxy_addr, _) = start_sv2_translator_with_user_identities(
+        &[(upstream_addr, "user_identity".to_string())],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+        Some(INITIAL_UPSTREAM_BACKOFF),
+    )
+    .await;
+    tokio::time::sleep(ATTEMPTS_ON_A_DOWN_UPSTREAM).await;
+    wait_for_sv1_port(
+        tproxy_addr,
+        false,
+        "tProxy keeps its SV1 port closed while the upstream is down",
+    )
+    .await;
+
+    // tProxy connects to the upstream once it is up.
+    let upstream = upstream_answering_setup(upstream_addr).await;
+    upstream.wait_for_held_connection(0).await;
+    wait_for_sv1_port(tproxy_addr, true, "tProxy opens its SV1 port").await;
+
+    drop(upstream);
+    wait_for_sv1_port(
+        tproxy_addr,
+        false,
+        "tProxy closes its SV1 port once the upstream drops",
+    )
+    .await;
+
+    // tProxy connects to the upstream again once it is back.
+    let upstream = upstream_answering_setup(upstream_addr).await;
+    upstream.wait_for_held_connection(0).await;
+    wait_for_sv1_port(tproxy_addr, true, "tProxy opens its SV1 port again").await;
+
+    translator.shutdown().await;
+}
+
+// While on a lower-ranked upstream, tProxy probes the upstreams ranked above it and switches back
+// to the first one that answers, closing its connection to the lower-ranked one.
+#[tokio::test]
+async fn translator_switches_back_to_the_primary_upstream_once_it_answers() {
+    start_tracing();
+
+    let primary_addr = get_available_address();
+    let backup_addr = get_available_address();
+    let backup = upstream_answering_setup(backup_addr).await;
+    let (translator, _tproxy_addr, _) = start_sv2_translator_with_user_identities(
+        &[
+            (primary_addr, "user_identity".to_string()),
+            (backup_addr, "user_identity".to_string()),
+        ],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+        Some(INITIAL_UPSTREAM_BACKOFF),
+    )
+    .await;
+    // tProxy connects to the backup upstream while the primary is down.
+    let backup_connection = backup.wait_for_held_connection(0).await;
+
+    // tProxy switches to the primary upstream once it answers.
+    let primary = upstream_answering_setup(primary_addr).await;
+    primary.wait_for_held_connection(0).await;
+    backup.wait_for_close(backup_connection).await;
+
+    translator.shutdown().await;
+}
+
+// tProxy waiting for an upstream that is down still shuts down when asked, and its run ends
+// without an error.
+#[tokio::test]
+async fn translator_shuts_down_while_no_upstream_is_reachable() {
+    start_tracing();
+
+    // Started here rather than through the harness, which drops what the run returns.
+    let upstream_addr = get_available_address();
+    let listening_addr = get_available_address();
+    let config = translator_sv2::config::TranslatorConfig::new(
+        vec![translator_sv2::config::Upstream::new(
+            upstream_addr.ip().to_string(),
+            upstream_addr.port(),
+            TEST_AUTHORITY_PUBLIC_KEY
+                .parse()
+                .expect("the test authority key is valid"),
+            "user_identity".to_string(),
+        )],
+        listening_addr.ip().to_string(),
+        listening_addr.port(),
+        translator_sv2::config::DownstreamDifficultyConfig::new(1_000.0, 120.0, true, 60),
+        2,
+        2,
+        4,
+        false,
+        false,
+        vec![],
+        vec![],
+        None,
+        None,
+    );
+    let translator = translator_sv2::TranslatorSv2::new(config);
+    let run = tokio::spawn({
+        let translator = translator.clone();
+        async move { translator.start().await }
+    });
+    tokio::time::sleep(ATTEMPTS_ON_A_DOWN_UPSTREAM).await;
+
+    tokio::time::timeout(Duration::from_secs(15), translator.shutdown())
+        .await
+        .expect("tProxy shuts down while no upstream is reachable");
+    run.await
+        .expect("the run does not panic")
+        .expect("a shutdown while waiting for an upstream is not an error");
 }

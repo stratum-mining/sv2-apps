@@ -174,8 +174,13 @@ pub struct UpstreamEntry {
     pub host: String,
     pub port: u16,
     pub authority_pubkey: Secp256k1PublicKey,
-    pub tried_or_flagged: bool,
     pub user_identity: String,
+}
+
+impl std::fmt::Display for UpstreamEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
 }
 
 /// A reconnect the upstream asked for, with the endpoint to connect to.

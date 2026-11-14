@@ -82,7 +82,6 @@ impl HandleCommonMessagesFromServerOwnedAsync for Upstream {
         if msg.new_port != 0 {
             upstream.port = msg.new_port;
         }
-        upstream.tried_or_flagged = false;
         Err(TproxyError::reconnect(ReconnectRequest::Redirect(upstream)))
     }
 }
@@ -113,7 +112,6 @@ mod tests {
                 "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan",
             )
             .unwrap(),
-            tried_or_flagged: false,
             user_identity: "miner".to_string(),
         }
     }
