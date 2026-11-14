@@ -34,6 +34,7 @@ use stratum_apps::{
     utils::types::OutboundFrame,
 };
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub enum WithSetup {
@@ -273,21 +274,74 @@ impl MockUpstream {
     }
 }
 
+/// A mock role started by [`answer_setup_connections`].
+pub struct SetupAnswerer {
+    /// Reports each connection whose `SetupConnection` was answered.
+    pub answered: Receiver<()>,
+    /// Reports each answered connection once it has ended.
+    pub closed: Receiver<()>,
+    stop: CancellationToken,
+    // Closed once the role has stopped listening.
+    listening: Receiver<()>,
+}
+
+impl SetupAnswerer {
+    /// Stops listening and ends the connections it answered, as a role that goes down does.
+    /// Returns once the address is free again. A connection that has not had its
+    /// `SetupConnection` answered yet still gets the answer, and ends right after it.
+    pub async fn stop(&self) {
+        self.stop.cancel();
+        _ = self.listening.recv().await;
+    }
+
+    /// Waits until a client holds a connection: one whose `SetupConnection` was answered and that
+    /// is still open two seconds later. A probe, which closes the connection once it is set up,
+    /// does not count. Panics with `what` if no client holds one within a minute.
+    pub async fn wait_for_held_connection(&self, what: &str) {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                self.answered
+                    .recv()
+                    .await
+                    .expect("the mock role is running");
+                if tokio::time::timeout(Duration::from_secs(2), self.closed.recv())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    }
+}
+
 /// Accepts every connection a client opens to `address` and answers its `SetupConnection` with
-/// `reply`, so a test decides what the client gets back, malformed frames included. Each
-/// connection is reported on the returned receiver once the client has closed it.
+/// `reply`, so a test decides what the client gets back, malformed frames included, until
+/// [`SetupAnswerer::stop`] is called.
 pub async fn answer_setup_connections(
     address: SocketAddr,
     reply: fn() -> OutboundFrame,
-) -> Receiver<()> {
+) -> SetupAnswerer {
     let listener = TcpListener::bind(address)
         .await
         .expect("the mock role's address is available");
-    let (closed_sender, closed_receiver) = async_channel::unbounded();
+    let (answered_sender, answered) = async_channel::unbounded();
+    let (closed_sender, closed) = async_channel::unbounded();
+    let stop = CancellationToken::new();
+    let role_stop = stop.clone();
+    let (still_listening, listening) = async_channel::bounded::<()>(1);
     tokio::spawn(async move {
+        let _still_listening = still_listening;
         loop {
-            let (stream, _) = listener.accept().await.expect("the client connects");
+            let stream = tokio::select! {
+                _ = role_stop.cancelled() => break,
+                accepted = listener.accept() => accepted.expect("the client connects").0,
+            };
+            let answered_sender = answered_sender.clone();
             let closed_sender = closed_sender.clone();
+            let role_stop = role_stop.clone();
             tokio::spawn(async move {
                 let (receiver, sender) = create_downstream(stream)
                     .await
@@ -301,13 +355,26 @@ pub async fn answer_setup_connections(
                     MESSAGE_TYPE_SETUP_CONNECTION
                 );
                 sender.send(reply()).await.expect("the reply is sent");
-                // The stream ends once the client closes the connection.
-                while receiver.recv().await.is_ok() {}
+                _ = answered_sender.send(()).await;
+                tokio::select! {
+                    _ = role_stop.cancelled() => {}
+                    // The stream ends once the client closes the connection.
+                    _ = async { while receiver.recv().await.is_ok() {} } => {}
+                }
+                sender.close();
+                receiver.close();
                 _ = closed_sender.send(()).await;
             });
         }
+        // Freed before `_still_listening` is dropped, which is what `stop` waits for.
+        drop(listener);
     });
-    closed_receiver
+    SetupAnswerer {
+        answered,
+        closed,
+        stop,
+        listening,
+    }
 }
 
 /// A `SetupConnection.Success` accepting version 2 with no flags.

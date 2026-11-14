@@ -89,6 +89,10 @@ pub mod payout;
 #[cfg(feature = "fallback-coordinator")]
 pub mod fallback_coordinator;
 
+/// Upstream selection shared by the miner-side applications
+#[cfg(feature = "fallback-coordinator")]
+pub mod upstream_selector;
+
 /// Share synchronous primitives
 pub mod sync;
 

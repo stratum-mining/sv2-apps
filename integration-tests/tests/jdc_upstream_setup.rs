@@ -91,8 +91,7 @@ async fn jdc_moves_to_the_next_pair_when_the_jds_setup_answer_is_malformed() {
     .await;
 
     let first_pool_addr = get_available_address();
-    let first_pool_closed =
-        answer_setup_connections(first_pool_addr, setup_connection_success).await;
+    let first_pool = answer_setup_connections(first_pool_addr, setup_connection_success).await;
     let malformed_jds_addr = get_available_address();
     answer_setup_connections(malformed_jds_addr, truncated_setup_connection_success).await;
 
@@ -131,10 +130,132 @@ async fn jdc_moves_to_the_next_pair_when_the_jds_setup_answer_is_malformed() {
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
         )
         .await;
-    tokio::time::timeout(Duration::from_secs(10), first_pool_closed.recv())
+    tokio::time::timeout(Duration::from_secs(10), first_pool.closed.recv())
         .await
         .expect("JDC closes its connection to the first pair's Pool")
         .expect("the first pair's Pool was connected");
 
     jdc.shutdown().await;
+}
+
+// Long enough for JDC to spend its three attempts on a pair that is down and start mining solo.
+const ATTEMPTS_ON_A_DOWN_PAIR: Duration = Duration::from_secs(5);
+
+// A pair stays eligible whatever happened with it before. With it as the only configured pair,
+// JDC mines solo while the pair is down, connects once it answers, mines solo again when it drops
+// and connects to it again when it is back.
+#[tokio::test]
+async fn jdc_reconnects_to_a_pair_it_was_connected_to_before() {
+    start_tracing();
+
+    let tp_addr = get_available_address();
+    MockUpstream::new(
+        tp_addr,
+        WithSetup::yes_with_defaults(Protocol::TemplateDistributionProtocol, 0),
+    )
+    .start()
+    .await;
+
+    let pool_addr = get_available_address();
+    let jds_addr = get_available_address();
+    let (jdc, _jdc_addr, _) = start_jdc(
+        &[(pool_addr, jds_addr)],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+    tokio::time::sleep(ATTEMPTS_ON_A_DOWN_PAIR).await;
+
+    let pool = answer_setup_connections(pool_addr, setup_connection_success).await;
+    let jds = answer_setup_connections(jds_addr, setup_connection_success).await;
+    jds.wait_for_held_connection("JDC connects to the pair once it is up")
+        .await;
+
+    pool.stop().await;
+    jds.stop().await;
+    let _pool = answer_setup_connections(pool_addr, setup_connection_success).await;
+    let jds = answer_setup_connections(jds_addr, setup_connection_success).await;
+    jds.wait_for_held_connection("JDC connects to the pair again once it is back")
+        .await;
+
+    jdc.shutdown().await;
+}
+
+// While on a lower-ranked pair, JDC probes the pairs ranked above it and switches back to the
+// first one that answers, closing its connections to the lower-ranked pair.
+#[tokio::test]
+async fn jdc_switches_back_to_the_primary_pair_once_it_answers() {
+    start_tracing();
+
+    let tp_addr = get_available_address();
+    MockUpstream::new(
+        tp_addr,
+        WithSetup::yes_with_defaults(Protocol::TemplateDistributionProtocol, 0),
+    )
+    .start()
+    .await;
+
+    let primary_pool_addr = get_available_address();
+    let primary_jds_addr = get_available_address();
+    let backup_pool_addr = get_available_address();
+    let backup_jds_addr = get_available_address();
+    let backup_pool = answer_setup_connections(backup_pool_addr, setup_connection_success).await;
+    let backup_jds = answer_setup_connections(backup_jds_addr, setup_connection_success).await;
+
+    let (jdc, _jdc_addr, _) = start_jdc(
+        &[
+            (primary_pool_addr, primary_jds_addr),
+            (backup_pool_addr, backup_jds_addr),
+        ],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+    backup_jds
+        .wait_for_held_connection("JDC connects to the backup pair while the primary is down")
+        .await;
+
+    let _primary_pool = answer_setup_connections(primary_pool_addr, setup_connection_success).await;
+    let primary_jds = answer_setup_connections(primary_jds_addr, setup_connection_success).await;
+    primary_jds
+        .wait_for_held_connection("JDC switches to the primary pair once it answers")
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), backup_pool.closed.recv())
+        .await
+        .expect("JDC closes its connection to the backup pair's Pool")
+        .expect("the backup Pool was connected");
+
+    jdc.shutdown().await;
+}
+
+// JDC mining solo, with its only pair down and probed, still shuts down when asked.
+#[tokio::test]
+async fn jdc_shuts_down_while_mining_solo() {
+    start_tracing();
+
+    let tp_addr = get_available_address();
+    MockUpstream::new(
+        tp_addr,
+        WithSetup::yes_with_defaults(Protocol::TemplateDistributionProtocol, 0),
+    )
+    .start()
+    .await;
+
+    let (jdc, _jdc_addr, _) = start_jdc(
+        &[(get_available_address(), get_available_address())],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+    tokio::time::sleep(ATTEMPTS_ON_A_DOWN_PAIR).await;
+
+    tokio::time::timeout(Duration::from_secs(15), jdc.shutdown())
+        .await
+        .expect("JDC shuts down while mining solo");
 }

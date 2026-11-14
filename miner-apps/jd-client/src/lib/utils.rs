@@ -62,8 +62,17 @@ pub struct UpstreamEntry {
     pub jds_host: String,
     pub jds_port: u16,
     pub authority_pubkey: Secp256k1PublicKey,
-    pub tried_or_flagged: bool,
     pub user_identity: String,
+}
+
+impl std::fmt::Display for UpstreamEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pool={}:{}, jds={}:{}",
+            self.pool_host, self.pool_port, self.jds_host, self.jds_port
+        )
+    }
 }
 
 /// Constructs a `SetupConnection` message for the mining protocol.
