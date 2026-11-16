@@ -121,8 +121,8 @@ async fn test_sniffer_sv1_wait_and_assert() {
                     sv1_api::Message::Request(notif) => {
                         assert_eq!(notif.method.as_str(), "mining.notify");
                         // Parse the notification into a properly typed Notify struct
-                        let Ok(sv1_api::ServerNotification::Notify(notify)) =
-                            sv1_api::ServerNotification::try_from(notif.clone())
+                        let Ok(sv1_api::ServerToClient::Notify(notify)) =
+                            sv1_api::ServerToClient::try_from(notif.clone())
                         else {
                             panic!("Failed to parse mining.notify");
                         };

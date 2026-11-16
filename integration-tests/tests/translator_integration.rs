@@ -1212,8 +1212,8 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 MessageDirection::ToDownstream,
                 |msg| match msg {
                     sv1_api::Message::Request(notif) => {
-                        let Ok(sv1_api::ServerNotification::Notify(notify)) =
-                            sv1_api::ServerNotification::try_from(notif.clone())
+                        let Ok(sv1_api::ServerToClient::Notify(notify)) =
+                            sv1_api::ServerToClient::try_from(notif.clone())
                         else {
                             panic!("Failed to parse mining.notify");
                         };
@@ -1299,8 +1299,8 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
                 MessageDirection::ToDownstream,
                 |msg| match msg {
                     sv1_api::Message::Request(notif) => {
-                        let Ok(sv1_api::ServerNotification::Notify(notify)) =
-                            sv1_api::ServerNotification::try_from(notif.clone())
+                        let Ok(sv1_api::ServerToClient::Notify(notify)) =
+                            sv1_api::ServerToClient::try_from(notif.clone())
                         else {
                             panic!("Failed to parse mining.notify");
                         };
