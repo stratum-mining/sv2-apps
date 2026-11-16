@@ -70,11 +70,7 @@ pub fn validate_sv1_share(
     full_extranonce.extend_from_slice(extranonce1.as_slice());
     full_extranonce.extend_from_slice(share.extranonce2.0.as_ref());
 
-    let share_version = share
-        .version_bits
-        .clone()
-        .map(|vb| vb.0)
-        .unwrap_or(job.version.0);
+    let share_version = share.version_bits.map(|vb| vb.0).unwrap_or(job.version.0);
     let mask = version_rolling_mask
         .unwrap_or(HexU32Be(VERSION_ROLLING_MASK))
         .0;

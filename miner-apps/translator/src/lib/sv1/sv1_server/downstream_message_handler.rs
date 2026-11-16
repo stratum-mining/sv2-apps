@@ -22,7 +22,7 @@ impl IsServer for Sv1Server {
     fn handle_configure(
         &mut self,
         client_id: Option<usize>,
-        request: &Configure,
+        request: Configure,
     ) -> Result<ConfigureResult, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
@@ -38,7 +38,7 @@ impl IsServer for Sv1Server {
                 .with(|data| {
                     data.version_rolling_mask = request
                         .version_rolling_mask()
-                        .map(|mask| HexU32Be(mask & VERSION_ROLLING_MASK));
+                        .map(|mask| mask & VERSION_ROLLING_MASK);
 
                     data.version_rolling_min_bit =
                         request.version_rolling_min_bit_count().map(HexU32Be);
@@ -50,7 +50,7 @@ impl IsServer for Sv1Server {
 
                     ConfigureResult {
                         version_rolling: Some(VersionRollingResult::new(
-                            data.version_rolling_mask.clone().unwrap_or(HexU32Be(0)),
+                            data.version_rolling_mask.unwrap_or(HexU32Be(0)),
                         )),
                         minimum_difficulty: Some(false),
                     }
@@ -64,7 +64,7 @@ impl IsServer for Sv1Server {
     fn handle_subscribe(
         &mut self,
         client_id: Option<usize>,
-        request: &Subscribe,
+        request: Subscribe,
     ) -> Result<SubscribeResult, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
@@ -97,7 +97,7 @@ impl IsServer for Sv1Server {
     fn handle_authorize(
         &mut self,
         client_id: Option<usize>,
-        request: &Authorize,
+        request: Authorize,
     ) -> Result<bool, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
         info!("Received mining.authorize from Sv1 downstream {downstream_id}");
@@ -123,7 +123,7 @@ impl IsServer for Sv1Server {
     fn handle_submit(
         &mut self,
         client_id: Option<usize>,
-        request: &Submit,
+        request: Submit,
     ) -> Result<SubmitOutcome, Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
@@ -179,18 +179,18 @@ impl IsServer for Sv1Server {
                         channel_id
                     );
 
-                    let Some(job_context) = data.job_validation_context(job_id) else {
+                    let Some(job_context) = data.job_validation_context(&request.job_id) else {
                         debug!(
-                            job_id,
+                            job_id = request.job_id.as_str(),
                             channel_id, "Submitted SV1 job is no longer valid for this downstream"
                         );
                         return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
                     };
                     let share_hash = match validate_sv1_share(
-                        request,
+                        &request,
                         job_context.target,
                         job_context.extranonce.clone().into(),
-                        data.version_rolling_mask.clone(),
+                        data.version_rolling_mask,
                         job.clone(),
                     ) {
                         Ok(Sv1ShareValidationOutcome::MeetsTarget(hash)) => hash,
@@ -210,10 +210,10 @@ impl IsServer for Sv1Server {
                     data.pending_share = Some(SubmitShareWithChannelId {
                         channel_id,
                         downstream_id,
-                        share: request.clone(),
+                        share: request,
                         extranonce: job_context.extranonce.into(),
                         extranonce2_len: job_context.extranonce2_len,
-                        version_rolling_mask: data.version_rolling_mask.clone(),
+                        version_rolling_mask: data.version_rolling_mask,
                         job_version: Some(job.version.0),
                     });
 
@@ -239,7 +239,7 @@ impl IsServer for Sv1Server {
     fn handle_suggest_difficulty(
         &mut self,
         _client_id: Option<usize>,
-        _request: &SuggestDifficulty,
+        _request: SuggestDifficulty,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -276,7 +276,7 @@ impl IsServer for Sv1Server {
         self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
-                .with(|data| data.version_rolling_mask.clone())
+                .with(|data| data.version_rolling_mask)
                 .map_err(TproxyError::shutdown)
         })
     }
