@@ -1,7 +1,6 @@
 use crate::{
     error::{self, Action, LoopControl, TproxyError, TproxyErrorKind, TproxyResult},
     sv1::job_store::Sv1JobStore,
-    utils::SubmitShareWithChannelId,
 };
 use async_channel::{Receiver, Sender};
 #[cfg(feature = "monitoring")]
@@ -14,7 +13,7 @@ use stratum_apps::{
         bitcoin::{BlockHash, Target},
         channels_sv2::client::MAX_SEEN_SHARES,
         sv1_api::{
-            ClientRequest, Notify, SetExtranonce, json_rpc,
+            ClientToServer, Notify, SetExtranonce, json_rpc,
             utils::{Extranonce, HexU32Be},
         },
     },
@@ -230,9 +229,7 @@ pub struct DownstreamData {
     pub(super) advertised_target: Option<Target>,
     pub stable_hashrate: bool,
     // Queue of Sv1 handshake messages received while waiting for SV2 channel to open
-    pub queued_sv1_handshake_messages: Vec<ClientRequest>,
-    // Stores pending shares to be sent to the sv1_server
-    pub pending_share: Option<SubmitShareWithChannelId>,
+    pub queued_sv1_handshake_messages: Vec<ClientToServer>,
     // Exact target of the miner's upstream channel. The miner is never advertised a harder
     // difficulty.
     pub upstream_target: Option<Target>,
@@ -282,7 +279,6 @@ impl DownstreamData {
             advertised_target: None,
             stable_hashrate: false,
             queued_sv1_handshake_messages: Vec::new(),
-            pending_share: None,
             upstream_target: None,
             keepalive_timer_anchor: None,
             supports_set_extranonce: false,
@@ -702,7 +698,7 @@ mod tests {
     use async_channel::unbounded;
     use stratum_apps::stratum_core::{
         bitcoin::hashes::Hash,
-        sv1_api::{ServerNotification, json_rpc::Message},
+        sv1_api::{ServerToClient, json_rpc::Message},
     };
 
     // JSON fixtures exercise the same typed events as production, without parsing internal messages
@@ -712,9 +708,9 @@ mod tests {
             let json_rpc::Message::Request(request) = message else {
                 panic!("expected a notification fixture");
             };
-            match ServerNotification::try_from(request).unwrap() {
-                ServerNotification::Notify(notify) => Self::Notify(Arc::new(notify)),
-                ServerNotification::SetExtranonce(message) => Self::SetExtranonce {
+            match ServerToClient::try_from(request).unwrap() {
+                ServerToClient::Notify(notify) => Self::Notify(Arc::new(notify)),
+                ServerToClient::SetExtranonce(message) => Self::SetExtranonce {
                     message,
                     notify_miner: true,
                 },
@@ -787,8 +783,8 @@ mod tests {
         let Message::Request(request) = message else {
             panic!("expected mining.notify");
         };
-        match ServerNotification::try_from(request).unwrap() {
-            ServerNotification::Notify(notify) => notify,
+        match ServerToClient::try_from(request).unwrap() {
+            ServerToClient::Notify(notify) => notify,
             other => panic!("expected mining.notify, got {other:?}"),
         }
     }
