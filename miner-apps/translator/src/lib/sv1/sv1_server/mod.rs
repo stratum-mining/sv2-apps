@@ -2154,7 +2154,7 @@ mod tests {
         };
 
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
+            server.handle_submit(Some(7), submit.clone()).unwrap(),
             SubmitOutcome::Accepted
         );
         server
@@ -2218,11 +2218,11 @@ mod tests {
         };
 
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
+            server.handle_submit(Some(7), submit.clone()).unwrap(),
             SubmitOutcome::Accepted
         );
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
+            server.handle_submit(Some(7), submit.clone()).unwrap(),
             SubmitOutcome::Rejected(SubmitError::DuplicateShare)
         );
         server
@@ -2250,7 +2250,7 @@ mod tests {
         };
 
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
+            server.handle_submit(Some(7), submit.clone()).unwrap(),
             SubmitOutcome::Rejected(SubmitError::JobNotFound)
         );
 
@@ -2285,7 +2285,7 @@ mod tests {
         submit.job_id = job.job_id;
 
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
+            server.handle_submit(Some(7), submit.clone()).unwrap(),
             SubmitOutcome::Rejected(SubmitError::LowDifficultyShare)
         );
     }
