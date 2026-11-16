@@ -3,7 +3,7 @@ use async_channel::{Receiver, Sender};
 use std::{collections::VecDeque, net::SocketAddr, sync::Arc};
 use stratum_apps::{
     network_helpers::sv1_connection::ConnectionSV1,
-    stratum_core::sv1_api::{self, Id, ServerNotification},
+    stratum_core::sv1_api::{self, Id, ServerToClient},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -306,8 +306,7 @@ impl MessagesAggregatorSV1 {
         let messages = self.messages.lock().await;
         messages.iter().any(|msg| {
             if let sv1_api::Message::Request(notif) = msg {
-                if let Ok(ServerNotification::Notify(notify)) =
-                    ServerNotification::try_from(notif.clone())
+                if let Ok(ServerToClient::Notify(notify)) = ServerToClient::try_from(notif.clone())
                 {
                     return notify.job_id.contains('#');
                 }
