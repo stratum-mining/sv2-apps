@@ -65,7 +65,8 @@ use stratum_apps::{
             },
         },
         sv1_api::{
-            ClientRequest, IsServer, Notify, SetExtranonce, SubmitError, SubmitOutcome, json_rpc,
+            ClientToServer, IsServerAsync, Notify, SetExtranonce, SubmitError, SubmitOutcome,
+            json_rpc,
             utils::{Extranonce, HexU32Be},
         },
     },
@@ -724,7 +725,7 @@ impl Sv1Server {
             };
         // sv1_api owns all wire-shape and parameter validation. Keep the decoded request so the
         // normal handler can execute it later without a second parser or duplicated checks.
-        let request = ClientRequest::try_from(downstream_message).map_err(|error| {
+        let request = ClientToServer::try_from(downstream_message).map_err(|error| {
             TproxyError::disconnect(
                 stratum_apps::stratum_core::sv1_api::error::Error::from(error),
                 downstream_id,
@@ -734,22 +735,10 @@ impl Sv1Server {
         // transport violation. Reply without allocating an upstream channel so the miner can
         // subscribe and retry on the same connection.
         if !subscribed {
-            if let ClientRequest::Submit(id, _) = &request {
-                let response =
-                    SubmitOutcome::Rejected(SubmitError::NotSubscribed).into_response(id.clone());
-                let downstream_sender = self
-                    .with_registered_downstream(downstream_id, |downstream| {
-                        Ok(downstream.downstream_io.downstream_sv1_sender.clone())
-                    })?;
-                downstream_sender
-                    .send(response.into())
-                    .await
-                    .map_err(|error| {
-                        error!(
-                            "Down: Failed to send not-subscribed response to downstream: {error:?}"
-                        );
-                        TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
-                    })?;
+            if let ClientToServer::Submit(submit) = &request {
+                let response = SubmitOutcome::Rejected(SubmitError::NotSubscribed)
+                    .into_response(submit.id.clone());
+                self.send_response(downstream_id, response).await?;
                 return Ok(());
             }
         }
@@ -759,9 +748,9 @@ impl Sv1Server {
         // sv1_api after the channel needed for normal request processing is available.
         let can_start = matches!(
             request,
-            ClientRequest::Configure(..)
-                | ClientRequest::Subscribe(..)
-                | ClientRequest::Authorize(..)
+            ClientToServer::Configure(..)
+                | ClientToServer::Subscribe(..)
+                | ClientToServer::Authorize(..)
         );
         if channel_id.is_none() && !opening && !can_start {
             return Err(TproxyError::disconnect(
@@ -802,95 +791,75 @@ impl Sv1Server {
 
     /// Processes one SV1 message after its downstream SV2 channel is available.
     ///
-    /// Setup progress is recorded immediately after a successful response is queued to the miner.
-    /// Pre-subscribe prefix updates are applied in this same server task, so a queued downstream
-    /// event cannot change the response prefix during construction. The completion event releases
-    /// cached notifications in FIFO order.
+    /// The handler for the message queues the reply to the miner and acts on the request.
     async fn process_sv1_message(
         &self,
         downstream_id: DownstreamId,
-        downstream_message: ClientRequest,
+        downstream_message: ClientToServer,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let setup_request = match &downstream_message {
-            ClientRequest::Subscribe(..) => Some(Sv1SetupRequest::Subscribe),
-            ClientRequest::Authorize(..) => Some(Sv1SetupRequest::Authorize),
-            _ => None,
-        };
-        let response = self
-            .clone()
+        self.clone()
             .handle_request(Some(downstream_id), downstream_message)
-            .map_err(|e| e.with_sv1_downstream_context(downstream_id));
-
-        match response {
-            Ok(Some(response_msg)) => {
-                debug!("Down: Sending Sv1 message to downstream: {}", response_msg);
-                let downstream_sender = self
-                    .with_registered_downstream(downstream_id, |downstream| {
-                        Ok(downstream.downstream_io.downstream_sv1_sender.clone())
-                    })?;
-                downstream_sender
-                    .send(response_msg.into())
-                    .await
-                    .map_err(|error| {
-                        error!("Down: Failed to send SV1 response to downstream: {error:?}");
-                        TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
-                    })?;
-
-                if let Some(setup_request) = setup_request {
-                    let setup_just_completed =
-                        self.with_registered_downstream(downstream_id, |downstream| {
-                            downstream
-                                .downstream_data
-                                .with(|data| data.session_state.record_response(setup_request))
-                                .map_err(TproxyError::shutdown)
-                        })?;
-                    if setup_just_completed {
-                        let event_sender = self
-                            .sv1_server_io
-                            .sv1_server_to_downstream_sender
-                            .get_cloned(&downstream_id)
-                            .ok_or_else(|| {
-                                TproxyError::disconnect(
-                                    TproxyErrorKind::DownstreamNotPresent(downstream_id),
-                                    downstream_id,
-                                )
-                            })?;
-                        event_sender
-                            .send(Sv1ServerEvent::SetupComplete)
-                            .await
-                            .map_err(|error| {
-                                error!(
-                                    "Down: Failed to queue setup completion for downstream: {error:?}"
-                                );
-                                TproxyError::disconnect(
-                                    TproxyErrorKind::ChannelErrorSender,
-                                    downstream_id,
-                                )
-                            })?;
-                    }
-                }
-            }
-            Ok(None) => {
-                // Message was handled but no response needed
-            }
-            Err(e) => {
+            .await
+            .map_err(|e| {
                 error!("Down: Error handling downstream message: {:?}", e);
-                return Err(e);
-            }
-        }
+                e.with_sv1_downstream_context(downstream_id)
+            })
+    }
 
-        // Check if there's a pending share to send to the Sv1Server
-        let pending_share = self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|d| d.pending_share.take())
-                .map_err(TproxyError::shutdown)
+    /// Queues `response` to the miner.
+    async fn send_response(
+        &self,
+        downstream_id: DownstreamId,
+        response: impl Into<json_rpc::Message>,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let response = response.into();
+        debug!("Down: Sending Sv1 message to downstream: {}", response);
+        let downstream_sender = self.with_registered_downstream(downstream_id, |downstream| {
+            Ok(downstream.downstream_io.downstream_sv1_sender.clone())
         })?;
-        if let Some(share) = pending_share {
-            self.handle_submit_shares(share).await?;
-        }
+        downstream_sender.send(response).await.map_err(|error| {
+            error!("Down: Failed to send SV1 response to downstream: {error:?}");
+            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+        })
+    }
 
-        Ok(())
+    /// Records that the response to a setup request was queued to the miner.
+    ///
+    /// Pre-subscribe prefix updates are applied in this same server task, so a queued downstream
+    /// event cannot change the response prefix during construction. Once both setup responses are
+    /// queued, the completion event releases cached notifications in FIFO order.
+    async fn record_setup_response(
+        &self,
+        downstream_id: DownstreamId,
+        setup_request: Sv1SetupRequest,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let setup_just_completed =
+            self.with_registered_downstream(downstream_id, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| data.session_state.record_response(setup_request))
+                    .map_err(TproxyError::shutdown)
+            })?;
+        if !setup_just_completed {
+            return Ok(());
+        }
+        let event_sender = self
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&downstream_id)
+            .ok_or_else(|| {
+                TproxyError::disconnect(
+                    TproxyErrorKind::DownstreamNotPresent(downstream_id),
+                    downstream_id,
+                )
+            })?;
+        event_sender
+            .send(Sv1ServerEvent::SetupComplete)
+            .await
+            .map_err(|error| {
+                error!("Down: Failed to queue setup completion for downstream: {error:?}");
+                TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+            })
     }
 
     /// Handles share submission messages from downstream.
@@ -1941,21 +1910,33 @@ mod tests {
                 OpenMiningChannelErrorOwned, SetExtranoncePrefixOwned, SetNewPrevHashOwned,
                 SetTargetOwned,
             },
-            sv1_api::{Id, Method, ServerNotification, SetDifficulty, Submit, SubscribeResult},
+            sv1_api::{
+                Id, Method, Request, ServerToClient, SetDifficulty, Submit, SubscribeResult,
+            },
         },
     };
 
-    fn request(message: json_rpc::Message) -> ClientRequest {
-        ClientRequest::try_from(message).unwrap()
+    fn request(message: json_rpc::Message) -> ClientToServer {
+        ClientToServer::try_from(message).unwrap()
     }
 
-    fn server_notification(message: json_rpc::Message) -> ServerNotification {
-        ServerNotification::try_from(message).unwrap()
+    fn server_notification(message: json_rpc::Message) -> ServerToClient {
+        let json_rpc::Message::Request(request) = message else {
+            panic!("expected a notification");
+        };
+        ServerToClient::try_from(request).unwrap()
+    }
+
+    fn subscribe_result(response: &json_rpc::Response) -> SubscribeResult {
+        match ServerToClient::from_response(response, &Method::Subscribe) {
+            Ok(Some(ServerToClient::Subscribe(response))) => response.result.unwrap(),
+            other => panic!("expected a subscribe result, got {other:?}"),
+        }
     }
 
     fn notify_of(message: json_rpc::Message) -> Notify {
         match server_notification(message) {
-            ServerNotification::Notify(notify) => notify,
+            ServerToClient::Notify(notify) => notify,
             other => panic!("expected mining.notify, got {other:?}"),
         }
     }
@@ -2100,7 +2081,7 @@ mod tests {
 
     #[test]
     fn late_share_uses_its_job_validation_context() {
-        let mut server = create_test_sv1_server();
+        let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
         let old_job = test_sv1_notify("old", false);
         let mut current_job = test_sv1_notify("current", false);
@@ -2153,33 +2134,16 @@ mod tests {
             version_bits: None,
         };
 
-        assert_eq!(
-            server.handle_submit(Some(7), submit.clone()).unwrap(),
-            SubmitOutcome::Accepted
-        );
-        server
-            .downstreams
-            .with(&7, |downstream| {
-                downstream
-                    .downstream_data
-                    .with(|data| {
-                        let pending_share = data.pending_share.as_ref().unwrap();
-                        assert_eq!(
-                            pending_share.extranonce,
-                            Vec::<u8>::from(old_extranonce.clone())
-                        );
-                        assert_eq!(pending_share.extranonce2_len, 16);
-                        assert_eq!(pending_share.job_version, Some(old_job.version.0));
-                        assert_ne!(pending_share.job_version, Some(current_job.version.0));
-                    })
-                    .unwrap();
-            })
-            .unwrap();
+        let share = server.validate_submit(7, submit).unwrap().unwrap();
+        assert_eq!(share.extranonce, Vec::<u8>::from(old_extranonce.clone()));
+        assert_eq!(share.extranonce2_len, 16);
+        assert_eq!(share.job_version, Some(old_job.version.0));
+        assert_ne!(share.job_version, Some(current_job.version.0));
     }
 
     #[test]
     fn duplicate_sv1_share_is_rejected_before_forwarding() {
-        let mut server = create_test_sv1_server();
+        let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
         let job = test_sv1_notify("job", false);
         with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
@@ -2217,13 +2181,13 @@ mod tests {
             version_bits: None,
         };
 
+        assert!(server.validate_submit(7, submit.clone()).unwrap().is_ok());
         assert_eq!(
-            server.handle_submit(Some(7), submit.clone()).unwrap(),
-            SubmitOutcome::Accepted
-        );
-        assert_eq!(
-            server.handle_submit(Some(7), submit.clone()).unwrap(),
-            SubmitOutcome::Rejected(SubmitError::DuplicateShare)
+            server
+                .validate_submit(7, submit.clone())
+                .unwrap()
+                .unwrap_err(),
+            SubmitError::DuplicateShare
         );
         server
             .downstreams
@@ -2237,8 +2201,129 @@ mod tests {
     }
 
     #[test]
+    fn submit_session_checks_reject_before_share_validation() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let set = |username: &str, mask: Option<u32>| {
+            server
+                .downstreams
+                .with(&7, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| {
+                            data.sv1_username = username.to_string();
+                            data.extranonce2_len = 16;
+                            data.version_rolling_mask = mask.map(HexU32Be);
+                        })
+                        .unwrap();
+                })
+                .unwrap();
+        };
+        let submit = |extranonce2_len: usize, version_bits: Option<u32>| Submit {
+            worker_name: "worker".to_string(),
+            job_id: "1".to_string(),
+            extranonce2: vec![0; extranonce2_len].try_into().unwrap(),
+            ntime: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: version_bits.map(HexU32Be),
+        };
+        let check = |submit: Submit| server.check_submit_session(7, &submit).unwrap();
+
+        // An unauthorized worker takes precedence over the other checks.
+        set("other", Some(0x1fffe000));
+        assert_eq!(
+            check(submit(8, Some(0xe0000000))),
+            Some(SubmitError::UnauthorizedWorker)
+        );
+
+        set("worker", None);
+        assert_eq!(check(submit(16, None)), None);
+        assert_eq!(check(submit(8, None)), Some(SubmitError::Other));
+        assert_eq!(check(submit(16, Some(0x2000))), Some(SubmitError::Other));
+
+        set("worker", Some(0x1fffe000));
+        assert_eq!(check(submit(16, Some(0x2000))), None);
+        assert_eq!(check(submit(16, None)), Some(SubmitError::Other));
+        assert_eq!(check(submit(16, Some(0x20))), Some(SubmitError::Other));
+
+        // Reserved bits are rejected whatever the negotiated mask.
+        set("worker", Some(0xffffffff));
+        assert_eq!(
+            check(submit(16, Some(0xe0000000))),
+            Some(SubmitError::Other)
+        );
+        assert_eq!(check(submit(16, Some(0x2000))), None);
+    }
+
+    #[tokio::test]
+    async fn accepted_share_is_answered_then_forwarded_upstream() {
+        let (channel_manager_sender, channel_manager_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            upstream_receiver,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        let (_events, sv1_receiver) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+        let job = test_sv1_notify("1", false);
+        with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
+            jobs.activate(
+                job.job_id.clone(),
+                StoredSv1Job::upstream(job.clone()),
+                false,
+            );
+        });
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: vec![1, 2, 3, 4].try_into().unwrap(),
+                                extranonce2_len: 16,
+                                target: Target::from_le_bytes([0xff; 32]),
+                            },
+                            false,
+                        );
+                        data.sv1_username = "worker".to_string();
+                        data.extranonce2_len = 16;
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        let submit = serde_json::from_value(serde_json::json!({
+            "id": 4,
+            "method": "mining.submit",
+            "params": ["worker", "1", "00".repeat(16), "00000001", "00000000"]
+        }))
+        .unwrap();
+        server
+            .process_sv1_message(7, request(submit))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(sv1_receiver.recv().await.unwrap()).unwrap(),
+            serde_json::json!({"id": 4, "result": true, "error": null})
+        );
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        assert!(matches!(message, MiningOwned::SubmitSharesExtended(_)));
+        assert!(sv1_receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn sv1_share_rejections_distinguish_missing_jobs_and_low_difficulty() {
-        let mut server = create_test_sv1_server();
+        let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
         let mut submit = Submit {
             worker_name: "worker".to_string(),
@@ -2250,8 +2335,11 @@ mod tests {
         };
 
         assert_eq!(
-            server.handle_submit(Some(7), submit.clone()).unwrap(),
-            SubmitOutcome::Rejected(SubmitError::JobNotFound)
+            server
+                .validate_submit(7, submit.clone())
+                .unwrap()
+                .unwrap_err(),
+            SubmitError::JobNotFound
         );
 
         let job = test_sv1_notify("job", false);
@@ -2285,8 +2373,11 @@ mod tests {
         submit.job_id = job.job_id;
 
         assert_eq!(
-            server.handle_submit(Some(7), submit.clone()).unwrap(),
-            SubmitOutcome::Rejected(SubmitError::LowDifficultyShare)
+            server
+                .validate_submit(7, submit.clone())
+                .unwrap()
+                .unwrap_err(),
+            SubmitError::LowDifficultyShare
         );
     }
 
@@ -2481,7 +2572,7 @@ mod tests {
         else {
             panic!("expected subscribe response");
         };
-        let subscribe_response = response.result_as::<SubscribeResult>().unwrap();
+        let subscribe_response = subscribe_result(&response);
         assert_eq!(subscribe_response.extranonce1, new_extranonce);
 
         downstream.handle_sv1_server_message().await.unwrap();
@@ -2585,7 +2676,7 @@ mod tests {
                 .unwrap(),
             new_extranonce
         );
-        let subscribe_response = response.result_as::<SubscribeResult>().unwrap();
+        let subscribe_response = subscribe_result(&response);
         downstream.handle_sv1_server_message().await.unwrap();
         assert!(wire_receiver.try_recv().is_err());
         assert_eq!(
@@ -2709,7 +2800,7 @@ mod tests {
                     downstream.handle_sv1_server_message().await.unwrap();
                     assert_eq!(downstream.is_disconnected(), !announce_support);
                     if announce_support {
-                        let ServerNotification::SetExtranonce(update) =
+                        let ServerToClient::SetExtranonce(update) =
                             server_notification(wire.try_recv().unwrap())
                         else {
                             panic!("expected prefix update before notify");
@@ -4930,7 +5021,10 @@ mod tests {
             nonce: HexU32Be(nonce),
             version_bits: None,
         };
-        let request = ClientRequest::Submit(Id::from(42u64), request);
+        let request = ClientToServer::Submit(Request {
+            id: Id::from(42u64),
+            params: request,
+        });
         server
             .sv1_server_io
             .downstream_to_sv1_server_sender
