@@ -19,7 +19,6 @@ use stratum_apps::{
     key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::noise_connection::Connection,
     stratum_core::{
-        framing_sv2::framing::MessageFrame,
         noise_sv2::{Initiator, Responder},
         parsers_sv2::{
             AnyMessage, AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, IsSv2Message,
@@ -319,19 +318,15 @@ pub async fn recv_from_down_send_to_up(
                     continue;
                 }
                 InterceptAction::ReplaceMessage(intercept_message) => {
-                    let intercept_frame = MessageFrame::from_message(
-                        intercept_message.replacement_message.clone(),
-                        intercept_message.replacement_message.message_type(),
-                        0,
-                        false,
-                    )
-                    .expect("Failed to create the frame");
+                    let intercept_frame =
+                        OutboundFrame::from_message(intercept_message.replacement_message.clone())
+                            .expect("Failed to create the frame");
                     downstream_messages.add_message_with_tlvs(
                         intercept_message.replacement_message.message_type(),
                         intercept_message.replacement_message.clone(),
                         None,
                     );
-                    send.send(intercept_frame.into())
+                    send.send(intercept_frame)
                         .await
                         .map_err(|_| SnifferError::UpstreamClosed)?;
                     tracing::info!(
@@ -401,19 +396,15 @@ pub async fn recv_from_up_send_to_down(
                     continue;
                 }
                 InterceptAction::ReplaceMessage(intercept_message) => {
-                    let intercept_frame = MessageFrame::from_message(
-                        intercept_message.replacement_message.clone(),
-                        intercept_message.replacement_message.message_type(),
-                        0,
-                        false,
-                    )
-                    .expect("Failed to create the frame");
+                    let intercept_frame =
+                        OutboundFrame::from_message(intercept_message.replacement_message.clone())
+                            .expect("Failed to create the frame");
                     upstream_messages.add_message_with_tlvs(
                         intercept_message.replacement_message.message_type(),
                         intercept_message.replacement_message.clone(),
                         None,
                     );
-                    send.send(intercept_frame.into())
+                    send.send(intercept_frame)
                         .await
                         .map_err(|_| SnifferError::DownstreamClosed)?;
                     tracing::info!(

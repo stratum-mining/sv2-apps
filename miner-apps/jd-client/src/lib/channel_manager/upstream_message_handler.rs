@@ -17,7 +17,6 @@ use stratum_apps::{
         },
         handlers_sv2::{
             HandleMiningMessagesFromClientOwnedAsync, HandleMiningMessagesFromServerOwnedAsync,
-            SupportedChannelTypes,
         },
         mining_sv2::*,
         parsers_sv2::{AnyMessageOwned, MiningOwned, Tlv},
@@ -46,13 +45,6 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         self.negotiated_extensions
             .with(|data| data.clone())
             .map_err(JDCError::shutdown)
-    }
-
-    fn get_channel_type_for_server(&self, _server_id: Option<usize>) -> SupportedChannelTypes {
-        SupportedChannelTypes::Extended
-    }
-    fn is_work_selection_enabled_for_server(&self, _server_id: Option<usize>) -> bool {
-        true
     }
 
     // Handles an unexpected `OpenStandardMiningChannelSuccess` message from the upstream.

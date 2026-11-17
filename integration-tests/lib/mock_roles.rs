@@ -13,7 +13,7 @@ use std::{convert::TryInto, net::SocketAddr, time::Duration};
 use stratum_apps::{
     stratum_core::{
         binary_sv2::Seq064KOwned,
-        codec_sv2::{MessageFrame, SerializedFrame},
+        codec_sv2::SerializedFrame,
         common_messages_sv2::{
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, SetupConnectionErrorOwned,
@@ -26,8 +26,7 @@ use stratum_apps::{
             UpdateChannelOwned,
         },
         parsers_sv2::{
-            AnyMessageOwned, CommonMessagesOwned, IsSv2Message, MiningOwned,
-            TemplateDistributionOwned,
+            AnyMessageOwned, CommonMessagesOwned, MiningOwned, TemplateDistributionOwned,
         },
         template_distribution_sv2::{NewTemplateOwned, SetNewPrevHashOwned},
     },
@@ -101,11 +100,10 @@ impl MockDownstream {
             let flags = setup_connection.flags;
             let msg =
                 AnyMessageOwned::Common(CommonMessagesOwned::SetupConnection(setup_connection));
-            let message_type = msg.message_type();
-            let frame = MessageFrame::from_message(msg, message_type, 0, false)
-                .expect("Failed to create SetupConnection frame");
+            let frame =
+                OutboundFrame::from_message(msg).expect("Failed to create SetupConnection frame");
             upstream_sender
-                .send(frame.into())
+                .send(frame)
                 .await
                 .expect("Failed to send SetupConnection");
             info!(
@@ -126,10 +124,9 @@ impl MockDownstream {
 
         tokio::spawn(async move {
             while let Ok(message) = proxy_receiver.recv().await {
-                let message_type = message.message_type();
-                let frame = MessageFrame::from_message(message, message_type, 0, false)
+                let frame = OutboundFrame::from_message(message)
                     .expect("Failed to create frame from message");
-                if upstream_sender.send(frame.into()).await.is_err() {
+                if upstream_sender.send(frame).await.is_err() {
                     break;
                 }
             }
@@ -198,12 +195,10 @@ impl MockUpstream {
                                     },
                                 ),
                             );
-                            let success_type = success.message_type();
-                            let response_frame =
-                                MessageFrame::from_message(success, success_type, 0, false)
-                                    .expect("Failed to create SetupConnectionSuccess frame");
+                            let response_frame = OutboundFrame::from_message(success)
+                                .expect("Failed to create SetupConnectionSuccess frame");
                             downstream_sender
-                                .send(response_frame.into())
+                                .send(response_frame)
                                 .await
                                 .expect("Failed to send SetupConnectionSuccess");
                             info!(
@@ -230,12 +225,10 @@ impl MockUpstream {
                                                 .unwrap(),
                                     },
                                 ));
-                            let error_type = error.message_type();
-                            let response_frame =
-                                MessageFrame::from_message(error, error_type, 0, false)
-                                    .expect("Failed to create SetupConnectionError frame");
+                            let response_frame = OutboundFrame::from_message(error)
+                                .expect("Failed to create SetupConnectionError frame");
                             downstream_sender
-                                .send(response_frame.into())
+                                .send(response_frame)
                                 .await
                                 .expect("Failed to send SetupConnectionError");
                             info!(
@@ -260,10 +253,9 @@ impl MockUpstream {
             });
 
             while let Ok(message) = proxy_receiver.recv().await {
-                let message_type = message.message_type();
-                let frame = MessageFrame::from_message(message, message_type, 0, false)
+                let frame = OutboundFrame::from_message(message)
                     .expect("Failed to create frame from message");
-                if downstream_sender.send(frame.into()).await.is_err() {
+                if downstream_sender.send(frame).await.is_err() {
                     break;
                 }
             }
