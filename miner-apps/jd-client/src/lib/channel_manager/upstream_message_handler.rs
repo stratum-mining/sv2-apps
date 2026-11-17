@@ -47,10 +47,6 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             .map_err(JDCError::shutdown)
     }
 
-    fn is_work_selection_enabled_for_server(&self, _server_id: Option<usize>) -> bool {
-        true
-    }
-
     // Handles an unexpected `OpenStandardMiningChannelSuccess` message from the upstream.
     //
     // The Job Declarator Client (JDC) only supports extended channel when

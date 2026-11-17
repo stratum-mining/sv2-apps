@@ -36,10 +36,6 @@ use tracing::{error, info, warn};
 impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
     type Error = TproxyError<error::ChannelManager>;
 
-    fn is_work_selection_enabled_for_server(&self, _server_id: Option<usize>) -> bool {
-        false
-    }
-
     fn get_negotiated_extensions_with_server(
         &self,
         _server_id: Option<usize>,
