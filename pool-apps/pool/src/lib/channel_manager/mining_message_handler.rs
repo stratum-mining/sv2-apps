@@ -61,10 +61,6 @@ fn extranonce_allocation_error_code(
 impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
     type Error = PoolError<error::ChannelManager>;
 
-    fn is_work_selection_enabled_for_client(&self, _client_id: Option<usize>) -> bool {
-        true
-    }
-
     fn get_negotiated_extensions_with_client(
         &self,
         client_id: Option<usize>,

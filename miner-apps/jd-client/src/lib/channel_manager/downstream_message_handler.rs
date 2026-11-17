@@ -173,10 +173,6 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
         })
     }
 
-    fn is_work_selection_enabled_for_client(&self, _client_id: Option<usize>) -> bool {
-        false
-    }
-
     // Handles a `CloseChannel` message:
     // - Look up the downstream associated with the given `channel_id`.
     // - If found, release the channel and what JDC keeps for it (see `release_downstream_channel`).
