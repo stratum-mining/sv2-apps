@@ -22,6 +22,18 @@ This directory contains utility scripts for building, testing, and publishing th
 ./scripts/publish.sh
 ```
 
+#### `check-published-crates.sh`
+**Guard against a crate being left out of a release**
+- Compares every crate whose version is already on crates.io with what was published under that version
+- Fails when the contents differ: `cargo publish` refuses a version that already exists, so the crate would be skipped and needs a version bump
+- Runs in CI on release branches, and again in the release workflow before anything is published
+- Meant for release branches, where `stratum-core` carries its version requirement
+
+**Usage:**
+```bash
+./scripts/check-published-crates.sh
+```
+
 ### 🔧 Development Scripts
 
 #### `clippy-fmt-and-test.sh`
@@ -132,6 +144,9 @@ All crates depend on external SV2 protocol libraries that should be available on
    ```bash
    # Check everything builds and tests pass
    ./scripts/clippy-fmt-and-test.sh
+
+   # On the release branch, check that no released version changed contents
+   ./scripts/check-published-crates.sh
    ```
 
 2. **Test publishing (dry run):**

@@ -2,9 +2,11 @@ on:
   pull_request:
     branches:
       - main
+      - 'release/v*'
   push:
     branches:
       - main
+      - 'release/v*'
 
 name: MSRV 1.88 Check
 
