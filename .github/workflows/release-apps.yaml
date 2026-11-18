@@ -36,6 +36,12 @@ jobs:
       - name: Install capnp dependencies
         run: sudo apt-get install -y capnproto libcapnp-dev
 
+      # `release-apps.sh` takes a version that is already on crates.io as
+      # published, so nothing below would notice a crate whose contents
+      # changed without a version bump.
+      - name: Check that no published version changed contents
+        run: ./scripts/check-published-crates.sh
+
       - name: Login
         run: cargo login ${{ secrets.CRATES_IO_DEPLOY_KEY }}
 
