@@ -87,3 +87,20 @@ jobs:
 
       - name: Check that modified crates carry a version bump
         run: ./scripts/check-version-bumps.sh origin/${{ github.base_ref }}
+
+  published-crates-check:
+    # Release branches only: the check reads each dependency's version
+    # requirement, which `stratum-core` only carries once it is pinned on a
+    # release branch.
+    if: startsWith(github.base_ref || github.ref_name, 'release/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Check that no published version changed contents
+        run: ./scripts/check-published-crates.sh
