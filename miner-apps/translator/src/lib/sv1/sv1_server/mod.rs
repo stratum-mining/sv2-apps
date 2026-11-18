@@ -65,11 +65,8 @@ use stratum_apps::{
             },
         },
         sv1_api::{
-            IsServer,
-            client_to_server::{SubmitError, SubmitOutcome},
+            ClientToServer, IsServerAsync, Notify, SetExtranonce, SubmitError, SubmitOutcome,
             json_rpc,
-            methods::Client2Server,
-            server_to_client,
             utils::{Extranonce, HexU32Be},
         },
     },
@@ -103,15 +100,15 @@ const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;
 
 #[derive(Clone, Debug)]
 struct StoredSv1Job {
-    notify: server_to_client::Notify,
+    notify: Notify,
     /// Original upstream job time used to cap locally generated keepalive jobs. Keepalives advance
-    /// `notify.time`, while this anchor remains fixed so the future-time limit does not move.
+    /// `notify.ntime`, while this anchor remains fixed so the future-time limit does not move.
     keepalive_base_time: u32,
 }
 
 impl StoredSv1Job {
-    fn upstream(notify: server_to_client::Notify) -> Self {
-        let keepalive_base_time = notify.time.0;
+    fn upstream(notify: Notify) -> Self {
+        let keepalive_base_time = notify.ntime.0;
         Self {
             notify,
             keepalive_base_time,
@@ -341,7 +338,7 @@ impl Sv1Server {
     /// In aggregated mode the channel manager rewrites the job's channel_id to
     /// `AGGREGATED_CHANNEL_ID` before forwarding, which signals a broadcast: send to every
     /// connected downstream.
-    async fn send_to_channel(&self, channel_id: ChannelId, msg: Arc<server_to_client::Notify>) {
+    async fn send_to_channel(&self, channel_id: ChannelId, msg: Arc<Notify>) {
         if channel_id == AGGREGATED_CHANNEL_ID {
             let mut downstream_senders = Vec::new();
             self.sv1_server_io
@@ -728,7 +725,7 @@ impl Sv1Server {
             };
         // sv1_api owns all wire-shape and parameter validation. Keep the decoded request so the
         // normal handler can execute it later without a second parser or duplicated checks.
-        let request = Client2Server::try_from(downstream_message).map_err(|error| {
+        let request = ClientToServer::try_from(downstream_message).map_err(|error| {
             TproxyError::disconnect(
                 stratum_apps::stratum_core::sv1_api::error::Error::from(error),
                 downstream_id,
@@ -738,23 +735,10 @@ impl Sv1Server {
         // transport violation. Reply without allocating an upstream channel so the miner can
         // subscribe and retry on the same connection.
         if !subscribed {
-            if let Client2Server::Submit(submit) = &request {
-                let response = submit
-                    .clone()
-                    .respond(SubmitOutcome::Rejected(SubmitError::NotSubscribed));
-                let downstream_sender = self
-                    .with_registered_downstream(downstream_id, |downstream| {
-                        Ok(downstream.downstream_io.downstream_sv1_sender.clone())
-                    })?;
-                downstream_sender
-                    .send(response.into())
-                    .await
-                    .map_err(|error| {
-                        error!(
-                            "Down: Failed to send not-subscribed response to downstream: {error:?}"
-                        );
-                        TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
-                    })?;
+            if let ClientToServer::Submit(submit) = &request {
+                let response = SubmitOutcome::Rejected(SubmitError::NotSubscribed)
+                    .into_response(submit.id.clone());
+                self.send_response(downstream_id, response).await?;
                 return Ok(());
             }
         }
@@ -764,7 +748,9 @@ impl Sv1Server {
         // sv1_api after the channel needed for normal request processing is available.
         let can_start = matches!(
             request,
-            Client2Server::Configure(_) | Client2Server::Subscribe(_) | Client2Server::Authorize(_)
+            ClientToServer::Configure(..)
+                | ClientToServer::Subscribe(..)
+                | ClientToServer::Authorize(..)
         );
         if channel_id.is_none() && !opening && !can_start {
             return Err(TproxyError::disconnect(
@@ -805,95 +791,75 @@ impl Sv1Server {
 
     /// Processes one SV1 message after its downstream SV2 channel is available.
     ///
-    /// Setup progress is recorded immediately after a successful response is queued to the miner.
-    /// Pre-subscribe prefix updates are applied in this same server task, so a queued downstream
-    /// event cannot change the response prefix during construction. The completion event releases
-    /// cached notifications in FIFO order.
+    /// The handler for the message queues the reply to the miner and acts on the request.
     async fn process_sv1_message(
         &self,
         downstream_id: DownstreamId,
-        downstream_message: Client2Server,
+        downstream_message: ClientToServer,
     ) -> TproxyResult<(), error::Sv1Server> {
-        let setup_request = match &downstream_message {
-            Client2Server::Subscribe(_) => Some(Sv1SetupRequest::Subscribe),
-            Client2Server::Authorize(_) => Some(Sv1SetupRequest::Authorize),
-            _ => None,
-        };
-        let response = self
-            .clone()
-            .handle_parsed_request(Some(downstream_id), downstream_message)
-            .map_err(|e| e.with_sv1_downstream_context(downstream_id));
-
-        match response {
-            Ok(Some(response_msg)) => {
-                debug!("Down: Sending Sv1 message to downstream: {}", response_msg);
-                let downstream_sender = self
-                    .with_registered_downstream(downstream_id, |downstream| {
-                        Ok(downstream.downstream_io.downstream_sv1_sender.clone())
-                    })?;
-                downstream_sender
-                    .send(response_msg.into())
-                    .await
-                    .map_err(|error| {
-                        error!("Down: Failed to send SV1 response to downstream: {error:?}");
-                        TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
-                    })?;
-
-                if let Some(setup_request) = setup_request {
-                    let setup_just_completed =
-                        self.with_registered_downstream(downstream_id, |downstream| {
-                            downstream
-                                .downstream_data
-                                .with(|data| data.session_state.record_response(setup_request))
-                                .map_err(TproxyError::shutdown)
-                        })?;
-                    if setup_just_completed {
-                        let event_sender = self
-                            .sv1_server_io
-                            .sv1_server_to_downstream_sender
-                            .get_cloned(&downstream_id)
-                            .ok_or_else(|| {
-                                TproxyError::disconnect(
-                                    TproxyErrorKind::DownstreamNotPresent(downstream_id),
-                                    downstream_id,
-                                )
-                            })?;
-                        event_sender
-                            .send(Sv1ServerEvent::SetupComplete)
-                            .await
-                            .map_err(|error| {
-                                error!(
-                                    "Down: Failed to queue setup completion for downstream: {error:?}"
-                                );
-                                TproxyError::disconnect(
-                                    TproxyErrorKind::ChannelErrorSender,
-                                    downstream_id,
-                                )
-                            })?;
-                    }
-                }
-            }
-            Ok(None) => {
-                // Message was handled but no response needed
-            }
-            Err(e) => {
+        self.clone()
+            .handle_request(Some(downstream_id), downstream_message)
+            .await
+            .map_err(|e| {
                 error!("Down: Error handling downstream message: {:?}", e);
-                return Err(e);
-            }
-        }
+                e.with_sv1_downstream_context(downstream_id)
+            })
+    }
 
-        // Check if there's a pending share to send to the Sv1Server
-        let pending_share = self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|d| d.pending_share.take())
-                .map_err(TproxyError::shutdown)
+    /// Queues `response` to the miner.
+    async fn send_response(
+        &self,
+        downstream_id: DownstreamId,
+        response: impl Into<json_rpc::Message>,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let response = response.into();
+        debug!("Down: Sending Sv1 message to downstream: {}", response);
+        let downstream_sender = self.with_registered_downstream(downstream_id, |downstream| {
+            Ok(downstream.downstream_io.downstream_sv1_sender.clone())
         })?;
-        if let Some(share) = pending_share {
-            self.handle_submit_shares(share).await?;
-        }
+        downstream_sender.send(response).await.map_err(|error| {
+            error!("Down: Failed to send SV1 response to downstream: {error:?}");
+            TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+        })
+    }
 
-        Ok(())
+    /// Records that the response to a setup request was queued to the miner.
+    ///
+    /// Pre-subscribe prefix updates are applied in this same server task, so a queued downstream
+    /// event cannot change the response prefix during construction. Once both setup responses are
+    /// queued, the completion event releases cached notifications in FIFO order.
+    async fn record_setup_response(
+        &self,
+        downstream_id: DownstreamId,
+        setup_request: Sv1SetupRequest,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let setup_just_completed =
+            self.with_registered_downstream(downstream_id, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| data.session_state.record_response(setup_request))
+                    .map_err(TproxyError::shutdown)
+            })?;
+        if !setup_just_completed {
+            return Ok(());
+        }
+        let event_sender = self
+            .sv1_server_io
+            .sv1_server_to_downstream_sender
+            .get_cloned(&downstream_id)
+            .ok_or_else(|| {
+                TproxyError::disconnect(
+                    TproxyErrorKind::DownstreamNotPresent(downstream_id),
+                    downstream_id,
+                )
+            })?;
+        event_sender
+            .send(Sv1ServerEvent::SetupComplete)
+            .await
+            .map_err(|error| {
+                error!("Down: Failed to queue setup completion for downstream: {error:?}");
+                TproxyError::disconnect(TproxyErrorKind::ChannelErrorSender, downstream_id)
+            })
     }
 
     /// Handles share submission messages from downstream.
@@ -1412,9 +1378,9 @@ impl Sv1Server {
             })
             .map_err(TproxyError::shutdown)?;
 
-        let notification = server_to_client::SetExtranonce {
-            extra_nonce1: extranonce1,
-            extra_nonce2_size: extranonce2_len,
+        let notification = SetExtranonce {
+            extranonce1,
+            extranonce2_size: extranonce2_len,
         };
         self.sv1_server_io
             .sv1_server_to_downstream_sender
@@ -1706,7 +1672,7 @@ impl Sv1Server {
         &self,
         channel_id: ChannelId,
         keepalive_interval_secs: u16,
-    ) -> Option<server_to_client::Notify> {
+    ) -> Option<Notify> {
         let last_job = self.get_last_job(channel_id)?;
         let original_job_id = Self::extract_original_job_id(&last_job.notify.job_id)
             .unwrap_or_else(|| last_job.notify.job_id.clone());
@@ -1716,17 +1682,17 @@ impl Sv1Server {
         // upstream job.
         let new_time = last_job
             .notify
-            .time
+            .ntime
             .0
             .saturating_add(keepalive_interval_secs as u32)
             .min(base_time.saturating_add(MAX_FUTURE_BLOCK_TIME));
-        if new_time == last_job.notify.time.0 {
+        if new_time == last_job.notify.ntime.0 {
             return None;
         }
 
         let mut keepalive_notify = last_job.notify;
         keepalive_notify.job_id = self.next_keepalive_job_id(&original_job_id);
-        keepalive_notify.time = HexU32Be(new_time);
+        keepalive_notify.ntime = HexU32Be(new_time);
         // A keepalive only rolls nTime on the current work and must not invalidate prior jobs.
         keepalive_notify.clean_jobs = false;
 
@@ -1753,11 +1719,11 @@ impl Sv1Server {
     async fn send_keepalive_to_downstream(
         &self,
         downstream_id: DownstreamId,
-        notify: server_to_client::Notify,
+        notify: Notify,
     ) -> TproxyResult<(), error::Sv1Server> {
         debug!(
             "Sending keepalive job to downstream {} with job_id: {}, time: {}",
-            downstream_id, notify.job_id, notify.time.0
+            downstream_id, notify.job_id, notify.ntime.0
         );
 
         let Some(sender) = self
@@ -1876,12 +1842,7 @@ impl Sv1Server {
     ///
     /// Like [`Self::store_prevhash`], it only stores into an existing entry, so a closed channel's
     /// job history is never recreated.
-    fn store_job(
-        &self,
-        channel_id: ChannelId,
-        notify: &server_to_client::Notify,
-        resets_job_history: bool,
-    ) -> bool {
+    fn store_job(&self, channel_id: ChannelId, notify: &Notify, resets_job_history: bool) -> bool {
         self.channels
             .with_mut(&channel_id, |channel| {
                 channel
@@ -1949,9 +1910,36 @@ mod tests {
                 OpenMiningChannelErrorOwned, SetExtranoncePrefixOwned, SetNewPrevHashOwned,
                 SetTargetOwned,
             },
-            sv1_api::client_to_server,
+            sv1_api::{
+                Id, Method, Request, ServerToClient, SetDifficulty, Submit, SubscribeResult,
+            },
         },
     };
+
+    fn request(message: json_rpc::Message) -> ClientToServer {
+        ClientToServer::try_from(message).unwrap()
+    }
+
+    fn server_notification(message: json_rpc::Message) -> ServerToClient {
+        let json_rpc::Message::Request(request) = message else {
+            panic!("expected a notification");
+        };
+        ServerToClient::try_from(request).unwrap()
+    }
+
+    fn subscribe_result(response: &json_rpc::Response) -> SubscribeResult {
+        match ServerToClient::from_response(response, &Method::Subscribe) {
+            Ok(Some(ServerToClient::Subscribe(response))) => response.result.unwrap(),
+            other => panic!("expected a subscribe result, got {other:?}"),
+        }
+    }
+
+    fn notify_of(message: json_rpc::Message) -> Notify {
+        match server_notification(message) {
+            ServerToClient::Notify(notify) => notify,
+            other => panic!("expected mining.notify, got {other:?}"),
+        }
+    }
 
     fn create_test_config() -> TranslatorConfig {
         let pubkey_str = "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan";
@@ -2062,7 +2050,7 @@ mod tests {
         }
     }
 
-    fn test_sv1_notify(job_id: &str, clean_jobs: bool) -> server_to_client::Notify {
+    fn test_sv1_notify(job_id: &str, clean_jobs: bool) -> Notify {
         let message: json_rpc::Message = serde_json::from_value(serde_json::json!({
             "id": null,
             "method": "mining.notify",
@@ -2079,10 +2067,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let json_rpc::Message::Notification(notification) = message else {
-            unreachable!();
-        };
-        server_to_client::Notify::try_from(notification).unwrap()
+        notify_of(message)
     }
 
     #[test]
@@ -2140,38 +2125,20 @@ mod tests {
             })
             .unwrap();
 
-        let submit = client_to_server::Submit {
-            user_name: "worker".to_string(),
+        let submit = Submit {
+            worker_name: "worker".to_string(),
             job_id: "old".to_string(),
-            extra_nonce2: vec![0; 16].try_into().unwrap(),
-            time: HexU32Be(1),
+            extranonce2: vec![0; 16].try_into().unwrap(),
+            ntime: HexU32Be(1),
             nonce: HexU32Be(0),
             version_bits: None,
-            id: 1,
         };
 
-        assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
-            client_to_server::SubmitOutcome::Accepted
-        );
-        server
-            .downstreams
-            .with(&7, |downstream| {
-                downstream
-                    .downstream_data
-                    .with(|data| {
-                        let pending_share = data.pending_share.as_ref().unwrap();
-                        assert_eq!(
-                            pending_share.extranonce,
-                            Vec::<u8>::from(old_extranonce.clone())
-                        );
-                        assert_eq!(pending_share.extranonce2_len, 16);
-                        assert_eq!(pending_share.job_version, Some(old_job.version.0));
-                        assert_ne!(pending_share.job_version, Some(current_job.version.0));
-                    })
-                    .unwrap();
-            })
-            .unwrap();
+        let share = server.validate_submit(7, submit).unwrap().unwrap();
+        assert_eq!(share.extranonce, Vec::<u8>::from(old_extranonce.clone()));
+        assert_eq!(share.extranonce2_len, 16);
+        assert_eq!(share.job_version, Some(old_job.version.0));
+        assert_ne!(share.job_version, Some(current_job.version.0));
     }
 
     #[test]
@@ -2205,25 +2172,22 @@ mod tests {
                     .unwrap();
             })
             .unwrap();
-        let submit = client_to_server::Submit {
-            user_name: "worker".to_string(),
+        let submit = Submit {
+            worker_name: "worker".to_string(),
             job_id: job.job_id,
-            extra_nonce2: vec![0; 16].try_into().unwrap(),
-            time: HexU32Be(1),
+            extranonce2: vec![0; 16].try_into().unwrap(),
+            ntime: HexU32Be(1),
             nonce: HexU32Be(0),
             version_bits: None,
-            id: 1,
         };
 
+        assert!(server.validate_submit(7, submit.clone()).unwrap().is_ok());
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
-            client_to_server::SubmitOutcome::Accepted
-        );
-        assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
-            client_to_server::SubmitOutcome::Rejected(
-                client_to_server::SubmitError::DuplicateShare
-            )
+            server
+                .validate_submit(7, submit.clone())
+                .unwrap()
+                .unwrap_err(),
+            SubmitError::DuplicateShare
         );
         server
             .downstreams
@@ -2237,22 +2201,145 @@ mod tests {
     }
 
     #[test]
+    fn submit_session_checks_reject_before_share_validation() {
+        let server = create_test_sv1_server();
+        register_test_downstream(&server, 7, Some(9), 100.0, false);
+        let set = |username: &str, mask: Option<u32>| {
+            server
+                .downstreams
+                .with(&7, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| {
+                            data.sv1_username = username.to_string();
+                            data.extranonce2_len = 16;
+                            data.version_rolling_mask = mask.map(HexU32Be);
+                        })
+                        .unwrap();
+                })
+                .unwrap();
+        };
+        let submit = |extranonce2_len: usize, version_bits: Option<u32>| Submit {
+            worker_name: "worker".to_string(),
+            job_id: "1".to_string(),
+            extranonce2: vec![0; extranonce2_len].try_into().unwrap(),
+            ntime: HexU32Be(1),
+            nonce: HexU32Be(0),
+            version_bits: version_bits.map(HexU32Be),
+        };
+        let check = |submit: Submit| server.check_submit_session(7, &submit).unwrap();
+
+        // An unauthorized worker takes precedence over the other checks.
+        set("other", Some(0x1fffe000));
+        assert_eq!(
+            check(submit(8, Some(0xe0000000))),
+            Some(SubmitError::UnauthorizedWorker)
+        );
+
+        set("worker", None);
+        assert_eq!(check(submit(16, None)), None);
+        assert_eq!(check(submit(8, None)), Some(SubmitError::Other));
+        assert_eq!(check(submit(16, Some(0x2000))), Some(SubmitError::Other));
+
+        set("worker", Some(0x1fffe000));
+        assert_eq!(check(submit(16, Some(0x2000))), None);
+        assert_eq!(check(submit(16, None)), Some(SubmitError::Other));
+        assert_eq!(check(submit(16, Some(0x20))), Some(SubmitError::Other));
+
+        // Reserved bits are rejected whatever the negotiated mask.
+        set("worker", Some(0xffffffff));
+        assert_eq!(
+            check(submit(16, Some(0xe0000000))),
+            Some(SubmitError::Other)
+        );
+        assert_eq!(check(submit(16, Some(0x2000))), None);
+    }
+
+    #[tokio::test]
+    async fn accepted_share_is_answered_then_forwarded_upstream() {
+        let (channel_manager_sender, channel_manager_receiver) = unbounded();
+        let (_upstream_sender, upstream_receiver) = unbounded();
+        let config = create_test_config();
+        let addr = "127.0.0.1:3333".parse().unwrap();
+        let mode = TproxyMode::from(config.aggregate_channels);
+        let server = Sv1Server::new(
+            addr,
+            upstream_receiver,
+            channel_manager_sender,
+            config,
+            mode,
+        );
+        let (_events, sv1_receiver) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+        let job = test_sv1_notify("1", false);
+        with_test_jobs(&server, AGGREGATED_CHANNEL_ID, |jobs| {
+            jobs.activate(
+                job.job_id.clone(),
+                StoredSv1Job::upstream(job.clone()),
+                false,
+            );
+        });
+        server
+            .downstreams
+            .with(&7, |downstream| {
+                downstream
+                    .downstream_data
+                    .with(|data| {
+                        data.job_validation_contexts.activate(
+                            job.job_id.clone(),
+                            Sv1JobValidationContext {
+                                extranonce: vec![1, 2, 3, 4].try_into().unwrap(),
+                                extranonce2_len: 16,
+                                target: Target::from_le_bytes([0xff; 32]),
+                            },
+                            false,
+                        );
+                        data.sv1_username = "worker".to_string();
+                        data.extranonce2_len = 16;
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+
+        let submit = serde_json::from_value(serde_json::json!({
+            "id": 4,
+            "method": "mining.submit",
+            "params": ["worker", "1", "00".repeat(16), "00000001", "00000000"]
+        }))
+        .unwrap();
+        server
+            .process_sv1_message(7, request(submit))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(sv1_receiver.recv().await.unwrap()).unwrap(),
+            serde_json::json!({"id": 4, "result": true, "error": null})
+        );
+        let (message, _) = channel_manager_receiver.recv().await.unwrap();
+        assert!(matches!(message, MiningOwned::SubmitSharesExtended(_)));
+        assert!(sv1_receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn sv1_share_rejections_distinguish_missing_jobs_and_low_difficulty() {
         let server = create_test_sv1_server();
         register_test_downstream(&server, 7, Some(9), 100.0, false);
-        let mut submit = client_to_server::Submit {
-            user_name: "worker".to_string(),
+        let mut submit = Submit {
+            worker_name: "worker".to_string(),
             job_id: "missing".to_string(),
-            extra_nonce2: vec![0; 16].try_into().unwrap(),
-            time: HexU32Be(1),
+            extranonce2: vec![0; 16].try_into().unwrap(),
+            ntime: HexU32Be(1),
             nonce: HexU32Be(0),
             version_bits: None,
-            id: 1,
         };
 
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
-            client_to_server::SubmitOutcome::Rejected(client_to_server::SubmitError::JobNotFound)
+            server
+                .validate_submit(7, submit.clone())
+                .unwrap()
+                .unwrap_err(),
+            SubmitError::JobNotFound
         );
 
         let job = test_sv1_notify("job", false);
@@ -2286,10 +2373,11 @@ mod tests {
         submit.job_id = job.job_id;
 
         assert_eq!(
-            server.handle_submit(Some(7), &submit).unwrap(),
-            client_to_server::SubmitOutcome::Rejected(
-                client_to_server::SubmitError::LowDifficultyShare
-            )
+            server
+                .validate_submit(7, submit.clone())
+                .unwrap()
+                .unwrap_err(),
+            SubmitError::LowDifficultyShare
         );
     }
 
@@ -2357,13 +2445,13 @@ mod tests {
         )
         .unwrap();
         server
-            .process_sv1_message(7, authorize.try_into().unwrap())
+            .process_sv1_message(7, request(authorize))
             .await
             .unwrap();
 
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
-            json_rpc::Message::OkResponse(_)
+            json_rpc::Message::Response(json_rpc::Response { result: Ok(_), .. })
         ));
         assert!(downstream_sv1_receiver.try_recv().is_err());
         assert_eq!(
@@ -2380,7 +2468,7 @@ mod tests {
         let subscribe: json_rpc::Message =
             serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
         server
-            .process_sv1_message(7, subscribe.try_into().unwrap())
+            .process_sv1_message(7, request(subscribe))
             .await
             .unwrap();
         server
@@ -2393,17 +2481,17 @@ mod tests {
 
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
-            json_rpc::Message::OkResponse(_)
+            json_rpc::Message::Response(json_rpc::Response { result: Ok(_), .. })
         ));
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
-            json_rpc::Message::Notification(notification)
-                if notification.method == "mining.set_difficulty"
+            json_rpc::Message::Request(notification)
+                if notification.method.as_str() == "mining.set_difficulty"
         ));
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
-            json_rpc::Message::Notification(notification)
-                if notification.method == "mining.notify"
+            json_rpc::Message::Request(notification)
+                if notification.method.as_str() == "mining.notify"
         ));
         assert_eq!(
             server.downstreams.with(&7, |downstream| downstream
@@ -2454,12 +2542,12 @@ mod tests {
         )
         .unwrap();
         server
-            .process_sv1_message(7, authorize.try_into().unwrap())
+            .process_sv1_message(7, request(authorize))
             .await
             .unwrap();
         assert!(matches!(
             downstream_sv1_receiver.recv().await.unwrap(),
-            json_rpc::Message::OkResponse(_)
+            json_rpc::Message::Response(json_rpc::Response { result: Ok(_), .. })
         ));
 
         let new_extranonce_bytes = vec![1, 2, 3, 4];
@@ -2477,15 +2565,15 @@ mod tests {
         let subscribe: json_rpc::Message =
             serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
         server
-            .process_sv1_message(7, subscribe.try_into().unwrap())
+            .process_sv1_message(7, request(subscribe))
             .await
             .unwrap();
-        let json_rpc::Message::OkResponse(response) = downstream_sv1_receiver.recv().await.unwrap()
+        let json_rpc::Message::Response(response) = downstream_sv1_receiver.recv().await.unwrap()
         else {
             panic!("expected subscribe response");
         };
-        let subscribe_response = server_to_client::Subscribe::try_from(&response).unwrap();
-        assert_eq!(subscribe_response.extra_nonce1, new_extranonce);
+        let subscribe_response = subscribe_result(&response);
+        assert_eq!(subscribe_response.extranonce1, new_extranonce);
 
         downstream.handle_sv1_server_message().await.unwrap();
         assert!(downstream_sv1_receiver.try_recv().is_err());
@@ -2557,7 +2645,7 @@ mod tests {
             .unwrap();
         let subscribe: json_rpc::Message =
             serde_json::from_str(r#"{"id":2,"method":"mining.subscribe","params":[]}"#).unwrap();
-        let mut response = Box::pin(server.process_sv1_message(7, subscribe.try_into().unwrap()));
+        let mut response = Box::pin(server.process_sv1_message(7, request(subscribe)));
         let pending = std::future::poll_fn(|cx| {
             std::task::Poll::Ready(std::future::Future::poll(response.as_mut(), cx).is_pending())
         })
@@ -2574,7 +2662,7 @@ mod tests {
         );
         wire_receiver.recv().await.unwrap();
         response.await.unwrap();
-        let json_rpc::Message::OkResponse(response) = wire_receiver.recv().await.unwrap() else {
+        let json_rpc::Message::Response(response) = wire_receiver.recv().await.unwrap() else {
             panic!("expected subscribe response");
         };
         assert!(
@@ -2588,11 +2676,11 @@ mod tests {
                 .unwrap(),
             new_extranonce
         );
-        let subscribe_response = server_to_client::Subscribe::try_from(&response).unwrap();
+        let subscribe_response = subscribe_result(&response);
         downstream.handle_sv1_server_message().await.unwrap();
         assert!(wire_receiver.try_recv().is_err());
         assert_eq!(
-            subscribe_response.extra_nonce1, new_extranonce,
+            subscribe_response.extranonce1, new_extranonce,
             "a silently applied prefix must also be advertised in subscribe"
         );
     }
@@ -2618,7 +2706,7 @@ mod tests {
                                 "id": id, "method": method, "params": params,
                             }))
                             .unwrap();
-                        Client2Server::try_from(message).unwrap()
+                        request(message)
                     };
                     server
                         .process_sv1_message(
@@ -2629,7 +2717,7 @@ mod tests {
                         .unwrap();
                     assert!(matches!(
                         wire.try_recv().unwrap(),
-                        json_rpc::Message::OkResponse(_)
+                        json_rpc::Message::Response(json_rpc::Response { result: Ok(_), .. })
                     ));
                     if ready_before_change {
                         server
@@ -2685,11 +2773,10 @@ mod tests {
                             )
                             .await
                             .unwrap();
-                        let json_rpc::Message::OkResponse(response) = wire.try_recv().unwrap()
-                        else {
+                        let json_rpc::Message::Response(response) = wire.try_recv().unwrap() else {
                             panic!("expected capability acknowledgement");
                         };
-                        assert_eq!(response.result, serde_json::json!(true));
+                        assert_eq!(response.result, Ok(serde_json::json!(true)));
                     }
                     if ready_before_change {
                         sender
@@ -2713,12 +2800,12 @@ mod tests {
                     downstream.handle_sv1_server_message().await.unwrap();
                     assert_eq!(downstream.is_disconnected(), !announce_support);
                     if announce_support {
-                        let json_rpc::Message::Notification(update) = wire.try_recv().unwrap()
+                        let ServerToClient::SetExtranonce(update) =
+                            server_notification(wire.try_recv().unwrap())
                         else {
                             panic!("expected prefix update before notify");
                         };
-                        let update = server_to_client::SetExtranonce::try_from(update).unwrap();
-                        assert_eq!(update.extra_nonce1, vec![9; 4].try_into().unwrap());
+                        assert_eq!(update.extranonce1, vec![9; 4].try_into().unwrap());
                         assert_eq!(
                             serde_json::to_value(wire.try_recv().unwrap()).unwrap(),
                             serde_json::to_value(&notify).unwrap()
@@ -2728,7 +2815,7 @@ mod tests {
                                 .downstream_data
                                 .with(|data| data.job_validation_context("new").unwrap().extranonce)
                                 .unwrap(),
-                            update.extra_nonce1
+                            update.extranonce1
                         );
                     } else {
                         assert!(
@@ -2754,16 +2841,16 @@ mod tests {
                 .unwrap();
 
         server
-            .process_sv1_message(7, subscribe.try_into().unwrap())
+            .process_sv1_message(7, request(subscribe))
             .await
             .unwrap();
 
-        let json_rpc::Message::OkResponse(response) = downstream_sv1_receiver.recv().await.unwrap()
+        let json_rpc::Message::Response(response) = downstream_sv1_receiver.recv().await.unwrap()
         else {
             panic!("expected mining.extranonce.subscribe response");
         };
-        assert_eq!(response.id, 1);
-        assert_eq!(response.result, serde_json::json!(true));
+        assert_eq!(response.id, Some(Id::from(1u64)));
+        assert_eq!(response.result, Ok(serde_json::json!(true)));
 
         assert_eq!(
             server.downstreams.with(&7, |downstream| downstream
@@ -2815,9 +2902,9 @@ mod tests {
         let downstream_id = 7;
         let _downstream_receiver =
             register_test_downstream(&server, downstream_id, None, 100.0, false);
-        let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
-            id: 1,
-            method: "mining.subscribe".to_string(),
+        let message = json_rpc::Message::Request(json_rpc::Request {
+            id: Some(Id::from(1u64)),
+            method: Method::Subscribe,
             params: serde_json::json!([]),
         });
 
@@ -3377,12 +3464,9 @@ mod tests {
         server.handle_upstream_message(target).await.unwrap();
 
         let sent = message_from_server_event(first_downstream_receiver.try_recv().unwrap());
-        let json_rpc::Message::Notification(sent) = sent else {
-            panic!("expected mining.notify");
-        };
-        let sent = server_to_client::Notify::try_from(sent).unwrap();
+        let sent = notify_of(sent);
         assert_eq!(sent.job_id, current.job_id);
-        assert_eq!(sent.time, current.time);
+        assert_eq!(sent.ntime, current.ntime);
         assert!(
             sent.clean_jobs,
             "only the new miner starts with a clean view"
@@ -3414,7 +3498,7 @@ mod tests {
         let next = server
             .create_keepalive_job(AGGREGATED_CHANNEL_ID, 5)
             .unwrap();
-        assert_eq!(next.time.0, current.time.0 + 5);
+        assert_eq!(next.ntime.0, current.ntime.0 + 5);
 
         // Never replace current work with an unrelated bootstrap.
         bootstrap.job_id = 2;
@@ -3979,7 +4063,7 @@ mod tests {
             .get_last_job(AGGREGATED_CHANNEL_ID)
             .unwrap()
             .notify
-            .time
+            .ntime
             .0;
         let interval = Duration::from_secs(60);
 
@@ -4014,7 +4098,7 @@ mod tests {
         assert!(second_receiver.try_recv().is_err());
         assert_eq!(history_len(), 2);
         let latest = server.get_last_job(AGGREGATED_CHANNEL_ID).unwrap().notify;
-        assert_eq!(latest.time.0, original_time + 60);
+        assert_eq!(latest.ntime.0, original_time + 60);
         assert!(!latest.clean_jobs);
         assert_eq!(
             server
@@ -4088,7 +4172,7 @@ mod tests {
                 .get_last_job(AGGREGATED_CHANNEL_ID)
                 .unwrap()
                 .notify
-                .time
+                .ntime
                 .0,
             original_time + 120
         );
@@ -4166,10 +4250,7 @@ mod tests {
                 "id": null, "method": "mining.notify",
                 "params": ["1", "00".repeat(32), "", "", [], "20000000", "1d00ffff", "00000001", false]
             })).unwrap();
-            let json_rpc::Message::Notification(notification) = message else {
-                unreachable!()
-            };
-            let notify = server_to_client::Notify::try_from(notification).unwrap();
+            let notify = notify_of(message);
             let channel_id = if aggregated { AGGREGATED_CHANNEL_ID } else { 4 };
             with_test_jobs(&server, channel_id, |jobs| {
                 jobs.activate(notify.job_id.clone(), StoredSv1Job::upstream(notify), false);
@@ -4226,10 +4307,7 @@ mod tests {
                 .unwrap();
             server.send_keepalive_jobs(60).await.unwrap();
             downstream.handle_sv1_server_message().await.unwrap();
-            let json_rpc::Message::Notification(message) = wire.try_recv().unwrap() else {
-                panic!("expected mining.notify");
-            };
-            let notify = server_to_client::Notify::try_from(message).unwrap();
+            let notify = notify_of(wire.try_recv().unwrap());
             assert!(!notify.clean_jobs);
             downstream
                 .downstream_data
@@ -4526,11 +4604,7 @@ mod tests {
                     })).await.unwrap();
                     server.handle_upstream_message(target).await.unwrap();
                     downstream.handle_sv1_server_message().await.unwrap();
-                    let json_rpc::Message::Notification(sent) = responses.try_recv().unwrap()
-                    else {
-                        panic!("expected mining.notify");
-                    };
-                    let sent = server_to_client::Notify::try_from(sent).unwrap();
+                    let sent = notify_of(responses.try_recv().unwrap());
                     assert_eq!(sent.job_id, job_id.to_string());
                 }
 
@@ -4629,11 +4703,11 @@ mod tests {
         receive_request(&server, serde_json::from_str(r#"{"id":1,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap();
 
         let response = responses.recv().await.unwrap();
-        let json_rpc::Message::ErrorResponse(response) = response else {
+        let json_rpc::Message::Response(response) = response else {
             panic!("expected mining.submit error response");
         };
-        assert_eq!(response.id, 1);
-        assert_eq!(response.error.unwrap().code, 25);
+        assert_eq!(response.id, Some(Id::from(1u64)));
+        assert_eq!(response.result.unwrap_err().code, 25);
         assert!(from_server.is_empty());
         assert!(server.request_id_to_downstream_id.is_empty());
         server
@@ -4673,11 +4747,11 @@ mod tests {
         receive_request(&server, serde_json::from_str(r#"{"id":1,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap();
 
         let response = responses.recv().await.unwrap();
-        let json_rpc::Message::ErrorResponse(response) = response else {
+        let json_rpc::Message::Response(response) = response else {
             panic!("expected mining.submit error response");
         };
-        assert_eq!(response.id, 1);
-        assert_eq!(response.error.unwrap().code, 24);
+        assert_eq!(response.id, Some(Id::from(1u64)));
+        assert_eq!(response.result.unwrap_err().code, 24);
         assert!(server.downstreams.contains_key(&7));
     }
 
@@ -4751,14 +4825,14 @@ mod tests {
                     server.handle_upstream_message(target).await.unwrap();
                     for wire in sequence {
                         let input: serde_json::Value = serde_json::from_str(wire).unwrap();
-                        let json_rpc::Message::OkResponse(response) = responses.try_recv().unwrap()
+                        let json_rpc::Message::Response(response) = responses.try_recv().unwrap()
                         else {
                             panic!("expected setup response");
                         };
                         assert_eq!(serde_json::json!(response.id), input["id"]);
-                        if response.id == 2 {
-                            assert_eq!(response.result[1], "01020304");
-                            assert_eq!(response.result[2], 4);
+                        if response.id == Some(Id::from(2u64)) {
+                            assert_eq!(response.result.as_ref().unwrap()[1], "01020304");
+                            assert_eq!(response.result.as_ref().unwrap()[2], 4);
                         }
                     }
                     assert!(responses.is_empty());
@@ -4833,8 +4907,12 @@ mod tests {
         // The miner gets both setup responses, then the cached job with its difficulty.
         let delivered: Vec<String> = std::iter::from_fn(|| responses.try_recv().ok())
             .map(|message| match message {
-                json_rpc::Message::Notification(notification) => notification.method,
-                json_rpc::Message::OkResponse(_) => "response".to_string(),
+                json_rpc::Message::Request(notification) => {
+                    notification.method.as_str().to_string()
+                }
+                json_rpc::Message::Response(json_rpc::Response { result: Ok(_), .. }) => {
+                    "response".to_string()
+                }
                 other => panic!("unexpected message {other:?}"),
             })
             .collect();
@@ -4876,11 +4954,11 @@ mod tests {
         assert_eq!(from_server.len(), 1);
         receive_request(&server, serde_json::from_str(r#"{"id":2,"method":"mining.submit","params":["worker","job","00000000","00000001","00000000"]}"#).unwrap()).await.unwrap();
         let response = responses.recv().await.unwrap();
-        let json_rpc::Message::ErrorResponse(response) = response else {
+        let json_rpc::Message::Response(response) = response else {
             panic!("expected mining.submit error response");
         };
-        assert_eq!(response.id, 2);
-        assert_eq!(response.error.unwrap().code, 25);
+        assert_eq!(response.id, Some(Id::from(2u64)));
+        assert_eq!(response.result.unwrap_err().code, 25);
         assert_eq!(from_server.len(), 1);
         assert_eq!(server.request_id_to_downstream_id.len(), 1);
     }
@@ -4889,7 +4967,7 @@ mod tests {
         server: &Sv1Server,
         downstream_id: usize,
         responses: &Receiver<json_rpc::Message>,
-        notify: server_to_client::Notify,
+        notify: Notify,
         next_target: Option<Target>,
     ) {
         let downstream = server.downstreams.get_cloned(&downstream_id).unwrap();
@@ -4903,7 +4981,7 @@ mod tests {
             // the difficulty/notify boundary; target-to-difficulty conversion is tested separately.
             events
                 .send(Sv1ServerEvent::SetDifficulty(Sv1Difficulty {
-                    message: server_to_client::SetDifficulty { value: 1.0 }.into(),
+                    message: SetDifficulty { difficulty: 1.0 }.into(),
                     target,
                 }))
                 .await
@@ -4917,15 +4995,12 @@ mod tests {
             .unwrap();
         downstream.handle_sv1_server_message().await.unwrap();
         if next_target.is_some() {
-            let json_rpc::Message::Notification(difficulty) = responses.try_recv().unwrap() else {
+            let json_rpc::Message::Request(difficulty) = responses.try_recv().unwrap() else {
                 panic!("expected difficulty");
             };
-            assert_eq!(difficulty.method, "mining.set_difficulty");
+            assert_eq!(difficulty.method, Method::SetDifficulty);
         }
-        let json_rpc::Message::Notification(sent) = responses.try_recv().unwrap() else {
-            panic!("expected job");
-        };
-        let sent = server_to_client::Notify::try_from(sent).unwrap();
+        let sent = notify_of(responses.try_recv().unwrap());
         assert_eq!(sent.job_id, notify.job_id);
         assert_eq!(sent.clean_jobs, notify.clean_jobs);
     }
@@ -4938,15 +5013,18 @@ mod tests {
         nonce: u32,
         expected_error: Option<i32>,
     ) {
-        let request = client_to_server::Submit {
-            user_name: "worker".to_string(),
+        let request = Submit {
+            worker_name: "worker".to_string(),
             job_id: "1".to_string(),
-            extra_nonce2: vec![0; 16].try_into().unwrap(),
-            time: HexU32Be(1),
+            extranonce2: vec![0; 16].try_into().unwrap(),
+            ntime: HexU32Be(1),
             nonce: HexU32Be(nonce),
             version_bits: None,
-            id: 42,
         };
+        let request = ClientToServer::Submit(Request {
+            id: Id::from(42u64),
+            params: request,
+        });
         server
             .sv1_server_io
             .downstream_to_sv1_server_sender

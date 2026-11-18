@@ -1,70 +1,84 @@
-use stratum_apps::stratum_core::sv1_api::{
-    IsServer,
-    client_to_server::{self, SubmitError, SubmitOutcome},
-    json_rpc, server_to_client,
-    utils::{Extranonce, HexU32Be, VERSION_ROLLING_MASK},
+use stratum_apps::{
+    stratum_core::sv1_api::{
+        Authorize, Configure, ConfigureResult, Id, IsServerAsync, Response, Submit, SubmitError,
+        SubmitOutcome, Subscribe, SubscribeResult, SuggestDifficulty, VersionRollingResult,
+        utils::{HexU32Be, VERSION_ROLLING_MASK},
+    },
+    utils::types::DownstreamId,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::{
-    error::{self, TproxyError},
-    sv1::Sv1Server,
+    error::{self, TproxyError, TproxyResult},
+    sv1::{Sv1Server, downstream::Sv1SetupRequest},
     utils::{
         AGGREGATED_CHANNEL_ID, SubmitShareWithChannelId, Sv1ShareValidationOutcome,
         sv1_worker_name_from_sv1_username, validate_sv1_share,
     },
 };
 
-// Implements `IsServer` for `Sv1Server` to handle the Sv1 messages.
+// Implements `IsServerAsync` for `Sv1Server`: each handler acts on its request and queues the
+// reply to the miner.
 #[cfg_attr(not(test), hotpath::measure_all)]
-impl IsServer for Sv1Server {
+impl IsServerAsync for Sv1Server {
     type Error = TproxyError<error::Sv1Server>;
 
-    fn handle_configure(
+    async fn handle_configure(
         &mut self,
         client_id: Option<usize>,
-        request: &client_to_server::Configure,
-    ) -> Result<(Option<server_to_client::VersionRollingParams>, Option<bool>), Self::Error> {
+        id: Id,
+        request: Configure,
+    ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
         info!("Received mining.configure from SV1 downstream");
-        debug!("Downstream {downstream_id}: mining.configure = {}", request);
+        debug!(
+            "Downstream {downstream_id}: mining.configure = {:?}",
+            request
+        );
 
-        self.with_registered_downstream(downstream_id, |downstream| {
+        let result = self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
                 .with(|data| {
                     data.version_rolling_mask = request
                         .version_rolling_mask()
-                        .map(|mask| HexU32Be(mask & VERSION_ROLLING_MASK));
+                        .map(|mask| mask & VERSION_ROLLING_MASK);
 
-                    data.version_rolling_min_bit = request.version_rolling_min_bit_count();
+                    data.version_rolling_min_bit =
+                        request.version_rolling_min_bit_count().map(HexU32Be);
 
                     debug!(
                         "Negotiated version_rolling_mask: {:?}",
                         data.version_rolling_mask
                     );
 
-                    let params = server_to_client::VersionRollingParams::new(
-                        data.version_rolling_mask.clone().unwrap_or(HexU32Be(0)),
-                        data.version_rolling_min_bit.clone().unwrap_or(HexU32Be(0)),
-                    );
-
-                    (Some(params), Some(false))
+                    ConfigureResult {
+                        version_rolling: Some(VersionRollingResult::new(
+                            data.version_rolling_mask.unwrap_or(HexU32Be(0)),
+                            data.version_rolling_min_bit.map_or(0, |count| count.0),
+                        )),
+                        minimum_difficulty: Some(false),
+                    }
                 })
                 .map_err(TproxyError::shutdown)
-        })
+        })?;
+        self.send_response(downstream_id, Response::success(id, result))
+            .await
     }
 
-    fn handle_subscribe(
-        &self,
+    /// Returns the `extranonce1` and `extranonce2_size` assigned by the SV2
+    /// `OpenExtendedMiningChannelSuccess` message from the Upstream role.
+    async fn handle_subscribe(
+        &mut self,
         client_id: Option<usize>,
-        request: &client_to_server::Subscribe,
-    ) -> Result<Vec<(String, String)>, Self::Error> {
+        id: Id,
+        request: Subscribe,
+    ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
 
         info!("Received mining.subscribe from Sv1 downstream");
-        debug!("Down: Handling mining.subscribe: {}", request);
+        debug!("Down: Handling mining.subscribe: {:?}", request);
 
         let set_difficulty_sub = (
             "mining.set_difficulty".to_string(),
@@ -76,29 +90,159 @@ impl IsServer for Sv1Server {
             "ae6812eb4cd7735a302a8a9dd95cf71f".to_string(),
         );
 
-        Ok(vec![set_difficulty_sub, notify_sub])
+        let result = self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| SubscribeResult {
+                    subscriptions: vec![set_difficulty_sub, notify_sub],
+                    extranonce1: data.extranonce1.clone(),
+                    extranonce2_size: data.extranonce2_len,
+                })
+                .map_err(TproxyError::shutdown)
+        })?;
+        self.send_response(downstream_id, Response::success(id, result))
+            .await?;
+        self.record_setup_response(downstream_id, Sv1SetupRequest::Subscribe)
+            .await
     }
 
-    fn handle_authorize(
-        &self,
+    /// Authorizes every worker and records its user name.
+    async fn handle_authorize(
+        &mut self,
         client_id: Option<usize>,
-        request: &client_to_server::Authorize,
-    ) -> Result<bool, Self::Error> {
+        id: Id,
+        request: Authorize,
+    ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
         info!("Received mining.authorize from Sv1 downstream {downstream_id}");
-        debug!("Down: Handling mining.authorize: {}", request);
-        Ok(true)
+        debug!("Down: Handling mining.authorize: {:?}", request);
+
+        let name = &request.worker_name;
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    data.sv1_username = name.to_string();
+                    data.sv1_worker_name = sv1_worker_name_from_sv1_username(name).to_string();
+                    debug!(
+                        "Down: Set sv1_username '{}' and sv1_worker_name '{}' for downstream {}",
+                        data.sv1_username, data.sv1_worker_name, downstream_id
+                    );
+                })
+                .map_err(TproxyError::shutdown)
+        })?;
+        self.send_response(downstream_id, Response::success(id, true))
+            .await?;
+        self.record_setup_response(downstream_id, Sv1SetupRequest::Authorize)
+            .await
     }
 
-    fn handle_submit(
-        &self,
+    /// Replies to the miner, then forwards an accepted share upstream.
+    async fn handle_submit(
+        &mut self,
         client_id: Option<usize>,
-        request: &client_to_server::Submit,
-    ) -> Result<SubmitOutcome, Self::Error> {
+        id: Id,
+        request: Submit,
+    ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
+        let outcome = match self.check_submit_session(downstream_id, &request)? {
+            Some(error) => Err(error),
+            None => self.validate_submit(downstream_id, request)?,
+        };
+        match outcome {
+            Ok(share) => {
+                self.send_response(downstream_id, SubmitOutcome::Accepted.into_response(id))
+                    .await?;
+                self.handle_submit_shares(share).await
+            }
+            Err(error) => {
+                self.send_response(
+                    downstream_id,
+                    SubmitOutcome::Rejected(error).into_response(id),
+                )
+                .await
+            }
+        }
+    }
 
-        let job_id = &request.job_id;
+    /// Indicates to the server that the client supports the mining.set_extranonce method.
+    async fn handle_extranonce_subscribe(
+        &mut self,
+        client_id: Option<usize>,
+        id: Id,
+    ) -> Result<(), Self::Error> {
+        let downstream_id = client_id.expect("Downstream id should exist");
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| data.supports_set_extranonce = true)
+                .map_err(TproxyError::shutdown)
+        })?;
+        self.send_response(downstream_id, Response::success(id, true))
+            .await
+    }
 
+    /// The suggestion is not used: the initial target comes from the configured hashrate, then
+    /// vardiff.
+    async fn handle_suggest_difficulty(
+        &mut self,
+        _client_id: Option<usize>,
+        _id: Id,
+        _request: SuggestDifficulty,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(test), hotpath::measure_all)]
+impl Sv1Server {
+    /// The session checks a submit passes before its share is validated: its worker is
+    /// authorized, its extranonce2 has the size assigned to the miner, and its version bits match
+    /// the negotiated mask, including whether they must be present. Bits outside
+    /// [`VERSION_ROLLING_MASK`] are rejected even if the negotiated mask allows them.
+    ///
+    /// Returns the reason the miner is given for a rejection.
+    #[allow(clippy::result_large_err)]
+    pub(super) fn check_submit_session(
+        &self,
+        downstream_id: DownstreamId,
+        request: &Submit,
+    ) -> TproxyResult<Option<SubmitError>, error::Sv1Server> {
+        self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    let has_valid_version_bits =
+                        match (&request.version_bits, data.version_rolling_mask) {
+                            (Some(bits), Some(mask)) => {
+                                (mask & VERSION_ROLLING_MASK).check_mask(bits)
+                            }
+                            (Some(_), None) => false,
+                            (None, mask) => mask.is_none(),
+                        };
+                    if data.sv1_username != request.worker_name {
+                        Some(SubmitError::UnauthorizedWorker)
+                    } else if data.extranonce2_len != request.extranonce2.len()
+                        || !has_valid_version_bits
+                    {
+                        Some(SubmitError::Other)
+                    } else {
+                        None
+                    }
+                })
+                .map_err(TproxyError::shutdown)
+        })
+    }
+
+    /// Validates a submit that passed the session checks.
+    ///
+    /// Returns the share to forward upstream, or the reason the miner is given for its rejection.
+    #[allow(clippy::result_large_err)]
+    pub(super) fn validate_submit(
+        &self,
+        downstream_id: DownstreamId,
+        request: Submit,
+    ) -> TproxyResult<Result<SubmitShareWithChannelId, SubmitError>, error::Sv1Server> {
         let Some(channel_id) = self.with_registered_downstream(downstream_id, |downstream| {
             downstream
                 .downstream_data
@@ -106,7 +250,7 @@ impl IsServer for Sv1Server {
                 .map_err(TproxyError::shutdown)
         })?
         else {
-            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
+            return Ok(Err(SubmitError::Other));
         };
 
         let channel_id = if self.mode.is_aggregated() {
@@ -121,12 +265,12 @@ impl IsServer for Sv1Server {
                 channel
                     .jobs
                     .as_ref()
-                    .and_then(|jobs| jobs.get(job_id).map(|job| job.notify.clone()))
+                    .and_then(|jobs| jobs.get(&request.job_id).map(|job| job.notify.clone()))
             })
             .flatten();
 
         let Some(job) = job else {
-            return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
+            return Ok(Err(SubmitError::JobNotFound));
         };
 
         self.with_registered_downstream(downstream_id, |downstream| {
@@ -140,7 +284,7 @@ impl IsServer for Sv1Server {
                                 "Cannot submit share: channel_id is None \
                          (waiting for OpenExtendedMiningChannelSuccess)"
                             );
-                            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
+                            return Ok(Err(SubmitError::Other));
                         }
                     };
 
@@ -149,203 +293,45 @@ impl IsServer for Sv1Server {
                         channel_id
                     );
 
-                    let Some(job_context) = data.job_validation_context(job_id) else {
+                    let Some(job_context) = data.job_validation_context(&request.job_id) else {
                         debug!(
-                            job_id,
+                            job_id = request.job_id.as_str(),
                             channel_id, "Submitted SV1 job is no longer valid for this downstream"
                         );
-                        return Ok(SubmitOutcome::Rejected(SubmitError::JobNotFound));
+                        return Ok(Err(SubmitError::JobNotFound));
                     };
                     let share_hash = match validate_sv1_share(
-                        request,
+                        &request,
                         job_context.target,
                         job_context.extranonce.clone().into(),
-                        data.version_rolling_mask.clone(),
+                        data.version_rolling_mask,
                         job.clone(),
                     ) {
                         Ok(Sv1ShareValidationOutcome::MeetsTarget(hash)) => hash,
                         Ok(Sv1ShareValidationOutcome::DoesNotMeetTarget) => {
-                            return Ok(SubmitOutcome::Rejected(SubmitError::LowDifficultyShare));
+                            return Ok(Err(SubmitError::LowDifficultyShare));
                         }
                         Err(error) => {
                             debug!(channel_id, ?error, "SV1 share could not be validated");
-                            return Ok(SubmitOutcome::Rejected(SubmitError::Other));
+                            return Ok(Err(SubmitError::Other));
                         }
                     };
 
                     if !data.accepted_share_hashes.insert_if_new(share_hash) {
-                        return Ok(SubmitOutcome::Rejected(SubmitError::DuplicateShare));
+                        return Ok(Err(SubmitError::DuplicateShare));
                     }
 
-                    data.pending_share = Some(SubmitShareWithChannelId {
+                    Ok(Ok(SubmitShareWithChannelId {
                         channel_id,
                         downstream_id,
-                        share: request.clone(),
+                        share: request,
                         extranonce: job_context.extranonce.into(),
                         extranonce2_len: job_context.extranonce2_len,
-                        version_rolling_mask: data.version_rolling_mask.clone(),
+                        version_rolling_mask: data.version_rolling_mask,
                         job_version: Some(job.version.0),
-                    });
-
-                    Ok(SubmitOutcome::Accepted)
+                    }))
                 })
                 .map_err(TproxyError::shutdown)?
         })
-    }
-
-    /// Indicates to the server that the client supports the mining.set_extranonce method.
-    fn handle_extranonce_subscribe(&mut self, client_id: Option<usize>) -> Result<(), Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.supports_set_extranonce = true)
-                .map_err(TproxyError::shutdown)
-        })
-    }
-
-    /// Checks if a Downstream role is authorized.
-    fn is_authorized(&self, client_id: Option<usize>, name: &str) -> Result<bool, Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        let is_authorized = self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.sv1_username == *name)
-                .map_err(TproxyError::shutdown)
-        })?;
-        Ok(is_authorized)
-    }
-
-    /// Authorizes a Downstream role.
-    fn authorize(&mut self, client_id: Option<usize>, name: &str) -> Result<(), Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        let is_authorized = self.is_authorized(client_id, name)?;
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| {
-                    if !is_authorized {
-                        data.sv1_username = name.to_string();
-                    }
-                    data.sv1_worker_name = sv1_worker_name_from_sv1_username(name).to_string();
-                    debug!(
-                        "Down: Set sv1_username '{}' and sv1_worker_name '{}' for downstream {}",
-                        data.sv1_username, data.sv1_worker_name, downstream_id
-                    );
-                })
-                .map_err(TproxyError::shutdown)
-        })?;
-        Ok(())
-    }
-
-    /// Sets the `extranonce1` field sent in the SV1 `mining.notify` message to the value specified
-    /// by the SV2 `OpenExtendedMiningChannelSuccess` message sent from the Upstream role.
-    fn set_extranonce1(
-        &mut self,
-        client_id: Option<usize>,
-        _extranonce1: Option<Extranonce>,
-    ) -> Result<Extranonce, Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.extranonce1.clone())
-                .map_err(TproxyError::shutdown)
-        })
-    }
-
-    /// Returns the `Downstream`'s `extranonce1` value.
-    fn extranonce1(&self, client_id: Option<usize>) -> Result<Extranonce, Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.extranonce1.clone())
-                .map_err(TproxyError::shutdown)
-        })
-    }
-
-    /// Sets the `extranonce2_size` field sent in the SV1 `mining.notify` message to the value
-    /// specified by the SV2 `OpenExtendedMiningChannelSuccess` message sent from the Upstream role.
-    fn set_extranonce2_size(
-        &mut self,
-        client_id: Option<usize>,
-        _extra_nonce2_size: Option<usize>,
-    ) -> Result<usize, Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.extranonce2_len)
-                .map_err(TproxyError::shutdown)
-        })
-    }
-
-    /// Returns the `Downstream`'s `extranonce2_size` value.
-    fn extranonce2_size(&self, client_id: Option<usize>) -> Result<usize, Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.extranonce2_len)
-                .map_err(TproxyError::shutdown)
-        })
-    }
-
-    /// Returns the version rolling mask.
-    fn version_rolling_mask(
-        &self,
-        client_id: Option<usize>,
-    ) -> Result<Option<HexU32Be>, Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.version_rolling_mask.clone())
-                .map_err(TproxyError::shutdown)
-        })
-    }
-
-    /// Sets the version rolling mask.
-    fn set_version_rolling_mask(
-        &mut self,
-        client_id: Option<usize>,
-        mask: Option<HexU32Be>,
-    ) -> Result<(), Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.version_rolling_mask = mask)
-                .map_err(TproxyError::shutdown)
-        })?;
-
-        Ok(())
-    }
-
-    /// Sets the minimum version rolling bit.
-    fn set_version_rolling_min_bit(
-        &mut self,
-        client_id: Option<usize>,
-        mask: Option<HexU32Be>,
-    ) -> Result<(), Self::Error> {
-        let downstream_id = client_id.expect("Downstream id should exist");
-        self.with_registered_downstream(downstream_id, |downstream| {
-            downstream
-                .downstream_data
-                .with(|data| data.version_rolling_min_bit = mask)
-                .map_err(TproxyError::shutdown)
-        })?;
-        Ok(())
-    }
-
-    fn notify(&mut self, _client_id: Option<usize>) -> Result<json_rpc::Message, Self::Error> {
-        warn!("notify() called on Sv1Server - this method is not implemented for Sv1Server");
-        Err(
-            stratum_apps::stratum_core::sv1_api::error::Error::UnexpectedMessage(
-                "notify".to_string(),
-            )
-            .into(),
-        )
     }
 }
