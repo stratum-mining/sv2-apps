@@ -39,7 +39,6 @@ bs58 = { version = "0.4.0", default-features = false, features = ["check", "allo
 dirs = "6.0"
 secp256k1 = { version = "0.28.2", default-features = false, features = ["alloc", "rand"] }
 rand = { version = "0.8.5", default-features = false }
-rustversion = "1.0"
 
 # Shared optional dependencies
 # Used by both `sv1` networking helpers and `monitoring` HTTP JSON APIs.
