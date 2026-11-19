@@ -114,12 +114,22 @@ backup. It is mandatory, and JDC exits with an error if any entry omits it. Solo
 upstreams (`upstreams = []`) and therefore no `user_identity`.
 
 When the Pool or JDS in use stops being usable, JDC falls back: it moves to the next upstream in the
-list, and mines solo once none is left. A token answer from the JDS whose coinbase outputs JDC can't
+list, and mines solo until one is back. A token answer from the JDS whose coinbase outputs JDC can't
 use is one such case: the outputs don't deserialize, there are none, one carries a value (the JDS
 hands every output out at 0 sats, and JDC puts the template's reward in the first), they need more
 room or sigops than `CoinbaseOutputConstraints` can reserve, or they're too big for a job's coinbase
 to fit the messages that carry it. An answer to a token request JDC
 never sent, or a second answer to one already answered, is ignored instead.
+
+No upstream is excluded for good. An upstream fails when the three connection attempts JDC makes
+on it fail, when it does not answer a probe, or when it drops less than 10 minutes after it
+connected. It then waits before it is tried again: 10 seconds, doubled on each consecutive failure
+up to 10 minutes, at most 1 minute while JDC mines solo, each wait varied by up to 20 %. Staying
+connected for 10 minutes clears the count. While mining solo, or connected to an upstream other
+than the first, JDC probes the upstreams ranked above the current one as their waits run out: it
+connects to the Pool and the JDS and completes `SetupConnection` with both, leaving the current
+connections alone, and switches to the first upstream that answers through a fallback, which
+disconnects the downstreams like any other.
 
 Answers to declarations and custom jobs follow the same split. A `SetCustomMiningJob.Error` with any
 code but `stale-chain-tip`, a `DeclareMiningJob.Error` with any code but `stale-chain-tip` or

@@ -2,7 +2,7 @@ use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, CommonMessagesOwn
 // This file contains integration tests for the `TranslatorSv2` module.
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
-    mock_roles::{MockUpstream, WithSetup},
+    mock_roles::{MockUpstream, WithSetup, answer_setup_connections, setup_connection_success},
     sniffer::Sniffer,
     start_sv2_translator_with_user_identities,
     sv1_sniffer::SV1MessageFilter,
@@ -3165,4 +3165,117 @@ async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
     );
 
     shutdown_all!(translator);
+}
+
+// Long enough for tProxy to spend its three attempts on an upstream that is down.
+const ATTEMPTS_ON_A_DOWN_UPSTREAM: Duration = Duration::from_secs(5);
+
+// Waits until tProxy's SV1 port accepts connections when `open` holds, or refuses them when not.
+async fn wait_for_sv1_port(tproxy_addr: std::net::SocketAddr, open: bool, what: &str) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while TcpStream::connect(tproxy_addr).await.is_ok() != open {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
+}
+
+// An upstream stays eligible whatever happened with it before. With it as the only configured
+// upstream, tProxy keeps running with its SV1 port closed while the upstream is down, serves
+// miners once it answers, closes the port again when it drops and serves miners again when it is
+// back.
+#[tokio::test]
+async fn translator_reconnects_to_an_upstream_it_was_connected_to_before() {
+    start_tracing();
+
+    let upstream_addr = get_available_address();
+    let (translator, tproxy_addr, _) =
+        start_sv2_translator(&[upstream_addr], false, vec![], vec![], None, false).await;
+    tokio::time::sleep(ATTEMPTS_ON_A_DOWN_UPSTREAM).await;
+    wait_for_sv1_port(
+        tproxy_addr,
+        false,
+        "tProxy keeps its SV1 port closed while the upstream is down",
+    )
+    .await;
+
+    let upstream = answer_setup_connections(upstream_addr, setup_connection_success).await;
+    upstream
+        .wait_for_held_connection("tProxy connects to the upstream once it is up")
+        .await;
+    wait_for_sv1_port(tproxy_addr, true, "tProxy opens its SV1 port").await;
+
+    upstream.stop().await;
+    wait_for_sv1_port(
+        tproxy_addr,
+        false,
+        "tProxy closes its SV1 port once the upstream drops",
+    )
+    .await;
+
+    let upstream = answer_setup_connections(upstream_addr, setup_connection_success).await;
+    upstream
+        .wait_for_held_connection("tProxy connects to the upstream again once it is back")
+        .await;
+    wait_for_sv1_port(tproxy_addr, true, "tProxy opens its SV1 port again").await;
+
+    translator.shutdown().await;
+}
+
+// While on a lower-ranked upstream, tProxy probes the upstreams ranked above it and switches back
+// to the first one that answers, closing its connection to the lower-ranked one.
+#[tokio::test]
+async fn translator_switches_back_to_the_primary_upstream_once_it_answers() {
+    start_tracing();
+
+    let primary_addr = get_available_address();
+    let backup_addr = get_available_address();
+    let backup = answer_setup_connections(backup_addr, setup_connection_success).await;
+    let (translator, _tproxy_addr, _) = start_sv2_translator(
+        &[primary_addr, backup_addr],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
+    backup
+        .wait_for_held_connection(
+            "tProxy connects to the backup upstream while the primary is down",
+        )
+        .await;
+
+    let primary = answer_setup_connections(primary_addr, setup_connection_success).await;
+    primary
+        .wait_for_held_connection("tProxy switches to the primary upstream once it answers")
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), backup.closed.recv())
+        .await
+        .expect("tProxy closes its connection to the backup upstream")
+        .expect("the backup upstream was connected");
+
+    translator.shutdown().await;
+}
+
+// tProxy waiting for an upstream that is down still shuts down when asked.
+#[tokio::test]
+async fn translator_shuts_down_while_no_upstream_is_reachable() {
+    start_tracing();
+
+    let (translator, _tproxy_addr, _) = start_sv2_translator(
+        &[get_available_address()],
+        false,
+        vec![],
+        vec![],
+        None,
+        false,
+    )
+    .await;
+    tokio::time::sleep(ATTEMPTS_ON_A_DOWN_UPSTREAM).await;
+
+    tokio::time::timeout(Duration::from_secs(15), translator.shutdown())
+        .await
+        .expect("tProxy shuts down while no upstream is reachable");
 }

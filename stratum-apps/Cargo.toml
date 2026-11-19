@@ -61,7 +61,7 @@ default = ["network", "fallback-coordinator", "config", "std"]
 
 # Core module features
 network = ["tokio-util", "core"]
-fallback-coordinator = ["tokio-util"]
+fallback-coordinator = ["tokio-util", "rand/std", "rand/std_rng"]
 config = ["dep:ext-config"]
 payout = ["config", "core"]
 monitoring = ["serde_json", "axum", "prometheus", "utoipa", "utoipa-swagger-ui"]
@@ -83,6 +83,7 @@ translator = ["network", "fallback-coordinator", "config", "sv1", "with_buffer_p
 mining_device = ["config"]
 
 [dev-dependencies]
+tokio = { version = "1.44.1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = "1.1.0"

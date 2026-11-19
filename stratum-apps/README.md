@@ -14,6 +14,8 @@ This crate is organized into several main modules:
 - **`config_helpers`** - Configuration management helpers (from `config_helpers_sv2`)  
 - **`payout`** - Shared payout-mode parsing and coinbase-output distribution helpers
 - **`fallback_coordinator`** - Runtime fallback cancellation and acknowledgement helpers
+- **`upstream_selector`** - Upstream priority, failure waits, connection walks and probes shared by
+  the miner-side applications
 
 The crate also re-exports `stratum-core`, the central hub for the Stratum V2 ecosystem that provides a cohesive API for all low-level protocol functionality.
 With the `bitcoin-core-sv2` feature enabled, it also re-exports `bitcoin_core_sv2` runtime APIs.

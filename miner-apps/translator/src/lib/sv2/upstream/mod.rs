@@ -241,18 +241,11 @@ impl Upstream {
         }
     }
 
-    /// Creates a new upstream connection by attempting to connect to configured servers.
-    ///
-    /// This method tries to establish a connection to one of the provided upstream
-    /// servers, implementing retry logic and fallback behavior. It will attempt
-    /// to connect to each server multiple times before giving up.
+    /// Connects to `upstream` and completes the Noise handshake, in a single attempt. Retrying and
+    /// moving on to other upstreams is up to the caller.
     ///
     /// # Arguments
-    /// * `upstreams` - A single `UpstreamEntry` representing the upstream candidate currently being
-    ///   attempted. The `tried_or_flagged` is set once the upstream has either been connected to
-    ///   successfully or marked as malicious. Because `new` is only called from
-    ///   `try_initialize_upstream`, we can treat this flag as the definitive state for that
-    ///   upstream.
+    /// * `upstream` - The upstream candidate currently being attempted.
     /// * `channel_manager_sender` - Channel to send messages to the channel manager
     /// * `channel_manager_receiver` - Channel to receive messages from the channel manager
     /// * `cancellation_token` - Global application cancellation token
@@ -429,7 +422,7 @@ impl Upstream {
     ///
     /// The handshake establishes the protocol version, capabilities, and
     /// other connection parameters needed for SV2 communication.
-    async fn setup_connection(&mut self) -> TproxyResult<(), error::Upstream> {
+    pub(crate) async fn setup_connection(&mut self) -> TproxyResult<(), error::Upstream> {
         debug!("Upstream: initiating SV2 handshake...");
         // Build SetupConnection message
         let setup_conn_msg = Self::get_setup_connection_message(2, 2, &self.address, false)

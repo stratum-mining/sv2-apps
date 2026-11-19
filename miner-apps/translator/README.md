@@ -388,9 +388,22 @@ authority_pubkey = "backup_pool_pubkey"
 
 ### **Upstream Fallback**
 
-When the current upstream cannot be used, tProxy falls back to the next upstream in its
-configuration. Fallback disconnects every SV1 miner; miners reconnect to tProxy once the next
-upstream is ready. Each upstream is used at most once: when none is left, tProxy stops.
+When the current upstream cannot be used, tProxy falls back: it goes through the configured
+upstreams in order, the first being the primary, and gives each up to three connection attempts.
+Fallback disconnects every SV1 miner; miners reconnect to tProxy once an upstream is ready. While
+no upstream can be reached, tProxy keeps running with its SV1 port closed and tries again as the
+upstreams become eligible.
+
+An upstream fails when it uses up its attempts, when it does not answer a probe, or when it drops
+less than 10 minutes after it connected. It then waits before it is tried again: 10 seconds,
+doubled on each consecutive failure up to 10 minutes, at most 1 minute while no upstream is
+connected, each wait varied by up to 20 %. Staying connected for 10 minutes clears the count. No
+upstream is excluded for good.
+
+While connected to an upstream other than the primary, tProxy probes the upstreams ranked above
+it as their waits run out: it opens a separate connection and completes `SetupConnection`, leaving
+the current connection alone. When one answers, tProxy switches to it through a fallback, which
+disconnects the SV1 miners like any other.
 
 A failed channel open triggers fallback in both channel modes, whether the upstream rejects it
 with `OpenMiningChannel.Error` or assigns a target easier than the requested `max_target`. In
@@ -402,8 +415,10 @@ trusts the miners connected to it (see [Trust Model](#trust-model)).
 An upstream can also ask tProxy to move with `Reconnect`, for example before maintenance. tProxy
 disconnects its miners as for a fallback, then connects to the requested host and port with the
 same authority key and user identity, so the request can only point to another server of the same
-pool. If the requested endpoint cannot be used or reached, tProxy moves on to the configured
-upstreams. A request arriving less than 5 minutes after the last one tProxy followed is ignored,
+pool. Once connected, the endpoint takes the rank of the upstream that sent the request, and
+leaving that upstream to follow it is not a failure. If the requested endpoint cannot be used or
+reached, tProxy moves on to the configured upstreams. A request arriving less than 5 minutes
+after the last one tProxy followed is ignored,
 and tProxy stays on the current upstream. A `ChannelEndpointChanged` reconnects to the current
 upstream the same way, so that extensions are negotiated again. Within 5 minutes of the last
 followed request it is ignored like a `Reconnect`, and the extensions negotiated on the current
