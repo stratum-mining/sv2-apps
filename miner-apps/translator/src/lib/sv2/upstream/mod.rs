@@ -14,7 +14,7 @@ use std::{
 use stratum_apps::{
     channel_utils::ReceiverCleanup,
     fallback_coordinator::FallbackCoordinator,
-    network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
+    network_helpers::{TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host},
     stratum_core::{
         binary_sv2::Seq064KOwned,
         common_messages_sv2::{
@@ -315,7 +315,7 @@ impl Upstream {
                         info!("Shutdown received during handshake, dropping connection");
                         Err(TproxyError::shutdown(TproxyErrorKind::CouldNotInitiateSystem))
                     }
-                    result = connect_with_noise(socket, Some(upstream.authority_pubkey)) => {
+                    result = connect_with_noise(socket, upstream.authority_pubkey) => {
                         match result {
                             Ok(stream) => {
                                 let (reader, writer) = stream.into_split();
@@ -351,9 +351,6 @@ impl Upstream {
                                     entry: upstream.clone(),
                                     protocol_reconnect,
                                 })
-                            }
-                            Err(network_helpers::Error::InvalidKey) => {
-                                Err(TproxyError::fallback(TproxyErrorKind::InvalidKey))
                             }
                             Err(e) => {
                                 error!(
