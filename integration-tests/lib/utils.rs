@@ -242,8 +242,11 @@ pub async fn wait_for_client(listen_socket: SocketAddr) -> tokio::net::TcpStream
     stream
 }
 
+/// Performs the Noise handshake as the server on `stream`. Cancelling `cancellation_token` closes
+/// the connection.
 pub async fn handshake_as_server(
     stream: tokio::net::TcpStream,
+    cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
     let pub_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
         .to_string()
@@ -260,7 +263,7 @@ pub async fn handshake_as_server(
             .unwrap();
 
     if let Ok((receiver_from_client, sender_to_client)) =
-        Connection::accept::<OutboundFrame>(stream, responder, CancellationToken::new()).await
+        Connection::accept::<OutboundFrame>(stream, responder, cancellation_token).await
     {
         Some((receiver_from_client, sender_to_client))
     } else {
@@ -268,11 +271,14 @@ pub async fn handshake_as_server(
     }
 }
 
+/// Performs the Noise handshake as the client on `stream`. Cancelling `cancellation_token` closes
+/// the connection.
 pub async fn handshake_as_client(
     stream: tokio::net::TcpStream,
+    cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
-    Connection::connect::<OutboundFrame>(stream, initiator, CancellationToken::new())
+    Connection::connect::<OutboundFrame>(stream, initiator, cancellation_token)
         .await
         .ok()
 }

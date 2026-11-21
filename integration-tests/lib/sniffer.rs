@@ -14,6 +14,7 @@ use std::{
 };
 use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, message_type_to_name};
 use tokio::{net::TcpStream, select};
+use tokio_util::sync::CancellationToken;
 
 /// Allows to intercept messages sent between two roles.
 ///
@@ -86,24 +87,29 @@ impl<'a> Sniffer<'a> {
         let identifier = self.identifier.to_string();
         let negotiated_extensions = self.negotiated_extensions.clone();
         tokio::spawn(async move {
-            let (downstream_receiver, downstream_sender) =
-                handshake_as_server(wait_for_client(listening_address).await)
-                    .await
-                    .expect("Failed to create downstream");
-            let (upstream_receiver, upstream_sender) = handshake_as_client(loop {
-                match TcpStream::connect(upstream_address).await {
-                    Ok(stream) => break stream,
-                    Err(_) => {
-                        tracing::warn!(
-                            "Sniffer {}: unable to connect to upstream {}, retrying in {:?}",
-                            identifier,
-                            upstream_address,
-                            CONNECT_RETRY_INTERVAL
-                        );
-                        tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+            let (downstream_receiver, downstream_sender) = handshake_as_server(
+                wait_for_client(listening_address).await,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("Failed to create downstream");
+            let (upstream_receiver, upstream_sender) = handshake_as_client(
+                loop {
+                    match TcpStream::connect(upstream_address).await {
+                        Ok(stream) => break stream,
+                        Err(_) => {
+                            tracing::warn!(
+                                "Sniffer {}: unable to connect to upstream {}, retrying in {:?}",
+                                identifier,
+                                upstream_address,
+                                CONNECT_RETRY_INTERVAL
+                            );
+                            tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+                        }
                     }
-                }
-            })
+                },
+                CancellationToken::new(),
+            )
             .await
             .expect("Failed to create upstream");
             select! {

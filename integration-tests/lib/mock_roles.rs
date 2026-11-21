@@ -34,6 +34,7 @@ use stratum_apps::{
     utils::types::OutboundFrame,
 };
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub enum WithSetup {
@@ -84,15 +85,18 @@ impl MockDownstream {
 
         let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessageOwned>();
 
-        let (upstream_receiver, upstream_sender) = handshake_as_client(loop {
-            match TcpStream::connect(upstream_address).await {
-                Ok(stream) => break stream,
-                Err(_) => {
-                    tracing::warn!("MockDownstream: unable to connect to upstream, retrying");
-                    tokio::time::sleep(crate::utils::CONNECT_RETRY_INTERVAL).await;
+        let (upstream_receiver, upstream_sender) = handshake_as_client(
+            loop {
+                match TcpStream::connect(upstream_address).await {
+                    Ok(stream) => break stream,
+                    Err(_) => {
+                        tracing::warn!("MockDownstream: unable to connect to upstream, retrying");
+                        tokio::time::sleep(crate::utils::CONNECT_RETRY_INTERVAL).await;
+                    }
                 }
-            }
-        })
+            },
+            CancellationToken::new(),
+        )
         .await
         .expect("Failed to create upstream");
 
@@ -165,10 +169,12 @@ impl MockUpstream {
         let (proxy_sender, proxy_receiver) = async_channel::unbounded::<AnyMessageOwned>();
 
         tokio::spawn(async move {
-            let (downstream_receiver, downstream_sender) =
-                handshake_as_server(wait_for_client(listening_address).await)
-                    .await
-                    .expect("Failed to connect to downstream");
+            let (downstream_receiver, downstream_sender) = handshake_as_server(
+                wait_for_client(listening_address).await,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("Failed to connect to downstream");
 
             if let WithSetup::Yes(expected_setup) = self.setup {
                 let expected_protocol = expected_setup.protocol;
@@ -289,7 +295,7 @@ pub async fn answer_setup_connections(
             let (stream, _) = listener.accept().await.expect("the client connects");
             let closed_sender = closed_sender.clone();
             tokio::spawn(async move {
-                let (receiver, sender) = handshake_as_server(stream)
+                let (receiver, sender) = handshake_as_server(stream, CancellationToken::new())
                     .await
                     .expect("the noise handshake completes");
                 let setup_connection = receiver
@@ -527,7 +533,7 @@ pub async fn connect_closable_downstream(
             Err(_) => tokio::time::sleep(CONNECT_RETRY_INTERVAL).await,
         }
     };
-    let (receiver, sender) = handshake_as_client(stream)
+    let (receiver, sender) = handshake_as_client(stream, CancellationToken::new())
         .await
         .expect("the noise handshake completes");
     let WithSetup::Yes(setup_connection) =
