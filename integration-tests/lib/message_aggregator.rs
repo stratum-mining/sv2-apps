@@ -1,10 +1,16 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 use stratum_apps::{
     stratum_core::parsers_sv2::{AnyMessageOwned, Tlv},
     sync::SharedLock,
 };
 
-use crate::types::MsgType;
+use crate::{types::MsgType, utils::POLL_INTERVAL};
+
+/// The default bound for a wait on a [`MessagesAggregator`].
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone)]
@@ -85,6 +91,54 @@ impl MessagesAggregator {
                 false
             })
             .unwrap()
+    }
+
+    /// Waits until the queue holds a message of `message_type`. Returns `false` if `timeout`
+    /// elapses first.
+    pub async fn wait_for_message_type(&self, message_type: u8, timeout: Duration) -> bool {
+        self.wait_until(timeout, || self.has_message_type(message_type))
+            .await
+    }
+
+    /// Like [`MessagesAggregator::wait_for_message_type`], but also removes the messages from the
+    /// queue up to and including the first one of `message_type`.
+    pub async fn wait_for_message_type_and_clean_queue(
+        &self,
+        message_type: u8,
+        timeout: Duration,
+    ) -> bool {
+        self.wait_until(timeout, || self.has_message_type_with_remove(message_type))
+            .await
+    }
+
+    // Polls `found` every `POLL_INTERVAL` until it returns `true`. Returns `false` if `timeout`
+    // elapses first.
+    async fn wait_until(&self, timeout: Duration, found: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while !found() {
+            if start.elapsed() > timeout {
+                return false;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        true
+    }
+
+    /// Polls the queue every 100ms for `deadline`, returning `false` as soon as it holds a message
+    /// of `message_type`. Returns `true` only after the full duration passes with no match.
+    ///
+    /// The queue should be cleared before calling this to avoid matching stale messages.
+    pub async fn assert_message_not_present(&self, message_type: u8, deadline: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            if self.has_message_type(message_type) {
+                return false;
+            }
+            if start.elapsed() >= deadline {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// The aggregator queues messages in FIFO order, so this function returns the oldest message in
