@@ -26,6 +26,7 @@ pub mod message_aggregator;
 pub mod mining_device;
 pub mod mock_roles;
 pub mod mocked_jdc;
+pub mod mocks;
 pub mod prometheus_metrics_assertions;
 pub mod sniffer;
 pub mod sniffer_error;

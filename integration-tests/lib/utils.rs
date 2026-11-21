@@ -474,18 +474,20 @@ pub fn message_from_frame_with_tlvs(
     }
 
     // Fallback to standard parsing without TLV support
+    let Some((msg_type, message)) = try_message_from_frame(frame) else {
+        println!("Received frame with invalid payload or message type: {frame:?}");
+        panic!();
+    };
+    (msg_type, message, None)
+}
+
+/// Parses `frame` without TLV support, or returns `None` if its payload or message type is
+/// invalid.
+pub fn try_message_from_frame(frame: &mut InboundFrame) -> Option<(MsgType, AnyMessageOwned)> {
+    let header = frame.header();
     let mut payload = frame.payload().to_vec();
-    let message: Result<AnyMessage<'_>, _> = (header, payload.as_mut_slice()).try_into();
-    match message {
-        Ok(message) => {
-            let message = into_owned(message);
-            (header.msg_type(), message, None)
-        }
-        _ => {
-            println!("Received frame with invalid payload or message type: {frame:?}");
-            panic!();
-        }
-    }
+    let message: AnyMessage<'_> = (header, payload.as_mut_slice()).try_into().ok()?;
+    Some((header.msg_type(), into_owned(message)))
 }
 
 pub fn into_owned(m: AnyMessage<'_>) -> AnyMessageOwned {
