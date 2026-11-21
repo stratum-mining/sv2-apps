@@ -108,6 +108,8 @@ pub struct MockServer {
     connections: SharedMap<ConnectionId, Connection>,
     // Why the server stopped accepting connections, if it did.
     accept_failure: SharedLock<Option<String>>,
+    // How many connections failed the Noise handshake, and so never became available.
+    failed_handshakes: Arc<AtomicUsize>,
     // Closes every connection and ends every task of the server when the server is dropped.
     _tasks: DropGuard,
 }
@@ -124,6 +126,7 @@ impl MockServer {
             .unwrap_or_else(|error| panic!("MockServer {address}: can't listen: {error}"));
         let connections = SharedMap::new();
         let accept_failure = SharedLock::new(None);
+        let failed_handshakes = Arc::new(AtomicUsize::new(0));
         let tasks = CancellationToken::new();
         tokio::spawn(accept_connections(
             listener,
@@ -131,12 +134,14 @@ impl MockServer {
             setup_connection,
             connections.clone(),
             accept_failure.clone(),
+            failed_handshakes.clone(),
             tasks.clone(),
         ));
         Self {
             address,
             connections,
             accept_failure,
+            failed_handshakes,
             _tasks: tasks.drop_guard(),
         }
     }
@@ -214,8 +219,10 @@ impl MockServer {
             if start.elapsed() > DEFAULT_TIMEOUT {
                 panic!(
                     "MockServer {}: timeout while waiting for connection {connection} to complete \
-                     the Noise handshake and, if the server answers it, to send SetupConnection",
-                    self.address
+                     the Noise handshake and, if the server answers it, to send SetupConnection \
+                     ({} connections failed the Noise handshake)",
+                    self.address,
+                    self.failed_handshakes.load(Ordering::Relaxed)
                 );
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -231,6 +238,7 @@ async fn accept_connections(
     setup_connection: Option<ServerSetupConnection>,
     connections: SharedMap<ConnectionId, Connection>,
     accept_failure: SharedLock<Option<String>>,
+    failed_handshakes: Arc<AtomicUsize>,
     tasks: CancellationToken,
 ) {
     let next_id = Arc::new(AtomicUsize::new(0));
@@ -252,6 +260,7 @@ async fn accept_connections(
             setup_connection.clone(),
             connections.clone(),
             next_id.clone(),
+            failed_handshakes.clone(),
             tasks.clone(),
         ));
     }
@@ -266,6 +275,7 @@ async fn serve_connection(
     setup_connection: Option<ServerSetupConnection>,
     connections: SharedMap<ConnectionId, Connection>,
     next_id: Arc<AtomicUsize>,
+    failed_handshakes: Arc<AtomicUsize>,
     tasks: CancellationToken,
 ) {
     let handshake = tokio::select! {
@@ -274,6 +284,7 @@ async fn serve_connection(
     };
     let Some((frames, sender)) = handshake else {
         tracing::warn!("MockServer {address}: a Noise handshake failed");
+        failed_handshakes.fetch_add(1, Ordering::Relaxed);
         return;
     };
     // Only a connection that completed the handshake takes an ID, so a bare TCP probe of the
