@@ -3,8 +3,8 @@ use crate::{
     message_aggregator::{DEFAULT_TIMEOUT, MessagesAggregator},
     types::MsgType,
     utils::{
-        CONNECT_RETRY_INTERVAL, create_downstream, create_upstream, recv_from_down_send_to_up,
-        recv_from_up_send_to_down, wait_for_client,
+        CONNECT_RETRY_INTERVAL, handshake_as_client, handshake_as_server,
+        recv_from_down_send_to_up, recv_from_up_send_to_down, wait_for_client,
     },
 };
 use std::{
@@ -87,10 +87,10 @@ impl<'a> Sniffer<'a> {
         let negotiated_extensions = self.negotiated_extensions.clone();
         tokio::spawn(async move {
             let (downstream_receiver, downstream_sender) =
-                create_downstream(wait_for_client(listening_address).await)
+                handshake_as_server(wait_for_client(listening_address).await)
                     .await
                     .expect("Failed to create downstream");
-            let (upstream_receiver, upstream_sender) = create_upstream(loop {
+            let (upstream_receiver, upstream_sender) = handshake_as_client(loop {
                 match TcpStream::connect(upstream_address).await {
                     Ok(stream) => break stream,
                     Err(_) => {

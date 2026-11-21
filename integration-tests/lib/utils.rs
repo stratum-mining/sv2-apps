@@ -242,7 +242,7 @@ pub async fn wait_for_client(listen_socket: SocketAddr) -> tokio::net::TcpStream
     stream
 }
 
-pub async fn create_downstream(
+pub async fn handshake_as_server(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
     let pub_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
@@ -268,7 +268,7 @@ pub async fn create_downstream(
     }
 }
 
-pub async fn create_upstream(
+pub async fn handshake_as_client(
     stream: tokio::net::TcpStream,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
