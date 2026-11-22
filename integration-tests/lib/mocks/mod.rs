@@ -171,6 +171,13 @@ impl Connection {
         );
     }
 
+    // Waits for a message of `message_type`, then removes the messages from the queue up to and
+    // including the first one of that type.
+    async fn wait_for_message_type_and_clean_queue(&self, message_type: u8) {
+        self.wait_for_message_type(message_type).await;
+        self.received.has_message_type_with_remove(message_type);
+    }
+
     // Completes once no further message will be queued.
     async fn stopped_receiving(&self) {
         while self.end.get().ok().flatten().is_none() {
@@ -468,6 +475,22 @@ mod tests {
         server
             .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
             .await;
+    }
+
+    #[tokio::test]
+    async fn waiting_and_cleaning_removes_the_awaited_message() {
+        let address = get_available_address();
+        let server = MockServer::new(address, None).await;
+        let _client = MockClient::new(
+            address,
+            Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+        )
+        .await;
+
+        server
+            .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
+            .await;
+        assert!(server.next_message(0).is_none());
     }
 
     #[tokio::test]

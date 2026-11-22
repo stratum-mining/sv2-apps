@@ -122,6 +122,14 @@ impl MockClient {
         self.connection.wait_for_message_type(message_type).await;
     }
 
+    /// Like [`MockClient::wait_for_message_type`], but also removes the messages from the queue up
+    /// to and including the first one of `message_type`.
+    pub async fn wait_for_message_type_and_clean_queue(&self, message_type: u8) {
+        self.connection
+            .wait_for_message_type_and_clean_queue(message_type)
+            .await;
+    }
+
     /// Watches the queue for `deadline`, returning `false` as soon as it holds a message of
     /// `message_type`, and `true` if the whole duration passes without one.
     pub async fn assert_message_not_present(&self, message_type: u8, deadline: Duration) -> bool {
