@@ -1,23 +1,23 @@
 use integration_tests_sv2::{
-    mock_roles::{
-        MockUpstream, WithSetup, connect_closable_downstream, extended_channel_request,
-        next_message_type, request_extensions, send_chain_tip, send_message, send_template,
-        template,
-    },
+    mocks::{ClientSetupConnection, MockClient, MockServer, ServerSetupConnection},
     start_jdc_with_user_identities, start_tracing, sv2_tp_config,
     utils::get_available_address,
 };
 use jd_client_sv2::config::ConfigJDCMode;
-use std::time::Duration;
 use stratum_apps::stratum_core::{
-    common_messages_sv2::Protocol,
+    binary_sv2::Seq064KOwned,
+    common_messages_sv2::{MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol},
     extensions_sv2::{
-        EXTENSION_TYPE_WORKER_HASHRATE_TRACKING,
+        EXTENSION_TYPE_WORKER_HASHRATE_TRACKING, RequestExtensionsOwned,
         extensions_negotiation::{
             MESSAGE_TYPE_REQUEST_EXTENSIONS_ERROR, MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS,
         },
     },
-    mining_sv2::MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
+    mining_sv2::{
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, OpenExtendedMiningChannelOwned,
+    },
+    parsers_sv2::{AnyMessageOwned, MiningOwned, TemplateDistributionOwned},
+    template_distribution_sv2::{NewTemplateOwned, SetNewPrevHashOwned},
 };
 
 // An extension JDC requires only from its Pool, which no downstream asks for.
@@ -30,11 +30,13 @@ const POOL_ONLY_EXTENSION: u16 = 0x0003;
 async fn jdc_grants_downstreams_extensions_without_the_ones_it_requires_from_its_pool() {
     start_tracing();
     let tp_address = get_available_address();
-    let tp = MockUpstream::new(
+    let tp = MockServer::new(
         tp_address,
-        WithSetup::yes_with_defaults(Protocol::TemplateDistributionProtocol, 0),
+        Some(ServerSetupConnection::new([(
+            Protocol::TemplateDistributionProtocol,
+            0,
+        )])),
     )
-    .start()
     .await;
     let (jdc, jdc_address, _) = start_jdc_with_user_identities(
         &[],
@@ -47,17 +49,75 @@ async fn jdc_grants_downstreams_extensions_without_the_ones_it_requires_from_its
         Some(ConfigJDCMode::SoloMining),
         "JDC",
     );
-    send_chain_tip(&tp, 1).await;
-
-    let (receiver, sender) = connect_closable_downstream(jdc_address).await;
-    send_message(
-        &sender,
-        request_extensions(vec![EXTENSION_TYPE_WORKER_HASHRATE_TRACKING]),
+    tp.send(
+        0,
+        AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::NewTemplate(
+            NewTemplateOwned {
+                template_id: 1,
+                future_template: true,
+                version: 536_870_912,
+                coinbase_tx_version: 2,
+                coinbase_prefix: vec![82, 0]
+                    .try_into()
+                    .expect("coinbase prefix must fit into B0255"),
+                coinbase_tx_input_sequence: u32::MAX,
+                coinbase_tx_value_remaining: 5_000_000_000,
+                coinbase_tx_outputs_count: 1,
+                coinbase_tx_outputs: vec![
+                    0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 226, 246, 28, 63, 113,
+                    209, 222, 253, 63, 169, 153, 223, 163, 105, 83, 117, 92, 105, 6, 137, 121, 153,
+                    98, 180, 139, 235, 216, 54, 151, 78, 140, 249,
+                ]
+                .try_into()
+                .expect("coinbase outputs must fit into B064K"),
+                coinbase_tx_locktime: 0,
+                merkle_path: vec![].try_into().expect("empty merkle path must be valid"),
+            },
+        )),
     )
     .await;
+    tp.send(
+        0,
+        AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::SetNewPrevHash(
+            SetNewPrevHashOwned {
+                template_id: 1,
+                prev_hash: [1; 32].into(),
+                ntime_start: 1_700_000_000,
+                n_bits: 0x1d00ffff,
+                target: [0xff; 32].into(),
+            },
+        )),
+    )
+    .await;
+
+    let downstream = MockClient::new(
+        jdc_address,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
+    downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
+        .await;
+    downstream
+        .send(AnyMessageOwned::Extensions(
+            RequestExtensionsOwned {
+                request_id: 1,
+                requested_extensions: Seq064KOwned::new(vec![
+                    EXTENSION_TYPE_WORKER_HASHRATE_TRACKING,
+                ])
+                .expect("the extensions fit into Seq064K"),
+            }
+            .into(),
+        ))
+        .await;
+    downstream
+        .wait_for_message_type(MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS)
+        .await;
     assert_eq!(
-        next_message_type(&receiver).await,
-        MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS
+        downstream
+            .next_message()
+            .map(|(message_type, _)| message_type),
+        Some(MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS)
     );
 
     jdc.shutdown().await;
@@ -71,11 +131,13 @@ async fn jdc_grants_downstreams_extensions_without_the_ones_it_requires_from_its
 async fn jdc_disconnects_only_the_downstream_without_a_required_extension() {
     start_tracing();
     let tp_address = get_available_address();
-    let tp = MockUpstream::new(
+    let tp = MockServer::new(
         tp_address,
-        WithSetup::yes_with_defaults(Protocol::TemplateDistributionProtocol, 0),
+        Some(ServerSetupConnection::new([(
+            Protocol::TemplateDistributionProtocol,
+            0,
+        )])),
     )
-    .start()
     .await;
     let (jdc, jdc_address, _) = start_jdc_with_user_identities(
         &[],
@@ -88,49 +150,169 @@ async fn jdc_disconnects_only_the_downstream_without_a_required_extension() {
         Some(ConfigJDCMode::SoloMining),
         "JDC",
     );
-    send_chain_tip(&tp, 1).await;
-
-    let (rejected_receiver, rejected_sender) = connect_closable_downstream(jdc_address).await;
-    send_message(&rejected_sender, extended_channel_request([0xff; 32])).await;
-    assert_eq!(
-        next_message_type(&rejected_receiver).await,
-        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
-    );
-    send_message(&rejected_sender, request_extensions(vec![])).await;
-    // The channel's job and prevhash come before the refusal.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let message_type = next_message_type(&rejected_receiver).await;
-            if message_type == MESSAGE_TYPE_REQUEST_EXTENSIONS_ERROR {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("JDC sends its refusal before closing the connection");
-    // While JDC waits for the refusal to go out, a new template gives it a job for the refused
-    // downstream's channel.
-    send_template(&tp, template(2, false)).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while rejected_receiver.recv().await.is_ok() {}
-    })
-    .await
-    .expect("JDC closes the connection of a downstream without a required extension");
-
-    let (receiver, sender) = connect_closable_downstream(jdc_address).await;
-    send_message(
-        &sender,
-        request_extensions(vec![EXTENSION_TYPE_WORKER_HASHRATE_TRACKING]),
+    tp.send(
+        0,
+        AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::NewTemplate(
+            NewTemplateOwned {
+                template_id: 1,
+                future_template: true,
+                version: 536_870_912,
+                coinbase_tx_version: 2,
+                coinbase_prefix: vec![82, 0]
+                    .try_into()
+                    .expect("coinbase prefix must fit into B0255"),
+                coinbase_tx_input_sequence: u32::MAX,
+                coinbase_tx_value_remaining: 5_000_000_000,
+                coinbase_tx_outputs_count: 1,
+                coinbase_tx_outputs: vec![
+                    0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 226, 246, 28, 63, 113,
+                    209, 222, 253, 63, 169, 153, 223, 163, 105, 83, 117, 92, 105, 6, 137, 121, 153,
+                    98, 180, 139, 235, 216, 54, 151, 78, 140, 249,
+                ]
+                .try_into()
+                .expect("coinbase outputs must fit into B064K"),
+                coinbase_tx_locktime: 0,
+                merkle_path: vec![].try_into().expect("empty merkle path must be valid"),
+            },
+        )),
     )
     .await;
+    tp.send(
+        0,
+        AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::SetNewPrevHash(
+            SetNewPrevHashOwned {
+                template_id: 1,
+                prev_hash: [1; 32].into(),
+                ntime_start: 1_700_000_000,
+                n_bits: 0x1d00ffff,
+                target: [0xff; 32].into(),
+            },
+        )),
+    )
+    .await;
+
+    let rejected = MockClient::new(
+        jdc_address,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
+    rejected
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
+        .await;
+    rejected
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "mock-downstream".try_into().unwrap(),
+                nominal_hash_rate: 1_000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await;
+    rejected
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
     assert_eq!(
-        next_message_type(&receiver).await,
-        MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS
+        rejected
+            .next_message()
+            .map(|(message_type, _)| message_type),
+        Some(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
     );
-    send_message(&sender, extended_channel_request([0xff; 32])).await;
+    rejected
+        .send(AnyMessageOwned::Extensions(
+            RequestExtensionsOwned {
+                request_id: 1,
+                requested_extensions: Seq064KOwned::new(vec![])
+                    .expect("the extensions fit into Seq064K"),
+            }
+            .into(),
+        ))
+        .await;
+    // The channel's job and prevhash come before the refusal.
+    rejected
+        .wait_for_message_type(MESSAGE_TYPE_REQUEST_EXTENSIONS_ERROR)
+        .await;
+    // While JDC waits for the refusal to go out, a new template gives it a job for the refused
+    // downstream's channel.
+    tp.send(
+        0,
+        AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::NewTemplate(
+            NewTemplateOwned {
+                template_id: 2,
+                future_template: false,
+                version: 536_870_912,
+                coinbase_tx_version: 2,
+                coinbase_prefix: vec![82, 0]
+                    .try_into()
+                    .expect("coinbase prefix must fit into B0255"),
+                coinbase_tx_input_sequence: u32::MAX,
+                coinbase_tx_value_remaining: 5_000_000_000,
+                coinbase_tx_outputs_count: 1,
+                coinbase_tx_outputs: vec![
+                    0, 0, 0, 0, 0, 0, 0, 0, 38, 106, 36, 170, 33, 169, 237, 226, 246, 28, 63, 113,
+                    209, 222, 253, 63, 169, 153, 223, 163, 105, 83, 117, 92, 105, 6, 137, 121, 153,
+                    98, 180, 139, 235, 216, 54, 151, 78, 140, 249,
+                ]
+                .try_into()
+                .expect("coinbase outputs must fit into B064K"),
+                coinbase_tx_locktime: 0,
+                merkle_path: vec![].try_into().expect("empty merkle path must be valid"),
+            },
+        )),
+    )
+    .await;
+    // JDC closes the connection of a downstream without a required extension.
+    rejected.wait_for_close().await;
+
+    let downstream = MockClient::new(
+        jdc_address,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
+    downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
+        .await;
+    downstream
+        .send(AnyMessageOwned::Extensions(
+            RequestExtensionsOwned {
+                request_id: 1,
+                requested_extensions: Seq064KOwned::new(vec![
+                    EXTENSION_TYPE_WORKER_HASHRATE_TRACKING,
+                ])
+                .expect("the extensions fit into Seq064K"),
+            }
+            .into(),
+        ))
+        .await;
+    downstream
+        .wait_for_message_type(MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS)
+        .await;
     assert_eq!(
-        next_message_type(&receiver).await,
-        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS
+        downstream
+            .next_message()
+            .map(|(message_type, _)| message_type),
+        Some(MESSAGE_TYPE_REQUEST_EXTENSIONS_SUCCESS)
+    );
+    downstream
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "mock-downstream".try_into().unwrap(),
+                nominal_hash_rate: 1_000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await;
+    downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+    assert_eq!(
+        downstream
+            .next_message()
+            .map(|(message_type, _)| message_type),
+        Some(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
     );
 
     jdc.shutdown().await;
