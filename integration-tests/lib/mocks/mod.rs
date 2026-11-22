@@ -178,6 +178,11 @@ impl Connection {
         self.received.has_message_type_with_remove(message_type);
     }
 
+    fn clean_queue(&self) {
+        self.panic_on_failure();
+        self.received.clear();
+    }
+
     // Completes once no further message will be queued.
     async fn stopped_receiving(&self) {
         while self.end.get().ok().flatten().is_none() {

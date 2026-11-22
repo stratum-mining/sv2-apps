@@ -130,6 +130,11 @@ impl MockClient {
             .await;
     }
 
+    /// Removes every message from the queue.
+    pub fn clean_queue(&self) {
+        self.connection.clean_queue();
+    }
+
     /// Watches the queue for `deadline`, returning `false` as soon as it holds a message of
     /// `message_type`, and `true` if the whole duration passes without one.
     pub async fn assert_message_not_present(&self, message_type: u8, deadline: Duration) -> bool {
