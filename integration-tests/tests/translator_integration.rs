@@ -2,8 +2,7 @@ use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, CommonMessagesOwn
 // This file contains integration tests for the `TranslatorSv2` module.
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
-    mock_roles::{MockUpstream, WithSetup},
-    sniffer::Sniffer,
+    mocks::{MockServer, ServerSetupConnection},
     start_sv2_translator_with_user_identities,
     sv1_sniffer::SV1MessageFilter,
     template_provider::DifficultyLevel,
@@ -26,13 +25,12 @@ use std::{
 use stratum_apps::stratum_core::{
     binary_sv2::{Seq0255Owned, Sv2OptionOwned},
     common_messages_sv2::{
-        ChannelEndpointChangedOwned, MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED, MESSAGE_TYPE_RECONNECT,
-        MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
-        MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol, ReconnectOwned, SetupConnectionErrorOwned,
-        SetupConnectionSuccessOwned,
+        ChannelEndpointChangedOwned, MESSAGE_TYPE_SETUP_CONNECTION,
+        MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol,
+        ReconnectOwned, SetupConnectionErrorOwned, SetupConnectionSuccessOwned,
     },
     mining_sv2::{
-        MESSAGE_TYPE_CLOSE_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+        MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
         MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
     },
     parsers_sv2::{self},
@@ -160,38 +158,32 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
     // Extra `/NexusPool/` scriptSig bytes increase the prefix scriptSig length from 0x22 to 0x2d.
     let coinbase_tx_prefix_with_remaining_scriptsig_bytes = hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff2d5200162f5374726174756d2056322053524920506f6f6c2f2f08").unwrap();
 
-    for (identifier, user_identity, coinbase_tx_prefix, coinbase_tx_suffix) in [
+    for (user_identity, coinbase_tx_prefix, coinbase_tx_suffix) in [
         (
-            "payout-address",
             PAYOUT_VERIFICATION_MINER_ADDRESS.to_string(),
             default_coinbase_tx_prefix.clone(),
             legacy_solo_coinbase_tx_suffix,
         ),
         (
-            "payout-donation",
             format!("sri/donate/10/{PAYOUT_VERIFICATION_MINER_ADDRESS}/worker"),
             default_coinbase_tx_prefix,
             partial_donation_coinbase_tx_suffix,
         ),
         (
-            "payout-address-scriptsig-suffix",
             PAYOUT_VERIFICATION_MINER_ADDRESS.to_string(),
             coinbase_tx_prefix_with_remaining_scriptsig_bytes,
             suffix_with_remaining_scriptsig_bytes,
         ),
     ] {
         let mock_upstream_addr = get_available_address();
-        let send_to_tproxy = MockUpstream::new(
+        let mock_upstream = MockServer::new(
             mock_upstream_addr,
-            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+            Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
         )
-        .start()
         .await;
-        let (sniffer, sniffer_addr) =
-            start_sniffer(identifier, mock_upstream_addr, false, vec![], None);
 
         let (translator, tproxy_addr, _) = start_sv2_translator_with_user_identity(
-            &[sniffer_addr],
+            &[mock_upstream_addr],
             false,
             vec![],
             vec![],
@@ -203,14 +195,11 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
         .await;
         let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
 
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-            )
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
             .await;
         let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-            match sniffer.next_message_from_downstream() {
+            match mock_upstream.next_message(0) {
                 Some((
                     _,
                     AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(
@@ -221,75 +210,64 @@ async fn translator_mines_when_payout_matches_address_or_donation_identity() {
             };
         };
 
-        send_to_tproxy
-            .send(AnyMessageOwned::Mining(
-                parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(
-                    OpenExtendedMiningChannelSuccessOwned {
-                        request_id: open_extended_mining_channel.request_id,
-                        channel_id: 0,
-                        // A compliant upstream never assigns a target easier than the requested
-                        // one.
-                        target: open_extended_mining_channel.max_target.clone(),
-                        extranonce_size: 4,
-                        extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
-                        group_channel_id: 100,
-                    },
+        mock_upstream
+            .send(
+                0,
+                AnyMessageOwned::Mining(
+                    parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(
+                        OpenExtendedMiningChannelSuccessOwned {
+                            request_id: open_extended_mining_channel.request_id,
+                            channel_id: 0,
+                            // A compliant upstream never assigns a target easier than the requested
+                            // one.
+                            target: open_extended_mining_channel.max_target.clone(),
+                            extranonce_size: 4,
+                            extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
+                            group_channel_id: 100,
+                        },
+                    ),
                 ),
-            ))
-            .await
-            .unwrap();
-
-        send_to_tproxy
-            .send(AnyMessageOwned::Mining(
-                parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
-                    channel_id: 0,
-                    job_id: 1,
-                    ntime_start: Sv2OptionOwned::new(None),
-                    version: 0x20000000,
-                    version_rolling_allowed: true,
-                    merkle_path: Seq0255Owned::new(vec![]).unwrap(),
-                    coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
-                    coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
-                }),
-            ))
-            .await
-            .unwrap();
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
             )
             .await;
 
-        send_to_tproxy
-            .send(AnyMessageOwned::Mining(
-                parsers_sv2::MiningOwned::SetNewPrevHash(SetNewPrevHashOwned {
-                    channel_id: 0,
-                    job_id: 1,
-                    prev_hash: hex::decode(
-                        "3ab7089cd2cd30f133552cfde82c4cb239cd3c2310306f9d825e088a1772cc39",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-                    ntime_start: 1766782170,
-                    nbits: 0x207fffff,
-                }),
-            ))
-            .await
-            .unwrap();
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
+        mock_upstream
+            .send(
+                0,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(
+                    NewExtendedMiningJobOwned {
+                        channel_id: 0,
+                        job_id: 1,
+                        ntime_start: Sv2OptionOwned::new(None),
+                        version: 0x20000000,
+                        version_rolling_allowed: true,
+                        merkle_path: Seq0255Owned::new(vec![]).unwrap(),
+                        coinbase_tx_prefix: coinbase_tx_prefix.try_into().unwrap(),
+                        coinbase_tx_suffix: coinbase_tx_suffix.try_into().unwrap(),
+                    },
+                )),
             )
             .await;
-
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
+        mock_upstream
+            .send(
+                0,
+                AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(
+                    SetNewPrevHashOwned {
+                        channel_id: 0,
+                        job_id: 1,
+                        prev_hash: hex::decode(
+                            "3ab7089cd2cd30f133552cfde82c4cb239cd3c2310306f9d825e088a1772cc39",
+                        )
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                        ntime_start: 1766782170,
+                        nbits: 0x207fffff,
+                    },
+                )),
             )
+            .await;
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED)
             .await;
 
         translator.shutdown().await;
@@ -313,37 +291,21 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
     wrong_coinbase_tx_suffix.extend([0, 0, 0, 0]);
 
     let primary_upstream_addr = get_available_address();
-    let primary_sender = MockUpstream::new(
+    let primary_upstream = MockServer::new(
         primary_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
-    let (primary_sniffer, primary_sniffer_addr) = start_sniffer(
-        "payout-bad-primary",
-        primary_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
 
     let fallback_upstream_addr = get_available_address();
-    let _fallback_sender = MockUpstream::new(
+    let fallback_upstream = MockServer::new(
         fallback_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
-    let (fallback_sniffer, fallback_sniffer_addr) = start_sniffer(
-        "payout-fallback",
-        fallback_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
 
     let (translator, tproxy_addr, _) = start_sv2_translator_with_user_identity(
-        &[primary_sniffer_addr, fallback_sniffer_addr],
+        &[primary_upstream_addr, fallback_upstream_addr],
         false,
         vec![],
         vec![],
@@ -355,14 +317,11 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
     .await;
     let (minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
 
-    primary_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    primary_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
     let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-        match primary_sniffer.next_message_from_downstream() {
+        match primary_upstream.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(msg)),
@@ -371,9 +330,10 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
         };
     };
 
-    primary_sender
-        .send(AnyMessageOwned::Mining(
-            parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(
+    primary_upstream
+        .send(
+            0,
+            AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannelSuccess(
                 OpenExtendedMiningChannelSuccessOwned {
                     request_id: open_extended_mining_channel.request_id,
                     channel_id: 0,
@@ -383,13 +343,12 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
                     extranonce_prefix: vec![0x00, 0x01, 0x00, 0x00].try_into().unwrap(),
                     group_channel_id: 100,
                 },
-            ),
-        ))
-        .await
-        .unwrap();
+            )),
+        )
+        .await;
 
-    primary_sender
-        .send(AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
+    primary_upstream
+        .send(0, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
             channel_id: 0,
             job_id: 1,
             ntime_start: Sv2OptionOwned::new(None),
@@ -399,19 +358,11 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
             coinbase_tx_prefix: hex::decode("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff225200162f5374726174756d2056322053524920506f6f6c2f2f08").unwrap().try_into().unwrap(),
             coinbase_tx_suffix: wrong_coinbase_tx_suffix.try_into().unwrap(),
         })))
-        .await
-        .unwrap();
-    primary_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
         .await;
-
     assert!(
-        primary_sniffer
+        primary_upstream
             .assert_message_not_present(
-                MessageDirection::ToUpstream,
+                0,
                 MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
                 Duration::from_secs(2),
             )
@@ -419,8 +370,8 @@ async fn translator_falls_back_when_payout_does_not_match_user_identity() {
         "tProxy should not submit shares to the upstream that failed payout verification"
     );
 
-    fallback_sniffer
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+    fallback_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     drop(minerd_process);
@@ -734,7 +685,7 @@ async fn aggregated_translator_does_not_send_update_channel_before_channel_opens
     shutdown_all!(translator, pool);
 }
 
-// This test launches a tProxy in aggregated mode and leverages a MockUpstream to test the correct
+// This test launches a tProxy in aggregated mode and leverages a Sniffer to test the correct
 // functionalities of grouping extended channels.
 #[tokio::test]
 async fn aggregated_translator_correctly_deals_with_group_channels() {
@@ -1026,7 +977,7 @@ async fn aggregated_translator_correctly_deals_with_group_channels() {
     shutdown_all!(translator, pool);
 }
 
-// This test launches a tProxy in non-aggregated mode and leverages a MockUpstream to test the
+// This test launches a tProxy in non-aggregated mode and leverages a Sniffer to test the
 // correct functionalities of grouping extended channels.
 #[tokio::test]
 async fn non_aggregated_translator_correctly_deals_with_group_channels() {
@@ -1399,7 +1350,7 @@ async fn non_aggregated_translator_correctly_deals_with_group_channels() {
     shutdown_all!(translator, pool);
 }
 
-/// This test launches a tProxy in non-aggregated mode and leverages a MockUpstream to test the
+/// This test launches a tProxy in non-aggregated mode and leverages a MockServer to test the
 /// correct behavior of handling SetGroupChannel messages.
 ///
 /// We first send a SetGroupChannel message to set a group channel ID A and B, and then we send a
@@ -1412,19 +1363,13 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
     start_tracing();
 
     let mock_upstream_addr = get_available_address();
-    let mock_upstream = MockUpstream::new(mock_upstream_addr, WithSetup::no());
-    let send_to_tproxy = mock_upstream.start().await;
-
-    let (sniffer, sniffer_addr) = start_sniffer("", mock_upstream_addr, false, vec![], None);
+    let mock_upstream = MockServer::new(mock_upstream_addr, None).await;
 
     let (translator, tproxy_addr, _) =
-        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None, false).await;
+        start_sv2_translator(&[mock_upstream_addr], false, vec![], vec![], None, false).await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
+    mock_upstream
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     let setup_connection_success = AnyMessageOwned::Common(
@@ -1433,7 +1378,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
             flags: 0,
         }),
     );
-    send_to_tproxy.send(setup_connection_success).await.unwrap();
+    mock_upstream.send(0, setup_connection_success).await;
 
     const N_EXTENDED_CHANNELS: u32 = 6;
     const GROUP_CHANNEL_ID_A: u32 = 100;
@@ -1448,14 +1393,11 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
         let (minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
         minerd_vec.push(minerd_process);
 
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-            )
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
             .await;
         let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-            match sniffer.next_message_from_downstream() {
+            match mock_upstream.next_message(0) {
                 Some((
                     _,
                     AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(
@@ -1481,16 +1423,8 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
                     group_channel_id: GROUP_CHANNEL_ID_A,
                 },
             ));
-        send_to_tproxy
-            .send(open_extended_mining_channel_success)
-            .await
-            .unwrap();
-
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-            )
+        mock_upstream
+            .send(0, open_extended_mining_channel_success)
             .await;
 
         let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
@@ -1505,14 +1439,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
             coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
         }));
 
-        send_to_tproxy.send(new_extended_mining_job).await.unwrap();
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-            )
-            .await;
-
+        mock_upstream.send(0, new_extended_mining_job).await;
         let set_new_prev_hash = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(
             SetNewPrevHashOwned {
                 channel_id: i,
@@ -1528,13 +1455,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
             },
         ));
 
-        send_to_tproxy.send(set_new_prev_hash).await.unwrap();
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-            )
-            .await;
+        mock_upstream.send(0, set_new_prev_hash).await;
     }
 
     // half of the channels belong to GROUP_CHANNEL_ID_A
@@ -1554,7 +1475,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
             group_channel_id: GROUP_CHANNEL_ID_B,
         },
     ));
-    send_to_tproxy.send(set_group_channel).await.unwrap();
+    mock_upstream.send(0, set_group_channel).await;
 
     // send a NewExtendedMiningJob + SetNewPrevHash message pair ONLY to GROUP_CHANNEL_ID_B
     let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
@@ -1569,14 +1490,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
         coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
     }));
 
-    send_to_tproxy.send(new_extended_mining_job).await.unwrap();
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-
+    mock_upstream.send(0, new_extended_mining_job).await;
     let set_new_prev_hash = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(
         SetNewPrevHashOwned {
             channel_id: GROUP_CHANNEL_ID_B,
@@ -1591,25 +1505,15 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
             nbits: 0x207fffff,
         },
     ));
-    send_to_tproxy.send(set_new_prev_hash).await.unwrap();
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
-        .await;
-
+    mock_upstream.send(0, set_new_prev_hash).await;
     // all channels in GROUP_CHANNEL_ID_B must submit at least one share with job_id = 2
     // channels in GROUP_CHANNEL_ID_A must NOT submit any shares with job_id = 2
     let mut channels_submitted_to: HashSet<u32> = group_channel_b_ids.clone().into_iter().collect();
     loop {
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
-            )
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED)
             .await;
-        let submit_shares_extended = match sniffer.next_message_from_downstream() {
+        let submit_shares_extended = match mock_upstream.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
@@ -1636,7 +1540,7 @@ async fn non_aggregated_translator_handles_set_group_channel_message() {
     translator.shutdown().await;
 }
 
-/// This test launches a tProxy in non-aggregated mode and leverages a MockUpstream to test the
+/// This test launches a tProxy in non-aggregated mode and leverages a MockServer to test the
 /// correct behavior of handling CloseChannel messages.
 ///
 /// First we close a single channel, and assert that no shares are submitted from it.
@@ -1646,19 +1550,13 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
     start_tracing();
 
     let mock_upstream_addr = get_available_address();
-    let mock_upstream = MockUpstream::new(mock_upstream_addr, WithSetup::no());
-    let send_to_tproxy = mock_upstream.start().await;
-
-    let (sniffer, sniffer_addr) = start_sniffer("", mock_upstream_addr, false, vec![], None);
+    let mock_upstream = MockServer::new(mock_upstream_addr, None).await;
 
     let (translator, tproxy_addr, _) =
-        start_sv2_translator(&[sniffer_addr], false, vec![], vec![], None, false).await;
+        start_sv2_translator(&[mock_upstream_addr], false, vec![], vec![], None, false).await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
+    mock_upstream
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     let setup_connection_success = AnyMessageOwned::Common(
@@ -1667,7 +1565,7 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
             flags: 0,
         }),
     );
-    send_to_tproxy.send(setup_connection_success).await.unwrap();
+    mock_upstream.send(0, setup_connection_success).await;
 
     const N_EXTENDED_CHANNELS: u32 = 3;
     const GROUP_CHANNEL_ID: u32 = 100;
@@ -1681,14 +1579,11 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
         let (minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
         minerd_vec.push(minerd_process);
 
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-            )
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
             .await;
         let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-            match sniffer.next_message_from_downstream() {
+            match mock_upstream.next_message(0) {
                 Some((
                     _,
                     AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(
@@ -1714,16 +1609,8 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
                     group_channel_id: GROUP_CHANNEL_ID,
                 },
             ));
-        send_to_tproxy
-            .send(open_extended_mining_channel_success)
-            .await
-            .unwrap();
-
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-            )
+        mock_upstream
+            .send(0, open_extended_mining_channel_success)
             .await;
 
         let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
@@ -1738,14 +1625,7 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
             coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
         }));
 
-        send_to_tproxy.send(new_extended_mining_job).await.unwrap();
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-            )
-            .await;
-
+        mock_upstream.send(0, new_extended_mining_job).await;
         let set_new_prev_hash = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(
             SetNewPrevHashOwned {
                 channel_id: i,
@@ -1761,25 +1641,16 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
             },
         ));
 
-        send_to_tproxy.send(set_new_prev_hash).await.unwrap();
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-            )
-            .await;
+        mock_upstream.send(0, set_new_prev_hash).await;
     }
 
     // let's wait until all channels send at least one share
     let mut channels_submitted_to: HashSet<u32> = (0..N_EXTENDED_CHANNELS).collect();
     loop {
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
-            )
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED)
             .await;
-        let submit_shares_extended = match sniffer.next_message_from_downstream() {
+        let submit_shares_extended = match mock_upstream.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
@@ -1800,33 +1671,24 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
             channel_id: CLOSED_CHANNEL_ID,
             reason_code: "".try_into().unwrap(),
         }));
-    send_to_tproxy.send(close_channel).await.unwrap();
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_CLOSE_CHANNEL,
-        )
-        .await;
+    mock_upstream.send(0, close_channel).await;
 
-    // Drain all pending messages from the sniffer queue
-    while sniffer.next_message_from_downstream().is_some() {
+    // Small delay to let the translator close the channel and any in-flight messages arrive
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Drain all pending messages from the mock's queue
+    while mock_upstream.next_message(0).is_some() {
         // Keep draining until queue is empty
     }
-
-    // Small delay to let any in-flight messages arrive
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // let's wait until all open channels send at least 5 shares
     // if the closed channel sends a share, the test fails
     let mut share_submission_count = HashMap::new();
     loop {
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
-            )
+        mock_upstream
+            .wait_for_message_type(0, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED)
             .await;
-        let submit_shares_extended = match sniffer.next_message_from_downstream() {
+        let submit_shares_extended = match mock_upstream.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SubmitSharesExtended(msg)),
@@ -1864,21 +1726,14 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
             channel_id: GROUP_CHANNEL_ID,
             reason_code: "".try_into().unwrap(),
         }));
-    send_to_tproxy.send(close_channel).await.unwrap();
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_CLOSE_CHANNEL,
-        )
-        .await;
-
+    mock_upstream.send(0, close_channel).await;
     // wait enough time for any channels to submit some share (which they shouldn't)
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // no shares should arrive after the group channel is closed
-    sniffer
+    mock_upstream
         .assert_message_not_present(
-            MessageDirection::ToUpstream,
+            0,
             MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED,
             std::time::Duration::from_secs(1),
         )
@@ -1886,7 +1741,7 @@ async fn non_aggregated_translator_correctly_deals_with_close_channel_message() 
     translator.shutdown().await;
 }
 
-/// This test launches a tProxy in aggregated mode and leverages two MockUpstreams to test the
+/// This test launches a tProxy in aggregated mode and leverages two MockServers to test the
 /// correct behavior of handling CloseChannel messages.
 ///
 /// We first send a CloseChannel message to a single channel, and assert that no shares are
@@ -1898,21 +1753,18 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
 
     // first upstream server mock
     let mock_upstream_addr_a = get_available_address();
-    let mock_upstream_a = MockUpstream::new(mock_upstream_addr_a, WithSetup::no());
-    let send_to_tproxy_a = mock_upstream_a.start().await;
-    let (sniffer_a, sniffer_addr_a) = start_sniffer("", mock_upstream_addr_a, false, vec![], None);
+    let mock_upstream_a = MockServer::new(mock_upstream_addr_a, None).await;
 
     // fallback upstream server mock
     let mock_upstream_addr_b = get_available_address();
-    let mock_upstream_b = MockUpstream::new(
+    let mock_upstream_b = MockServer::new(
         mock_upstream_addr_b,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let _send_to_tproxy_b = mock_upstream_b.start().await;
-    let (sniffer_b, sniffer_addr_b) = start_sniffer("", mock_upstream_addr_b, false, vec![], None);
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
+    )
+    .await;
 
     let (translator, tproxy_addr, _) = start_sv2_translator(
-        &[sniffer_addr_a, sniffer_addr_b],
+        &[mock_upstream_addr_a, mock_upstream_addr_b],
         true,
         vec![],
         vec![],
@@ -1921,11 +1773,8 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
     )
     .await;
 
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
+    mock_upstream_a
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     let setup_connection_success = AnyMessageOwned::Common(
@@ -1934,10 +1783,7 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
             flags: 0,
         }),
     );
-    send_to_tproxy_a
-        .send(setup_connection_success)
-        .await
-        .unwrap();
+    mock_upstream_a.send(0, setup_connection_success).await;
 
     // we need to keep references to each minerd
     // otherwise they would be dropped
@@ -1946,14 +1792,11 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
     let (minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
     minerd_vec.push(minerd_process);
 
-    sniffer_a
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    mock_upstream_a
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
     let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-        match sniffer_a.next_message_from_downstream() {
+        match mock_upstream_a.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(msg)),
@@ -1977,16 +1820,8 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
                 group_channel_id: 100,
             },
         ));
-    send_to_tproxy_a
-        .send(open_extended_mining_channel_success)
-        .await
-        .unwrap();
-
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_upstream_a
+        .send(0, open_extended_mining_channel_success)
         .await;
 
     let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
@@ -2001,17 +1836,7 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
             coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
         }));
 
-    send_to_tproxy_a
-        .send(new_extended_mining_job)
-        .await
-        .unwrap();
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-
+    mock_upstream_a.send(0, new_extended_mining_job).await;
     let set_new_prev_hash = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(
         SetNewPrevHashOwned {
             channel_id: 0,
@@ -2027,14 +1852,7 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
         },
     ));
 
-    send_to_tproxy_a.send(set_new_prev_hash).await.unwrap();
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
-        .await;
-
+    mock_upstream_a.send(0, set_new_prev_hash).await;
     // up until now, we have done the usual channel initialization process
     // now, lets send a CloseChannel message for the channel
     let close_channel =
@@ -2042,11 +1860,11 @@ async fn aggregated_translator_triggers_fallback_on_close_channel_message() {
             channel_id: 0,
             reason_code: "".try_into().unwrap(),
         }));
-    send_to_tproxy_a.send(close_channel).await.unwrap();
+    mock_upstream_a.send(0, close_channel).await;
 
     // this should trigger fallback
-    sniffer_b
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+    mock_upstream_b
+        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
     translator.shutdown().await;
 }
@@ -2061,18 +1879,13 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
 
     // upstream server mock
     let mock_upstream_addr_a = get_available_address();
-    let mock_upstream_a = MockUpstream::new(mock_upstream_addr_a, WithSetup::no());
-    let send_to_tproxy_a = mock_upstream_a.start().await;
-    let (sniffer_a, sniffer_addr_a) = start_sniffer("", mock_upstream_addr_a, false, vec![], None);
+    let mock_upstream_a = MockServer::new(mock_upstream_addr_a, None).await;
 
     let (translator, tproxy_addr, _) =
-        start_sv2_translator(&[sniffer_addr_a], false, vec![], vec![], None, false).await;
+        start_sv2_translator(&[mock_upstream_addr_a], false, vec![], vec![], None, false).await;
 
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
+    mock_upstream_a
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     let setup_connection_success = AnyMessageOwned::Common(
@@ -2081,21 +1894,15 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
             flags: 0,
         }),
     );
-    send_to_tproxy_a
-        .send(setup_connection_success)
-        .await
-        .unwrap();
+    mock_upstream_a.send(0, setup_connection_success).await;
 
     let (_minerd_process, _minerd_addr) = start_minerd(tproxy_addr, None, None, false).await;
 
-    sniffer_a
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    mock_upstream_a
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
     let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-        match sniffer_a.next_message_from_downstream() {
+        match mock_upstream_a.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(msg)),
@@ -2119,16 +1926,8 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
                 group_channel_id: 100,
             },
         ));
-    send_to_tproxy_a
-        .send(open_extended_mining_channel_success)
-        .await
-        .unwrap();
-
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_upstream_a
+        .send(0, open_extended_mining_channel_success)
         .await;
 
     let new_extended_mining_job = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(NewExtendedMiningJobOwned {
@@ -2143,17 +1942,7 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
             coinbase_tx_suffix: hex::decode("feffffff0200f2052a01000000160014ebe1b7dcc293ccaa0ee743a86f89df8258c208fc0000000000000000266a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf901000000").unwrap().try_into().unwrap(),
         }));
 
-    send_to_tproxy_a
-        .send(new_extended_mining_job)
-        .await
-        .unwrap();
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
-
+    mock_upstream_a.send(0, new_extended_mining_job).await;
     let set_new_prev_hash = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetNewPrevHash(
         SetNewPrevHashOwned {
             channel_id: 0,
@@ -2169,20 +1958,13 @@ async fn translator_does_not_shutdown_on_missing_downstream_channel() {
         },
     ));
 
-    send_to_tproxy_a.send(set_new_prev_hash).await.unwrap();
-    sniffer_a
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
-        .await;
-
+    mock_upstream_a.send(0, set_new_prev_hash).await;
     // SetTarget message with channel id not present in downstream
     let set_target = AnyMessageOwned::Mining(parsers_sv2::MiningOwned::SetTarget(SetTargetOwned {
         channel_id: 5,
         target: [0; 32].into(),
     }));
-    send_to_tproxy_a.send(set_target).await.unwrap();
+    mock_upstream_a.send(0, set_target).await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -2203,31 +1985,14 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
     start_tracing();
 
     let mock_upstream_addr = get_available_address();
-    let mock_upstream = MockUpstream::new(mock_upstream_addr, WithSetup::no());
-    let send_to_tproxy = mock_upstream.start().await;
-
-    // ignore SubmitSharesSuccess messages to simplify the test flow
-    let ignore_submit_shares_success = IgnoreMessage::new(
-        MessageDirection::ToDownstream,
-        MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS,
-    );
-    let (sniffer, sniffer_addr) = start_sniffer(
-        "future_job_test",
-        mock_upstream_addr,
-        false,
-        vec![ignore_submit_shares_success.into()],
-        None,
-    );
+    let mock_upstream = MockServer::new(mock_upstream_addr, None).await;
 
     // Start translator in aggregated mode
     let (translator, tproxy_addr, _) =
-        start_sv2_translator(&[sniffer_addr], true, vec![], vec![], None, false).await;
+        start_sv2_translator(&[mock_upstream_addr], true, vec![], vec![], None, false).await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
+    mock_upstream
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     let setup_connection_success = AnyMessageOwned::Common(
@@ -2236,7 +2001,7 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
             flags: 0,
         }),
     );
-    send_to_tproxy.send(setup_connection_success).await.unwrap();
+    mock_upstream.send(0, setup_connection_success).await;
 
     // Keep references to minerd processes and SV1 sniffers so they don't get dropped
     let mut minerd_vec = Vec::new();
@@ -2249,15 +2014,12 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
         start_minerd(sv1_sniffer_addr_1, None, None, false).await;
     minerd_vec.push(minerd_process_1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    mock_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
 
     let open_extended_mining_channel: OpenExtendedMiningChannelOwned = loop {
-        match sniffer.next_message_from_downstream() {
+        match mock_upstream.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(msg)),
@@ -2282,16 +2044,8 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
                 group_channel_id: 1,
             },
         ));
-    send_to_tproxy
-        .send(open_extended_mining_channel_success)
-        .await
-        .unwrap();
-
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_upstream
+        .send(0, open_extended_mining_channel_success)
         .await;
 
     // Send a FUTURE job (ntime_start: None) - this job is not active yet!
@@ -2308,13 +2062,7 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
         },
     ));
 
-    send_to_tproxy.send(future_job).await.unwrap();
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
-        .await;
+    mock_upstream.send(0, future_job).await;
 
     // CRITICAL: Start a SECOND minerd BEFORE sending SetNewPrevHash
     // This is the race condition we're testing - the new downstream connects
@@ -2348,13 +2096,7 @@ async fn aggregated_translator_handles_downstream_connecting_during_future_job()
         },
     ));
 
-    send_to_tproxy.send(set_new_prev_hash).await.unwrap();
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
-        .await;
+    mock_upstream.send(0, set_new_prev_hash).await;
 
     // Verify BOTH miners receive the mining.notify message
     sv1_sniffer_1
@@ -2576,12 +2318,10 @@ async fn multiple_tproxy_sessions() {
 async fn test_translator_fallback_during_abrupt_disconnection() {
     start_tracing();
     let primary_addr = get_available_address();
-    let _primary_upstream = MockUpstream::new(
+    let primary_upstream = MockServer::new(
         primary_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .disconnect_after_setup_connection_success(Duration::from_secs(1))
-    .start()
     .await;
 
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
@@ -2599,6 +2339,13 @@ async fn test_translator_fallback_during_abrupt_disconnection() {
         false,
     )
     .await;
+
+    // The primary upstream disconnects abruptly, a second after it set the connection up.
+    primary_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    primary_upstream.close(0).await;
 
     pool_translator_sniffer_2
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
@@ -2636,68 +2383,34 @@ async fn translator_reconnects_to_the_endpoint_requested_by_the_upstream() {
     start_tracing();
 
     let current_upstream_addr = get_available_address();
-    let send_from_current_upstream = MockUpstream::new(
+    let current_upstream = MockServer::new(
         current_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
     let requested_upstream_addr = get_available_address();
-    let _requested_upstream = MockUpstream::new(
+    let requested_upstream = MockServer::new(
         requested_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
 
-    let (current_sniffer, current_sniffer_addr) = start_sniffer(
-        "reconnect-current",
-        current_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-    let (requested_sniffer, requested_sniffer_addr) = start_sniffer(
-        "reconnect-requested",
-        requested_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-
     let (translator, _, _) =
-        start_sv2_translator(&[current_sniffer_addr], false, vec![], vec![], None, false).await;
+        start_sv2_translator(&[current_upstream_addr], false, vec![], vec![], None, false).await;
 
-    current_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+    current_upstream
+        .send(
+            0,
+            AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(ReconnectOwned {
+                new_host: requested_upstream_addr.ip().to_string().try_into().unwrap(),
+                new_port: requested_upstream_addr.port(),
+            })),
         )
         .await;
 
-    send_from_current_upstream
-        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
-            ReconnectOwned {
-                new_host: requested_sniffer_addr.ip().to_string().try_into().unwrap(),
-                new_port: requested_sniffer_addr.port(),
-            },
-        )))
-        .await
-        .unwrap();
-
-    current_sniffer
-        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_RECONNECT)
+    requested_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
-    requested_sniffer
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
-        .await;
-    requested_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
-        .await;
-
     shutdown_all!(translator);
 }
 
@@ -2708,72 +2421,27 @@ async fn translator_reconnects_to_the_same_endpoint_on_channel_endpoint_changed(
     start_tracing();
 
     let first_upstream_addr = get_available_address();
-    let send_from_first_upstream = MockUpstream::new(
+    let first_upstream = MockServer::new(
         first_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
-    let (first_sniffer, endpoint) = start_sniffer(
-        "endpoint-changed-first",
-        first_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
 
     let (translator, _, _) =
-        start_sv2_translator(&[endpoint], false, vec![], vec![], None, false).await;
+        start_sv2_translator(&[first_upstream_addr], false, vec![], vec![], None, false).await;
 
-    first_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+    first_upstream
+        .send(
+            0,
+            AnyMessageOwned::Common(CommonMessagesOwned::ChannelEndpointChanged(
+                ChannelEndpointChangedOwned { channel_id: 0 },
+            )),
         )
         .await;
 
-    // A sniffer only accepts one connection, so the endpoint is free again: the next connection
-    // to it reaches a second upstream.
-    let second_upstream_addr = get_available_address();
-    let _second_upstream = MockUpstream::new(
-        second_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    )
-    .start()
-    .await;
-    let second_sniffer = Sniffer::new(
-        "endpoint-changed-second",
-        endpoint,
-        second_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-    second_sniffer.start();
-
-    send_from_first_upstream
-        .send(AnyMessageOwned::Common(
-            CommonMessagesOwned::ChannelEndpointChanged(ChannelEndpointChangedOwned {
-                channel_id: 0,
-            }),
-        ))
-        .await
-        .unwrap();
-
-    first_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED,
-        )
-        .await;
-    second_sniffer
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
-        .await;
-    second_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    // The translator opens a second connection to the same endpoint and sets it up.
+    first_upstream
+        .wait_for_message_type(1, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
     shutdown_all!(translator);
@@ -2787,65 +2455,32 @@ async fn translator_ignores_a_reconnect_requested_too_soon_after_the_last_one() 
     start_tracing();
 
     let current_upstream_addr = get_available_address();
-    let send_from_current_upstream = MockUpstream::new(
+    let current_upstream = MockServer::new(
         current_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
     let requested_upstream_addr = get_available_address();
-    let send_from_requested_upstream = MockUpstream::new(
+    let requested_upstream = MockServer::new(
         requested_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
     let second_requested_upstream_addr = get_available_address();
-    let _second_requested_upstream = MockUpstream::new(
+    let second_requested_upstream = MockServer::new(
         second_requested_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
     let fallback_upstream_addr = get_available_address();
-    let _fallback_upstream = MockUpstream::new(
+    let fallback_upstream = MockServer::new(
         fallback_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
-
-    let (current_sniffer, current_sniffer_addr) = start_sniffer(
-        "reconnect-too-soon-current",
-        current_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-    let (requested_sniffer, requested_sniffer_addr) = start_sniffer(
-        "reconnect-too-soon-requested",
-        requested_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-    let (second_requested_sniffer, second_requested_sniffer_addr) = start_sniffer(
-        "reconnect-too-soon-second-requested",
-        second_requested_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-    let (fallback_sniffer, fallback_sniffer_addr) = start_sniffer(
-        "reconnect-too-soon-fallback",
-        fallback_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
 
     let (translator, _, _) = start_sv2_translator(
-        &[current_sniffer_addr, fallback_sniffer_addr],
+        &[current_upstream_addr, fallback_upstream_addr],
         false,
         vec![],
         vec![],
@@ -2854,57 +2489,45 @@ async fn translator_ignores_a_reconnect_requested_too_soon_after_the_last_one() 
     )
     .await;
 
-    current_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+    current_upstream
+        .send(
+            0,
+            AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(ReconnectOwned {
+                new_host: requested_upstream_addr.ip().to_string().try_into().unwrap(),
+                new_port: requested_upstream_addr.port(),
+            })),
         )
         .await;
-    send_from_current_upstream
-        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
-            ReconnectOwned {
-                new_host: requested_sniffer_addr.ip().to_string().try_into().unwrap(),
-                new_port: requested_sniffer_addr.port(),
-            },
-        )))
-        .await
-        .unwrap();
-    requested_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    // The translator sets the requested endpoint up, which is the last time it may do so.
+    requested_upstream
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
-    requested_sniffer.clean_queue(MessageDirection::ToUpstream);
 
-    send_from_requested_upstream
-        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
-            ReconnectOwned {
-                new_host: second_requested_sniffer_addr
+    requested_upstream
+        .send(
+            0,
+            AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(ReconnectOwned {
+                new_host: second_requested_upstream_addr
                     .ip()
                     .to_string()
                     .try_into()
                     .unwrap(),
-                new_port: second_requested_sniffer_addr.port(),
-            },
-        )))
-        .await
-        .unwrap();
-    requested_sniffer
-        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_RECONNECT)
+                new_port: second_requested_upstream_addr.port(),
+            })),
+        )
         .await;
-
     // Neither the requested endpoint nor the next configured upstream is contacted, and the
-    // current upstream is not set up again.
-    for sniffer in [
-        &second_requested_sniffer,
-        &fallback_sniffer,
-        &requested_sniffer,
+    // current upstream is not set up again, on its connection or on a new one.
+    for (upstream, connection) in [
+        (&second_requested_upstream, 0),
+        (&fallback_upstream, 0),
+        (&requested_upstream, 0),
+        (&requested_upstream, 1),
     ] {
         assert!(
-            sniffer
+            upstream
                 .assert_message_not_present(
-                    MessageDirection::ToUpstream,
+                    connection,
                     MESSAGE_TYPE_SETUP_CONNECTION,
                     Duration::from_secs(3),
                 )
@@ -2922,38 +2545,22 @@ async fn translator_uses_the_configured_upstreams_when_the_requested_one_fails()
     start_tracing();
 
     let current_upstream_addr = get_available_address();
-    let send_from_current_upstream = MockUpstream::new(
+    let current_upstream = MockServer::new(
         current_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
     let fallback_upstream_addr = get_available_address();
-    let _fallback_upstream = MockUpstream::new(
+    let fallback_upstream = MockServer::new(
         fallback_upstream_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
 
-    let (current_sniffer, current_sniffer_addr) = start_sniffer(
-        "reconnect-failure-current",
-        current_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
-    let (fallback_sniffer, fallback_sniffer_addr) = start_sniffer(
-        "reconnect-failure-fallback",
-        fallback_upstream_addr,
-        false,
-        vec![],
-        None,
-    );
     let unavailable_upstream_addr = get_available_address();
 
     let (translator, _, _) = start_sv2_translator(
-        &[current_sniffer_addr, fallback_sniffer_addr],
+        &[current_upstream_addr, fallback_upstream_addr],
         false,
         vec![],
         vec![],
@@ -2962,40 +2569,23 @@ async fn translator_uses_the_configured_upstreams_when_the_requested_one_fails()
     )
     .await;
 
-    current_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
-        .await;
-
-    send_from_current_upstream
-        .send(AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(
-            ReconnectOwned {
+    current_upstream
+        .send(
+            0,
+            AnyMessageOwned::Common(CommonMessagesOwned::Reconnect(ReconnectOwned {
                 new_host: unavailable_upstream_addr
                     .ip()
                     .to_string()
                     .try_into()
                     .unwrap(),
                 new_port: unavailable_upstream_addr.port(),
-            },
-        )))
-        .await
-        .unwrap();
-
-    current_sniffer
-        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_RECONNECT)
-        .await;
-    fallback_sniffer
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
-        .await;
-    fallback_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+            })),
         )
         .await;
 
+    fallback_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
     shutdown_all!(translator);
 }
 
@@ -3004,15 +2594,12 @@ async fn tproxy_sends_per_upstream_user_identity() {
     start_tracing();
 
     let mock_upstream_addr = get_available_address();
-    let mock_upstream = MockUpstream::new(mock_upstream_addr, WithSetup::no());
-    let send_to_tproxy = mock_upstream.start().await;
-
-    let (sniffer, sniffer_addr) = start_sniffer("", mock_upstream_addr, false, vec![], None);
+    let mock_upstream = MockServer::new(mock_upstream_addr, None).await;
 
     const PER_UPSTREAM_IDENTITY: &str = "bc1qtest.worker";
 
     let (translator, tproxy_addr, _) = start_sv2_translator_with_user_identities(
-        &[(sniffer_addr, PER_UPSTREAM_IDENTITY.to_string())],
+        &[(mock_upstream_addr, PER_UPSTREAM_IDENTITY.to_string())],
         false,
         vec![],
         vec![],
@@ -3021,34 +2608,30 @@ async fn tproxy_sends_per_upstream_user_identity() {
     )
     .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
+    mock_upstream
+        .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
-    send_to_tproxy
-        .send(AnyMessageOwned::Common(
-            CommonMessagesOwned::SetupConnectionSuccess(SetupConnectionSuccessOwned {
-                used_version: 2,
-                flags: 0,
-            }),
-        ))
-        .await
-        .unwrap();
+    mock_upstream
+        .send(
+            0,
+            AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionSuccess(
+                SetupConnectionSuccessOwned {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )),
+        )
+        .await;
 
     let (_minerd, _) = start_minerd(tproxy_addr, None, None, false).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    mock_upstream
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
 
     let oemc = loop {
-        match sniffer.next_message_from_downstream() {
+        match mock_upstream.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(msg)),
@@ -3072,31 +2655,23 @@ async fn tproxy_sends_per_upstream_user_identity() {
 async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
     start_tracing();
 
-    // Both upstreams are mocks: assertions happen on the sniffers, no real pool needed.
+    // Both upstreams are mocks: assertions happen on them, no real pool needed.
     let mock_primary_addr = get_available_address();
-    let send_to_tproxy = MockUpstream::new(mock_primary_addr, WithSetup::no())
-        .start()
-        .await;
+    let mock_primary = MockServer::new(mock_primary_addr, None).await;
     let mock_fallback_addr = get_available_address();
-    let _mock_fallback = MockUpstream::new(
+    let mock_fallback = MockServer::new(
         mock_fallback_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
     )
-    .start()
     .await;
 
     const PRIMARY_IDENTITY: &str = "bc1qprimary.worker";
     const FALLBACK_IDENTITY: &str = "bc1qfallback.worker";
 
-    let (sniffer_1, sniffer_addr_1) =
-        start_sniffer("primary", mock_primary_addr, false, vec![], None);
-    let (sniffer_2, sniffer_addr_2) =
-        start_sniffer("fallback", mock_fallback_addr, false, vec![], None);
-
     let (translator, tproxy_addr, _) = start_sv2_translator_with_user_identities(
         &[
-            (sniffer_addr_1, PRIMARY_IDENTITY.to_string()),
-            (sniffer_addr_2, FALLBACK_IDENTITY.to_string()),
+            (mock_primary_addr, PRIMARY_IDENTITY.to_string()),
+            (mock_fallback_addr, FALLBACK_IDENTITY.to_string()),
         ],
         false,
         vec![],
@@ -3108,46 +2683,37 @@ async fn tproxy_per_upstream_user_identity_switches_on_fallback() {
 
     let (_minerd, _) = start_minerd(tproxy_addr, None, None, false).await;
 
-    // The primary mock (WithSetup::no) sends back SetupConnectionError by hand once tproxy's
-    // SetupConnection arrives, forcing tproxy to fall over to mock_fallback.
-    sniffer_1
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
-        .await;
-    send_to_tproxy
-        .send(AnyMessageOwned::Common(
-            parsers_sv2::CommonMessagesOwned::SetupConnectionError(SetupConnectionErrorOwned {
-                flags: 0,
-                error_code: "test-identity-fallback".try_into().unwrap(),
-            }),
-        ))
-        .await
-        .unwrap();
-    sniffer_1
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
-        )
-        .await;
-
+    // The primary mock answers nothing by itself: the test sends back SetupConnectionError by hand
+    // each time tproxy's SetupConnection arrives. tproxy tries an upstream
+    // `MAX_UPSTREAM_RETRIES` times (private to `translator_sv2::translator_runtime`) before it
+    // falls over to mock_fallback.
+    const TPROXY_ATTEMPTS_PER_UPSTREAM: usize = 3;
+    for attempt in 0..TPROXY_ATTEMPTS_PER_UPSTREAM {
+        mock_primary
+            .wait_for_message_type(attempt, MESSAGE_TYPE_SETUP_CONNECTION)
+            .await;
+        mock_primary
+            .send(
+                attempt,
+                AnyMessageOwned::Common(parsers_sv2::CommonMessagesOwned::SetupConnectionError(
+                    SetupConnectionErrorOwned {
+                        flags: 0,
+                        error_code: "test-identity-fallback".try_into().unwrap(),
+                    },
+                )),
+            )
+            .await;
+    }
     // Fallback connects and opens a channel.
-    sniffer_2
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+    mock_fallback
+        .wait_for_message_type(0, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
-    sniffer_2
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
-        .await;
-    sniffer_2
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    mock_fallback
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
 
     let oemc = loop {
-        match sniffer_2.next_message_from_downstream() {
+        match mock_fallback.next_message(0) {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenExtendedMiningChannel(msg)),
