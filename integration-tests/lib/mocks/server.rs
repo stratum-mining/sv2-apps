@@ -191,6 +191,11 @@ impl MockServer {
             .await;
     }
 
+    /// Removes every message from the queue of `connection`.
+    pub async fn clean_queue(&self, connection: ConnectionId) {
+        self.connection(connection).await.clean_queue();
+    }
+
     /// Watches `connection` for `deadline`, returning `false` as soon as its queue holds a message
     /// of `message_type`, and `true` if the whole duration passes without one.
     ///
