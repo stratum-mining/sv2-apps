@@ -1,9 +1,6 @@
-use async_channel::Sender;
 use integration_tests_sv2::{
     POOL_COINBASE_REWARD_ADDRESS,
-    interceptor::MessageDirection,
-    mock_roles::{MockDownstream, MockUpstream, WithSetup},
-    sniffer::Sniffer,
+    mocks::{ClientSetupConnection, MockClient, MockServer, ServerSetupConnection},
     utils::get_available_address,
 };
 use jd_client_sv2::{JobDeclaratorClient, config::ConfigJDCMode};
@@ -62,25 +59,21 @@ async fn jdc_coinbase_only_sends_one_custom_job_per_template() {
 
     // A second downstream opens its own extended channel on the open upstream channel, and a
     // third only completes its setup, without opening any channel.
-    let second = jdc.connect_downstream("jdc-downstream-second").await;
+    let second = jdc.connect_downstream().await;
     second.request_extended_channel().await;
     second
         .wait_for(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
-    let without_channel = jdc
-        .connect_downstream("jdc-downstream-without-channel")
-        .await;
+    let without_channel = jdc.connect_downstream().await;
 
     let spent_tokens: Vec<B0255Owned> = jdc
         .sent_custom_jobs()
         .into_iter()
         .map(|custom_job| custom_job.token)
         .collect();
-    jdc.jds_sniffer.clean_queue(MessageDirection::ToUpstream);
+    jdc.jds.clean_queue(0).await;
     for downstream in [&first, &second, &without_channel] {
-        downstream
-            .sniffer
-            .clean_queue(MessageDirection::ToDownstream);
+        downstream.client.clean_queue();
     }
 
     jdc.send_template(template(2, false)).await;
@@ -90,12 +83,8 @@ async fn jdc_coinbase_only_sends_one_custom_job_per_template() {
     let custom_job = jdc.next_custom_job().await;
     assert!(!spent_tokens.contains(&custom_job.token));
     assert!(
-        jdc.pool_sniffer
-            .assert_message_not_present(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
-                ABSENCE_WINDOW,
-            )
+        jdc.pool
+            .assert_message_not_present(0, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, ABSENCE_WINDOW,)
             .await,
         "JDC must send one custom job per template, whatever the number of downstreams"
     );
@@ -106,10 +95,11 @@ async fn jdc_coinbase_only_sends_one_custom_job_per_template() {
             .wait_for(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
             .await;
     }
-    assert!(!without_channel.sniffer.has_message_type(
-        MessageDirection::ToDownstream,
-        MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-    ));
+    assert!(
+        !without_channel
+            .client
+            .has_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,)
+    );
 
     jdc.jdc.shutdown().await;
 }
@@ -126,9 +116,7 @@ async fn jdc_coinbase_only_activated_template_custom_job_pays_the_template_rewar
     let jdc = MockedJdc::start().await;
     let downstream = jdc.connect_with_upstream_channel().await;
     jdc.sent_custom_jobs();
-    downstream
-        .sniffer
-        .clean_queue(MessageDirection::ToDownstream);
+    downstream.client.clean_queue();
 
     jdc.send_template(template(2, true)).await;
     let downstream_job = downstream.next_extended_job().await;
@@ -182,13 +170,10 @@ async fn jdc_coinbase_only_keeps_its_tokens_until_the_upstream_channel_opens() {
     // JDC handles what the Template Provider sends ahead of what a downstream sends, so by the
     // time a downstream's channel request makes it ask the Pool for the upstream channel, both
     // prevhashes have been handled.
-    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    let downstream = jdc.connect_downstream().await;
     downstream.request_extended_channel().await;
-    jdc.pool_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    jdc.pool
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
 
     // The custom job sent as the upstream channel opens, and the one for the next template, are
@@ -214,29 +199,21 @@ async fn jdc_coinbase_only_chain_tip_before_the_first_token_answer_stays_solo() 
     let jdc = MockedJdc::start().await;
     let token_requests = jdc.token_requests(2).await;
     jdc.send_chain_tip(1).await;
-    let downstream = jdc.connect_downstream("jdc-downstream").await;
+    let downstream = jdc.connect_downstream().await;
     downstream.request_extended_channel().await;
     jdc.open_upstream_channel().await;
     downstream
         .wait_for(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
     assert!(
-        jdc.pool_sniffer
-            .assert_message_not_present(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
-                ABSENCE_WINDOW,
-            )
+        jdc.pool
+            .assert_message_not_present(0, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, ABSENCE_WINDOW,)
             .await,
         "JDC must not send solo work upstream"
     );
     assert!(
-        jdc.jds_sniffer
-            .assert_message_not_present(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN,
-                ABSENCE_WINDOW,
-            )
+        jdc.jds
+            .assert_message_not_present(0, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN, ABSENCE_WINDOW,)
             .await,
         "solo work must not ask the JDS for a token"
     );
@@ -270,54 +247,48 @@ fn assert_pays_template_reward(
     );
 }
 
-// A coinbase-only JDC whose Template Provider, Pool and JDS are mocks, each behind a sniffer, so a
-// test decides what every peer sends and observes everything JDC sends back.
+// A coinbase-only JDC whose Template Provider, Pool and JDS are mocks, so a test decides what
+// every peer sends and observes everything JDC sends back.
 struct MockedJdc {
     jdc: JobDeclaratorClient,
     address: SocketAddr,
-    tp: Sender<AnyMessageOwned>,
-    pool: Sender<AnyMessageOwned>,
-    jds: Sender<AnyMessageOwned>,
-    tp_sniffer: Sniffer<'static>,
-    pool_sniffer: Sniffer<'static>,
-    jds_sniffer: Sniffer<'static>,
+    tp: MockServer,
+    pool: MockServer,
+    jds: MockServer,
 }
 
 impl MockedJdc {
     async fn start() -> Self {
         let tp_address = get_available_address();
-        let tp = MockUpstream::new(
+        let tp = MockServer::new(
             tp_address,
-            WithSetup::yes_with_defaults(Protocol::TemplateDistributionProtocol, 0),
+            Some(ServerSetupConnection::new([(
+                Protocol::TemplateDistributionProtocol,
+                0,
+            )])),
         )
-        .start()
         .await;
-        let (tp_sniffer, tp_sniffer_address) =
-            integration_tests_sv2::start_sniffer("jdc-tp", tp_address, false, vec![], None);
 
         let pool_address = get_available_address();
-        let pool = MockUpstream::new(
+        let pool = MockServer::new(
             pool_address,
-            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+            Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
         )
-        .start()
         .await;
-        let (pool_sniffer, pool_sniffer_address) =
-            integration_tests_sv2::start_sniffer("jdc-pool", pool_address, false, vec![], None);
 
         let jds_address = get_available_address();
-        let jds = MockUpstream::new(
+        let jds = MockServer::new(
             jds_address,
-            WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0),
+            Some(ServerSetupConnection::new([(
+                Protocol::JobDeclarationProtocol,
+                0,
+            )])),
         )
-        .start()
         .await;
-        let (jds_sniffer, jds_sniffer_address) =
-            integration_tests_sv2::start_sniffer("jdc-jds", jds_address, false, vec![], None);
 
         let (jdc, address, _) = integration_tests_sv2::start_jdc(
-            &[(pool_sniffer_address, jds_sniffer_address)],
-            integration_tests_sv2::sv2_tp_config(tp_sniffer_address),
+            &[(pool_address, jds_address)],
+            integration_tests_sv2::sv2_tp_config(tp_address),
             vec![],
             vec![],
             false,
@@ -330,9 +301,6 @@ impl MockedJdc {
             tp,
             pool,
             jds,
-            tp_sniffer,
-            pool_sniffer,
-            jds_sniffer,
         }
     }
 
@@ -345,7 +313,7 @@ impl MockedJdc {
         self.answer_token_requests(&token_requests).await;
         self.wait_for_first_token().await;
         self.send_chain_tip(1).await;
-        let first = self.connect_downstream("jdc-downstream-first").await;
+        let first = self.connect_downstream().await;
         first.request_extended_channel().await;
         self.open_upstream_channel().await;
         first
@@ -358,14 +326,17 @@ impl MockedJdc {
     async fn token_requests(&self, count: usize) -> Vec<AllocateMiningJobTokenOwned> {
         let mut requests = Vec::new();
         while requests.len() < count {
-            match self.jds_sniffer.next_message_from_downstream() {
-                Some((
-                    _,
-                    AnyMessageOwned::JobDeclaration(JobDeclarationOwned::AllocateMiningJobToken(
-                        request,
-                    )),
-                )) => requests.push(request),
-                _ => tokio::time::sleep(Duration::from_secs(1)).await,
+            self.jds
+                .wait_for_message_type(0, MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN)
+                .await;
+            if let Some((
+                _,
+                AnyMessageOwned::JobDeclaration(JobDeclarationOwned::AllocateMiningJobToken(
+                    request,
+                )),
+            )) = self.jds.next_message(0)
+            {
+                requests.push(request);
             }
         }
         requests
@@ -384,20 +355,22 @@ impl MockedJdc {
         }]);
         for (token, request) in requests.iter().enumerate() {
             self.jds
-                .send(AnyMessageOwned::JobDeclaration(
-                    JobDeclarationOwned::AllocateMiningJobTokenSuccess(
-                        AllocateMiningJobTokenSuccessOwned {
-                            request_id: request.request_id,
-                            mining_job_token: mining_job_token(token as u64),
-                            coinbase_outputs: coinbase_outputs
-                                .clone()
-                                .try_into()
-                                .expect("serialized coinbase outputs must fit into B064K"),
-                        },
+                .send(
+                    0,
+                    AnyMessageOwned::JobDeclaration(
+                        JobDeclarationOwned::AllocateMiningJobTokenSuccess(
+                            AllocateMiningJobTokenSuccessOwned {
+                                request_id: request.request_id,
+                                mining_job_token: mining_job_token(token as u64),
+                                coinbase_outputs: coinbase_outputs
+                                    .clone()
+                                    .try_into()
+                                    .expect("serialized coinbase outputs must fit into B064K"),
+                            },
+                        ),
                     ),
-                ))
-                .await
-                .expect("mock JDS should send a token");
+                )
+                .await;
         }
     }
 
@@ -406,11 +379,8 @@ impl MockedJdc {
     // ones for its own outputs it sent on startup.
     async fn wait_for_first_token(&self) {
         for _ in 0..2 {
-            self.tp_sniffer
-                .wait_for_message_type_and_clean_queue(
-                    MessageDirection::ToUpstream,
-                    MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
-                )
+            self.tp
+                .wait_for_message_type_and_clean_queue(0, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS)
                 .await;
         }
     }
@@ -423,42 +393,50 @@ impl MockedJdc {
 
     async fn send_template(&self, template: NewTemplateOwned) {
         self.tp
-            .send(AnyMessageOwned::TemplateDistribution(
-                TemplateDistributionOwned::NewTemplate(template),
-            ))
-            .await
-            .expect("mock TP should send NewTemplate");
+            .send(
+                0,
+                AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::NewTemplate(
+                    template,
+                )),
+            )
+            .await;
     }
 
     async fn send_prev_hash(&self, template_id: u64) {
         self.tp
-            .send(AnyMessageOwned::TemplateDistribution(
-                TemplateDistributionOwned::SetNewPrevHash(SetNewPrevHashOwned {
-                    template_id,
-                    prev_hash: [template_id as u8; 32].into(),
-                    ntime_start: 1_700_000_000,
-                    n_bits: 0x1d00ffff,
-                    target: [0xff; 32].into(),
-                }),
-            ))
-            .await
-            .expect("mock TP should send SetNewPrevHash");
+            .send(
+                0,
+                AnyMessageOwned::TemplateDistribution(TemplateDistributionOwned::SetNewPrevHash(
+                    SetNewPrevHashOwned {
+                        template_id,
+                        prev_hash: [template_id as u8; 32].into(),
+                        ntime_start: 1_700_000_000,
+                        n_bits: 0x1d00ffff,
+                        target: [0xff; 32].into(),
+                    },
+                )),
+            )
+            .await;
     }
 
     // The Pool opens the upstream channel JDC asks it for.
     async fn open_upstream_channel(&self) {
+        self.pool
+            .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
+            .await;
         let request = loop {
-            match self.pool_sniffer.next_message_from_downstream() {
-                Some((
-                    _,
-                    AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(request)),
-                )) => break request,
-                _ => tokio::time::sleep(Duration::from_secs(1)).await,
+            if let Some((
+                _,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(request)),
+            )) = self.pool.next_message(0)
+            {
+                break request;
             }
         };
         self.pool
-            .send(AnyMessageOwned::Mining(
-                MiningOwned::OpenExtendedMiningChannelSuccess(
+            .send(
+                0,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(
                     OpenExtendedMiningChannelSuccessOwned {
                         request_id: request.request_id,
                         channel_id: 9,
@@ -469,25 +447,21 @@ impl MockedJdc {
                             .expect("extranonce prefix must fit into B032"),
                         group_channel_id: 1,
                     },
-                ),
-            ))
-            .await
-            .expect("mock pool should open the upstream extended channel");
+                )),
+            )
+            .await;
     }
 
-    // Connects a mock downstream to JDC through a sniffer, and returns it once JDC has accepted
-    // it. JDC accepts downstreams only once it holds a future template and a prevhash, so this
-    // also shows the first chain tip has been handled.
-    async fn connect_downstream(&self, identifier: &'static str) -> MockedDownstream {
-        let (sniffer, sniffer_address) =
-            integration_tests_sv2::start_sniffer(identifier, self.address, false, vec![], None);
-        let sender = MockDownstream::new(
-            sniffer_address,
-            WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+    // Connects a mock downstream to JDC, and returns it once JDC has accepted it. JDC accepts
+    // downstreams only once it holds a future template and a prevhash, so this also shows the
+    // first chain tip has been handled.
+    async fn connect_downstream(&self) -> MockedDownstream {
+        let client = MockClient::new(
+            self.address,
+            Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
         )
-        .start()
         .await;
-        let downstream = MockedDownstream { sniffer, sender };
+        let downstream = MockedDownstream { client };
         downstream
             .wait_for(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
             .await;
@@ -497,15 +471,12 @@ impl MockedJdc {
     // Waits for the next custom job JDC sends the Pool. Whatever JDC sent the Pool before it is
     // discarded, and whatever it sent after it stays queued.
     async fn next_custom_job(&self) -> SetCustomMiningJobOwned {
-        self.pool_sniffer
-            .wait_for_message_type(
-                MessageDirection::ToUpstream,
-                MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
-            )
+        self.pool
+            .wait_for_message_type(0, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB)
             .await;
         loop {
             if let Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(custom_job)))) =
-                self.pool_sniffer.next_message_from_downstream()
+                self.pool.next_message(0)
             {
                 return custom_job;
             }
@@ -515,7 +486,7 @@ impl MockedJdc {
     // Returns the custom jobs JDC has sent the Pool and the test has not read yet, and discards
     // everything else JDC has sent it.
     fn sent_custom_jobs(&self) -> Vec<SetCustomMiningJobOwned> {
-        std::iter::from_fn(|| self.pool_sniffer.next_message_from_downstream())
+        std::iter::from_fn(|| self.pool.next_message(0))
             .filter_map(|(_, message)| match message {
                 AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(custom_job)) => {
                     Some(custom_job)
@@ -526,15 +497,14 @@ impl MockedJdc {
     }
 }
 
-// A mock downstream connected to JDC, behind a sniffer.
+// A mock downstream connected to JDC.
 struct MockedDownstream {
-    sniffer: Sniffer<'static>,
-    sender: Sender<AnyMessageOwned>,
+    client: MockClient,
 }
 
 impl MockedDownstream {
     async fn request_extended_channel(&self) {
-        self.sender
+        self.client
             .send(AnyMessageOwned::Mining(
                 MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                     request_id: 1,
@@ -544,15 +514,12 @@ impl MockedDownstream {
                     min_extranonce_size: 0,
                 }),
             ))
-            .await
-            .expect("mock downstream should request an extended channel");
+            .await;
     }
 
     // Waits for JDC to send this downstream a message of `message_type`.
     async fn wait_for(&self, message_type: u8) {
-        self.sniffer
-            .wait_for_message_type(MessageDirection::ToDownstream, message_type)
-            .await;
+        self.client.wait_for_message_type(message_type).await;
     }
 
     // Waits for the next extended job JDC hands this downstream. Whatever JDC sent it before the
@@ -561,7 +528,7 @@ impl MockedDownstream {
         self.wait_for(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB).await;
         loop {
             if let Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(job)))) =
-                self.sniffer.next_message_from_upstream()
+                self.client.next_message()
             {
                 return job;
             }
