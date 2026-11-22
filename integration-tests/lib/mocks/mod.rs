@@ -499,6 +499,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_message_is_present_on_a_connection_nobody_opened() {
+        let server = MockServer::new(get_available_address(), None).await;
+
+        assert!(
+            server
+                .assert_message_not_present(
+                    0,
+                    MESSAGE_TYPE_SETUP_CONNECTION,
+                    Duration::from_millis(300),
+                )
+                .await
+        );
+    }
+
+    // A connection that opens while its absence is being watched is watched for the rest of the
+    // deadline.
+    #[tokio::test]
+    async fn a_message_on_a_connection_opened_during_the_deadline_is_present() {
+        let address = get_available_address();
+        let server = MockServer::new(address, None).await;
+        let absent = server.assert_message_not_present(
+            0,
+            MESSAGE_TYPE_SETUP_CONNECTION,
+            Duration::from_secs(5),
+        );
+        let connect = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            MockClient::new(
+                address,
+                Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+            )
+            .await
+        };
+
+        let (absent, _client) = tokio::join!(absent, connect);
+        assert!(!absent);
+    }
+
+    #[tokio::test]
     async fn closing_a_connection_is_seen_by_the_peer() {
         let address = get_available_address();
         let server = MockServer::new(address, None).await;

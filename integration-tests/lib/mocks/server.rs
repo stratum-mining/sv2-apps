@@ -193,16 +193,37 @@ impl MockServer {
 
     /// Watches `connection` for `deadline`, returning `false` as soon as its queue holds a message
     /// of `message_type`, and `true` if the whole duration passes without one.
+    ///
+    /// This doesn't wait for `connection` to become available: a connection that never does
+    /// received no message, so the answer is `true`. It panics instead if the server stopped
+    /// accepting connections, which proves nothing about what the peer would have sent.
     pub async fn assert_message_not_present(
         &self,
         connection: ConnectionId,
         message_type: u8,
         deadline: Duration,
     ) -> bool {
-        self.connection(connection)
-            .await
-            .assert_message_not_present(message_type, deadline)
-            .await
+        let start = Instant::now();
+        loop {
+            if let Some(connection) = self.connections.get_cloned(&connection) {
+                return connection
+                    .assert_message_not_present(
+                        message_type,
+                        deadline.saturating_sub(start.elapsed()),
+                    )
+                    .await;
+            }
+            if start.elapsed() >= deadline {
+                if let Some(failure) = self.accept_failure.get().ok().flatten() {
+                    panic!(
+                        "MockServer {}: connection {connection} can't be accepted: {failure}",
+                        self.address
+                    );
+                }
+                return true;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     /// Closes `connection`, once the messages already sent on it have been written out.
