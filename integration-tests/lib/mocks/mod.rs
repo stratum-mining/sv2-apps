@@ -178,6 +178,11 @@ impl Connection {
         self.received.has_message_type_with_remove(message_type);
     }
 
+    fn has_message_type(&self, message_type: u8) -> bool {
+        self.panic_on_failure();
+        self.received.has_message_type(message_type)
+    }
+
     fn clean_queue(&self) {
         self.panic_on_failure();
         self.received.clear();

@@ -130,6 +130,11 @@ impl MockClient {
             .await;
     }
 
+    /// Whether the queue holds a message of `message_type` received from the server.
+    pub fn has_message_type(&self, message_type: u8) -> bool {
+        self.connection.has_message_type(message_type)
+    }
+
     /// Removes every message from the queue.
     pub fn clean_queue(&self) {
         self.connection.clean_queue();
