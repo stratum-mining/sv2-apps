@@ -22,9 +22,9 @@ use translator_sv2::TranslatorSv2;
 use utils::{ROLE_STARTUP_DELAY, get_available_address};
 
 pub mod interceptor;
+pub mod jdc_with_mocks;
 pub mod message_aggregator;
 pub mod mining_device;
-pub mod mocked_jdc;
 pub mod mocks;
 pub mod prometheus_metrics_assertions;
 pub mod sniffer;

@@ -1,5 +1,5 @@
 use integration_tests_sv2::{
-    mocked_jdc::MockedJdc,
+    jdc_with_mocks::JdcWithMocks,
     mocks::{ClientSetupConnection, MockClient},
     utils::ABSENCE_WINDOW,
 };
@@ -33,7 +33,7 @@ use stratum_apps::{
 #[tokio::test]
 async fn jdc_ignores_replayed_upstream_channel_open_answers() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -201,7 +201,7 @@ async fn jdc_ignores_replayed_upstream_channel_open_answers() {
 #[tokio::test]
 async fn jdc_ignores_upstream_channel_open_answers_for_another_request() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -344,7 +344,7 @@ async fn jdc_ignores_upstream_channel_open_answers_for_another_request() {
 #[tokio::test]
 async fn jdc_falls_back_from_a_pool_assigning_a_target_easier_than_requested() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -456,7 +456,7 @@ async fn jdc_falls_back_from_a_pool_assigning_a_target_easier_than_requested() {
 #[tokio::test]
 async fn jdc_falls_back_from_a_pool_extranonce_layout_it_cannot_allocate_from() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -569,7 +569,7 @@ async fn jdc_falls_back_from_a_pool_extranonce_layout_it_cannot_allocate_from() 
 #[tokio::test]
 async fn jdc_falls_back_from_a_pool_extranonce_too_large_for_the_coinbase() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start_with_signature(&"x".repeat(60)).await;
+    let jdc = JdcWithMocks::start_with_signature(&"x".repeat(60)).await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -679,7 +679,7 @@ async fn jdc_falls_back_from_a_pool_extranonce_too_large_for_the_coinbase() {
 #[tokio::test]
 async fn jdc_opens_the_channels_queued_behind_a_disconnected_requester() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -800,7 +800,7 @@ async fn jdc_opens_the_channels_queued_behind_a_disconnected_requester() {
 #[tokio::test]
 async fn jdc_answers_a_refused_update_channel_only_to_its_downstream() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -979,7 +979,7 @@ async fn next_open_mining_channel_error(downstream: &MockClient) -> OpenMiningCh
 // A first open the channel constructor refuses is answered by JDC itself: the downstream gets its
 // `OpenMiningChannel.Error`, the Pool hears nothing, JDC does not fall back, and the next valid
 // open still opens the upstream channel.
-async fn assert_refused_open_stays_local(jdc: &MockedJdc) {
+async fn assert_refused_open_stays_local(jdc: &JdcWithMocks) {
     assert!(
         jdc.pool
             .assert_message_not_present(
@@ -1002,7 +1002,7 @@ async fn assert_refused_open_stays_local(jdc: &MockedJdc) {
 #[tokio::test]
 async fn jdc_refuses_a_first_open_with_an_invalid_hash_rate_without_touching_the_pool() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -1138,7 +1138,7 @@ async fn jdc_refuses_a_first_open_with_an_invalid_hash_rate_without_touching_the
 #[tokio::test]
 async fn jdc_refuses_a_first_open_with_a_zero_max_target_without_touching_the_pool() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(
@@ -1270,7 +1270,7 @@ async fn jdc_refuses_a_first_open_with_a_zero_max_target_without_touching_the_po
 #[tokio::test]
 async fn jdc_refuses_a_standard_first_open_with_an_invalid_hash_rate_without_touching_the_pool() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     // The Template Provider sends future template 1 and the prevhash activating it.
     jdc.tp
         .send(

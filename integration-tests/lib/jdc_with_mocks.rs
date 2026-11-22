@@ -13,7 +13,7 @@ use stratum_apps::stratum_core::common_messages_sv2::{
 /// and observes what JDC sends them: it sends from, and reads, the `tp`, `pool` and `next_pool`
 /// mocks. A second Pool/JDS pair is configured after the first, so
 /// a fallback from the first shows as JDC setting up the second.
-pub struct MockedJdc {
+pub struct JdcWithMocks {
     pub jdc: JobDeclaratorClient,
     pub address: SocketAddr,
     /// The Template Provider. JDC's connection to it is connection `0`.
@@ -27,7 +27,7 @@ pub struct MockedJdc {
     _next_jds: MockServer,
 }
 
-impl MockedJdc {
+impl JdcWithMocks {
     /// Starts JDC with its mocked peers.
     pub async fn start() -> Self {
         Self::start_with_signature("JDC").await

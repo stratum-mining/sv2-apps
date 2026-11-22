@@ -54,7 +54,7 @@ const TEMPLATE_VALUE: u64 = 5_000_000_000;
 #[tokio::test]
 async fn jdc_coinbase_only_sends_one_custom_job_per_template() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     let first = jdc.connect_with_upstream_channel().await;
 
     // A second downstream opens its own extended channel on the open upstream channel, and a
@@ -113,7 +113,7 @@ async fn jdc_coinbase_only_sends_one_custom_job_per_template() {
 #[tokio::test]
 async fn jdc_coinbase_only_activated_template_custom_job_pays_the_template_reward() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     let downstream = jdc.connect_with_upstream_channel().await;
     jdc.sent_custom_jobs();
     downstream.client.clean_queue();
@@ -137,7 +137,7 @@ async fn jdc_coinbase_only_activated_template_custom_job_pays_the_template_rewar
 #[tokio::test]
 async fn jdc_coinbase_only_upstream_channel_opens_with_a_custom_job_for_the_chain_tip() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     let downstream = jdc.connect_with_upstream_channel().await;
     let downstream_job = downstream.next_extended_job().await;
 
@@ -157,7 +157,7 @@ async fn jdc_coinbase_only_upstream_channel_opens_with_a_custom_job_for_the_chai
 #[tokio::test]
 async fn jdc_coinbase_only_keeps_its_tokens_until_the_upstream_channel_opens() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     let token_requests = jdc.token_requests(2).await;
     jdc.answer_token_requests(&token_requests).await;
     jdc.wait_for_first_token().await;
@@ -196,7 +196,7 @@ async fn jdc_coinbase_only_keeps_its_tokens_until_the_upstream_channel_opens() {
 #[tokio::test]
 async fn jdc_coinbase_only_chain_tip_before_the_first_token_answer_stays_solo() {
     integration_tests_sv2::start_tracing();
-    let jdc = MockedJdc::start().await;
+    let jdc = JdcWithMocks::start().await;
     let token_requests = jdc.token_requests(2).await;
     jdc.send_chain_tip(1).await;
     let downstream = jdc.connect_downstream().await;
@@ -249,7 +249,7 @@ fn assert_pays_template_reward(
 
 // A coinbase-only JDC whose Template Provider, Pool and JDS are mocks, so a test decides what
 // every peer sends and observes everything JDC sends back.
-struct MockedJdc {
+struct JdcWithMocks {
     jdc: JobDeclaratorClient,
     address: SocketAddr,
     tp: MockServer,
@@ -257,7 +257,7 @@ struct MockedJdc {
     jds: MockServer,
 }
 
-impl MockedJdc {
+impl JdcWithMocks {
     async fn start() -> Self {
         let tp_address = get_available_address();
         let tp = MockServer::new(
