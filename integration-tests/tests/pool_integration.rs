@@ -6,7 +6,7 @@ use stratum_apps::stratum_core::parsers_sv2::{
 // `PoolSv2` is a module that implements the Pool role in the Stratum V2 protocol.
 use integration_tests_sv2::{
     interceptor::{MessageDirection, ReplaceMessage},
-    mock_roles::{MockDownstream, WithSetup},
+    mocks::{ClientSetupConnection, MockClient},
     template_provider::DifficultyLevel,
     *,
 };
@@ -462,36 +462,21 @@ async fn pool_reject_setup_connection_with_unsupported_version() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("0", pool_addr, false, vec![], None);
-    let _mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes(SetupConnectionOwned {
-            protocol: Protocol::MiningProtocol,
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection {
             min_version: 3,
             max_version: 3,
-            flags: 0,
-            endpoint_host: "0.0.0.0".try_into().unwrap(),
-            endpoint_port: 0,
-            vendor: "integration-test".try_into().unwrap(),
-            hardware_version: "".try_into().unwrap(),
-            firmware: "".try_into().unwrap(),
-            device_id: "".try_into().unwrap(),
+            ..ClientSetupConnection::new(Protocol::MiningProtocol)
         }),
     )
-    .start()
     .await;
 
-    sniffer
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
-        .await;
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_SETUP_CONNECTION_ERROR)
         .await;
 
-    let setup_connection_error = sniffer.next_message_from_upstream();
+    let setup_connection_error = mock_downstream.next_message();
     let setup_connection_error = match setup_connection_error {
         Some((_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(msg)))) => msg,
         msg => panic!("Expected SetupConnectionError message, found: {:?}", msg),
@@ -514,25 +499,17 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
     // no JDS
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
-    let (sniffer, sniffer_addr) = start_sniffer("mock-pool", pool_addr, false, vec![], None);
-    let send_to_pool = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0b0010),
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection {
+            flags: 0b0010,
+            ..ClientSetupConnection::new(Protocol::MiningProtocol)
+        }),
     )
-    .start()
     .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_SETUP_CONNECTION,
-        )
-        .await;
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     let set_custom_mining_job =
@@ -551,17 +528,14 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
             coinbase_tx_locktime: 0,
             merkle_path: Seq0255Owned::new(Vec::new()).unwrap(),
         }));
-    send_to_pool.send(set_custom_mining_job).await.unwrap();
+    mock_downstream.send(set_custom_mining_job).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR)
         .await;
 
     let set_custom_mining_job_error = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobError(msg)))) => {
                 break msg;
             }
@@ -579,7 +553,7 @@ async fn pool_without_jds_rejects_set_custom_mining_job() {
     shutdown_all!(pool);
 }
 
-// This test launches a Pool and leverages a MockDownstream to test the correct functionalities of
+// This test launches a Pool and leverages a MockClient to test the correct functionalities of
 // grouping extended channels.
 #[tokio::test]
 async fn pool_group_extended_channels() {
@@ -589,19 +563,14 @@ async fn pool_group_extended_channels() {
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
-    let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
-
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     const NUM_EXTENDED_CHANNELS: u32 = 10;
@@ -618,20 +587,14 @@ async fn pool_group_extended_channels() {
                 min_extranonce_size: 0,
             }),
         );
-        send_to_pool
-            .send(open_extended_mining_channel)
-            .await
-            .unwrap();
+        mock_downstream.send(open_extended_mining_channel).await;
 
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-            )
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
             .await;
 
         let group_channel_id = loop {
-            match sniffer.next_message_from_upstream() {
+            match mock_downstream.next_message() {
                 Some((
                     _,
                     AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(msg)),
@@ -648,17 +611,11 @@ async fn pool_group_extended_channels() {
         );
 
         // also assert the correct message sequence after OpenExtendedMiningChannelSuccess
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-            )
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
             .await;
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-            )
+        mock_downstream
+            .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
             .await;
     }
 
@@ -670,15 +627,12 @@ async fn pool_group_extended_channels() {
     tp.create_mempool_transaction().unwrap();
 
     // wait for a NewExtendedMiningJob message
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // assert that the NewExtendedMiningJob message is directed to the correct group channel ID
-    let new_extended_mining_job_msg = sniffer.next_message_from_upstream();
+    let new_extended_mining_job_msg = mock_downstream.next_message();
     let new_extended_mining_job_msg = match new_extended_mining_job_msg {
         Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(msg)))) => msg,
         msg => panic!("Expected NewExtendedMiningJob message, found: {:?}", msg),
@@ -694,9 +648,8 @@ async fn pool_group_extended_channels() {
 
     // make sure there's no extra NewExtendedMiningJob messages
     assert!(
-        sniffer
+        mock_downstream
             .assert_message_not_present(
-                MessageDirection::ToDownstream,
                 MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
                 std::time::Duration::from_secs(1),
             )
@@ -709,20 +662,14 @@ async fn pool_group_extended_channels() {
 
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
         .await;
 
-    let set_new_prev_hash_msg = sniffer.next_message_from_upstream();
+    let set_new_prev_hash_msg = mock_downstream.next_message();
     let set_new_prev_hash_msg = match set_new_prev_hash_msg {
         Some((_, AnyMessageOwned::Mining(MiningOwned::SetNewPrevHash(msg)))) => msg,
         msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
@@ -738,9 +685,8 @@ async fn pool_group_extended_channels() {
 
     // make sure there's no extra SetNewPrevHash messages
     assert!(
-        sniffer
+        mock_downstream
             .assert_message_not_present(
-                MessageDirection::ToDownstream,
                 MESSAGE_TYPE_SET_NEW_PREV_HASH,
                 std::time::Duration::from_secs(1),
             )
@@ -750,7 +696,7 @@ async fn pool_group_extended_channels() {
     pool.shutdown().await;
 }
 
-// This test launches a Pool and leverages a MockDownstream to test the correct functionalities of
+// This test launches a Pool and leverages a MockClient to test the correct functionalities of
 // grouping standard channels.
 #[tokio::test]
 async fn pool_group_standard_channels() {
@@ -760,19 +706,14 @@ async fn pool_group_standard_channels() {
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
-    let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
-
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     const NUM_STANDARD_CHANNELS: u32 = 10;
@@ -788,20 +729,14 @@ async fn pool_group_standard_channels() {
             }),
         );
 
-        send_to_pool
-            .send(open_standard_mining_channel)
-            .await
-            .unwrap();
+        mock_downstream.send(open_standard_mining_channel).await;
 
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-            )
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
             .await;
 
         let (channel_id, group_channel_id) = loop {
-            match sniffer.next_message_from_upstream() {
+            match mock_downstream.next_message() {
                 Some((
                     _,
                     AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannelSuccess(msg)),
@@ -823,14 +758,11 @@ async fn pool_group_standard_channels() {
         );
 
         // also assert the correct message sequence after OpenStandardMiningChannelSuccess
-        sniffer
-            .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_NEW_MINING_JOB)
             .await;
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-            )
+        mock_downstream
+            .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
             .await;
     }
 
@@ -842,15 +774,12 @@ async fn pool_group_standard_channels() {
     tp.create_mempool_transaction().unwrap();
 
     // wait for a NewExtendedMiningJob message targeted to the correct group channel ID
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // assert that the NewExtendedMiningJob message is directed to the correct group channel ID
-    let new_extended_mining_job_msg = sniffer.next_message_from_upstream();
+    let new_extended_mining_job_msg = mock_downstream.next_message();
     let new_extended_mining_job_msg = match new_extended_mining_job_msg {
         Some((_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(msg)))) => msg,
         msg => panic!("Expected NewMiningJob message, found: {:?}", msg),
@@ -866,9 +795,8 @@ async fn pool_group_standard_channels() {
 
     // make sure there's no extra NewExtendedMiningJob messages
     assert!(
-        sniffer
+        mock_downstream
             .assert_message_not_present(
-                MessageDirection::ToDownstream,
                 MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
                 std::time::Duration::from_secs(1),
             )
@@ -878,9 +806,8 @@ async fn pool_group_standard_channels() {
 
     // make sure there's no NewMiningJob message
     assert!(
-        sniffer
+        mock_downstream
             .assert_message_not_present(
-                MessageDirection::ToDownstream,
                 MESSAGE_TYPE_NEW_MINING_JOB,
                 std::time::Duration::from_secs(1),
             )
@@ -893,20 +820,14 @@ async fn pool_group_standard_channels() {
 
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
         .await;
 
-    let set_new_prev_hash_msg = sniffer.next_message_from_upstream();
+    let set_new_prev_hash_msg = mock_downstream.next_message();
     let set_new_prev_hash_msg = match set_new_prev_hash_msg {
         Some((_, AnyMessageOwned::Mining(MiningOwned::SetNewPrevHash(msg)))) => msg,
         msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
@@ -922,9 +843,8 @@ async fn pool_group_standard_channels() {
 
     // make sure there's no extra SetNewPrevHash messages
     assert!(
-        sniffer
+        mock_downstream
             .assert_message_not_present(
-                MessageDirection::ToDownstream,
                 MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
                 std::time::Duration::from_secs(1),
             )
@@ -934,7 +854,7 @@ async fn pool_group_standard_channels() {
     pool.shutdown().await;
 }
 
-// This test launches a Pool and leverages a MockDownstream to test the correct functionalities of
+// This test launches a Pool and leverages a MockClient to test the correct functionalities of
 // NOT grouping standard channels when REQUIRES_STANDARD_JOBS is set.
 #[tokio::test]
 async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
@@ -944,20 +864,18 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
 
-    let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
-
     // Use REQUIRES_STANDARD_JOBS flag (0b0001) to prevent channel grouping
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0b0001),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection {
+            flags: 0b0001,
+            ..ClientSetupConnection::new(Protocol::MiningProtocol)
+        }),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     const NUM_STANDARD_CHANNELS: u32 = 10;
@@ -974,20 +892,14 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
             }),
         );
 
-        send_to_pool
-            .send(open_standard_mining_channel)
-            .await
-            .unwrap();
+        mock_downstream.send(open_standard_mining_channel).await;
 
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-            )
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
             .await;
 
         let (channel_id, group_channel_id) = loop {
-            match sniffer.next_message_from_upstream() {
+            match mock_downstream.next_message() {
                 Some((
                     _,
                     AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannelSuccess(msg)),
@@ -1011,14 +923,11 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
         );
 
         // also assert the correct message sequence after OpenStandardMiningChannelSuccess
-        sniffer
-            .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_NEW_MINING_JOB)
             .await;
-        sniffer
-            .wait_for_message_type_and_clean_queue(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-            )
+        mock_downstream
+            .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
             .await;
     }
 
@@ -1030,11 +939,11 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
     tp.create_mempool_transaction().unwrap();
 
     for _i in 0..NUM_STANDARD_CHANNELS {
-        sniffer
-            .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_NEW_MINING_JOB)
             .await;
 
-        let new_mining_job_msg = sniffer.next_message_from_upstream();
+        let new_mining_job_msg = mock_downstream.next_message();
         let channel_id = match new_mining_job_msg {
             Some((_, AnyMessageOwned::Mining(MiningOwned::NewMiningJob(msg)))) => msg.channel_id,
             msg => panic!("Expected NewMiningJob message, found: {:?}", msg),
@@ -1057,11 +966,11 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
     tp.generate_blocks(1);
 
     for _i in 0..NUM_STANDARD_CHANNELS {
-        sniffer
-            .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_NEW_MINING_JOB)
             .await;
 
-        let new_mining_job_msg = sniffer.next_message_from_upstream();
+        let new_mining_job_msg = mock_downstream.next_message();
         let channel_id = match new_mining_job_msg {
             Some((_, AnyMessageOwned::Mining(MiningOwned::NewMiningJob(msg)))) => msg.channel_id,
             msg => panic!("Expected NewMiningJob message, found: {:?}", msg),
@@ -1074,14 +983,11 @@ async fn pool_require_standard_jobs_set_does_not_group_standard_channels() {
     }
 
     for _i in 0..NUM_STANDARD_CHANNELS {
-        sniffer
-            .wait_for_message_type(
-                MessageDirection::ToDownstream,
-                MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-            )
+        mock_downstream
+            .wait_for_message_type(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
             .await;
 
-        let set_new_prev_hash_msg = sniffer.next_message_from_upstream();
+        let set_new_prev_hash_msg = mock_downstream.next_message();
         let channel_id = match set_new_prev_hash_msg {
             Some((_, AnyMessageOwned::Mining(MiningOwned::SetNewPrevHash(msg)))) => msg.channel_id,
             msg => panic!("Expected SetNewPrevHash message, found: {:?}", msg),
@@ -1113,19 +1019,18 @@ async fn pool_require_standard_jobs_set_rejects_open_extended_mining_channel() {
     )
     .await;
 
-    let (sniffer, sniffer_addr) = start_sniffer("sniffer", pool_addr, false, vec![], None);
     // SetupConnection flags: 0b0001 == REQUIRES_STANDARD_JOBS.
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0b0001),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection {
+            flags: 0b0001,
+            ..ClientSetupConnection::new(Protocol::MiningProtocol)
+        }),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     let open_extended_mining_channel = AnyMessageOwned::Mining(
@@ -1137,20 +1042,14 @@ async fn pool_require_standard_jobs_set_rejects_open_extended_mining_channel() {
             min_extranonce_size: 8,
         }),
     );
-    send_to_pool
-        .send(open_extended_mining_channel)
-        .await
-        .unwrap();
+    mock_downstream.send(open_extended_mining_channel).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
         .await;
 
     let error = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((_, AnyMessageOwned::Mining(MiningOwned::OpenMiningChannelError(msg)))) => {
                 break msg;
             }
