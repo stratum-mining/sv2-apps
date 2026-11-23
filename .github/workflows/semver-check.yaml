@@ -13,6 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # cargo-semver-checks resolves each crate, and its published baseline,
+      # from scratch, without Cargo.lock. This makes that resolution prefer
+      # dependency versions whose `rust-version` the installed toolchain
+      # satisfies, instead of the newest release, which may require a newer
+      # rustc than the one this job runs on.
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
 
     steps:
       - name: Checkout repository
