@@ -180,6 +180,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     vec![0u8; local_prefix_padding_len],
                     full_extranonce_size,
                     AGGREGATED_TPROXY_MAX_CHANNELS,
+                    stratum_apps::utils::extranonce_allocator_seed(),
                 )
                 .map_err(|e| {
                     error!(
@@ -351,6 +352,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                         vec![0u8; local_prefix_padding_len],
                         full_extranonce_size,
                         NON_AGGREGATED_TPROXY_MAX_CHANNELS,
+                        stratum_apps::utils::extranonce_allocator_seed(),
                     )
                     .map_err(|e| {
                         error!(

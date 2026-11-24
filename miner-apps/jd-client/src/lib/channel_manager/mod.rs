@@ -886,9 +886,13 @@ impl ChannelManager {
         // Start with a solo-mining allocator (no upstream prefix). Once the
         // upstream channel is opened in `handle_open_extended_mining_channel_success`
         // this allocator is replaced with one built from the upstream prefix.
-        let extranonce_allocator =
-            ExtranonceAllocator::new(Vec::new(), SOLO_FULL_EXTRANONCE_SIZE, JDC_MAX_CHANNELS)
-                .map_err(JDCError::<error::ChannelManager>::shutdown)?;
+        let extranonce_allocator = ExtranonceAllocator::new(
+            Vec::new(),
+            SOLO_FULL_EXTRANONCE_SIZE,
+            JDC_MAX_CHANNELS,
+            stratum_apps::utils::extranonce_allocator_seed(),
+        )
+        .map_err(JDCError::<error::ChannelManager>::shutdown)?;
 
         // Record the cap actually in force. When unset it comes from the `channels_sv2`
         // default, so it appears nowhere in this application's own config and is

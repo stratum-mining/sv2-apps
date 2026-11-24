@@ -184,6 +184,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             Vec::new(),
             total_len as u8,
             JDC_MAX_CHANNELS,
+            stratum_apps::utils::extranonce_allocator_seed(),
         )
         .map_err(|e| {
             warn!("Pool granted an extranonce layout JDC can't allocate from, preparing fallback: {e:?}");
@@ -433,6 +434,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                         Vec::new(),
                         full_extranonce_size as u8,
                         JDC_MAX_CHANNELS,
+                        stratum_apps::utils::extranonce_allocator_seed(),
                     ) {
                         Ok(e) => e,
                         Err(e) => {

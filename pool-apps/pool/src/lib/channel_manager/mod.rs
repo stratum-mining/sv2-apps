@@ -174,9 +174,13 @@ impl ChannelManager {
         // allocates extranonce prefixes in its own distinct namespace.
         let local_prefix_bytes = config.server_id().to_be_bytes().to_vec();
 
-        let extranonce_allocator =
-            ExtranonceAllocator::new(local_prefix_bytes, FULL_EXTRANONCE_SIZE, POOL_MAX_CHANNELS)
-                .map_err(PoolError::shutdown)?;
+        let extranonce_allocator = ExtranonceAllocator::new(
+            local_prefix_bytes,
+            FULL_EXTRANONCE_SIZE,
+            POOL_MAX_CHANNELS,
+            stratum_apps::utils::extranonce_allocator_seed(),
+        )
+        .map_err(PoolError::shutdown)?;
 
         let channel_manager_io = ChannelManagerIo {
             tp_sender,

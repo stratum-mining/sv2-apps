@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn capacity_exhaustion_has_specific_error_code() {
-        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1).unwrap();
+        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1, [0; 16]).unwrap();
         let _occupied_prefix = allocator.allocate_standard().unwrap();
 
         let error = allocator.allocate_standard().unwrap_err();
@@ -1523,7 +1523,7 @@ mod tests {
 
     #[test]
     fn invalid_rollable_size_keeps_specific_error_code() {
-        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1).unwrap();
+        let mut allocator = ExtranonceAllocator::new(vec![], 4, 1, [0; 16]).unwrap();
         let invalid_size = allocator.rollable_extranonce_size() as usize + 1;
 
         let error = allocator.allocate_extended(invalid_size).unwrap_err();

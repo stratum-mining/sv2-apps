@@ -1500,6 +1500,7 @@ mod tests {
                     vec![],
                     12,
                     AGGREGATED_TPROXY_MAX_CHANNELS,
+                    [0; 16],
                 )
                 .unwrap(),
             ))
@@ -2835,7 +2836,8 @@ mod tests {
             true,
         );
         let mut allocator =
-            ExtranonceAllocator::from_upstream_prefix(vec![0; 4], vec![0; 23], 32, 1).unwrap();
+            ExtranonceAllocator::from_upstream_prefix(vec![0; 4], vec![0; 23], 32, 1, [0; 16])
+                .unwrap();
         let allocated_prefix = allocator.allocate_extended(4).unwrap();
         let original_prefix = allocated_prefix.as_bytes().to_vec();
         assert_eq!(original_prefix.len(), 28);
@@ -2892,7 +2894,8 @@ mod tests {
     async fn aggregated_channel_capacity_exhaustion_rejects_request() {
         let (manager, sv1_server_receiver) = create_connected_aggregated_channel_manager();
         let mut allocator =
-            ExtranonceAllocator::from_upstream_prefix(vec![0; 4], vec![0; 1], 12, 1).unwrap();
+            ExtranonceAllocator::from_upstream_prefix(vec![0; 4], vec![0; 1], 12, 1, [0; 16])
+                .unwrap();
         let occupied_prefix = allocator.allocate_extended(6).unwrap();
         manager
             .aggregated_extranonce_allocator
