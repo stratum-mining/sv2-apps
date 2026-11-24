@@ -184,15 +184,17 @@ impl IsServerAsync for Sv1Server {
             .await
     }
 
-    /// The suggestion is not used: the initial target comes from the configured hashrate, then
-    /// vardiff.
+    /// Acknowledges the suggestion without using it: the initial target comes from the
+    /// configured hashrate, then vardiff.
     async fn handle_suggest_difficulty(
         &mut self,
-        _client_id: Option<usize>,
-        _id: Id,
+        client_id: Option<usize>,
+        id: Id,
         _request: SuggestDifficulty,
     ) -> Result<(), Self::Error> {
-        Ok(())
+        let downstream_id = client_id.expect("Downstream id should exist");
+        self.send_response(downstream_id, Response::success(id, true))
+            .await
     }
 }
 

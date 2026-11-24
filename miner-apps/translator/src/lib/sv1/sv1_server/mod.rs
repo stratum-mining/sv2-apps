@@ -4809,6 +4809,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suggest_difficulty_is_acknowledged() {
+        let (server, _to_server, _from_server) = server_with_channels(false);
+        let (_events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+        let line = r#"{"id":4,"method":"mining.suggest_difficulty","params":[1000]}"#;
+        receive_request(&server, serde_json::from_str(line).unwrap())
+            .await
+            .unwrap();
+        let json_rpc::Message::Response(response) = responses.try_recv().unwrap() else {
+            panic!("expected a suggest_difficulty response");
+        };
+        assert_eq!(response.id, Some(Id::from(4u64)));
+        assert_eq!(response.result.unwrap(), serde_json::json!(true));
+    }
+
+    #[tokio::test]
     async fn accepted_setup_is_parsed_before_open_and_dispatched_after_success() {
         let configure = r#"{"id":1,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"1fffe000","version-rolling.min-bit-count":2}]}"#;
         let authorize = r#"{"id":3,"method":"mining.authorize","params":["worker",""]}"#;
