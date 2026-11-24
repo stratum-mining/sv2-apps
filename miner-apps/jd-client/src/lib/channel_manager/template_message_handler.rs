@@ -376,9 +376,18 @@ impl HandleTemplateDistributionMessagesFromServerOwnedAsync for ChannelManager {
                 .map_err(|_e| JDCError::fallback(JDCErrorKind::ChannelErrorSender))?;
         }
 
-        self.last_new_prev_hash
-            .set(Some(msg.clone()))
+        let previous = self
+            .last_new_prev_hash
+            .with(|last| last.replace(msg.clone()))
             .map_err(JDCError::shutdown)?;
+        // Downstream channels are only given jobs on `msg.prev_hash` from here on, so the
+        // extranonce prefixes of the ones that were closed under the previous one can be assigned
+        // again.
+        if previous.is_none_or(|previous| previous.prev_hash != msg.prev_hash) {
+            self.extranonce_allocator
+                .with(|allocator| allocator.release_dropped_prefixes())
+                .map_err(JDCError::shutdown)?;
+        }
 
         let mut messages: Vec<crate::channel_manager::downstream_message_handler::RouteMessageTo> =
             Vec::new();

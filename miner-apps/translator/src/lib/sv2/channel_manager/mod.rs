@@ -52,11 +52,11 @@ use stratum_apps::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-/// Maximum number of concurrent downstream channels managed by the
-/// aggregated-mode shared [`ExtranonceAllocator`]. Determines
-/// [`AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES`] via [`bytes_needed`]. The
-/// internal allocation bitmap uses `AGGREGATED_TPROXY_MAX_CHANNELS / 8`
-/// bytes of RAM.
+/// Maximum number of downstream channels the aggregated-mode shared
+/// [`ExtranonceAllocator`] can allocate under one chain tip, counting the ones
+/// that were closed. Determines [`AGGREGATED_TPROXY_LOCAL_PREFIX_BYTES`] via
+/// [`bytes_needed`]. The internal allocation bitmaps use
+/// `AGGREGATED_TPROXY_MAX_CHANNELS / 4` bytes of RAM.
 pub(crate) const AGGREGATED_TPROXY_MAX_CHANNELS: u32 = 65_536;
 
 /// Bytes the translator reserves for its `local_index` in aggregated mode.
@@ -1024,13 +1024,14 @@ impl ChannelManager {
                 // releases the allocator-minted `ExtranoncePrefix` it owns
                 // via RAII:
                 //
-                // - Aggregated mode: clears the downstream's bit in the shared
-                //   `aggregated_extranonce_allocator`'s bitmap, making the slot reusable for future
-                //   downstreams. This is the primary reclaim path for aggregated slots.
+                // - Aggregated mode: ends the downstream's allocation in the shared
+                //   `aggregated_extranonce_allocator`, which makes the slot reusable for future
+                //   downstreams on the next chain tip. This is the primary reclaim path for
+                //   aggregated slots.
                 // - Non-aggregated mode: a silent no-op — the per-channel allocator has already
                 //   been dropped right after minting the single prefix (the bitmap was keyed only
                 //   on that one slot), so the prefix's `Weak` reference fails to upgrade and there
-                //   is nothing to clear.
+                //   is nothing to mark.
                 if self.extended_channels.remove(&m.channel_id).is_some() {
                     debug!("Removed channel {} from extended_channels", m.channel_id);
                 } else {
@@ -1169,8 +1170,8 @@ impl ChannelManager {
                             .find(|channel_id| !self.extended_channels.contains_key(channel_id))
                     });
                 let Some(next_channel_id) = next_channel_id else {
-                    // The prefix holds its allocator slot until dropped. Release it before the
-                    // asynchronous rejection path so a failed request does not consume capacity.
+                    // The prefix counts as held by the allocator until dropped. Drop it before the
+                    // asynchronous rejection path; its slot is reusable on the next chain tip.
                     drop(new_extranonce_prefix);
                     return self
                         .reject_downstream_channel_request(

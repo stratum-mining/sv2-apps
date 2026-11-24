@@ -99,7 +99,8 @@ mod upstream_message_handler;
 // [`JobDeclaratorClientConfig::reserved_downstream_rollable_extranonce_size`];
 // see `handle_downstream_message` for the exact formula.
 
-/// Maximum number of concurrent downstream channels JDC can allocate.
+/// Maximum number of downstream channels JDC can allocate under one chain tip, counting the ones
+/// that were closed.
 /// Determines [`JDC_LOCAL_PREFIX_BYTES`] via [`bytes_needed`].
 const JDC_MAX_CHANNELS: u32 = 65_536;
 
