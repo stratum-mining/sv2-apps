@@ -184,17 +184,24 @@ impl IsServerAsync for Sv1Server {
             .await
     }
 
-    /// Acknowledges the suggestion without using it: the initial target comes from the
-    /// configured hashrate, then vardiff.
+    /// Acknowledges the suggestion, which is a receipt and not a promise, then uses it as the
+    /// miner's starting difficulty, see [`Sv1Server::apply_suggested_difficulty`].
     async fn handle_suggest_difficulty(
         &mut self,
         client_id: Option<usize>,
         id: Id,
-        _request: SuggestDifficulty,
+        request: SuggestDifficulty,
     ) -> Result<(), Self::Error> {
         let downstream_id = client_id.expect("Downstream id should exist");
         self.send_response(downstream_id, Response::success(id, true))
-            .await
+            .await?;
+        match request.difficulty {
+            Some(difficulty) => {
+                self.apply_suggested_difficulty(downstream_id, difficulty)
+                    .await
+            }
+            None => Ok(()),
+        }
     }
 }
 

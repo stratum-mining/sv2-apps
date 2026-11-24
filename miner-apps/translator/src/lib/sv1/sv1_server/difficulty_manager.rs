@@ -179,6 +179,84 @@ impl Sv1Server {
         Ok(())
     }
 
+    /// Starts a downstream's vardiff from the difficulty the miner suggested.
+    ///
+    /// Only the first suggestion of a connection counts, and only to raise the hashrate estimate.
+    /// The estimate never starts below the configured minimum, which keeps a miner from asking
+    /// for a flood of cheap shares. The upstream is told the new estimate, and the miner is
+    /// advertised the matching difficulty as far as its upstream target allows, see
+    /// [`Self::update_difficulty`]. From there vardiff owns the difficulty.
+    ///
+    /// With vardiff disabled the upstream sets the difficulty, so the suggestion is only recorded.
+    pub(super) async fn apply_suggested_difficulty(
+        &self,
+        downstream_id: DownstreamId,
+        difficulty: f64,
+    ) -> TproxyResult<(), error::Sv1Server> {
+        let difficulty_config = &self.config.downstream_difficulty_config;
+        let vardiff_enabled = difficulty_config.enable_vardiff;
+        let minimum_hashrate = difficulty_config.min_individual_miner_hashrate;
+        let shares_per_minute = self.shares_per_minute as f64;
+        // A share at difficulty 1 takes 2^32 hashes on average.
+        let suggested_hashrate = difficulty * 2f64.powi(32) * shares_per_minute / 60.0;
+
+        let update = self.with_registered_downstream(downstream_id, |downstream| {
+            downstream
+                .downstream_data
+                .with(|data| {
+                    if data.suggested_difficulty.is_some() {
+                        return None;
+                    }
+                    data.suggested_difficulty = Some(difficulty);
+                    let (true, Some(channel_id), Some(current_hashrate)) =
+                        (vardiff_enabled, data.channel_id, data.hashrate)
+                    else {
+                        return None;
+                    };
+                    if suggested_hashrate > Hashrate::MAX as f64 {
+                        warn!(
+                            "Ignoring difficulty {difficulty} suggested by downstream {downstream_id}: its hashrate cannot be represented"
+                        );
+                        return None;
+                    }
+                    let hashrate = (suggested_hashrate as Hashrate).max(minimum_hashrate);
+                    if hashrate <= current_hashrate {
+                        return None;
+                    }
+                    let target = match hash_rate_to_target(hashrate as f64, shares_per_minute) {
+                        Ok(target) => target,
+                        Err(e) => {
+                            warn!(
+                                "Ignoring difficulty {difficulty} suggested by downstream {downstream_id}: no target for hashrate {hashrate}: {e:?}"
+                            );
+                            return None;
+                        }
+                    };
+                    data.hashrate = Some(hashrate);
+                    data.desired_target = Some(target);
+                    data.stable_hashrate = false;
+                    Some((channel_id, target, hashrate))
+                })
+                .map_err(TproxyError::shutdown)
+        })?;
+        let Some((channel_id, target, hashrate)) = update else {
+            return Ok(());
+        };
+        info!(
+            "Downstream {downstream_id} suggested difficulty {difficulty}: starting vardiff from hashrate {hashrate}"
+        );
+
+        // Shares counted at the previous difficulty do not describe the new one.
+        self.vardiff.with_mut(&downstream_id, |vardiff_state| {
+            if let Err(e) = vardiff_state.reset_counter() {
+                error!("Failed to reset vardiff for downstream {downstream_id}: {e:?}");
+            }
+        });
+        self.send_update_channel_messages(vec![(downstream_id, channel_id, target, hashrate)])
+            .await?;
+        self.update_difficulty(downstream_id)
+    }
+
     /// Sends UpdateChannel messages for all target updates.
     ///
     /// Always sends UpdateChannel to keep upstream informed about target changes.

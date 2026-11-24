@@ -4824,6 +4824,119 @@ mod tests {
         assert_eq!(response.result.unwrap(), serde_json::json!(true));
     }
 
+    async fn suggest_test_difficulty(
+        server: &Sv1Server,
+        responses: &Receiver<json_rpc::Message>,
+        difficulty: f64,
+    ) {
+        let line =
+            format!(r#"{{"id":4,"method":"mining.suggest_difficulty","params":[{difficulty}]}}"#);
+        receive_request(server, serde_json::from_str(&line).unwrap())
+            .await
+            .unwrap();
+        let json_rpc::Message::Response(response) = responses.try_recv().unwrap() else {
+            panic!("expected a suggest_difficulty response");
+        };
+        assert_eq!(response.result.unwrap(), serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn suggested_difficulty_starts_vardiff_once() {
+        for aggregated in [false, true] {
+            let (server, _to_server, channel_manager) = vardiff_server(aggregated);
+            let (events, responses) =
+                register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+            let upstream_target = hash_rate_to_target(100.0, 5.0).unwrap();
+            server
+                .handle_set_target_message(test_set_target(9, upstream_target))
+                .await
+                .unwrap();
+            assert_eq!(queued_target(&events), Some(advertised(upstream_target)));
+
+            // A share at difficulty 1 takes 2^32 hashes, and 5 are expected per minute.
+            let hashrate = (1000.0 * 4294967296.0 * 5.0 / 60.0) as Hashrate;
+            let desired_target = hash_rate_to_target(hashrate as f64, 5.0).unwrap();
+            suggest_test_difficulty(&server, &responses, 1000.0).await;
+
+            let (MiningOwned::UpdateChannel(update), _) = channel_manager.try_recv().unwrap()
+            else {
+                panic!("expected UpdateChannel");
+            };
+            assert_eq!(update.nominal_hash_rate, hashrate);
+            assert_eq!(
+                Target::from_le_bytes(update.max_target.to_array()),
+                desired_target
+            );
+            assert_eq!(
+                read_test_data(&server, 7, |data| (
+                    data.hashrate,
+                    data.desired_target,
+                    data.suggested_difficulty
+                )),
+                (Some(hashrate), Some(desired_target), Some(1000.0))
+            );
+            // The miner moves to the harder difficulty once the upstream applies it.
+            assert_eq!(queued_target(&events), None);
+            server
+                .handle_set_target_message(test_set_target(9, desired_target))
+                .await
+                .unwrap();
+            assert_eq!(queued_target(&events), Some(advertised(desired_target)));
+
+            // Later suggestions are acknowledged and left to vardiff.
+            suggest_test_difficulty(&server, &responses, 2000.0).await;
+            assert!(channel_manager.is_empty());
+            assert_eq!(
+                read_test_data(&server, 7, |data| (
+                    data.hashrate,
+                    data.suggested_difficulty
+                )),
+                (Some(hashrate), Some(1000.0))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn suggested_difficulty_never_starts_below_the_minimum_hashrate() {
+        let (server, _to_server, channel_manager) = vardiff_server(false);
+        let (events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+        set_test_upstream_target(&server, 7, hash_rate_to_target(100.0, 5.0).unwrap());
+
+        suggest_test_difficulty(&server, &responses, 0.000000001).await;
+
+        assert!(channel_manager.is_empty());
+        assert_eq!(queued_target(&events), None);
+        assert_eq!(
+            read_test_data(&server, 7, |data| (
+                data.hashrate,
+                data.desired_target,
+                data.suggested_difficulty
+            )),
+            (Some(100.0), None, Some(0.000000001))
+        );
+    }
+
+    #[tokio::test]
+    async fn suggested_difficulty_is_only_recorded_without_vardiff() {
+        let (server, _to_server, channel_manager) = server_with_channels(false);
+        let (events, responses) =
+            register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+        set_test_upstream_target(&server, 7, hash_rate_to_target(100.0, 5.0).unwrap());
+
+        suggest_test_difficulty(&server, &responses, 1000.0).await;
+
+        assert!(channel_manager.is_empty());
+        assert_eq!(queued_target(&events), None);
+        assert_eq!(
+            read_test_data(&server, 7, |data| (
+                data.hashrate,
+                data.suggested_difficulty
+            )),
+            (Some(100.0), Some(1000.0))
+        );
+    }
+
     #[tokio::test]
     async fn accepted_setup_is_parsed_before_open_and_dispatched_after_success() {
         let configure = r#"{"id":1,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"1fffe000","version-rolling.min-bit-count":2}]}"#;

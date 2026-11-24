@@ -208,6 +208,8 @@ pub struct DownstreamData {
     pub connection_ip: IpAddr,
     pub version_rolling_mask: Option<HexU32Be>,
     pub version_rolling_min_bit: Option<u32>,
+    /// First difficulty the miner suggested with `mining.suggest_difficulty`.
+    pub suggested_difficulty: Option<f64>,
     pub sv1_username: String,
     pub sv1_worker_name: String,
     pub(super) cached_set_difficulty: Option<Sv1Difficulty>,
@@ -266,6 +268,7 @@ impl DownstreamData {
             connection_ip,
             version_rolling_mask: None,
             version_rolling_min_bit: None,
+            suggested_difficulty: None,
             sv1_username: String::new(),
             sv1_worker_name: String::new(),
             cached_set_difficulty: None,
