@@ -1,20 +1,20 @@
 use crate::{
     interceptor::{InterceptAction, MessageDirection},
-    message_aggregator::MessagesAggregator,
+    message_aggregator::{DEFAULT_TIMEOUT, MessagesAggregator},
     types::MsgType,
     utils::{
-        CONNECT_RETRY_INTERVAL, POLL_INTERVAL, create_downstream, create_upstream,
+        CONNECT_RETRY_INTERVAL, handshake_as_client, handshake_as_server,
         recv_from_down_send_to_up, recv_from_up_send_to_down, wait_for_client,
     },
 };
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, message_type_to_name};
 use tokio::{net::TcpStream, select};
-
-const DEFAULT_TIMEOUT: u64 = 60;
+use tokio_util::sync::CancellationToken;
 
 /// Allows to intercept messages sent between two roles.
 ///
@@ -87,24 +87,29 @@ impl<'a> Sniffer<'a> {
         let identifier = self.identifier.to_string();
         let negotiated_extensions = self.negotiated_extensions.clone();
         tokio::spawn(async move {
-            let (downstream_receiver, downstream_sender) =
-                create_downstream(wait_for_client(listening_address).await)
-                    .await
-                    .expect("Failed to create downstream");
-            let (upstream_receiver, upstream_sender) = create_upstream(loop {
-                match TcpStream::connect(upstream_address).await {
-                    Ok(stream) => break stream,
-                    Err(_) => {
-                        tracing::warn!(
-                            "Sniffer {}: unable to connect to upstream {}, retrying in {:?}",
-                            identifier,
-                            upstream_address,
-                            CONNECT_RETRY_INTERVAL
-                        );
-                        tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+            let (downstream_receiver, downstream_sender) = handshake_as_server(
+                wait_for_client(listening_address).await,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("Failed to create downstream");
+            let (upstream_receiver, upstream_sender) = handshake_as_client(
+                loop {
+                    match TcpStream::connect(upstream_address).await {
+                        Ok(stream) => break stream,
+                        Err(_) => {
+                            tracing::warn!(
+                                "Sniffer {}: unable to connect to upstream {}, retrying in {:?}",
+                                identifier,
+                                upstream_address,
+                                CONNECT_RETRY_INTERVAL
+                            );
+                            tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
+                        }
                     }
-                }
-            })
+                },
+                CancellationToken::new(),
+            )
             .await
             .expect("Failed to create upstream");
             select! {
@@ -169,32 +174,16 @@ impl<'a> Sniffer<'a> {
         message_direction: MessageDirection,
         message_type: u8,
     ) {
-        let now = std::time::Instant::now();
-        loop {
-            let has_message_type = match message_direction {
-                MessageDirection::ToDownstream => {
-                    self.messages_from_upstream.has_message_type(message_type)
-                }
-                MessageDirection::ToUpstream => {
-                    self.messages_from_downstream.has_message_type(message_type)
-                }
-            };
-
-            // ready to unblock test runtime
-            if has_message_type {
-                return;
-            }
-
-            // configurable timeout, 1 minute default
-            if now.elapsed().as_secs() > self.timeout.unwrap_or(DEFAULT_TIMEOUT) {
-                panic!(
-                    "timeout while waiting for message {} to go {}",
-                    message_type_to_name(message_type),
-                    message_direction
-                );
-            }
-
-            tokio::time::sleep(POLL_INTERVAL).await;
+        if !self
+            .queue(message_direction)
+            .wait_for_message_type(message_type, self.timeout())
+            .await
+        {
+            panic!(
+                "timeout while waiting for message {} to go {}",
+                message_type_to_name(message_type),
+                message_direction
+            );
         }
     }
 
@@ -213,16 +202,9 @@ impl<'a> Sniffer<'a> {
         message_type: u8,
         deadline: std::time::Duration,
     ) -> bool {
-        let start = std::time::Instant::now();
-
-        while start.elapsed() < deadline {
-            if self.has_message_type(message_direction, message_type) {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        true
+        self.queue(message_direction)
+            .assert_message_not_present(message_type, deadline)
+            .await
     }
 
     /// Similar to `[Sniffer::wait_for_message_type]` but also removes the messages from the queue
@@ -232,57 +214,41 @@ impl<'a> Sniffer<'a> {
         message_direction: MessageDirection,
         message_type: u8,
     ) -> bool {
-        let now = std::time::Instant::now();
-        loop {
-            let has_message_type = match message_direction {
-                MessageDirection::ToDownstream => self
-                    .messages_from_upstream
-                    .has_message_type_with_remove(message_type),
-                MessageDirection::ToUpstream => self
-                    .messages_from_downstream
-                    .has_message_type_with_remove(message_type),
-            };
-
-            // ready to unblock test runtime
-            if has_message_type {
-                return true;
-            }
-
-            // configurable timeout, 1 minute default
-            if now.elapsed().as_secs() > self.timeout.unwrap_or(DEFAULT_TIMEOUT) {
-                panic!(
-                    "timeout while waiting for message {} to go {}",
-                    message_type_to_name(message_type),
-                    message_direction
-                );
-            }
-
-            tokio::time::sleep(POLL_INTERVAL).await;
+        if !self
+            .queue(message_direction)
+            .wait_for_message_type_and_clean_queue(message_type, self.timeout())
+            .await
+        {
+            panic!(
+                "timeout while waiting for message {} to go {}",
+                message_type_to_name(message_type),
+                message_direction
+            );
         }
+        true
     }
 
     /// Clears all messages from the specified direction's queue.
     pub fn clean_queue(&self, message_direction: MessageDirection) {
-        match message_direction {
-            MessageDirection::ToDownstream => {
-                self.messages_from_upstream.clear();
-            }
-            MessageDirection::ToUpstream => {
-                self.messages_from_downstream.clear();
-            }
-        }
+        self.queue(message_direction).clear();
     }
 
     /// Checks whether the sniffer has received a message of the specified type.
     pub fn has_message_type(&self, message_direction: MessageDirection, message_type: u8) -> bool {
+        self.queue(message_direction).has_message_type(message_type)
+    }
+
+    // The queue holding the messages that travel in `message_direction`.
+    fn queue(&self, message_direction: MessageDirection) -> &MessagesAggregator {
         match message_direction {
-            MessageDirection::ToDownstream => {
-                self.messages_from_upstream.has_message_type(message_type)
-            }
-            MessageDirection::ToUpstream => {
-                self.messages_from_downstream.has_message_type(message_type)
-            }
+            MessageDirection::ToDownstream => &self.messages_from_upstream,
+            MessageDirection::ToUpstream => &self.messages_from_downstream,
         }
+    }
+
+    // How long this sniffer waits for a message: the configured timeout, 1 minute by default.
+    fn timeout(&self) -> Duration {
+        self.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_secs)
     }
 }
 

@@ -12,6 +12,16 @@ To assert the behavior of a role or the messages it exchanges with other roles, 
 For examples on how to use the `Sniffer` helper, check out the `sniffer_integration.rs` module or
 other tests in the `tests` folder.
 
+To stand in for a role, use the `mocks` module: a `MockServer` for the role under test to connect
+to, or a `MockClient` that connects to it. A test drives a mock through its methods: it sends
+messages and raw frames, waits for the messages the mock receives, asserts on them, and closes
+connections. A `MockServer` accepts every connection opened to it and addresses each by its
+`ConnectionId`.
+
+`SetupConnection` is the only exchange a mock performs by itself, when its constructor is given
+one. Every other answer is the test's to send: it waits for a message to arrive on a connection
+and then sends the answer on it. `jdc_upstream_setup.rs` is a short example.
+
 All tests run in either regtest or signet network.
 
 Bitcoin Core binaries are downloaded from https://bitcoincore.org/bin/ and the

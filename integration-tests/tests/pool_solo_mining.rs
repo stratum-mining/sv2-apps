@@ -23,9 +23,7 @@
 
 use integration_tests_sv2::{
     POOL_COINBASE_REWARD_ADDRESS,
-    interceptor::MessageDirection,
-    mock_roles::{MockDownstream, WithSetup},
-    sniffer::Sniffer,
+    mocks::{ClientSetupConnection, MockClient},
     template_provider::DifficultyLevel,
     *,
 };
@@ -115,19 +113,15 @@ async fn pool_solo_mining_invalid_payout_address() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - invalid payout address ===
@@ -143,17 +137,14 @@ async fn pool_solo_mining_invalid_payout_address() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
         .await;
 
     let error_ext: OpenMiningChannelErrorOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
@@ -180,17 +171,14 @@ async fn pool_solo_mining_invalid_payout_address() {
             max_target: vec![0xff; 32].try_into().unwrap(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
         .await;
 
     let error_std: OpenMiningChannelErrorOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
@@ -208,9 +196,11 @@ async fn pool_solo_mining_invalid_payout_address() {
     shutdown_all!(pool);
 }
 
-fn next_extended_channel_success(sniffer: &Sniffer<'_>) -> OpenExtendedMiningChannelSuccessOwned {
+fn next_extended_channel_success(
+    mock_downstream: &MockClient,
+) -> OpenExtendedMiningChannelSuccessOwned {
     loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -222,9 +212,9 @@ fn next_extended_channel_success(sniffer: &Sniffer<'_>) -> OpenExtendedMiningCha
     }
 }
 
-fn next_extended_job(sniffer: &Sniffer<'_>) -> NewExtendedMiningJobOwned {
+fn next_extended_job(mock_downstream: &MockClient) -> NewExtendedMiningJobOwned {
     loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -234,9 +224,9 @@ fn next_extended_job(sniffer: &Sniffer<'_>) -> NewExtendedMiningJobOwned {
     }
 }
 
-fn next_open_channel_error(sniffer: &Sniffer<'_>) -> OpenMiningChannelErrorOwned {
+fn next_open_channel_error(mock_downstream: &MockClient) -> OpenMiningChannelErrorOwned {
     loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
@@ -246,9 +236,9 @@ fn next_open_channel_error(sniffer: &Sniffer<'_>) -> OpenMiningChannelErrorOwned
     }
 }
 
-fn next_standard_job(sniffer: &Sniffer<'_>) -> NewMiningJobOwned {
+fn next_standard_job(mock_downstream: &MockClient) -> NewMiningJobOwned {
     loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((_, AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewMiningJob(msg)))) => {
                 break msg;
             }
@@ -263,23 +253,19 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("payout_isolation", pool_addr, false, vec![], None);
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // A zero max target is rejected during channel construction, before the
     // connection's payout policy is bound.
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 0,
@@ -289,21 +275,17 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
                 min_extranonce_size: 8,
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
         .await;
-    let rejected_open = next_open_channel_error(&sniffer);
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
+        .await;
+    let rejected_open = next_open_channel_error(&mock_downstream);
     assert_eq!(
         rejected_open.error_code.as_utf8_or_hex(),
         ERROR_CODE_OPEN_MINING_CHANNEL_MAX_TARGET_OUT_OF_RANGE
     );
 
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
@@ -315,16 +297,12 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
                 min_extranonce_size: 8,
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
         .await;
-    let channel_a = next_extended_channel_success(&sniffer);
-    let initial_job_a = next_extended_job(&sniffer);
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+    let channel_a = next_extended_channel_success(&mock_downstream);
+    let initial_job_a = next_extended_job(&mock_downstream);
     assert_eq!(
         extract_payout_info(&build_coinbase_tx(&channel_a, &initial_job_a)).addresses[0],
         MINER_COINBASE_REWARD_ADDR
@@ -332,7 +310,7 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
 
     // This identity would resolve to FullDonation, which conflicts with
     // channel A's policy; the rejected open must not replace it.
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
@@ -342,24 +320,17 @@ async fn pool_rejected_open_does_not_mutate_connection_payout_policy() {
                 min_extranonce_size: 8,
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
         .await;
-    let _rejected = next_open_channel_error(&sniffer);
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
+        .await;
+    let _rejected = next_open_channel_error(&mock_downstream);
 
     tp.create_mempool_transaction().unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
-    let refreshed_job_a = next_extended_job(&sniffer);
+    let refreshed_job_a = next_extended_job(&mock_downstream);
     let refreshed_payout_a = extract_payout_info(&build_coinbase_tx(&channel_a, &refreshed_job_a));
     assert_eq!(refreshed_payout_a.addresses[0], MINER_COINBASE_REWARD_ADDR);
 
@@ -372,22 +343,17 @@ async fn pool_rejects_incompatible_extended_channel_payout_policy() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) =
-        start_sniffer("payout_group_policy", pool_addr, false, vec![], None);
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 0,
@@ -399,18 +365,14 @@ async fn pool_rejects_incompatible_extended_channel_payout_policy() {
                 min_extranonce_size: 8,
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
         .await;
-    let channel_a = next_extended_channel_success(&sniffer);
-    let _initial_job_a = next_extended_job(&sniffer);
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+    let channel_a = next_extended_channel_success(&mock_downstream);
+    let _initial_job_a = next_extended_job(&mock_downstream);
 
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
@@ -420,28 +382,21 @@ async fn pool_rejects_incompatible_extended_channel_payout_policy() {
                 min_extranonce_size: 8,
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
         .await;
-    let error = next_open_channel_error(&sniffer);
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
+        .await;
+    let error = next_open_channel_error(&mock_downstream);
     assert_eq!(
         error.error_code.as_utf8_or_hex(),
         "incompatible-payout-mode"
     );
 
     tp.create_mempool_transaction().unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
-    let refreshed_job_a = next_extended_job(&sniffer);
+    let refreshed_job_a = next_extended_job(&mock_downstream);
     let refreshed_payout_a = extract_payout_info(&build_coinbase_tx(&channel_a, &refreshed_job_a));
     assert_eq!(refreshed_payout_a.addresses[0], MINER_COINBASE_REWARD_ADDR);
 
@@ -454,22 +409,20 @@ async fn pool_rejects_incompatible_standard_channel_payout_policy() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) =
-        start_sniffer("standard_payout_isolation", pool_addr, false, vec![], None);
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0b0001),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection {
+            flags: 0b0001,
+            ..ClientSetupConnection::new(Protocol::MiningProtocol)
+        }),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenStandardMiningChannel(OpenStandardMiningChannelOwned {
                 request_id: 0,
@@ -480,16 +433,12 @@ async fn pool_rejects_incompatible_standard_channel_payout_policy() {
                 max_target: [0xff; 32].into(),
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+        .await;
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
     let channel_a: OpenStandardMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -499,18 +448,15 @@ async fn pool_rejects_incompatible_standard_channel_payout_policy() {
             _ => continue,
         }
     };
-    sniffer
-        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_MINING_JOB)
         .await;
-    let _initial_job = next_standard_job(&sniffer);
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH,
-        )
+    let _initial_job = next_standard_job(&mock_downstream);
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH)
         .await;
 
-    send_to_pool
+    mock_downstream
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenStandardMiningChannel(OpenStandardMiningChannelOwned {
                 request_id: 1,
@@ -519,25 +465,21 @@ async fn pool_rejects_incompatible_standard_channel_payout_policy() {
                 max_target: [0xff; 32].into(),
             }),
         ))
-        .await
-        .unwrap();
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
         .await;
-    let error = next_open_channel_error(&sniffer);
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
+        .await;
+    let error = next_open_channel_error(&mock_downstream);
     assert_eq!(
         error.error_code.as_utf8_or_hex(),
         "incompatible-payout-mode"
     );
 
     tp.create_mempool_transaction().unwrap();
-    sniffer
-        .wait_for_message_type(MessageDirection::ToDownstream, MESSAGE_TYPE_NEW_MINING_JOB)
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_MINING_JOB)
         .await;
-    let refreshed_job = next_standard_job(&sniffer);
+    let refreshed_job = next_standard_job(&mock_downstream);
     assert_eq!(refreshed_job.channel_id, channel_a.channel_id);
 
     shutdown_all!(pool);
@@ -548,19 +490,15 @@ async fn pool_solo_mining_wrong_user_identity() {
     start_tracing();
     let (_tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - missing keyword ===
@@ -573,17 +511,14 @@ async fn pool_solo_mining_wrong_user_identity() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
         .await;
 
     let error_ext: OpenMiningChannelErrorOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
@@ -607,17 +542,14 @@ async fn pool_solo_mining_wrong_user_identity() {
             max_target: [0xff; 32].into(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR)
         .await;
 
     let error_std: OpenMiningChannelErrorOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::OpenMiningChannelError(msg)),
@@ -641,19 +573,15 @@ async fn pool_solo_mining_random_user_identity() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - random user_identity, pool gets 100% ===
@@ -666,17 +594,14 @@ async fn pool_solo_mining_random_user_identity() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
 
     let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -688,7 +613,7 @@ async fn pool_solo_mining_random_user_identity() {
     };
 
     let new_job_ext: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -712,16 +637,13 @@ async fn pool_solo_mining_random_user_identity() {
     // === Trigger new template via mempool transaction ===
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
     let new_job_ext_second: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -752,16 +674,13 @@ async fn pool_solo_mining_random_user_identity() {
     // === Trigger new template to force pool to send a new job ===
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
     let new_job_ext_third: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -798,13 +717,10 @@ async fn pool_solo_mining_random_user_identity() {
             max_target: [0xff; 32].into(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
 
     shutdown_all!(pool);
@@ -816,19 +732,15 @@ async fn pool_solo_mining_legacy_pattern() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - legacy pattern, miner gets 100% ===
@@ -841,17 +753,14 @@ async fn pool_solo_mining_legacy_pattern() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
 
     let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -863,7 +772,7 @@ async fn pool_solo_mining_legacy_pattern() {
     };
 
     let new_job_ext: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -887,16 +796,13 @@ async fn pool_solo_mining_legacy_pattern() {
     // === Trigger new template via mempool transaction ===
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
     let new_job_ext_second: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -927,16 +833,13 @@ async fn pool_solo_mining_legacy_pattern() {
     // === Trigger new template to force pool to send a new job ===
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
     let new_job_ext_third: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -973,13 +876,10 @@ async fn pool_solo_mining_legacy_pattern() {
             max_target: [0xff; 32].into(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
 
     shutdown_all!(pool);
@@ -991,19 +891,15 @@ async fn pool_solo_mining_solo_pattern() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - sri/solo pattern, miner gets 100% ===
@@ -1018,17 +914,14 @@ async fn pool_solo_mining_solo_pattern() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
 
     let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -1040,7 +933,7 @@ async fn pool_solo_mining_solo_pattern() {
     };
 
     let new_job_ext: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1064,16 +957,13 @@ async fn pool_solo_mining_solo_pattern() {
     // === Trigger new template via mempool transaction ===
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
     let new_job_ext_second: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1104,16 +994,13 @@ async fn pool_solo_mining_solo_pattern() {
     // === Trigger new template to force pool to send a new job ===
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
     let new_job_ext_third: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1152,13 +1039,10 @@ async fn pool_solo_mining_solo_pattern() {
             max_target: vec![0xff; 32].try_into().unwrap(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
 
     shutdown_all!(pool);
@@ -1170,19 +1054,15 @@ async fn pool_solo_mining_full_donate() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - sri/donate, pool gets 100% ===
@@ -1195,17 +1075,14 @@ async fn pool_solo_mining_full_donate() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
 
     let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -1217,7 +1094,7 @@ async fn pool_solo_mining_full_donate() {
     };
 
     let new_job_ext: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1241,16 +1118,13 @@ async fn pool_solo_mining_full_donate() {
     // === Trigger new template via mempool transaction ===
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
     let new_job_ext_second: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1281,16 +1155,13 @@ async fn pool_solo_mining_full_donate() {
     // === Trigger new template to force pool to send a new job ===
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
     let new_job_ext_third: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1327,13 +1198,10 @@ async fn pool_solo_mining_full_donate() {
             max_target: [0xff; 32].into(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
 
     shutdown_all!(pool);
@@ -1345,19 +1213,15 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - sri/donate (no worker name), pool gets 100% ===
@@ -1370,17 +1234,14 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
 
     let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -1392,7 +1253,7 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
     };
 
     let new_job_ext: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1416,16 +1277,13 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
     // === Trigger new template via mempool transaction ===
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
     let new_job_ext_second: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1456,16 +1314,13 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
     // === Trigger new template to force pool to send a new job ===
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
     let new_job_ext_third: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1502,13 +1357,10 @@ async fn pool_solo_mining_full_donate_no_worker_name() {
             max_target: [0xff; 32].into(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
 
     shutdown_all!(pool);
@@ -1520,19 +1372,15 @@ async fn pool_solo_mining_partial_donation() {
     let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
     tp.fund_wallet().unwrap();
     let (pool, pool_addr, _) = start_pool(sv2_tp_config(tp_addr), vec![], vec![], false).await;
-    let (sniffer, sniffer_addr) = start_sniffer("solo_test", pool_addr, false, vec![], None);
 
-    let mock_downstream = MockDownstream::new(
-        sniffer_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let send_to_pool = mock_downstream.start().await;
+    let mock_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
 
-    sniffer
-        .wait_for_message_type_and_clean_queue(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
         .await;
 
     // === Extended Channel - sri/donate/5%, pool gets 5%, miner gets 95% ===
@@ -1546,17 +1394,14 @@ async fn pool_solo_mining_partial_donation() {
             min_extranonce_size: 8,
         },
     ));
-    send_to_pool.send(open_extended).await.unwrap();
+    mock_downstream.send(open_extended).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
         .await;
 
     let channel_success_ext: OpenExtendedMiningChannelSuccessOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(
@@ -1568,7 +1413,7 @@ async fn pool_solo_mining_partial_donation() {
     };
 
     let new_job_ext: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1600,16 +1445,13 @@ async fn pool_solo_mining_partial_donation() {
     // === Trigger new template via mempool transaction ===
     tp.create_mempool_transaction().unwrap();
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for second job (from mempool) and verify payout ===
     let new_job_ext_second: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1647,16 +1489,13 @@ async fn pool_solo_mining_partial_donation() {
     // === Trigger new template to force pool to send a new job ===
     tp.generate_blocks(1);
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB)
         .await;
 
     // === Wait for third job (from generate blocks) and verify payout ===
     let new_job_ext_third: NewExtendedMiningJobOwned = loop {
-        match sniffer.next_message_from_upstream() {
+        match mock_downstream.next_message() {
             Some((
                 _,
                 AnyMessageOwned::Mining(parsers_sv2::MiningOwned::NewExtendedMiningJob(msg)),
@@ -1700,13 +1539,10 @@ async fn pool_solo_mining_partial_donation() {
             max_target: vec![0xff; 32].try_into().unwrap(),
         },
     ));
-    send_to_pool.send(open_standard).await.unwrap();
+    mock_downstream.send(open_standard).await;
 
-    sniffer
-        .wait_for_message_type(
-            MessageDirection::ToDownstream,
-            MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS,
-        )
+    mock_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS)
         .await;
 
     shutdown_all!(pool);

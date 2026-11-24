@@ -1,11 +1,10 @@
 use integration_tests_sv2::{
     interceptor::MessageDirection,
-    mock_roles::{MockUpstream, WithSetup},
+    mocks::{MockServer, ServerSetupConnection},
     template_provider::DifficultyLevel,
     utils::get_available_address,
     *,
 };
-use std::time::Duration;
 use stratum_apps::stratum_core::{
     common_messages_sv2::Protocol,
     mining_sv2::*,
@@ -30,17 +29,14 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
         start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
 
     let mock_pool_addr = get_available_address();
-    let mock_pool = MockUpstream::new(
+    let mock_pool = MockServer::new(
         mock_pool_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    );
-    let mock_pool_sender = mock_pool.start().await;
-
-    let (pool_sniffer, pool_sniffer_addr) =
-        start_sniffer("pool", mock_pool_addr, false, vec![], None);
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
+    )
+    .await;
 
     let (jdc, jdc_addr, _) = start_jdc(
-        &[(pool_sniffer_addr, jds_addr)],
+        &[(mock_pool_addr, jds_addr)],
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
@@ -53,14 +49,14 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
     let (sv1_sniffer, sv1_sniffer_addr) = start_sv1_sniffer(tproxy_addr);
     let (_minerd, _minerd_addr) = start_minerd(sv1_sniffer_addr, None, None, false).await;
 
+    mock_pool
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
+        .await;
     let open_channel_msg = loop {
-        match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(msg)))) => {
-                break msg;
-            }
-            _ => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+        if let Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(msg)))) =
+            mock_pool.next_message(0)
+        {
+            break msg;
         }
     };
 
@@ -78,14 +74,16 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
             group_channel_id: 1,
         }),
     );
-    mock_pool_sender.send(open_channel_success).await.unwrap();
+    mock_pool.send(0, open_channel_success).await;
 
+    mock_pool
+        .wait_for_message_type(0, MESSAGE_TYPE_SET_CUSTOM_MINING_JOB)
+        .await;
     let set_custom_mining_job = loop {
-        match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(msg)))) => break msg,
-            _ => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+        if let Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(msg)))) =
+            mock_pool.next_message(0)
+        {
+            break msg;
         }
     };
 
@@ -102,16 +100,16 @@ async fn jdc_cached_shares_relayed_on_set_custom_job_success() {
             job_id,
         },
     ));
-    mock_pool_sender.send(set_custom_job_success).await.unwrap();
+    mock_pool.send(0, set_custom_job_success).await;
 
+    mock_pool
+        .wait_for_message_type(0, MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED)
+        .await;
     let submit_share_extended = loop {
-        match pool_sniffer.next_message_from_downstream() {
-            Some((_, AnyMessageOwned::Mining(MiningOwned::SubmitSharesExtended(msg)))) => {
-                break msg;
-            }
-            _ => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+        if let Some((_, AnyMessageOwned::Mining(MiningOwned::SubmitSharesExtended(msg)))) =
+            mock_pool.next_message(0)
+        {
+            break msg;
         }
     };
 

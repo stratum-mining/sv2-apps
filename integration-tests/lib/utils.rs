@@ -242,8 +242,11 @@ pub async fn wait_for_client(listen_socket: SocketAddr) -> tokio::net::TcpStream
     stream
 }
 
-pub async fn create_downstream(
+/// Performs the Noise handshake as the server on `stream`. Cancelling `cancellation_token` closes
+/// the connection.
+pub async fn handshake_as_server(
     stream: tokio::net::TcpStream,
+    cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
     let pub_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
         .to_string()
@@ -260,7 +263,7 @@ pub async fn create_downstream(
             .unwrap();
 
     if let Ok((receiver_from_client, sender_to_client)) =
-        Connection::accept::<OutboundFrame>(stream, responder, CancellationToken::new()).await
+        Connection::accept::<OutboundFrame>(stream, responder, cancellation_token).await
     {
         Some((receiver_from_client, sender_to_client))
     } else {
@@ -268,11 +271,14 @@ pub async fn create_downstream(
     }
 }
 
-pub async fn create_upstream(
+/// Performs the Noise handshake as the client on `stream`. Cancelling `cancellation_token` closes
+/// the connection.
+pub async fn handshake_as_client(
     stream: tokio::net::TcpStream,
+    cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
     let initiator = Initiator::without_pk().expect("This fn call can not fail");
-    Connection::connect::<OutboundFrame>(stream, initiator, CancellationToken::new())
+    Connection::connect::<OutboundFrame>(stream, initiator, cancellation_token)
         .await
         .ok()
 }
@@ -468,18 +474,20 @@ pub fn message_from_frame_with_tlvs(
     }
 
     // Fallback to standard parsing without TLV support
+    let Some((msg_type, message)) = try_message_from_frame(frame) else {
+        println!("Received frame with invalid payload or message type: {frame:?}");
+        panic!();
+    };
+    (msg_type, message, None)
+}
+
+/// Parses `frame` without TLV support, or returns `None` if its payload or message type is
+/// invalid.
+pub fn try_message_from_frame(frame: &mut InboundFrame) -> Option<(MsgType, AnyMessageOwned)> {
+    let header = frame.header();
     let mut payload = frame.payload().to_vec();
-    let message: Result<AnyMessage<'_>, _> = (header, payload.as_mut_slice()).try_into();
-    match message {
-        Ok(message) => {
-            let message = into_owned(message);
-            (header.msg_type(), message, None)
-        }
-        _ => {
-            println!("Received frame with invalid payload or message type: {frame:?}");
-            panic!();
-        }
-    }
+    let message: AnyMessage<'_> = (header, payload.as_mut_slice()).try_into().ok()?;
+    Some((header.msg_type(), into_owned(message)))
 }
 
 pub fn into_owned(m: AnyMessage<'_>) -> AnyMessageOwned {

@@ -1,6 +1,6 @@
 use integration_tests_sv2::{
     interceptor::MessageDirection,
-    mock_roles::{MockUpstream, WithSetup},
+    mocks::{MockServer, ServerSetupConnection},
     start_jdc_with_user_identities,
     template_provider::DifficultyLevel,
     utils::get_available_address,
@@ -9,7 +9,7 @@ use integration_tests_sv2::{
 use stratum_apps::stratum_core::{
     common_messages_sv2::*,
     mining_sv2::*,
-    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, MiningOwned},
+    parsers_sv2::{AnyMessageOwned, MiningOwned},
 };
 
 #[tokio::test]
@@ -204,20 +204,16 @@ async fn jdc_sends_per_upstream_identity() {
         start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
 
     let mock_pool_addr = get_available_address();
-    let mock_pool = MockUpstream::new(mock_pool_addr, WithSetup::no());
-    let pool_sender = mock_pool.start().await;
-
-    let (pool_sniffer, pool_sniffer_addr) =
-        start_sniffer("pool", mock_pool_addr, false, vec![], None);
+    let mock_pool = MockServer::new(
+        mock_pool_addr,
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
+    )
+    .await;
 
     const PER_UPSTREAM_IDENTITY: &str = "bc1qtest.worker";
 
     let (jdc, jdc_addr, _) = start_jdc_with_user_identities(
-        &[(
-            pool_sniffer_addr,
-            jds_addr,
-            PER_UPSTREAM_IDENTITY.to_string(),
-        )],
+        &[(mock_pool_addr, jds_addr, PER_UPSTREAM_IDENTITY.to_string())],
         sv2_tp_config(tp_addr),
         vec![],
         vec![],
@@ -228,34 +224,16 @@ async fn jdc_sends_per_upstream_identity() {
         "JDC",
     );
 
-    pool_sniffer
-        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
-        .await;
-
-    // Respond with success so JDC proceeds to connect to JDS and open channels.
-    pool_sender
-        .send(AnyMessageOwned::Common(
-            CommonMessagesOwned::SetupConnectionSuccess(SetupConnectionSuccessOwned {
-                used_version: 2,
-                flags: 0,
-            }),
-        ))
-        .await
-        .unwrap();
-
     let (translator, tproxy_addr, _) =
         start_sv2_translator(&[jdc_addr], false, vec![], vec![], None, false).await;
     let (_minerd, _) = start_minerd(tproxy_addr, None, None, false).await;
 
-    pool_sniffer
-        .wait_for_message_type(
-            MessageDirection::ToUpstream,
-            MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
-        )
+    mock_pool
+        .wait_for_message_type(0, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL)
         .await;
 
     let oemc = loop {
-        match pool_sniffer.next_message_from_downstream() {
+        match mock_pool.next_message(0) {
             Some((_, AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(msg)))) => {
                 break msg;
             }

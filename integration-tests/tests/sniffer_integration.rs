@@ -1,12 +1,15 @@
 // This file contains integration tests for the `Sniffer` module.
 use integration_tests_sv2::{
     interceptor::{IgnoreMessage, MessageDirection, ReplaceMessage},
+    mocks::{ClientSetupConnection, MockClient, MockServer, ServerSetupConnection},
     template_provider::DifficultyLevel,
+    utils::get_available_address,
     *,
 };
 use std::convert::TryInto;
 use stratum_apps::stratum_core::{
     common_messages_sv2::{Protocol, SetupConnectionOwned, *},
+    mining_sv2::MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
     parsers_sv2::{AnyMessageOwned, CommonMessagesOwned},
     template_distribution_sv2::*,
 };
@@ -138,4 +141,52 @@ async fn test_sniffer_wait_for_message_type_with_remove() {
         ))
     );
     pool.shutdown().await;
+}
+
+// This test aims to assert that Sniffer tells a message it has seen from one it hasn't.
+// MockClient -> sniffer -> MockServer
+#[tokio::test]
+async fn test_sniffer_assert_message_not_present() {
+    let server_addr = get_available_address();
+    let _server = MockServer::new(
+        server_addr,
+        Some(ServerSetupConnection::new([(Protocol::MiningProtocol, 0)])),
+    )
+    .await;
+    let (sniffer, sniffer_addr) = start_sniffer("", server_addr, false, vec![], None);
+    let _client = MockClient::new(
+        sniffer_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
+
+    sniffer
+        .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
+        .await;
+
+    // SetupConnection was sent, so has_message_type should find it
+    assert!(sniffer.has_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION));
+
+    // OpenExtendedMiningChannel was never sent, so assert_message_not_present should return
+    // true
+    assert!(
+        sniffer
+            .assert_message_not_present(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+    );
+
+    // SetupConnection IS present, so assert_message_not_present should return false
+    assert!(
+        !sniffer
+            .assert_message_not_present(
+                MessageDirection::ToUpstream,
+                MESSAGE_TYPE_SETUP_CONNECTION,
+                std::time::Duration::from_millis(200),
+            )
+            .await
+    );
 }

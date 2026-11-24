@@ -1,6 +1,6 @@
 use integration_tests_sv2::{
     interceptor::MessageDirection,
-    mock_roles::{MockDownstream, WithSetup},
+    mocks::{ClientSetupConnection, MockClient},
     sniffer::Sniffer,
     template_provider::DifficultyLevel,
     *,
@@ -61,21 +61,19 @@ async fn jds_isolates_state_for_colliding_request_ids_across_downstreams() {
 
     // Attach one mock mining downstream per JDC so both JDCs open mining channels and
     // independently trigger the DeclareMiningJob/SetCustomMiningJob flow against the same JDS.
-    let send_to_jdc1 = MockDownstream::new(
+    let downstream1 = MockClient::new(
         jdc1_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
     )
-    .start()
     .await;
-    let send_to_jdc2 = MockDownstream::new(
+    let downstream2 = MockClient::new(
         jdc2_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
     )
-    .start()
     .await;
 
     // Trigger both JDCs to start job declaration for their mining channel.
-    send_to_jdc1
+    downstream1
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
@@ -85,9 +83,8 @@ async fn jds_isolates_state_for_colliding_request_ids_across_downstreams() {
                 min_extranonce_size: 0,
             }),
         ))
-        .await
-        .unwrap();
-    send_to_jdc2
+        .await;
+    downstream2
         .send(AnyMessageOwned::Mining(
             MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
                 request_id: 1,
@@ -97,8 +94,7 @@ async fn jds_isolates_state_for_colliding_request_ids_across_downstreams() {
                 min_extranonce_size: 0,
             }),
         ))
-        .await
-        .unwrap();
+        .await;
 
     // Wait until both DeclareMiningJob messages are observed, then assert request_id collision.
     jdc1_jds_sniffer
