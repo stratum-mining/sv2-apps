@@ -1013,6 +1013,7 @@ mod tests {
             extranonce2_len: 8,
             version_rolling_mask: Some("ffffffff".into()),
             version_rolling_min_bit: Some(0),
+            suggested_difficulty: None,
         }
     }
 
