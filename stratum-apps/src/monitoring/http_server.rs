@@ -1012,7 +1012,7 @@ mod tests {
             extranonce1_hex: "aabb".into(),
             extranonce2_len: 8,
             version_rolling_mask: Some("ffffffff".into()),
-            version_rolling_min_bit: Some("00000000".into()),
+            version_rolling_min_bit: Some(0),
         }
     }
 

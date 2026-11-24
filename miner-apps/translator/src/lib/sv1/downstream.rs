@@ -207,7 +207,7 @@ pub struct DownstreamData {
     #[cfg(feature = "monitoring")]
     pub connection_ip: IpAddr,
     pub version_rolling_mask: Option<HexU32Be>,
-    pub version_rolling_min_bit: Option<HexU32Be>,
+    pub version_rolling_min_bit: Option<u32>,
     pub sv1_username: String,
     pub sv1_worker_name: String,
     pub(super) cached_set_difficulty: Option<Sv1Difficulty>,

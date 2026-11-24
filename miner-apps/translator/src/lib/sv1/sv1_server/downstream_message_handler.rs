@@ -2,7 +2,7 @@ use stratum_apps::{
     stratum_core::sv1_api::{
         Authorize, Configure, ConfigureResult, Id, IsServerAsync, Response, Submit, SubmitError,
         SubmitOutcome, Subscribe, SubscribeResult, SuggestDifficulty, VersionRollingResult,
-        utils::{HexU32Be, VERSION_ROLLING_MASK},
+        utils::VERSION_ROLLING_MASK,
     },
     utils::types::DownstreamId,
 };
@@ -45,8 +45,7 @@ impl IsServerAsync for Sv1Server {
                         .version_rolling_mask()
                         .map(|mask| mask & VERSION_ROLLING_MASK);
 
-                    data.version_rolling_min_bit =
-                        request.version_rolling_min_bit_count().map(HexU32Be);
+                    data.version_rolling_min_bit = request.version_rolling_min_bit_count();
                     if request.supports_extranonce() {
                         data.supports_set_extranonce = true;
                     }

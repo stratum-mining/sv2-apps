@@ -4791,15 +4791,16 @@ mod tests {
                 panic!("expected a configure response");
             };
             assert_eq!(response.result.unwrap(), expected, "{params}");
-            let supports_set_extranonce = server
+            let (min_bit, supports_set_extranonce) = server
                 .downstreams
                 .with(&7, |downstream| {
                     downstream
                         .downstream_data
-                        .with(|data| data.supports_set_extranonce)
+                        .with(|data| (data.version_rolling_min_bit, data.supports_set_extranonce))
                         .unwrap()
                 })
                 .unwrap();
+            assert_eq!(min_bit, params.contains("min-bit-count").then_some(2));
             assert_eq!(
                 supports_set_extranonce,
                 params.contains("subscribe-extranonce")
