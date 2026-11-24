@@ -47,17 +47,21 @@ impl IsServerAsync for Sv1Server {
 
                     data.version_rolling_min_bit =
                         request.version_rolling_min_bit_count().map(HexU32Be);
+                    if request.supports_extranonce() {
+                        data.supports_set_extranonce = true;
+                    }
 
                     debug!(
                         "Negotiated version_rolling_mask: {:?}",
                         data.version_rolling_mask
                     );
 
+                    // Each requested extension gets a result, and no other key is sent.
                     ConfigureResult {
-                        version_rolling: Some(VersionRollingResult::new(
-                            data.version_rolling_mask.unwrap_or(HexU32Be(0)),
-                        )),
-                        minimum_difficulty: Some(false),
+                        version_rolling: data.version_rolling_mask.map(VersionRollingResult::new),
+                        minimum_difficulty: request.minimum_difficulty().map(|_| false),
+                        subscribe_extranonce: request.supports_extranonce().then_some(true),
+                        info: request.info().map(|_| true),
                     }
                 })
                 .map_err(TproxyError::shutdown)

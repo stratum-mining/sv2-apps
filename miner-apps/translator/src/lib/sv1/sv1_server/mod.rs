@@ -4756,6 +4756,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configure_answers_only_the_requested_extensions() {
+        let granted = serde_json::json!({
+            "version-rolling": true,
+            "version-rolling.mask": "1fffe000",
+        });
+        for (params, expected) in [
+            (
+                r#"[["version-rolling"],{"version-rolling.mask":"1fffe000","version-rolling.min-bit-count":2}]"#,
+                granted.clone(),
+            ),
+            (
+                r#"[["version-rolling"],{"version-rolling.min-bit-count":2}]"#,
+                serde_json::json!({"version-rolling": true, "version-rolling.mask": "1fffffe0"}),
+            ),
+            (
+                r#"[["subscribe-extranonce"]]"#,
+                serde_json::json!({"subscribe-extranonce": true}),
+            ),
+            (
+                r#"[["minimum-difficulty","info"],{"minimum-difficulty.value":1024}]"#,
+                serde_json::json!({"minimum-difficulty": false, "info": true}),
+            ),
+            (r#"[[]]"#, serde_json::json!({})),
+        ] {
+            let (server, _to_server, _from_server) = server_with_channels(false);
+            let (_events, responses) =
+                register_test_downstream_with_sv1_receiver(&server, 7, Some(9), 100.0, false);
+            let line = format!(r#"{{"id":1,"method":"mining.configure","params":{params}}}"#);
+            receive_request(&server, serde_json::from_str(&line).unwrap())
+                .await
+                .unwrap();
+            let json_rpc::Message::Response(response) = responses.try_recv().unwrap() else {
+                panic!("expected a configure response");
+            };
+            assert_eq!(response.result.unwrap(), expected, "{params}");
+            let supports_set_extranonce = server
+                .downstreams
+                .with(&7, |downstream| {
+                    downstream
+                        .downstream_data
+                        .with(|data| data.supports_set_extranonce)
+                        .unwrap()
+                })
+                .unwrap();
+            assert_eq!(
+                supports_set_extranonce,
+                params.contains("subscribe-extranonce")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn accepted_setup_is_parsed_before_open_and_dispatched_after_success() {
         let configure = r#"{"id":1,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"1fffe000","version-rolling.min-bit-count":2}]}"#;
         let authorize = r#"{"id":3,"method":"mining.authorize","params":["worker",""]}"#;
