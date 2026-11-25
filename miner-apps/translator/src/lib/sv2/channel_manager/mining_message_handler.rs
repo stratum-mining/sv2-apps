@@ -180,6 +180,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     vec![0u8; local_prefix_padding_len],
                     full_extranonce_size,
                     AGGREGATED_TPROXY_MAX_CHANNELS,
+                    stratum_apps::utils::extranonce_allocator_seed(),
                 )
                 .map_err(|e| {
                     error!(
@@ -232,8 +233,8 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                     .insert(AGGREGATED_CHANNEL_ID, upstream_channel);
 
                 // Hand the allocator-minted prefix to the downstream channel
-                // directly — its RAII release frees the bitmap slot on
-                // channel drop. Widen `AllocatedExtranoncePrefix` to the
+                // directly — its allocation ends on channel drop, and its
+                // slot is reusable on the next chain tip. Widen `AllocatedExtranoncePrefix` to the
                 // loose `ExtranoncePrefix` expected by the client-side
                 // channel constructor; the allocation record (including
                 // the bitmap back-reference) is preserved.
@@ -351,6 +352,7 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
                         vec![0u8; local_prefix_padding_len],
                         full_extranonce_size,
                         NON_AGGREGATED_TPROXY_MAX_CHANNELS,
+                        stratum_apps::utils::extranonce_allocator_seed(),
                     )
                     .map_err(|e| {
                         error!(
@@ -977,6 +979,29 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
 
                     // was the message sent to the aggregated channel?
                     if aggregated_channel_id == m.channel_id || group_channel_id == m.channel_id {
+                        let prev_hash_changed = self
+                            .extended_channels
+                            .with(&AGGREGATED_CHANNEL_ID, |channel| {
+                                channel
+                                    .get_chain_tip()
+                                    .is_none_or(|tip| tip.prev_hash() != m.prev_hash)
+                            })
+                            .unwrap_or(true);
+
+                        // No share has been accepted on the new `prev_hash` yet, and downstream
+                        // channels are only given jobs on it from here on, so the extranonce
+                        // prefixes of the ones that were closed under the previous one can be
+                        // assigned again.
+                        if prev_hash_changed {
+                            self.aggregated_extranonce_allocator
+                                .with(|allocator| {
+                                    if let Some(allocator) = allocator {
+                                        allocator.release_dropped_prefixes();
+                                    }
+                                })
+                                .map_err(TproxyError::shutdown)?;
+                        }
+
                         // update all extended channel states
                         self.extended_channels
                             .try_for_each_mut(|_, extended_channel| {

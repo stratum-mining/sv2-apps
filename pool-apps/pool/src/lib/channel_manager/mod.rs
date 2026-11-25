@@ -55,9 +55,9 @@ mod template_distribution_message_handler;
 // Size of the static identifier for this pool server, placed at the start of the pool's
 // extranonce allocation. One byte covers up to 256 distinct pool servers.
 const POOL_SERVER_BYTES: u8 = 1;
-// Maximum number of concurrent channels the pool can allocate. Determines
-// [`POOL_LOCAL_PREFIX_BYTES`] via [`bytes_needed`]. The internal allocation
-// bitmap uses `POOL_MAX_CHANNELS / 8` bytes of RAM.
+// Maximum number of channels the pool can allocate under one chain tip, counting the ones that
+// were closed. Determines [`POOL_LOCAL_PREFIX_BYTES`] via [`bytes_needed`]. The internal
+// allocation bitmaps use `POOL_MAX_CHANNELS / 4` bytes of RAM.
 const POOL_MAX_CHANNELS: u32 = 16_777_216;
 // Bytes consumed by the per-channel `local_index`. Derived from
 // [`POOL_MAX_CHANNELS`] so the two stay in sync.
@@ -94,7 +94,7 @@ pub struct ChannelManager {
     pub(crate) downstreams: SharedMap<DownstreamId, Downstream>,
     // Unified extranonce prefix allocator, shared by standard and extended
     // downstream channels. The allocated [`ExtranoncePrefix`] is stored on the
-    // channel itself, so dropping the channel automatically releases the slot.
+    // channel itself, and the slot of a dropped channel is released on the next chain tip.
     pub(crate) extranonce_allocator: SharedLock<ExtranonceAllocator>,
     // Factory that assigns a unique ID to each new downstream connection.
     downstream_id_factory: Arc<AtomicUsize>,
@@ -174,9 +174,13 @@ impl ChannelManager {
         // allocates extranonce prefixes in its own distinct namespace.
         let local_prefix_bytes = config.server_id().to_be_bytes().to_vec();
 
-        let extranonce_allocator =
-            ExtranonceAllocator::new(local_prefix_bytes, FULL_EXTRANONCE_SIZE, POOL_MAX_CHANNELS)
-                .map_err(PoolError::shutdown)?;
+        let extranonce_allocator = ExtranonceAllocator::new(
+            local_prefix_bytes,
+            FULL_EXTRANONCE_SIZE,
+            POOL_MAX_CHANNELS,
+            stratum_apps::utils::extranonce_allocator_seed(),
+        )
+        .map_err(PoolError::shutdown)?;
 
         let channel_manager_io = ChannelManagerIo {
             tp_sender,

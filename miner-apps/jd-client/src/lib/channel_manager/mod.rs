@@ -99,7 +99,8 @@ mod upstream_message_handler;
 // [`JobDeclaratorClientConfig::reserved_downstream_rollable_extranonce_size`];
 // see `handle_downstream_message` for the exact formula.
 
-/// Maximum number of concurrent downstream channels JDC can allocate.
+/// Maximum number of downstream channels JDC can allocate under one chain tip, counting the ones
+/// that were closed.
 /// Determines [`JDC_LOCAL_PREFIX_BYTES`] via [`bytes_needed`].
 const JDC_MAX_CHANNELS: u32 = 65_536;
 
@@ -886,9 +887,13 @@ impl ChannelManager {
         // Start with a solo-mining allocator (no upstream prefix). Once the
         // upstream channel is opened in `handle_open_extended_mining_channel_success`
         // this allocator is replaced with one built from the upstream prefix.
-        let extranonce_allocator =
-            ExtranonceAllocator::new(Vec::new(), SOLO_FULL_EXTRANONCE_SIZE, JDC_MAX_CHANNELS)
-                .map_err(JDCError::<error::ChannelManager>::shutdown)?;
+        let extranonce_allocator = ExtranonceAllocator::new(
+            Vec::new(),
+            SOLO_FULL_EXTRANONCE_SIZE,
+            JDC_MAX_CHANNELS,
+            stratum_apps::utils::extranonce_allocator_seed(),
+        )
+        .map_err(JDCError::<error::ChannelManager>::shutdown)?;
 
         // Record the cap actually in force. When unset it comes from the `channels_sv2`
         // default, so it appears nowhere in this application's own config and is
