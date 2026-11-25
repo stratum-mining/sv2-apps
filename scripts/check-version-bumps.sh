@@ -30,11 +30,13 @@ MANIFESTS=$(find . -name Cargo.toml -not -path '*/target/*' \
 # On main, a version is also taken once a release tag carries it, on crates.io
 # or not: a release candidate holds the versions its release is going to
 # publish, so a crate that changes after the candidate was cut belongs to the
-# following release and needs a version of its own. A release branch is checked
-# against crates.io alone, since what its own candidates carry is what it is
-# about to publish.
+# following release and needs a version of its own. v0.1.0 and v0.2.0 are left
+# out: they carry translator_sv2 at 2.0.0, a version that was never published
+# and that is above the ones the crate has had since. A release branch is
+# checked against crates.io alone, since what its own candidates carry is what
+# it is about to publish.
 case "$BASE" in
-  main | */main) RELEASE_TAGS=$(git tag --list 'v[0-9]*') ;;
+  main | */main) RELEASE_TAGS=$(git tag --list 'v[0-9]*' | grep -vxF -e v0.1.0 -e v0.2.0 || true) ;;
   *) RELEASE_TAGS="" ;;
 esac
 
