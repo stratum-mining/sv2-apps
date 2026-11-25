@@ -182,75 +182,6 @@ impl DeclaredCustomJob {
         self.validation_context.prev_hash
     }
 
-    /// Reconstructs the declared coinbase transaction by concatenating prefix, extranonce, and
-    /// suffix. Validation call sites pass `None` to fill the extranonce with zeros; a
-    /// `PushSolution` passes the solved extranonce.
-    ///
-    /// The extranonce size is calculated from the scriptSig size in the coinbase_tx_prefix
-    ///
-    /// Error type is () because we don't need extra granularity for error_code =
-    /// "invalid-coinbase-tx"
-    fn get_coinbase_tx(&self, extranonce: Option<&[u8]>) -> Result<Transaction, ()> {
-        let declared_coinbase_tx_prefix: Vec<u8> =
-            self.declare_mining_job.coinbase_tx_prefix.to_owned_bytes();
-        let declared_coinbase_tx_suffix: Vec<u8> =
-            self.declare_mining_job.coinbase_tx_suffix.to_owned_bytes();
-
-        // Parse scriptSig size from coinbase prefix
-        // Coinbase structure: version(4) + marker+flag(2) + input_count(1) + outpoint(32) +
-        // index(4) = 43 bytes Then comes scriptSig length (VarInt) followed by scriptSig
-        // data
-        const COINBASE_PREFIX_LEN: usize = 43;
-        let script_sig_size: usize = {
-            let mut cursor = &declared_coinbase_tx_prefix[COINBASE_PREFIX_LEN..];
-            match bitcoin::VarInt::consensus_decode(&mut cursor) {
-                Ok(varint) => varint.0 as usize,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to decode scriptSig size from coinbase prefix: {}",
-                        e
-                    );
-                    return Err(());
-                }
-            }
-        };
-
-        // Calculate the size of scriptSig bytes already in the prefix.
-        let varint_size = bitcoin::VarInt(script_sig_size as u64).size();
-        let script_sig_offset = COINBASE_PREFIX_LEN + varint_size;
-        let script_sig_bytes_in_prefix = declared_coinbase_tx_prefix.len() - script_sig_offset;
-
-        // The full extranonce fills the remaining space in scriptSig
-        let full_extranonce_size: usize = script_sig_size - script_sig_bytes_in_prefix;
-
-        let extranonce_bytes = match extranonce {
-            Some(bytes) => {
-                if bytes.len() != full_extranonce_size {
-                    tracing::error!(
-                        "PushSolution extranonce size mismatch: expected {}, got {}",
-                        full_extranonce_size,
-                        bytes.len()
-                    );
-                    return Err(());
-                }
-                bytes.to_vec()
-            }
-            None => vec![0; full_extranonce_size],
-        };
-
-        // Concatenate prefix + extranonce + suffix to form the complete transaction bytes.
-        let mut declared_coinbase_tx = declared_coinbase_tx_prefix;
-        declared_coinbase_tx.extend_from_slice(&extranonce_bytes);
-        declared_coinbase_tx.extend_from_slice(&declared_coinbase_tx_suffix);
-
-        // Deserialize the transaction
-        bitcoin::consensus::Decodable::consensus_decode(&mut &declared_coinbase_tx[..]).map_err(
-            |e| {
-                tracing::error!("Failed to deserialize declared coinbase transaction: {}", e);
-            },
-        )
-    }
-
     /// The coinbase merkle branch of the declared job, to compare with a
     /// `SetCustomMiningJob.merkle_path`.
     ///
@@ -280,15 +211,19 @@ impl SolvableJob {
         downstream_id: DownstreamId,
         push_solution: &PushSolutionOwned,
     ) -> Option<Block> {
-        let Ok(coinbase_tx) = self
-            .job
-            .get_coinbase_tx(Some(push_solution.extranonce.as_ref()))
-        else {
-            tracing::error!(
-                downstream_id,
-                "Failed to reconstruct solved coinbase transaction"
-            );
-            return None;
+        let coinbase_tx = match declared_coinbase_tx(
+            &self.job.declare_mining_job,
+            Some(push_solution.extranonce.as_ref()),
+        ) {
+            Ok(coinbase_tx) => coinbase_tx,
+            Err(error) => {
+                tracing::error!(
+                    downstream_id,
+                    ?error,
+                    "Failed to reconstruct solved coinbase transaction"
+                );
+                return None;
+            }
         };
 
         let merkle_root = merkle_root_from_path_(
@@ -313,6 +248,93 @@ impl SolvableJob {
                 .collect(),
         })
     }
+}
+
+/// Why [`declared_coinbase_tx`] refuses a declared coinbase transaction.
+#[derive(Debug, PartialEq)]
+enum DeclaredCoinbaseError {
+    /// It does not have exactly one input spending the null outpoint.
+    Input,
+    /// It is malformed in any other way.
+    Malformed,
+    /// The extranonce to splice in is not as long as the declared coinbase leaves room for.
+    ExtranonceLen { expected: usize, got: usize },
+}
+
+/// The bytes a coinbase transaction has before its scriptSig length: version (4), input count
+/// (1) and the input's outpoint (36). A SegWit one has [`SEGWIT_MARKER_AND_FLAG`] on top.
+const COINBASE_SCRIPT_SIG_LEN_OFFSET: usize = 41;
+
+/// What a SegWit transaction carries between its version and its input count (BIP144).
+const SEGWIT_MARKER_AND_FLAG: [u8; 2] = [0x00, 0x01];
+
+/// The lengths consensus allows a coinbase scriptSig.
+const COINBASE_SCRIPT_SIG_LEN: std::ops::RangeInclusive<u64> = 2..=100;
+
+/// Reconstructs the coinbase transaction of a `DeclareMiningJob` from its `coinbase_tx_prefix`,
+/// the extranonce and its `coinbase_tx_suffix`. The extranonce is whatever the prefix
+/// leaves of the scriptSig length it declares: `None` fills it with zeros, which is what
+/// validation needs, and a `PushSolution` passes the solved one.
+///
+/// Both fields come from the client as it sent them. The prefix is read only as far as it is
+/// long, the scriptSig length is held to its consensus bounds before anything is sized from it,
+/// and a transaction that is not a coinbase is refused before its bytes are put together. The
+/// coinbase may be a SegWit transaction or not: `DeclareMiningJob` carries either unstripped.
+fn declared_coinbase_tx(
+    declare_mining_job: &DeclareMiningJobOwned,
+    extranonce: Option<&[u8]>,
+) -> Result<Transaction, DeclaredCoinbaseError> {
+    use DeclaredCoinbaseError::{Input, Malformed};
+
+    let prefix: &[u8] = declare_mining_job.coinbase_tx_prefix.as_ref();
+    let suffix: &[u8] = declare_mining_job.coinbase_tx_suffix.as_ref();
+
+    // The marker is where a transaction without SegWit fields has its input count, and no
+    // transaction has zero inputs, so it tells the two layouts apart.
+    let segwit = prefix.get(4..6) == Some(&SEGWIT_MARKER_AND_FLAG);
+    let marker_len = if segwit {
+        SEGWIT_MARKER_AND_FLAG.len()
+    } else {
+        0
+    };
+    // `head` is the fixed-size part before the scriptSig length, `script_sig` what follows it.
+    let (head, mut script_sig) = prefix
+        .split_at_checked(COINBASE_SCRIPT_SIG_LEN_OFFSET + marker_len)
+        .ok_or(Malformed)?;
+    // One input, spending the null outpoint: an all-zero txid and index 0xffffffff.
+    let input = &head[4 + marker_len..];
+    if input[0] != 1 || input[1..33] != [0x00; 32] || input[33..] != [0xff; 4] {
+        return Err(Input);
+    }
+
+    // Decoding moves `script_sig` past the length, to the scriptSig bytes the prefix carries.
+    let script_sig_len = bitcoin::VarInt::consensus_decode(&mut script_sig)
+        .map_err(|_| Malformed)?
+        .0;
+    if !COINBASE_SCRIPT_SIG_LEN.contains(&script_sig_len) {
+        return Err(Malformed);
+    }
+    let extranonce_len = (script_sig_len as usize)
+        .checked_sub(script_sig.len())
+        .ok_or(Malformed)?;
+    if let Some(extranonce) = extranonce
+        && extranonce.len() != extranonce_len
+    {
+        return Err(DeclaredCoinbaseError::ExtranonceLen {
+            expected: extranonce_len,
+            got: extranonce.len(),
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(prefix.len() + extranonce_len + suffix.len());
+    bytes.extend_from_slice(prefix);
+    match extranonce {
+        Some(extranonce) => bytes.extend_from_slice(extranonce),
+        None => bytes.resize(prefix.len() + extranonce_len, 0),
+    }
+    bytes.extend_from_slice(suffix);
+
+    bitcoin::consensus::deserialize(&bytes).map_err(|_| Malformed)
 }
 
 /// Computes the coinbase merkle branch of a block whose non-coinbase transactions are `txdata`,
@@ -609,43 +631,22 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
             }
         };
 
-        // Create temporary DeclaredCustomJob for extracting coinbase (without prev_hash/nbits yet)
-        let declare_mining_job_static = declare_mining_job.clone();
-
-        // Extract and validate coinbase transaction
-        let declared_coinbase_tx = {
-            let temp_job = DeclaredCustomJob {
-                declare_mining_job: declare_mining_job_static.clone(),
-                validation_context: ValidationContext {
-                    prev_hash: BlockHash::all_zeros(), // irrelevant for coinbase tx validation
-                    nbits: CompactTarget::from_consensus(0), /* irrelevant for coinbase tx
-                                                        * validation */
-                },
-                merkle_path: Vec::new(), // irrelevant for coinbase tx validation
-                validated: false,        // irrelevant for coinbase tx validation
-            };
-
-            match temp_job.get_coinbase_tx(None) {
-                Ok(tx) => {
-                    tracing::debug!("Declared coinbase transaction validated successfully");
-                    tx
-                }
-                Err(_) => {
-                    return DeclareMiningJobResult::Error(
-                        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
-                    );
-                }
+        let coinbase_tx = match declared_coinbase_tx(&declare_mining_job, None) {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::debug!(downstream_id, ?error, "Refusing the declared coinbase");
+                return DeclareMiningJobResult::Error(match error {
+                    DeclaredCoinbaseError::Input => {
+                        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT
+                    }
+                    DeclaredCoinbaseError::Malformed
+                    | DeclaredCoinbaseError::ExtranonceLen { .. } => {
+                        ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX
+                    }
+                });
             }
         };
-
-        // fully validate coinbase as a real coinbase
-        {
-            if declared_coinbase_tx.input.len() != 1 {
-                return DeclareMiningJobResult::Error(
-                    ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
-                );
-            }
-        }
+        let declare_mining_job_static = declare_mining_job.clone();
 
         // Extract wtxid_list from DeclareMiningJob message
         let wtxid_list: Vec<Wtxid> = declare_mining_job
@@ -694,7 +695,7 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
         // Send request to BitcoinCoreSv2JDP (clone wtxid_list since we need it for error handling)
         let request = JdRequest::DeclareMiningJob {
             version: Version::from_consensus(declare_mining_job.version as i32),
-            coinbase_tx: declared_coinbase_tx,
+            coinbase_tx,
             wtxid_list: wtxid_list.clone(),
             missing_txs,
             response_tx,
@@ -1005,27 +1006,28 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
 
         // validate coinbase tx
         {
-            let declared_coinbase_tx = match declared_custom_job.get_coinbase_tx(None) {
-                Ok(tx) => tx,
-                Err(_) => {
-                    return SetCustomMiningJobResult::Error(
-                        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX,
-                    );
-                }
-            };
+            let coinbase_tx =
+                match declared_coinbase_tx(&declared_custom_job.declare_mining_job, None) {
+                    Ok(tx) => tx,
+                    Err(_) => {
+                        return SetCustomMiningJobResult::Error(
+                            ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX,
+                        );
+                    }
+                };
 
-            if declared_coinbase_tx.version.0 != set_custom_mining_job.coinbase_tx_version as i32 {
+            if coinbase_tx.version.0 != set_custom_mining_job.coinbase_tx_version as i32 {
                 tracing::debug!(
                     "coinbase version mismatch: custom={}, declared={}",
                     set_custom_mining_job.coinbase_tx_version,
-                    declared_coinbase_tx.version.0
+                    coinbase_tx.version.0
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_VERSION,
                 );
             }
 
-            let script_sig = declared_coinbase_tx.input[0].script_sig.as_bytes();
+            let script_sig = coinbase_tx.input[0].script_sig.as_bytes();
             let coinbase_prefix = set_custom_mining_job.coinbase_prefix.as_bytes();
             if !script_sig.starts_with(coinbase_prefix) {
                 tracing::debug!("coinbase prefix mismatch");
@@ -1034,21 +1036,19 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 );
             }
 
-            if declared_coinbase_tx.input[0].sequence.0
-                != set_custom_mining_job.coinbase_tx_input_n_sequence
+            if coinbase_tx.input[0].sequence.0 != set_custom_mining_job.coinbase_tx_input_n_sequence
             {
                 tracing::debug!(
                     "coinbase input sequence mismatch: custom={}, declared={}",
                     set_custom_mining_job.coinbase_tx_input_n_sequence,
-                    declared_coinbase_tx.input[0].sequence.0
+                    coinbase_tx.input[0].sequence.0
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_INPUT_N_SEQUENCE,
                 );
             }
 
-            let declared_outputs_bytes =
-                bitcoin::consensus::serialize(&declared_coinbase_tx.output);
+            let declared_outputs_bytes = bitcoin::consensus::serialize(&coinbase_tx.output);
             if declared_outputs_bytes != set_custom_mining_job.coinbase_tx_outputs.as_bytes() {
                 tracing::debug!("coinbase outputs mismatch");
                 return SetCustomMiningJobResult::Error(
@@ -1056,13 +1056,13 @@ impl JobValidationEngine for BitcoinCoreIPCEngine {
                 );
             }
 
-            if declared_coinbase_tx.lock_time.to_consensus_u32()
+            if coinbase_tx.lock_time.to_consensus_u32()
                 != set_custom_mining_job.coinbase_tx_locktime
             {
                 tracing::debug!(
                     "coinbase locktime mismatch: custom={}, declared={}",
                     set_custom_mining_job.coinbase_tx_locktime,
-                    declared_coinbase_tx.lock_time.to_consensus_u32()
+                    coinbase_tx.lock_time.to_consensus_u32()
                 );
                 return SetCustomMiningJobResult::Error(
                     ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_TX_LOCKTIME,
@@ -1184,7 +1184,7 @@ mod tests {
     /// nonce that meets the target for this job's merkle root.
     fn solution_on(job: &DeclaredCustomJob) -> PushSolutionOwned {
         let extranonce = [7u8; EXTRANONCE_LEN];
-        let coinbase = job.get_coinbase_tx(Some(&extranonce)).unwrap();
+        let coinbase = declared_coinbase_tx(&job.declare_mining_job, Some(&extranonce)).unwrap();
         let mut header = Header {
             version: Version::from_consensus(BLOCK_VERSION as i32),
             prev_blockhash: job.get_prev_hash(),
@@ -1274,5 +1274,243 @@ mod tests {
             )
         });
         assert_eq!(left, Some((0, 0)));
+    }
+
+    /// The prefix and suffix of [`accepted_job`]'s coinbase: a 12-byte scriptSig of which the
+    /// prefix carries the first four bytes.
+    fn declared_coinbase_parts() -> (Vec<u8>, Vec<u8>) {
+        let declared = accepted_job(1).job.declare_mining_job;
+        (
+            declared.coinbase_tx_prefix.as_ref().to_vec(),
+            declared.coinbase_tx_suffix.as_ref().to_vec(),
+        )
+    }
+
+    /// Where [`accepted_job`]'s coinbase, a SegWit one, has its scriptSig length.
+    const SEGWIT_SCRIPT_SIG_LEN_OFFSET: usize =
+        COINBASE_SCRIPT_SIG_LEN_OFFSET + SEGWIT_MARKER_AND_FLAG.len();
+
+    /// [`accepted_job`]'s declaration with its coinbase replaced by `prefix` and `suffix`.
+    fn declaring(prefix: &[u8], suffix: &[u8]) -> DeclareMiningJobOwned {
+        let mut declared = accepted_job(1).job.declare_mining_job;
+        declared.coinbase_tx_prefix = prefix.to_vec().try_into().unwrap();
+        declared.coinbase_tx_suffix = suffix.to_vec().try_into().unwrap();
+        declared
+    }
+
+    #[test]
+    fn declared_coinbase_tx_fills_or_takes_the_extranonce() {
+        let (prefix, suffix) = declared_coinbase_parts();
+
+        let zeroed = declared_coinbase_tx(&declaring(&prefix, &suffix), None).unwrap();
+        assert_eq!(
+            zeroed.input[0].script_sig.as_bytes(),
+            [vec![0x03, 1, 0, 0], vec![0; EXTRANONCE_LEN]].concat()
+        );
+
+        let solved =
+            declared_coinbase_tx(&declaring(&prefix, &suffix), Some(&[7; EXTRANONCE_LEN])).unwrap();
+        assert_eq!(
+            solved.input[0].script_sig.as_bytes()[4..],
+            [7; EXTRANONCE_LEN]
+        );
+
+        assert_eq!(
+            declared_coinbase_tx(&declaring(&prefix, &suffix), Some(&[7; EXTRANONCE_LEN + 1])),
+            Err(DeclaredCoinbaseError::ExtranonceLen {
+                expected: EXTRANONCE_LEN,
+                got: EXTRANONCE_LEN + 1
+            })
+        );
+    }
+
+    #[test]
+    fn declared_coinbase_tx_takes_a_coinbase_without_segwit_fields() {
+        let mut coinbase =
+            declared_coinbase_tx(&accepted_job(1).job.declare_mining_job, None).unwrap();
+        coinbase.input[0].witness.clear();
+        let bytes = bitcoin::consensus::serialize(&coinbase);
+        // scriptSig length (1) + height push (4)
+        let extranonce_offset = COINBASE_SCRIPT_SIG_LEN_OFFSET + 1 + 4;
+        assert_ne!(bytes[4..6], SEGWIT_MARKER_AND_FLAG);
+
+        let declared = declaring(
+            &bytes[..extranonce_offset],
+            &bytes[extranonce_offset + EXTRANONCE_LEN..],
+        );
+
+        assert_eq!(declared_coinbase_tx(&declared, None), Ok(coinbase));
+        assert_eq!(
+            declared_coinbase_tx(&declaring(&bytes[..40], &[]), None),
+            Err(DeclaredCoinbaseError::Malformed)
+        );
+        let mut spending = bytes[..extranonce_offset].to_vec();
+        spending[5] = 1;
+        assert_eq!(
+            declared_coinbase_tx(&declaring(&spending, &[]), None),
+            Err(DeclaredCoinbaseError::Input)
+        );
+    }
+
+    #[test]
+    fn declared_coinbase_tx_holds_the_script_sig_length_to_consensus() {
+        let (prefix, suffix) = declared_coinbase_parts();
+        // A prefix that stops at the scriptSig length leaves the whole scriptSig to the
+        // extranonce.
+        let with_len = |len: u8| [&prefix[..SEGWIT_SCRIPT_SIG_LEN_OFFSET], &[len]].concat();
+
+        for len in [2, 100] {
+            let tx = declared_coinbase_tx(&declaring(&with_len(len), &suffix), None).unwrap();
+            assert_eq!(tx.input[0].script_sig.len(), len as usize);
+        }
+        for len in [0, 1, 101] {
+            assert_eq!(
+                declared_coinbase_tx(&declaring(&with_len(len), &suffix), None),
+                Err(DeclaredCoinbaseError::Malformed),
+                "scriptSig length {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_coinbase_tx_refuses_malformed_parts() {
+        use DeclaredCoinbaseError::{Input, Malformed};
+
+        let (prefix, suffix) = declared_coinbase_parts();
+        let head = &prefix[..SEGWIT_SCRIPT_SIG_LEN_OFFSET];
+        let edited = |at: usize, byte: u8| {
+            let mut prefix = prefix.clone();
+            prefix[at] = byte;
+            prefix
+        };
+
+        let cases: [(&str, Vec<u8>, Vec<u8>, DeclaredCoinbaseError); 13] = [
+            ("empty prefix", vec![], suffix.clone(), Malformed),
+            (
+                "prefix one byte short of the scriptSig length",
+                head[..SEGWIT_SCRIPT_SIG_LEN_OFFSET - 1].to_vec(),
+                suffix.clone(),
+                Malformed,
+            ),
+            (
+                "no scriptSig length",
+                head.to_vec(),
+                suffix.clone(),
+                Malformed,
+            ),
+            (
+                "truncated scriptSig length",
+                [head, &[0xfd, 0xff]].concat(),
+                suffix.clone(),
+                Malformed,
+            ),
+            (
+                "scriptSig length of 0xffff",
+                [head, &[0xfd, 0xff, 0xff]].concat(),
+                suffix.clone(),
+                Malformed,
+            ),
+            (
+                "scriptSig length of u64::MAX",
+                [head, &[0xff; 9]].concat(),
+                suffix.clone(),
+                Malformed,
+            ),
+            (
+                "scriptSig length below the bytes the prefix carries",
+                edited(SEGWIT_SCRIPT_SIG_LEN_OFFSET, 3),
+                suffix.clone(),
+                Malformed,
+            ),
+            ("two inputs", edited(6, 2), suffix.clone(), Input),
+            (
+                "prefix ending inside the SegWit marker",
+                prefix[..5].to_vec(),
+                suffix.clone(),
+                Malformed,
+            ),
+            (
+                "no SegWit flag, which reads as an input count of zero",
+                edited(5, 2),
+                suffix.clone(),
+                Input,
+            ),
+            (
+                "input spending an outpoint",
+                edited(7, 1),
+                suffix.clone(),
+                Input,
+            ),
+            (
+                "input spending index 0",
+                edited(39, 0),
+                suffix.clone(),
+                Input,
+            ),
+            (
+                "bytes after the transaction",
+                prefix.clone(),
+                [suffix.as_slice(), &[0]].concat(),
+                Malformed,
+            ),
+        ];
+        for (case, prefix, suffix, error) in cases {
+            assert_eq!(
+                declared_coinbase_tx(&declaring(&prefix, &suffix), None),
+                Err(error),
+                "{case}"
+            );
+        }
+    }
+
+    // A declaration with a malformed coinbase is answered at the engine's entry point, before
+    // anything is asked of Bitcoin Core.
+    #[tokio::test]
+    async fn a_malformed_declared_coinbase_is_refused_before_reaching_bitcoin_core() {
+        let (request_sender, request_receiver) = async_channel::unbounded();
+        let engine = BitcoinCoreIPCEngine {
+            request_sender,
+            downstream_states: SharedMap::new(),
+            latest_prev_hash: SharedLock::new(None),
+            cancellation_token: CancellationToken::new(),
+            jdp_thread_handle: SharedLock::new(None),
+        };
+        let (prefix, _) = declared_coinbase_parts();
+        let head = &prefix[..SEGWIT_SCRIPT_SIG_LEN_OFFSET];
+        let mut two_inputs = prefix.clone();
+        two_inputs[6] = 2;
+        let mut script_sig_len_below_carried = prefix.clone();
+        script_sig_len_below_carried[SEGWIT_SCRIPT_SIG_LEN_OFFSET] = 3;
+
+        for (prefix, error_code) in [
+            (
+                head[..SEGWIT_SCRIPT_SIG_LEN_OFFSET - 1].to_vec(),
+                ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+            ),
+            (
+                [head, &[0xff; 9]].concat(),
+                ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+            ),
+            (
+                script_sig_len_below_carried,
+                ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX,
+            ),
+            (
+                two_inputs,
+                ERROR_CODE_DECLARE_MINING_JOB_INVALID_COINBASE_TX_INPUT,
+            ),
+        ] {
+            let mut declare_mining_job = accepted_job(1).job.declare_mining_job;
+            declare_mining_job.mining_job_token = 10u64.to_le_bytes().to_vec().try_into().unwrap();
+            declare_mining_job.coinbase_tx_prefix = prefix.try_into().unwrap();
+
+            let result = engine
+                .handle_declare_mining_job(7, declare_mining_job, None)
+                .await;
+
+            assert!(matches!(result, DeclareMiningJobResult::Error(code) if code == error_code));
+        }
+        assert!(request_receiver.is_empty());
+        assert!(engine.downstream_states.is_empty());
     }
 }
