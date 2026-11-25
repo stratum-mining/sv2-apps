@@ -19,7 +19,7 @@ use stratum_core::{
     },
 };
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Consensus block weight limit, in weight units.
 ///
@@ -273,6 +273,10 @@ impl BitcoinCoreSv2JDP {
                     reason = %reason,
                     debug = ?check_block_result.get_debug(),
                     "Bitcoin Core rejected the block via checkBlock"
+                );
+                trace!(
+                    wtxids = ?wtxid_list,
+                    "Declared job transaction wtxids rejected by Bitcoin Core"
                 );
                 debug!(
                     "Block details - version: {:?}, prev_blockhash: {:?}, bits: {:?}, num_txs: {}",
