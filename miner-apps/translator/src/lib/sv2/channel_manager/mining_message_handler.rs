@@ -706,6 +706,13 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
             ch.on_share_acknowledgement(m.new_submits_accepted_count, m.new_shares_sum);
         });
 
+        // Correlate batched ack to pending forwarded hashes (Phase 2 JSONL).
+        self.share_audit.on_upstream_success(
+            m.channel_id,
+            m.last_sequence_number,
+            m.new_submits_accepted_count,
+        );
+
         Ok(())
     }
 
@@ -728,6 +735,9 @@ impl HandleMiningMessagesFromServerOwnedAsync for ChannelManager {
         self.extended_channels.with_mut(&key, |ch| {
             ch.on_share_rejection(&error_code);
         });
+
+        self.share_audit
+            .on_upstream_error(m.channel_id, m.sequence_number, &error_code);
 
         Ok(())
     }
@@ -1505,6 +1515,7 @@ mod tests {
                 vec![],
                 mode,
                 None,
+                crate::share_audit::ShareAudit::disabled(),
                 #[cfg(feature = "monitoring")]
                 true,
             ),

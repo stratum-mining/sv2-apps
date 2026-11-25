@@ -47,6 +47,11 @@ verify_payout = false
 # Channel Configuration
 aggregate_channels = true  # true: shared channel, false: individual channels
 
+# Share audit. Unset share_audit_path keeps ordinary shares in the log only.
+# Candidates are written to ./block-candidates.jsonl unless this is set to "".
+# share_audit_path = "./share-audit.jsonl"
+# block_candidate_audit_path = "./block-candidates.jsonl"
+
 # Optional monitoring API and ASIC telemetry
 monitoring_address = "0.0.0.0:9092"
 monitoring_cache_refresh_secs = 15
@@ -221,6 +226,89 @@ name, telemetry is not assigned to either of them and the monitoring API reports
 #### **Upstream Configuration**
 - `address`/`port`: SV2 upstream server connection details
 - `authority_pubkey`: Public key for SV2 connection authentication
+
+#### **Share audit**
+
+A share that meets the downstream target is an info line. `share_hash` is the header hash in the same hex order bitcoind and block explorers display. `worker` is the name from the miner's `mining.authorize`. The config `user_identity` is the pool account and is not written on these lines.
+
+```text
+INFO share_accepted
+     worker=rig07 downstream_channel_id=1 job_id=42
+     share_hash=0000000000008483… meets_downstream_target=true
+```
+
+A share that also meets the upstream channel target is forwarded. The info line adds `upstream_channel_id`, `sequence_number`, and `block_candidate`. A share that meets the downstream target and misses the upstream target is `share_not_forwarded` at debug, with `reason=does_not_meet_upstream_target`. That gap is expected while vardiff is on: the miner target is often easier than the pool target.
+
+```text
+INFO share_forwarded
+     worker=rig07 downstream_channel_id=1 upstream_channel_id=7
+     job_id=42 sequence_number=9 share_hash=0000000000008483…
+     block_candidate=false
+```
+
+When the header meets the chain-tip `nbits`, the same forward is also a warning. Grep `BLOCK_CANDIDATE` in the translator log. The line means the hash met `nbits` when it was validated. `chain_status` on that line stays `unknown`. It is not a statement that the block is in the best chain. A later chain-status line, described below, is a separate event.
+
+```text
+WARN BLOCK_CANDIDATE meets network target; not a chain-tip confirmation
+     share_hash=0000… nbits=0x17020093 meets_network_target=true
+     chain_status=unknown
+```
+
+`share_audit_path` is an append-only JSONL file, one JSON object per line. Leave it unset and ordinary shares stay in the log only. `share_audit_block_candidates_only = true` keeps that file to candidates and their pool results. `block_candidate_audit_path` defaults to `block-candidates.jsonl` in the working directory, including when `share_audit_path` is unset. Set it to `""` to disable that file.
+
+The pool acks shares in a batch. `SubmitSharesSuccess` carries `last_sequence_number` and `new_submits_accepted_count`. Each sequence in that window becomes one `share_upstream_result` row, with the hash from the matching forward. The match key is `(upstream_channel_id, sequence_number)`.
+
+In aggregated mode every miner shares one upstream channel, so sequence numbers are one series on that channel. Each row still has its own `downstream_channel_id` and `worker`. In non-aggregated mode each miner has its own upstream channel. The same sequence number on two channels is two different shares. A pool ack on one channel does not attach to the other.
+
+`result` is `success` or `error`. An error row includes `error_code`, for example `difficulty-too-low`.
+
+```json
+{"event":"share_forwarded","worker":"rig07","downstream_channel_id":1,"upstream_channel_id":7,"job_id":42,"sequence_number":9,"share_hash":"0000000000008483…","block_candidate":false}
+{"event":"share_upstream_result","upstream_channel_id":7,"downstream_channel_id":1,"sequence_number":9,"job_id":42,"worker":"rig07","share_hash":"0000000000008483…","result":"success","block_candidate":false}
+{"event":"block_candidate","share_hash":"0000…","nbits":"0x17020093","meets_network_target":true,"chain_status":"unknown","worker":"rig07","sequence_number":1}
+```
+
+The forward path appends those lines and returns. It does not call bitcoind. Each line is flushed as it is written. Worker names are stored as the miner sent them. File rotation is outside the process.
+
+The default log level is info (`RUST_LOG` unset). That is one `share_accepted` line per share that met the downstream target, and one `share_forwarded` line per share sent upstream. With `shares_per_minute = 6`, expect about six accept lines per miner per minute, plus the forwards that cleared the pool target. `share_not_forwarded` stays at debug, so the larger set of shares that miss the pool target stays out of the log unless `RUST_LOG=debug`.
+
+`RUST_LOG` is a single level name: `error`, `warn`, `info`, `debug`, or `trace`. A module filter is ignored and the level falls back to info. `RUST_LOG=warn` keeps `BLOCK_CANDIDATE`, upstream share errors, and `orphaned_or_stale`, and drops the per-share info lines, including `in_best_chain` and `not_found`. The JSONL files do not follow `RUST_LOG`. Leave `share_audit_path` unset when the log is enough. The candidate file stays small, because a share that meets `nbits` is rare.
+
+Environment overrides use the `TPROXY__` prefix:
+
+```bash
+TPROXY__SHARE_AUDIT_PATH=./share-audit.jsonl
+TPROXY__SHARE_AUDIT_BLOCK_CANDIDATES_ONLY=false
+TPROXY__BLOCK_CANDIDATE_AUDIT_PATH=./block-candidates.jsonl
+TPROXY__SHARE_AUDIT_BITCOIN_RPC_URL=http://127.0.0.1:8332
+TPROXY__SHARE_AUDIT_BITCOIN_RPC_COOKIE_PATH=/absolute/path/to/.cookie
+```
+
+#### **Chain status**
+
+Chain-status checks stay off until `share_audit_bitcoin_rpc_url` is set to a bitcoind RPC endpoint on the same network as the upstream pool. Auth is `share_audit_bitcoin_rpc_cookie_path`, or `share_audit_bitcoin_rpc_user` together with `share_audit_bitcoin_rpc_password`. With a valid URL, startup logs:
+
+```text
+INFO Chain-status RPC enabled; only block candidates are checked
+     url=http://127.0.0.1:8332 initial_secs=120 max_secs=86400 stop_confirmations=6
+```
+
+An unset or invalid URL does not emit that line, and ordinary shares never call bitcoind. A check starts only after a share meets the network `nbits` target (`BLOCK_CANDIDATE`). The first `getblockheader` waits `share_audit_chain_poll_initial_secs` (default 120). Later tries wait 10 minutes, then 30, then 60. Polling stops at `share_audit_chain_stop_confirmations` (default 6) or after `share_audit_chain_poll_max_secs` (default 86400).
+
+Each answer is an `event=chain_status` log. `share_hash` is the candidate. `network` is the node's chain (`main` is logged as `mainnet`). `checked_at` in the JSONL row is the time of that RPC call.
+
+```text
+INFO chain_status block is in the best chain
+     chain_status=in_best_chain confirmations=6 network=mainnet poll_expired=false
+
+WARN chain_status header is known but not in the best chain
+     chain_status=orphaned_or_stale confirmations=-1 network=mainnet poll_expired=false
+
+INFO chain_status block hash is not in the node yet
+     chain_status=not_found network=mainnet poll_expired=false
+```
+
+`in_best_chain` means the header is in the node's active chain. The tip itself has `confirmations=1`. `orphaned_or_stale` means the node already knows the header and it is not in that chain (`confirmations` is negative). `not_found` means this node has not seen the hash yet; `poll_expired=true` means the time limit passed on that answer. A node that is down or still loading is a warning only and does not write `not_found`. The `BLOCK_CANDIDATE` line keeps `chain_status=unknown`; these lines are separate.
 
 ### Environment Variables
 

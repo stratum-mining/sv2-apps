@@ -177,6 +177,22 @@ impl IsServer for Sv1Server {
                         return Ok(SubmitOutcome::Rejected(SubmitError::DuplicateShare));
                     }
 
+                    let worker = if !data.sv1_worker_name.is_empty() {
+                        data.sv1_worker_name.as_str()
+                    } else {
+                        request.user_name.as_str()
+                    };
+                    info!(
+                        event = "share_accepted",
+                        worker,
+                        downstream_id,
+                        downstream_channel_id = channel_id,
+                        job_id = %job_id,
+                        share_hash = %share_hash,
+                        meets_downstream_target = true,
+                        "share_accepted"
+                    );
+
                     data.pending_share = Some(SubmitShareWithChannelId {
                         channel_id,
                         downstream_id,
@@ -185,6 +201,7 @@ impl IsServer for Sv1Server {
                         extranonce2_len: job_context.extranonce2_len,
                         version_rolling_mask: data.version_rolling_mask.clone(),
                         job_version: Some(job.version.0),
+                        share_hash,
                     });
 
                     Ok(SubmitOutcome::Accepted)
