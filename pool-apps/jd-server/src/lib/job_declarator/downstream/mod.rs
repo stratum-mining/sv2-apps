@@ -679,6 +679,30 @@ mod tests {
         );
     }
 
+    // Finding positions is one pass over the declared list however many transactions are
+    // missing. A declaration as long as the wire allows with all of it missing takes
+    // milliseconds that way, and billions of comparisons if every missing transaction is looked
+    // up in the list on its own.
+    #[test]
+    fn finds_positions_in_one_pass_over_the_declared_list() {
+        let wtxids: Vec<Wtxid> = (0..u16::MAX)
+            .map(|n| {
+                let mut bytes = [0; 32];
+                bytes[..2].copy_from_slice(&n.to_le_bytes());
+                Wtxid::from_byte_array(bytes)
+            })
+            .collect();
+        let declaration = declaration(&wtxids);
+
+        let started = Instant::now();
+        let (_, positions) =
+            PendingDeclareMiningJob::new(declaration, &wtxids, None, Instant::now());
+        let took = started.elapsed();
+
+        assert!(positions.into_iter().eq(0..u16::MAX));
+        assert!(took < Duration::from_secs(5), "took {took:?}");
+    }
+
     // An answer that would bring what is kept past the declared list is invalid, and nothing of
     // it is kept.
     #[test]
