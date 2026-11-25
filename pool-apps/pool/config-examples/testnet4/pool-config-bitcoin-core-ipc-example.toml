@@ -1,7 +1,12 @@
 # SRI Pool config
+# Development credentials: a throwaway static key and a certificate from the development
+# authority, whose secret key is public. For trying the examples only; they prove nothing to
+# anyone else. For a real deployment, including key rotation through
+# `active_static_key = "/etc/sv2/active_static_key.toml"`, see "Server keys" in the README.
+static_private_key = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8"
+certificate = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew"
+# Optional: the certificate is checked against it at startup and before every handshake.
 authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
-cert_validity_sec = 3600
 listen_address = "0.0.0.0:43333"
 
 # Coinbase outputs are specified as descriptors. A full list of descriptors is available at
@@ -51,7 +56,7 @@ min_interval = 5
 # Optional: Embedded Job Declaration Server (JDS)
 # When enabled, Pool runs a JDS subserver that listens for JDP connections from JDC.
 # Requires template_provider_type = BitcoinCoreIpc (JDS backend is selected by Pool startup).
-# Shared fields (authority keys, cert_validity, coinbase_reward_script) are inherited
+# Shared fields (server keys, coinbase_reward_script) are inherited
 # from the Pool config above.
 # [jds]
 # listen_address = "0.0.0.0:34254"

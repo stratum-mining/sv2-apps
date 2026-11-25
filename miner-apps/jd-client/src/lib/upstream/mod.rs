@@ -180,7 +180,7 @@ impl Upstream {
                 info!("Shutdown received during handshake, dropping connection");
                 Err(JDCError::shutdown(JDCErrorKind::CouldNotInitiateSystem))
             }
-            result = connect_with_noise(stream, Some(upstream_entry.authority_pubkey)) => {
+            result = connect_with_noise(stream, upstream_entry.authority_pubkey) => {
                 match result {
                     Ok(noise_stream) => Ok(noise_stream.into_split()),
                     Err(e) => Err(JDCError::fallback(e))

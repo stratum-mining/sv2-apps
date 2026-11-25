@@ -67,10 +67,13 @@ mod tests {
                 "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
             ),
             (
-                "JDC__AUTHORITY_SECRET_KEY",
-                "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n",
+                "JDC__STATIC_PRIVATE_KEY",
+                "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8",
             ),
-            ("JDC__CERT_VALIDITY_SEC", "3600"),
+            (
+                "JDC__CERTIFICATE",
+                "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew",
+            ),
             (
                 "JDC__COINBASE_REWARD_SCRIPT",
                 "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)",
@@ -87,6 +90,10 @@ mod tests {
             (
                 "JDC__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
                 "127.0.0.1:8442",
+            ),
+            (
+                "JDC__TEMPLATE_PROVIDER_TYPE__SV2TP__PUBLIC_KEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
             ),
             (
                 "JDC__UPSTREAM_01__AUTHORITY_PUBKEY",
@@ -125,5 +132,74 @@ mod tests {
         for (key, _) in vars {
             unsafe { std::env::remove_var(key) };
         }
+    }
+
+    /// The pre-issued certificate fields reach `ResponderCredentials` from the environment
+    /// through the flattened struct. Own prefix, so this does not race the test above on the
+    /// process environment.
+    #[test]
+    fn jdc_config_loads_pre_issued_credentials_from_env() {
+        use stratum_apps::network_helpers::ResponderCredentials;
+
+        let vars = [
+            ("JDC_PREISSUED__LISTENING_ADDRESS", "0.0.0.0:34265"),
+            ("JDC_PREISSUED__MAX_SUPPORTED_VERSION", "2"),
+            ("JDC_PREISSUED__MIN_SUPPORTED_VERSION", "2"),
+            (
+                "JDC_PREISSUED__STATIC_PRIVATE_KEY",
+                "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8",
+            ),
+            (
+                "JDC_PREISSUED__CERTIFICATE",
+                "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew",
+            ),
+            (
+                "JDC_PREISSUED__COINBASE_REWARD_SCRIPT",
+                "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)",
+            ),
+            ("JDC_PREISSUED__JDC_SIGNATURE", "Sv2MinerSignature"),
+            ("JDC_PREISSUED__SHARES_PER_MINUTE", "6.0"),
+            ("JDC_PREISSUED__SHARE_BATCH_SIZE", "10"),
+            (
+                "JDC_PREISSUED__TEMPLATE_PROVIDER_TYPE__SV2TP__ADDRESS",
+                "127.0.0.1:8442",
+            ),
+            (
+                "JDC_PREISSUED__TEMPLATE_PROVIDER_TYPE__SV2TP__PUBLIC_KEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
+            ),
+            (
+                "JDC_PREISSUED__UPSTREAM_01__AUTHORITY_PUBKEY",
+                "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72",
+            ),
+            ("JDC_PREISSUED__UPSTREAM_01__POOL_ADDRESS", "127.0.0.1"),
+            ("JDC_PREISSUED__UPSTREAM_01__POOL_PORT", "34254"),
+            ("JDC_PREISSUED__UPSTREAM_01__JDS_ADDRESS", "127.0.0.1"),
+            ("JDC_PREISSUED__UPSTREAM_01__JDS_PORT", "34264"),
+            ("JDC_PREISSUED__UPSTREAM_01__USER_IDENTITY", "user"),
+        ];
+        for (key, value) in vars {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        let config: JobDeclaratorClientConfig = load_config(
+            "jdc-config-does-not-exist.toml",
+            "JDC_PREISSUED",
+            LIST_KEYS,
+            ENUM_KEYS,
+        )
+        .expect("load JobDeclaratorClientConfig from env only");
+
+        for (key, _) in vars {
+            unsafe { std::env::remove_var(key) };
+        }
+
+        assert!(matches!(
+            config.responder_credentials(),
+            ResponderCredentials::PreIssued {
+                authority_public_key: None,
+                ..
+            }
+        ));
     }
 }

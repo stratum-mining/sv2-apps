@@ -18,7 +18,7 @@ use stratum_apps::{
     bitcoin_core_sv2::CancellationToken,
     channel_utils::ReceiverCleanup,
     key_utils::Secp256k1PublicKey,
-    network_helpers::{self, TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host_port},
+    network_helpers::{TCP_CONNECT_TIMEOUT, connect_with_noise, resolve_host_port},
     stratum_core::{
         common_messages_sv2::{
             MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
@@ -136,7 +136,7 @@ impl Sv2Tp {
     /// Retries up to 3 times before returning [`JDCError::Shutdown`].
     pub async fn new(
         tp_address: String,
-        public_key: Option<Secp256k1PublicKey>,
+        public_key: Secp256k1PublicKey,
         channel_manager_receiver: Receiver<TemplateDistributionOwned>,
         channel_manager_sender: Sender<TemplateDistributionOwned>,
         cancellation_token: CancellationToken,
@@ -198,9 +198,6 @@ impl Sv2Tp {
                                         sv2_tp_io,
                                         tp_address,
                                     });
-                                }
-                                Err(network_helpers::Error::InvalidKey) => {
-                                    return Err(JDCError::shutdown(JDCErrorKind::InvalidKey));
                                 }
                                 Err(e) => {
                                     error!(attempt, error = ?e, "Noise handshake failed");

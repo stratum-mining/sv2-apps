@@ -286,8 +286,6 @@ pub enum TproxyErrorKind {
         channel_id: ChannelId,
         error: ExtendedChannelError,
     },
-    /// Invalid key
-    InvalidKey,
     /// Downstream not found with given downstream_id
     DownstreamNotPresent(DownstreamId),
     /// Coinbase payout verification failed for a solo/donation user identity
@@ -405,7 +403,6 @@ impl fmt::Display for TproxyErrorKind {
                 f,
                 "Channel {channel_id} rejected its updated upstream extranonce prefix: {error:?}"
             ),
-            InvalidKey => write!(f, "Invalid key used during noise handshake"),
             DownstreamNotPresent(downstream_id) => write!(
                 f,
                 "downstream not found with downstream_id: {downstream_id}"

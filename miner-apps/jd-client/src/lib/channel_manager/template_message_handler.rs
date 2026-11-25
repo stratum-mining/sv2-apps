@@ -696,7 +696,7 @@ mod tests {
     use stratum_apps::{
         coinbase_output_constraints::coinbase_output_constraints_message,
         config_helpers::CoinbaseRewardScript,
-        key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
+        network_helpers::ResponderCredentials,
         stratum_core::{
             binary_sv2::B0255Owned,
             bitcoin::{
@@ -731,7 +731,7 @@ mod tests {
             MAX_CONSECUTIVE_DECLARATION_REFUSALS, MAX_REQUESTED_TEMPLATES, MAX_WAITING_FOR_TOKEN,
             MiningJobTokens, OutputSets, SOLO_FULL_EXTRANONCE_SIZE,
         },
-        config::{ConfigJDCMode, JobDeclaratorClientConfig, PoolConfig, ProtocolConfig},
+        config::{ConfigJDCMode, JobDeclaratorClientConfig, ProtocolConfig},
         downstream::Downstream,
         error::Action,
         jd_mode::JDMode,
@@ -770,20 +770,14 @@ mod tests {
             ),
             10.0,
             1,
-            PoolConfig::new(
-                Secp256k1PublicKey::try_from(
-                    "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string(),
-                )
-                .unwrap(),
-                Secp256k1SecretKey::try_from(
-                    "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string(),
-                )
-                .unwrap(),
-            ),
-            60,
+            ResponderCredentials::PreIssued {
+                static_private_key: "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8".parse().unwrap(),
+                certificate: "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew".parse().unwrap(),
+                authority_public_key: None,
+            },
             TemplateProviderType::Sv2Tp {
                 address: "127.0.0.1:0".to_string(),
-                public_key: None,
+                public_key: "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".parse().unwrap(),
             },
             vec![],
             "test-jdc".to_string(),

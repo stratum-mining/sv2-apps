@@ -16,11 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 use stratum_apps::{
-    key_utils::{Secp256k1PublicKey, Secp256k1SecretKey},
     network_helpers::noise_connection::Connection,
     stratum_core::{
         framing_sv2::framing::MessageFrame,
-        noise_sv2::{Initiator, Responder},
+        noise_sv2::Initiator,
         parsers_sv2::{
             AnyMessage, AnyMessageOwned, ExtensionsNegotiationOwned, ExtensionsOwned, IsSv2Message,
             Tlv, message_type_to_name, parse_message_frame_with_tlvs,
@@ -248,19 +247,12 @@ pub async fn handshake_as_server(
     stream: tokio::net::TcpStream,
     cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
-    let pub_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
-        .to_string()
-        .parse::<Secp256k1PublicKey>()
-        .unwrap()
-        .into_bytes();
-    let prv_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
-        .to_string()
-        .parse::<Secp256k1SecretKey>()
-        .unwrap()
-        .into_bytes();
-    let responder =
-        Responder::from_authority_kp(&pub_key, &prv_key, std::time::Duration::from_secs(10000))
-            .unwrap();
+    // The sniffer stands in for the server its client pins, so it presents what the servers
+    // under test present.
+    let responder = crate::test_responder_credentials()
+        .responder()
+        .await
+        .unwrap();
 
     if let Ok((receiver_from_client, sender_to_client)) =
         Connection::accept::<OutboundFrame>(stream, responder, cancellation_token).await
@@ -277,7 +269,13 @@ pub async fn handshake_as_client(
     stream: tokio::net::TcpStream,
     cancellation_token: CancellationToken,
 ) -> Option<(Receiver<InboundFrame>, Sender<OutboundFrame>)> {
-    let initiator = Initiator::without_pk().expect("This fn call can not fail");
+    // Every server the harness connects to presents a certificate from the test authority.
+    let initiator = Initiator::new(
+        crate::TEST_AUTHORITY_PUBLIC_KEY
+            .parse::<stratum_apps::key_utils::Secp256k1PublicKey>()
+            .expect("valid key")
+            .0,
+    );
     Connection::connect::<OutboundFrame>(stream, initiator, cancellation_token)
         .await
         .ok()
