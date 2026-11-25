@@ -61,6 +61,7 @@ impl IsServerAsync for Sv1Server {
                         minimum_difficulty: request.minimum_difficulty().map(|_| false),
                         subscribe_extranonce: request.supports_extranonce().then_some(true),
                         info: request.info().map(|_| true),
+                        unsupported: request.unknown_extensions().map(String::from).collect(),
                     }
                 })
                 .map_err(TproxyError::shutdown)

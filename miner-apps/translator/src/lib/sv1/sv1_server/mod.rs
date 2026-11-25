@@ -4778,6 +4778,10 @@ mod tests {
                 r#"[["minimum-difficulty","info"],{"minimum-difficulty.value":1024}]"#,
                 serde_json::json!({"minimum-difficulty": false, "info": true}),
             ),
+            (
+                r#"[["subscribe-extranonce","unknown"],{"unknown.value":1}]"#,
+                serde_json::json!({"subscribe-extranonce": true, "unknown": false}),
+            ),
             (r#"[[]]"#, serde_json::json!({})),
         ] {
             let (server, _to_server, _from_server) = server_with_channels(false);
