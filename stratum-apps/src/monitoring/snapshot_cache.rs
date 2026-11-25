@@ -102,6 +102,9 @@ pub struct MonitoringSnapshot {
     pub server_summary: Option<ServerSummary>,
     pub sv2_clients: Option<Vec<Sv2ClientInfo>>,
     pub sv2_clients_summary: Option<Sv2ClientsSummary>,
+    /// Cumulative blocks found, monotonic where the source tracks it at process
+    /// scope. Kept out of `Sv2ClientsSummary` so the JSON API schema is unchanged.
+    pub sv2_client_blocks_found: Option<u64>,
     pub sv1_clients: Option<Vec<Sv1ClientInfo>>,
     pub sv1_clients_summary: Option<Sv1ClientsSummary>,
 }
@@ -231,7 +234,9 @@ impl SnapshotCache {
 
         // Collect Sv2 clients data
         if let Some(ref source) = self.sv2_clients_source {
-            new_snapshot.sv2_clients = Some(source.get_sv2_clients());
+            let clients = source.get_sv2_clients();
+            new_snapshot.sv2_client_blocks_found = Some(source.get_blocks_found_total(&clients));
+            new_snapshot.sv2_clients = Some(clients);
             new_snapshot.sv2_clients_summary = Some(source.get_sv2_clients_summary());
         }
 
@@ -383,8 +388,6 @@ impl SnapshotCache {
                 m.set(summary.total_hashrate as f64);
             }
 
-            let mut client_blocks_total: u64 = 0;
-
             for client in snapshot.sv2_clients.as_deref().unwrap_or(&[]) {
                 let client_id = client.client_id.to_string();
 
@@ -426,7 +429,6 @@ impl SnapshotCache {
                             .set(channel.nominal_hashrate as f64);
                     }
                     current_client_labels.insert(labels);
-                    client_blocks_total += channel.blocks_found as u64;
                 }
 
                 for channel in &client.standard_channels {
@@ -467,12 +469,11 @@ impl SnapshotCache {
                             .set(channel.nominal_hashrate as f64);
                     }
                     current_client_labels.insert(labels);
-                    client_blocks_total += channel.blocks_found as u64;
                 }
             }
 
             if let Some(ref m) = metrics.sv2_client_blocks_found_total {
-                m.set(client_blocks_total as f64);
+                m.set(snapshot.sv2_client_blocks_found.unwrap_or(0) as f64);
             }
         }
 
@@ -739,6 +740,44 @@ mod tests {
         assert!(
             total_cache_requests > 2,
             "Cache should have processed requests",
+        );
+    }
+
+    // ── blocks_found lifetime ────────────────────────────────────────
+
+    /// A source with no live channels but a non-zero process-level total: the
+    /// shape left behind when the channel that found a block disconnects.
+    struct RetiredBlockFinder;
+
+    impl Sv2ClientsMonitoring for RetiredBlockFinder {
+        fn get_sv2_clients(&self) -> Vec<Sv2ClientInfo> {
+            vec![]
+        }
+
+        fn get_blocks_found_total(&self, _clients: &[Sv2ClientInfo]) -> u64 {
+            1
+        }
+    }
+
+    #[test]
+    fn blocks_found_survives_loss_of_the_finding_channel() {
+        let metrics = PrometheusMetrics::new(false, true, false).expect("metrics");
+        let cache = SnapshotCache::new(
+            Duration::from_secs(5),
+            None,
+            Some(Arc::new(RetiredBlockFinder)),
+        )
+        .with_metrics(metrics.clone());
+
+        cache.refresh();
+
+        // A total derived from live channels would read 0 here.
+        assert_eq!(
+            metrics
+                .sv2_client_blocks_found_total
+                .expect("client metrics enabled")
+                .get(),
+            1.0
         );
     }
 }
