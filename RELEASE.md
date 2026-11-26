@@ -42,7 +42,7 @@ candidate it builds on has to be tagged first.
 4. **Pin the Docker Images:** In `docker/docker-compose.yml`, point the images at the `vX.Y.Z-rc.N` tags.
 5. **Push the Release Branch:** CI runs on pushes to `release/v*`. On top of what it runs for `main`, it runs `./scripts/check-published-crates.sh`, which fails when a crate carries a version that is already on crates.io while its contents differ from what was published. `cargo publish` would refuse that crate, so it needs a version bump before the candidate goes out, made like any other fix (see [Fixing a Blocking Problem](#fixing-a-blocking-problem)).
 6. **Publish the Candidate:** Once CI passes on the release branch, create the `vX.Y.Z-rc.N` tag on it and publish it as a GitHub **pre-release**. The binaries are attached to it and the Docker images are pushed as `stratumv2/<app>:vX.Y.Z-rc.N`. Nothing is published to crates.io.
-7. **Deploy and Announce:** Upgrade the hosted SRI Pool and JDS to the candidate, smoke-test the miner apps against them, and announce the candidate together with the `sv2-ui` candidate that runs its images.
+7. **Deploy and Announce:** Upgrade the hosted SRI Pool and JDS to the candidate, smoke-test the miner apps against them (see [`AGENTS_SMOKE_TESTS.md`](AGENTS_SMOKE_TESTS.md)), and announce the candidate together with the `sv2-ui` candidate that runs its images.
 
 ### Test Period
 

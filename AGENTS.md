@@ -76,3 +76,7 @@ An issue and every Loupe finding it lists close together, with the PR that compl
 ## Ponytail
 
 If the plugin is not already installed into the coding agent harness, make sure to follow [Ponytail](https://ponytail.dev/) rules. But avoid installing it as a plugin, unless explicitly instructed to do so. This is only a repository-wide convention. Also avoid writing comments that reference "ponytail" in a compressed and implicit way, prefer explaining the actual rationale instead.
+
+## Clanker-driven smoke tests
+
+The miner apps can be smoke-tested against the hosted `pool_sv2` deployment, following `AGENTS_SMOKE_TESTS.md`. Only read and follow that file when explicitly instructed to run a smoke test — it is not a regular development workflow.
