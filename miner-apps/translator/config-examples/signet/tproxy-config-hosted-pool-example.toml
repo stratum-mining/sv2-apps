@@ -1,0 +1,70 @@
+# Local Mining Device Downstream Connection
+# SV1 is unencrypted and "0.0.0.0" listens on every interface: only expose this port to a trusted
+# LAN (see "Trust Model" in the README).
+downstream_address = "0.0.0.0"
+downstream_port = 34255
+
+# Version support
+max_supported_version = 2
+min_supported_version = 2
+
+# Extranonce2 size for downstream connections
+# This controls the rollable part of the extranonce for downstream SV1 miners
+# Max value for CGminer: 8
+# Min value: 2
+downstream_extranonce2_size = 4
+
+# If true, tProxy verifies upstream coinbase outputs against the payout encoded by each upstream
+# `user_identity`.
+# Keep false for standard pool mining, including pools that use a Bitcoin address as the username.
+# Enable for solo/donation identities: sri/solo/<address>/<worker>,
+# sri/donate/<percentage>/<address>/<worker>, or legacy <address>[.worker].
+verify_payout = false
+
+# Aggregate channels: if true, all miners share one upstream channel; if false, each miner gets its own channel
+aggregate_channels = true
+
+# Enable this option to set a predefined log file path.
+# When enabled, logs will always be written to this file.
+# The CLI option --log-file (or -f) will override this setting if provided.
+# log_file = "./tproxy.log"
+
+# Protocol extensions configuration
+# Extensions that the translator supports (will request if required by server)
+# Example: supported_extensions = [0x0002, 0x0003]
+supported_extensions = [
+    0x0002,  # Worker-Specific Hashrate Tracking
+]
+
+# Monitoring HTTP server address for exposing channel data (optional)
+# The monitoring API has no authentication: only expose it to a trusted network.
+monitoring_address = "0.0.0.0:9092"
+monitoring_cache_refresh_secs = 15
+
+# Past jobs retained per channel for late-share validation (optional). Unset or 0 uses the
+# channels_sv2 default of 16; set `ceil(16s / your job interval)` to reclaim ~4.5 kB per job.
+# max_past_jobs = 3
+
+# LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
+[miner_telemetry]
+cidrs = ["192.168.1.0/24"]
+
+# Difficulty params
+[downstream_difficulty_config]
+# hashes/s of the weakest miner that will be connecting (e.g.: 10 Th/s = 10_000_000_000_000.0)
+min_individual_miner_hashrate=10_000_000_000_000.0
+# target number of shares per minute the miner should be sending
+shares_per_minute = 6.0
+# enable variable difficulty adjustment (true by default, set to false when using with JDC)
+enable_vardiff = true
+
+# Interval in seconds for sending keepalive jobs to downstream miners.
+job_keepalive_interval_secs = 60
+
+[[upstreams]]
+# SRI Pool Primary Pool
+# address accepts IP addresses or hostnames (e.g. "pool.example.com")
+address = "75.119.150.111"
+port = 43333
+authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+user_identity = "your_primary_username_here"
