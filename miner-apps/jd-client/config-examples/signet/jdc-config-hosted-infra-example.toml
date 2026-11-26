@@ -1,0 +1,99 @@
+# SRI JDC config
+listening_address = "0.0.0.0:34265"
+
+# Version support
+max_supported_version = 2
+min_supported_version = 2
+
+# Auth keys for open encrypted connection downstream
+# Development credentials: a throwaway static key and a certificate from the development
+# authority, whose secret key is public. For trying the examples only; they prove nothing to
+# anyone else. For a real deployment, including key rotation through
+# `active_static_key = "/etc/sv2/active_static_key.toml"`, see "Server keys" in the README.
+static_private_key = "2Zdzjqd9c7EB4C9FBuqyDNzErruL4DNrJHoL5jhdE6QVArUTR8"
+certificate = "11HpWbvGUzBwSTTVZMX6Dc1bVAupxFfvzkFqWfcQzXwVWWeCFQ6rQTDtrNbv4ncSx11gBb1trRbuhuCuXNptqbQBHnyx4VJKULV9e4AWew"
+# Optional: the certificate is checked against it at startup and before every handshake.
+authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+
+# How many shares we expect to receive in a minute (determines difficulty targets)
+shares_per_minute = 6.0
+
+# How many shares do we want to acknowledge in a batch
+share_batch_size = 10
+
+# Number of rollable extranonce bytes reserved for extended downstreams (default 8)
+# reserved_downstream_rollable_extranonce_size = 8
+
+# JDC supports two modes:
+# "FULLTEMPLATE"  - full template mining
+# "COINBASEONLY" - coinbase-only mining
+mode = "FULLTEMPLATE"
+
+# string to be added into the Coinbase scriptSig
+jdc_signature = "Sv2MinerSignature"
+
+# Solo Mining config
+# Coinbase output used to build the coinbase tx in case of Solo Mining (as last-resort solution of the pools fallback system)
+#
+# Coinbase outputs are specified as descriptors. A full list of descriptors is available at
+#     https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki#appendix-b-index-of-script-expressions
+# Although the `musig` descriptor is not yet supported and the legacy `combo` descriptor never
+# will be. If you have an address, embed it in a descriptor like `addr(<address here>)`.
+coinbase_reward_script = "addr(tb1qpusf5256yxv50qt0pm0tue8k952fsu5lzsphft)"
+
+# Enable this option to set a predefined log file path.
+# When enabled, logs will always be written to this file.
+# The CLI option --log-file (or -f) will override this setting if provided.
+# log_file = "./jd-client.log"
+
+# Protocol Extensions Configuration
+# Comment/uncomment to enable/disable specific extensions.
+# Extensions JDC agrees to use with its Pool when the Pool requires them:
+supported_extensions = [
+    0x0002,  # Worker-Specific Hashrate Tracking
+]
+# Extensions JDC requires its Pool to support (JDC moves to the next upstream otherwise):
+# required_extensions = []
+# Extensions JDC grants downstreams that ask for them:
+supported_downstream_extensions = [
+    0x0002,  # Worker-Specific Hashrate Tracking
+]
+# Extensions every downstream must ask for (JDC disconnects a downstream that leaves one out):
+# required_downstream_extensions = []
+
+# Monitoring HTTP server address for exposing channel data (optional)
+monitoring_address = "0.0.0.0:9091"
+monitoring_cache_refresh_secs = 15
+
+# Past jobs retained per channel for late-share validation (optional). Unset or 0 uses the
+# channels_sv2 default of 16; set `ceil(16s / your job interval)` to reclaim ~4.5 kB per job.
+# max_past_jobs = 3
+
+# LAN subnet containing ASIC miner web/API addresses (for example, 192.168.1.0/24).
+[miner_telemetry]
+cidrs = ["192.168.1.0/24"]
+
+# List of upstreams (Pool and JDS) used as backup endpoints
+# In case of shares refused by the Pool or JDS, the fallback system will propose the same job to the next upstream in this list
+[[upstreams]]
+authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+# pool_address and jds_address accept IP addresses or hostnames (e.g. "pool.example.com")
+pool_address = "75.119.150.111"
+pool_port = 43333
+jds_address = "75.119.150.111"
+jds_port = 43334
+user_identity = "your_primary_username_here"
+ 
+# [[upstreams]]
+# authority_pubkey = "2di19GHYQnAZJmEpoUeP7C3Eg9TCcksHr23rZCC83dvUiZgiDL"
+# pool_address = "127.0.0.1:34254"
+# pool_port = "34254"
+# jds_address = "127.0.0.1:34264"
+# jds_port = "34264"
+# user_identity = "your_backup_username_here"
+
+# Hosted Sv2 Template Provider config
+[template_provider_type.Sv2Tp]
+# address accepts "ip:port" or "hostname:port" (e.g. "tp.example.com:38442")
+address = "75.119.150.111:38442"
+public_key = "9bwHCYnjhbHm4AS3pWg9MtAH83mzWohoJJJDELYBqZhDNqszDLc"
