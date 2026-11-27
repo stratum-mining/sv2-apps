@@ -188,13 +188,15 @@ impl Sv1Server {
     /// [`Self::update_difficulty`]. From there vardiff owns the difficulty.
     ///
     /// With vardiff disabled the upstream sets the difficulty, so the suggestion is only recorded.
+    /// It is only recorded in aggregated mode too: every estimate feeds the hashrate and target
+    /// of the one upstream channel the miners share, and a suggestion is not backed by work.
     pub(super) async fn apply_suggested_difficulty(
         &self,
         downstream_id: DownstreamId,
         difficulty: f64,
     ) -> TproxyResult<(), error::Sv1Server> {
         let difficulty_config = &self.config.downstream_difficulty_config;
-        let vardiff_enabled = difficulty_config.enable_vardiff;
+        let starts_vardiff = difficulty_config.enable_vardiff && !self.mode.is_aggregated();
         let minimum_hashrate = difficulty_config.min_individual_miner_hashrate;
         let shares_per_minute = self.shares_per_minute as f64;
         // A share at difficulty 1 takes 2^32 hashes on average.
@@ -209,7 +211,7 @@ impl Sv1Server {
                     }
                     data.suggested_difficulty = Some(difficulty);
                     let (true, Some(channel_id), Some(current_hashrate)) =
-                        (vardiff_enabled, data.channel_id, data.hashrate)
+                        (starts_vardiff, data.channel_id, data.hashrate)
                     else {
                         return None;
                     };
