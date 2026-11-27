@@ -745,7 +745,8 @@ impl Sv1Server {
         // Configure is optional; subscribe and authorize may arrive in either order. Ancillary
         // setup requests may follow the opening request. A submit cannot start a session; the
         // not-subscribed case was answered above, while an unauthorized worker is rejected by
-        // sv1_api after the channel needed for normal request processing is available.
+        // `check_submit_session` after the channel needed for normal request processing is
+        // available.
         let can_start = matches!(
             request,
             ClientToServer::Configure(..)
