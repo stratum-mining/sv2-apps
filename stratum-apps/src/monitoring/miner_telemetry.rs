@@ -96,11 +96,19 @@ const MINER_TELEMETRY_EXCLUDED_FIELDS: &[DataField] = &[
     DataField::ExpectedHashrate,
     DataField::Fans,
     DataField::PsuFans,
+    DataField::Psus,
     DataField::FluidTemperature,
+    DataField::OutletFluidTemperature,
+    DataField::TuningPercent,
     DataField::TuningTarget,
+    DataField::TuningCapabilities,
     DataField::LightFlashing,
     DataField::Messages,
     DataField::Pools,
+    DataField::BestShare,
+    DataField::SessionBestShare,
+    DataField::OperatingState,
+    DataField::DevFeeConnected,
 ];
 
 /// Collects miner telemetry and discovers miner management interfaces on configured LAN ranges.
@@ -426,6 +434,7 @@ mod tests {
             }),
             accepted_shares: None,
             rejected_shares: None,
+            last_share_time: None,
             active,
             alive: None,
             user: Some(user.to_string()),
