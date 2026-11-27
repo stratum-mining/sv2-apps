@@ -29,7 +29,9 @@ pub struct Sv1ClientInfo {
     pub extranonce1_hex: String,
     pub extranonce2_len: usize,
     pub version_rolling_mask: Option<String>,
-    pub version_rolling_min_bit: Option<String>,
+    pub version_rolling_min_bit: Option<u32>,
+    /// First difficulty the miner suggested with `mining.suggest_difficulty`.
+    pub suggested_difficulty: Option<f64>,
     #[cfg(feature = "asic-rs-telemetry")]
     /// Latest telemetry fetched from the matched miner management interface.
     pub miner_telemetry: Option<MinerTelemetry>,
@@ -92,7 +94,8 @@ mod tests {
             extranonce1_hex: "aabb".into(),
             extranonce2_len: 8,
             version_rolling_mask: Some("ffffffff".into()),
-            version_rolling_min_bit: Some("00000000".into()),
+            version_rolling_min_bit: Some(0),
+            suggested_difficulty: None,
             #[cfg(feature = "asic-rs-telemetry")]
             miner_telemetry: None,
             #[cfg(feature = "asic-rs-telemetry")]

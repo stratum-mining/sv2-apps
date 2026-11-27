@@ -26,7 +26,7 @@ use stratum_apps::{
         noise_sv2,
         parsers_sv2::{self, ParserError, TlvError},
         stratum_translation,
-        sv1_api::{self, server_to_client::SetDifficulty},
+        sv1_api::{self, SetDifficulty},
     },
     utils::types::{
         CanDisconnect, CanFallback, CanShutdown, ChannelId, DownstreamId, ExtensionType,
@@ -123,9 +123,9 @@ where
     }
 
     /// Attaches a downstream to an error built without connection context, such as the sv1 errors
-    /// `From` produces for the `IsServer::Error` bound. Used on the `handle_message` call sites in
-    /// `Sv1Server`, where a protocol violation should drop that miner instead of only being logged.
-    /// Actions chosen explicitly (fallback, shutdown) are left alone.
+    /// `From` produces for the `IsServerAsync::Error` type. Used on the `handle_request` call site
+    /// in `Sv1Server`, where a protocol violation should drop that miner instead of only being
+    /// logged. Actions chosen explicitly (fallback, shutdown) are left alone.
     pub fn with_sv1_downstream_context(mut self, downstream_id: DownstreamId) -> Self {
         if matches!(&self.kind, TproxyErrorKind::SV1Error(_)) && matches!(self.action, Action::Log)
         {

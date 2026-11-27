@@ -49,10 +49,8 @@ fn downstream_to_sv1_client_info(
                 .version_rolling_mask
                 .as_ref()
                 .map(|mask| format!("{:08x}", mask.0)),
-            version_rolling_min_bit: dd
-                .version_rolling_min_bit
-                .as_ref()
-                .map(|bit| format!("{:08x}", bit.0)),
+            version_rolling_min_bit: dd.version_rolling_min_bit,
+            suggested_difficulty: dd.suggested_difficulty,
         })
         .ok()
 }
