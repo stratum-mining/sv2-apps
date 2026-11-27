@@ -90,8 +90,7 @@ fn sv1_difficulty(target: Target) -> Result<Sv1Difficulty, StratumTranslationErr
     let target = sv1_advertised_target_from_sv2_target(
         target,
         SV1_MIN_DIFFICULTY_FOR_INTEGER_POWER_OF_TWO_ROUNDING,
-    )
-    .unwrap_or(target);
+    )?;
     Ok(Sv1Difficulty { message, target })
 }
 
