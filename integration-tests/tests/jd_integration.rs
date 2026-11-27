@@ -849,6 +849,151 @@ async fn pool_rejects_set_custom_mining_job_with_mismatched_user_identity() {
     shutdown_all!(jdc, pool);
 }
 
+// This test verifies that the Pool answers a SetCustomMiningJob whose coinbase_prefix does not end
+// with the push of the channel's full extranonce with invalid-coinbase-prefix, and keeps the
+// client connected.
+#[tokio::test]
+async fn pool_rejects_set_custom_mining_job_without_extranonce_push() {
+    start_tracing();
+    let (tp, tp_addr) = start_template_provider(None, DifficultyLevel::Low);
+    let (pool, pool_addr, jds_addr, _) =
+        start_pool_with_jds(tp.bitcoin_core(), vec![], vec![], false).await;
+
+    // JDC reaches the Pool through two chained sniffers: the first records JDC's
+    // SetCustomMiningJob, the second drops it, so the Pool never consumes the token.
+    let ignore_set_custom_mining_job = IgnoreMessage::new(
+        MessageDirection::ToUpstream,
+        MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+    );
+    let (_jdc_pool_drop_sniffer, jdc_pool_drop_sniffer_addr) = start_sniffer(
+        "jdc-pool-drop",
+        pool_addr,
+        false,
+        vec![ignore_set_custom_mining_job.into()],
+        None,
+    );
+    let (jdc_pool_record_sniffer, jdc_pool_record_sniffer_addr) = start_sniffer(
+        "jdc-pool-record",
+        jdc_pool_drop_sniffer_addr,
+        false,
+        vec![],
+        None,
+    );
+    let (jdc, jdc_addr, _) = start_jdc(
+        &[(jdc_pool_record_sniffer_addr, jds_addr)],
+        sv2_tp_config(tp_addr),
+        vec![],
+        vec![],
+        false,
+        None,
+    );
+
+    let jdc_downstream = MockClient::new(
+        jdc_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
+    jdc_downstream
+        .send(AnyMessageOwned::Mining(
+            MiningOwned::OpenExtendedMiningChannel(OpenExtendedMiningChannelOwned {
+                request_id: 1,
+                user_identity: "IT_TEST".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            }),
+        ))
+        .await;
+
+    jdc_pool_record_sniffer
+        .wait_for_message_type(
+            MessageDirection::ToUpstream,
+            MESSAGE_TYPE_SET_CUSTOM_MINING_JOB,
+        )
+        .await;
+    let jdc_set_custom_mining_job = loop {
+        match jdc_pool_record_sniffer.next_message_from_downstream() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(msg)))) => break msg,
+            _ => continue,
+        }
+    };
+
+    let pool_downstream = MockClient::new(
+        pool_addr,
+        Some(ClientSetupConnection::new(Protocol::MiningProtocol)),
+    )
+    .await;
+    pool_downstream
+        .wait_for_message_type_and_clean_queue(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS)
+        .await;
+
+    let open_channel = |request_id| {
+        AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannel(
+            OpenExtendedMiningChannelOwned {
+                request_id,
+                user_identity: "IT_TEST".try_into().unwrap(),
+                nominal_hash_rate: 1000.0,
+                max_target: [0xff; 32].into(),
+                min_extranonce_size: 0,
+            },
+        ))
+    };
+    pool_downstream.send(open_channel(1)).await;
+    pool_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+    let mock_channel_id = loop {
+        match pool_downstream.next_message() {
+            Some((
+                _,
+                AnyMessageOwned::Mining(MiningOwned::OpenExtendedMiningChannelSuccess(msg)),
+            )) => break msg.channel_id,
+            _ => continue,
+        }
+    };
+
+    // Without its last byte, the push opcode of the extranonce, the prefix still begins the
+    // scriptSig JDS validated, so only the Pool's own check is left to refuse it.
+    let mut truncated = jdc_set_custom_mining_job.clone();
+    truncated.channel_id = mock_channel_id;
+    let mut coinbase_prefix = truncated.coinbase_prefix.as_bytes().to_vec();
+    coinbase_prefix.pop();
+    truncated.coinbase_prefix = coinbase_prefix.try_into().unwrap();
+    pool_downstream
+        .send(AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJob(
+            truncated,
+        )))
+        .await;
+
+    pool_downstream
+        .wait_for_message_type(MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR)
+        .await;
+    let set_custom_mining_job_error = loop {
+        match pool_downstream.next_message() {
+            Some((_, AnyMessageOwned::Mining(MiningOwned::SetCustomMiningJobError(msg)))) => {
+                break msg;
+            }
+            _ => continue,
+        }
+    };
+    assert_eq!(
+        set_custom_mining_job_error.request_id,
+        jdc_set_custom_mining_job.request_id
+    );
+    assert_eq!(
+        set_custom_mining_job_error.error_code.as_utf8_or_hex(),
+        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX,
+    );
+
+    // the connection is still served
+    pool_downstream.send(open_channel(2)).await;
+    pool_downstream
+        .wait_for_message_type(MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS)
+        .await;
+
+    shutdown_all!(jdc, pool);
+}
+
 // This test verifies that JDS does not exit when it receives a `SubmitSolution`
 // while still expecting a `ProvideMissingTransactionsSuccess`.
 //

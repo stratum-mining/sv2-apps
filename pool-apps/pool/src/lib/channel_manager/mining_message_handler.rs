@@ -19,6 +19,7 @@ use stratum_apps::stratum_core::{
         server::{
             error::{ExtendedChannelError, StandardChannelError},
             extended::ExtendedChannel,
+            jobs::error::JobFactoryError,
             share_accounting::{ShareValidationError, ShareValidationResult},
             standard::StandardChannel,
         },
@@ -1462,9 +1463,33 @@ impl HandleMiningMessagesFromClientOwnedAsync for ChannelManager {
                 match downstream.extended_channels.with_mut(
                     &msg_static.channel_id,
                     |extended_channel| {
-                        let job_id = extended_channel
+                        let job_id = match extended_channel
                             .on_set_custom_mining_job(msg_static.clone())
-                            .map_err(|error| PoolError::disconnect(error, downstream_id))?;
+                        {
+                            Ok(job_id) => job_id,
+                            // a malformed `coinbase_prefix` refuses this job without breaking
+                            // the connection, so the client stays connected
+                            Err(ExtendedChannelError::JobFactoryError(
+                                JobFactoryError::InvalidCoinbasePrefix,
+                            )) => {
+                                error!("SetCustomMiningJobError: invalid-coinbase-prefix");
+                                let error = SetCustomMiningJobErrorOwned {
+                                    request_id: msg_static.request_id,
+                                    channel_id: msg_static.channel_id,
+                                    error_code:
+                                        ERROR_CODE_SET_CUSTOM_MINING_JOB_INVALID_COINBASE_PREFIX
+                                            .to_string()
+                                            .try_into()
+                                            .expect("error code must be valid string"),
+                                };
+                                return Ok((
+                                    downstream_id,
+                                    MiningOwned::SetCustomMiningJobError(error),
+                                )
+                                    .into());
+                            }
+                            Err(error) => return Err(PoolError::disconnect(error, downstream_id)),
+                        };
 
                         let success = SetCustomMiningJobSuccessOwned {
                             channel_id: msg_static.channel_id,
