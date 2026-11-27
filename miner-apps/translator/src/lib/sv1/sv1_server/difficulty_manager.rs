@@ -213,6 +213,7 @@ impl Sv1Server {
                     let (true, Some(channel_id), Some(current_hashrate)) =
                         (starts_vardiff, data.channel_id, data.hashrate)
                     else {
+                        info!("Downstream {downstream_id} suggested difficulty {difficulty}: recorded only");
                         return None;
                     };
                     if suggested_hashrate > Hashrate::MAX as f64 {
@@ -223,6 +224,9 @@ impl Sv1Server {
                     }
                     let hashrate = (suggested_hashrate as Hashrate).max(minimum_hashrate);
                     if hashrate <= current_hashrate {
+                        info!(
+                            "Downstream {downstream_id} suggested difficulty {difficulty}: not above its hashrate estimate {current_hashrate}, recorded only"
+                        );
                         return None;
                     }
                     let target = match hash_rate_to_target(hashrate as f64, shares_per_minute) {
