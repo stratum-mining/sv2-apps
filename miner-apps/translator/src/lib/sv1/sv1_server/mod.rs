@@ -4779,6 +4779,14 @@ mod tests {
                 serde_json::json!({"minimum-difficulty": false, "info": true}),
             ),
             (
+                r#"[["version-rolling","minimum-difficulty"],{"version-rolling.mask":"1fffe000","version-rolling.min-bit-count":2}]"#,
+                serde_json::json!({
+                    "version-rolling": true,
+                    "version-rolling.mask": "1fffe000",
+                    "minimum-difficulty": false,
+                }),
+            ),
+            (
                 r#"[["subscribe-extranonce","unknown"],{"unknown.value":1}]"#,
                 serde_json::json!({"subscribe-extranonce": true, "unknown": false}),
             ),

@@ -58,7 +58,7 @@ impl IsServerAsync for Sv1Server {
                     // Each requested extension gets a result, and no other key is sent.
                     ConfigureResult {
                         version_rolling: data.version_rolling_mask.map(VersionRollingResult::new),
-                        minimum_difficulty: request.minimum_difficulty().map(|_| false),
+                        minimum_difficulty: request.requests_minimum_difficulty().then_some(false),
                         subscribe_extranonce: request.supports_extranonce().then_some(true),
                         info: request.info().map(|_| true),
                         unsupported: request.unknown_extensions().map(String::from).collect(),
