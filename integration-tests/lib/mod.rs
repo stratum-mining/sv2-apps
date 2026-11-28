@@ -6,6 +6,7 @@ use pool_sv2::PoolSv2;
 use std::{
     convert::TryFrom,
     net::{Ipv4Addr, SocketAddr},
+    time::Duration,
 };
 use stratum_apps::{
     bitcoin_core_sv2::runtime_api::BitcoinCoreVersion, config_helpers::CoinbaseRewardScript,
@@ -233,13 +234,15 @@ pub fn start_jdc(
         enable_monitoring,
         jdc_mode,
         "JDC",
+        None,
     )
 }
 
 /// Like [`start_jdc`], with a user identity per upstream, the extensions JDC negotiates with its
 /// downstreams, and `jdc_signature` as the miner tag JDC writes in the coinbase scriptSig of its
 /// jobs. `supported_extensions` and `required_extensions` are the ones JDC negotiates with its
-/// Pool.
+/// Pool. With an `initial_upstream_backoff`, JDC backs off for that long after an upstream's first
+/// failure instead of the 10 seconds of a deployment.
 #[allow(clippy::too_many_arguments)]
 pub fn start_jdc_with_user_identities(
     pool: &[(SocketAddr, SocketAddr, String)], /* (pool_address, jds_address,
@@ -252,6 +255,7 @@ pub fn start_jdc_with_user_identities(
     enable_monitoring: bool,
     jdc_mode: Option<ConfigJDCMode>,
     jdc_signature: &str,
+    initial_upstream_backoff: Option<Duration>,
 ) -> (JobDeclaratorClient, SocketAddr, Option<SocketAddr>) {
     use jd_client_sv2::config::{JobDeclaratorClientConfig, ProtocolConfig, Upstream};
     let jdc_address = get_available_address();
@@ -300,6 +304,10 @@ pub fn start_jdc_with_user_identities(
         required_downstream_extensions,
     );
     let ret = jd_client_sv2::JobDeclaratorClient::new(jd_client_proxy);
+    let ret = match initial_upstream_backoff {
+        Some(backoff) => ret.with_initial_upstream_backoff(backoff),
+        None => ret,
+    };
     let ret_clone = ret.clone();
     tokio::spawn(async move { ret_clone.start().await });
     (ret, jdc_address, monitoring_address)
@@ -377,10 +385,14 @@ pub async fn start_sv2_translator(
         required_extensions,
         job_keepalive_interval_secs,
         enable_monitoring,
+        None,
     )
     .await
 }
 
+/// Like [`start_sv2_translator`], with a user identity per upstream. With an
+/// `initial_upstream_backoff`, tProxy backs off for that long after an upstream's first failure
+/// instead of the 10 seconds of a deployment.
 pub async fn start_sv2_translator_with_user_identities(
     upstreams: &[(SocketAddr, String)],
     aggregate_channels: bool,
@@ -388,6 +400,7 @@ pub async fn start_sv2_translator_with_user_identities(
     required_extensions: Vec<u16>,
     job_keepalive_interval_secs: Option<u16>,
     enable_monitoring: bool,
+    initial_upstream_backoff: Option<Duration>,
 ) -> (TranslatorSv2, SocketAddr, Option<SocketAddr>) {
     let job_keepalive_interval_secs = job_keepalive_interval_secs.unwrap_or(60);
     let upstream_authority_pubkey =
@@ -443,6 +456,10 @@ pub async fn start_sv2_translator_with_user_identities(
         monitoring_cache_refresh_secs,
     );
     let translator_v2 = translator_sv2::TranslatorSv2::new(config);
+    let translator_v2 = match initial_upstream_backoff {
+        Some(backoff) => translator_v2.with_initial_upstream_backoff(backoff),
+        None => translator_v2,
+    };
     let clone_translator_v2 = translator_v2.clone();
     tokio::spawn(async move {
         let _ = clone_translator_v2.start().await;

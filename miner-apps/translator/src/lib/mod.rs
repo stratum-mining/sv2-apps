@@ -11,10 +11,14 @@
 //! It relies on several sub-modules (`config`, `downstream_sv1`, `upstream_sv2`, `proxy`, `status`,
 //! etc.) for specialized functionalities.
 use error::TproxyErrorKind;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
+use stratum_apps::upstream_selector::INITIAL_BACKOFF;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -44,6 +48,7 @@ pub struct TranslatorSv2 {
     cancellation_token: CancellationToken,
     shutdown_notify: Arc<Notify>,
     is_alive: Arc<AtomicBool>,
+    initial_upstream_backoff: Duration,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -58,7 +63,15 @@ impl TranslatorSv2 {
             cancellation_token: CancellationToken::new(),
             shutdown_notify: Arc::new(Notify::new()),
             is_alive: Arc::new(AtomicBool::new(true)),
+            initial_upstream_backoff: INITIAL_BACKOFF,
         }
+    }
+
+    /// Backs off for `initial_backoff` after an upstream's first failure instead of
+    /// [`INITIAL_BACKOFF`], so tests do not sit through the backoffs of a deployment.
+    pub fn with_initial_upstream_backoff(mut self, initial_backoff: Duration) -> Self {
+        self.initial_upstream_backoff = initial_backoff;
+        self
     }
 
     /// Marks the Translator Proxy as stopped and releases anyone blocked on
@@ -94,7 +107,8 @@ impl TranslatorSv2 {
         };
 
         let mut running = match runtime.bootstrap().await {
-            Ok(running) => running,
+            Ok(Some(running)) => running,
+            Ok(None) => return Ok(()),
             Err(bootstrap_err) => {
                 let (kind, runtime) = bootstrap_err.into_parts();
                 error!(?kind, "Failed to bootstrap Translator Proxy");
@@ -122,7 +136,8 @@ impl TranslatorSv2 {
             };
 
             running = match upstream_ready {
-                Ok(new_running) => match new_running.start_services().await {
+                Ok(None) => return Ok(()),
+                Ok(Some(new_running)) => match new_running.start_services().await {
                     Ok(running) => running,
                     Err(bootstrap_err) => {
                         let (kind, runtime) = bootstrap_err.into_parts();

@@ -27,6 +27,10 @@ use stratum_apps::{
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
+/// How long [`MockServer::wait_for_held_connection`] watches a connection before taking it for
+/// one the peer keeps.
+pub const HELD_AFTER: Duration = Duration::from_secs(2);
+
 /// Identifies one connection of a [`MockServer`]: `0` for the first connection to complete the
 /// Noise handshake with the server, `1` for the second, and so on.
 pub type ConnectionId = usize;
@@ -240,6 +244,26 @@ impl MockServer {
     /// after it answered the connection's `SetupConnection` with `SetupConnection.Error`.
     pub async fn wait_for_close(&self, connection: ConnectionId) {
         self.connection(connection).await.wait_for_close().await;
+    }
+
+    /// Waits for a connection the peer keeps: the first one, from `first` on, that stays open for
+    /// [`HELD_AFTER`] once this call has reached it. Returns its ID.
+    ///
+    /// A peer that only probes the server closes its connection once `SetupConnection` is
+    /// answered, so the connections of its probes are skipped. Like
+    /// [`MockServer::wait_for_close`], it panics on a connection that failed.
+    pub async fn wait_for_held_connection(&self, first: ConnectionId) -> ConnectionId {
+        let mut id = first;
+        loop {
+            let connection = self.connection(id).await;
+            if tokio::time::timeout(HELD_AFTER, connection.wait_for_close())
+                .await
+                .is_err()
+            {
+                return id;
+            }
+            id += 1;
+        }
     }
 
     // Waits for the server to accept `connection`.

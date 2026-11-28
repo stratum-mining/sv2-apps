@@ -1,11 +1,14 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use error::JDCErrorKind;
 use jdc_runtime::{Init, JdcRuntime, RuntimeEvent};
-use stratum_apps::bitcoin_core_sv2::CancellationToken;
+use stratum_apps::{bitcoin_core_sv2::CancellationToken, upstream_selector::INITIAL_BACKOFF};
 use tokio::sync::Notify;
 use tracing::{error, info};
 
@@ -32,6 +35,7 @@ pub struct JobDeclaratorClient {
     cancellation_token: CancellationToken,
     shutdown_notify: Arc<Notify>,
     is_alive: Arc<AtomicBool>,
+    initial_upstream_backoff: Duration,
 }
 
 #[cfg_attr(not(test), hotpath::measure_all)]
@@ -43,7 +47,15 @@ impl JobDeclaratorClient {
             cancellation_token: CancellationToken::new(),
             shutdown_notify: Arc::new(Notify::new()),
             is_alive: Arc::new(AtomicBool::new(true)),
+            initial_upstream_backoff: INITIAL_BACKOFF,
         }
+    }
+
+    /// Backs off for `initial_backoff` after an upstream's first failure instead of
+    /// [`INITIAL_BACKOFF`], so tests do not sit through the backoffs of a deployment.
+    pub fn with_initial_upstream_backoff(mut self, initial_backoff: Duration) -> Self {
+        self.initial_upstream_backoff = initial_backoff;
+        self
     }
 
     /// Marks the JDC as stopped and releases anyone blocked on [`JobDeclaratorClient::shutdown`].

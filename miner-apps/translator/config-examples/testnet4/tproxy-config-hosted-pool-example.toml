@@ -61,6 +61,9 @@ enable_vardiff = true
 # Interval in seconds for sending keepalive jobs to downstream miners.
 job_keepalive_interval_secs = 60
 
+# Upstreams in priority order: the first is the primary, the others are backups.
+# When the current one cannot be used, tProxy goes through this list from the top, and it switches
+# back to a higher-ranked upstream once that answers again.
 [[upstreams]]
 # SRI Pool Primary Pool
 # address accepts IP addresses or hostnames (e.g. "pool.example.com")
